@@ -126,7 +126,8 @@ func (g *Gate) buildBedGates() {
 // a field added to Gate must be classified here: per-bed (set from spec), shared
 // read-only (copied), or shared mutable (reached through parent, like the
 // INCONCLUSIVE list, or through a pointer, like cov, which propagateToBeds sets
-// once the ledger is open).
+// once the ledger is open). roleSplitDisabledForTest is root-only: identitySet
+// reads it through root().
 func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 	cfg := g.Cfg
 	cfg.TestBed = spec.Dir
@@ -138,6 +139,7 @@ func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 		Out:           &prefixWriter{mu: outLock, w: g.Out, prefix: prefix},
 		Err:           &prefixWriter{mu: errLock, w: g.Err, prefix: prefix},
 		Exec:          g.Exec,
+		Procs:         g.Procs,
 		Env:           g.Env,
 		OnLeg:         g.OnLeg,
 		Sleep:         g.Sleep,

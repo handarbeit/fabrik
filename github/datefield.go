@@ -11,9 +11,10 @@ type DateField struct {
 }
 
 // FetchDateField returns the project's date field with the given name. It
-// returns (nil, nil) when no such field exists or the field is not a DATE
-// field — an absent display field is a normal, silent condition, not an
-// error. A transport or GraphQL failure is returned as an error.
+// returns (nil, nil) when no such field exists — an absent display field is a
+// normal condition, not an error — and a *FieldTypeMismatchError when the name
+// is taken by a field that is not DATE. A transport or GraphQL failure is
+// returned as an error.
 func (c *Client) FetchDateField(projectID, name string) (*DateField, error) {
 	id, fieldName, err := c.fetchProjectFieldID(projectID, name, "DATE")
 	if err != nil || id == "" {

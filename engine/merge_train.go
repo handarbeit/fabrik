@@ -451,7 +451,7 @@ func (e *Engine) effectiveMaxTrainRebaseCycles() int {
 
 // capBatch returns the first max items of the batch. Its caller
 // (groupQueuedByRepoAndBase, engine/poll.go) sorts items ascending by
-// (StatusEnteredAt, Number) before this ever runs, so "first max" means the max
+// (queueOrderTime, Number) before this ever runs, so "first max" means the max
 // members that have waited longest to enter Queued — the ADR-059 D2 / FR-4
 // "ordered by entry" intent, now actually enforced (#1833, ADR-1833) rather than
 // merely asserted: before that fix, this comment claimed an ordering the caller
@@ -478,7 +478,7 @@ func capBatch(items []gh.ProjectItem, max int) []gh.ProjectItem {
 // value independently, so it can never disagree with the partition that
 // dispatched it; prepareTrainWorker resolves the real git branch name from it.
 func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.ProjectItem, projectID string, partitionBase string) {
-	if len(batch) == 0 {
+	if len(batch) == 0 || e.isDraining() { // #2259: a SIGHUP drain starts no train worker
 		return
 	}
 	owner, repo := itemOwnerRepo(batch[0], e.defaultRepo())
@@ -2578,6 +2578,13 @@ type conflictEjectionDiagnostic struct {
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
+	// #2259: a SIGHUP drain starts no new conflict resolution. This is the same
+	// uncharged "not attempted" outcome as a cancelled slot wait: no ejection, no
+	// recordTrial, no dissolve; the persisted run resumes after the exec.
+	if e.isDraining() {
+		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: daemon draining for restart\n", memberItem.Number)
+		return false, nil, errDrainingNotAttempted
+	}
 	usageLimited := func() error {
 		if _, s := e.claudeUsageLimitedUntilTime(time.Now()); s {
 			e.logf(memberItem.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
@@ -2723,6 +2730,8 @@ func (e *Engine) acquireTrainSlotIn(ctx context.Context, ep *trainEpisode, repoK
 			held = e.sem
 		case <-ctx.Done():
 			return nil, false, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
+		case <-e.drainGateCh():
+			return nil, false, errDrainingNotAttempted // #2259
 		}
 		if prev != "" {
 			e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
@@ -2744,7 +2753,9 @@ func (e *Engine) acquireTrainSlotIn(ctx context.Context, ep *trainEpisode, repoK
 // a CI-infrastructure abort. Cancellation must never charge the runaway counter,
 // start a fallback, or dissolve a batch.
 func trainCancelled(ctx context.Context, err error) bool {
-	return err != nil && ctx.Err() != nil
+	// errDrainingNotAttempted (#2259): the SIGHUP drain refused a new conflict
+	// resolution with ctx still live; it is the same "could not attempt" verdict.
+	return err != nil && (ctx.Err() != nil || errors.Is(err, errDrainingNotAttempted))
 }
 
 // finalizeConflictResolution inspects trainWorkDir after a conflict-resolution

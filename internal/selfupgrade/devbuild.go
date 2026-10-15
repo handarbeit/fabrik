@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,8 +75,24 @@ type DevBuildStatus struct {
 	LocalCommitTime time.Time
 
 	// BinarySHA is the SHA embedded in the running version string
-	// ("dev(<sha>)"), or "" if Version isn't in that form.
+	// ("dev(<sha>)", optionally followed by a suffix such as "+dirty"), or ""
+	// if Version isn't in that form.
 	BinarySHA string
+
+	// BinaryDirty is true when the version string carries the "+dirty" suffix
+	// — the binary was built from a tree with uncommitted or untracked files.
+	// It only words the same-SHA note in Reason; it never affects whether a
+	// rebuild is needed (see the R2 decision on CompareDevBuild).
+	BinaryDirty bool
+
+	// Reason is a one-line explanation of why no rebuild is needed, set only
+	// when Applicable and NeedsRebuild are such that CheckAndRebuildDev would
+	// otherwise exit silently (not a source checkout, up to date, local ahead
+	// or diverged). Empty whenever a rebuild is needed or an error is
+	// returned. CompareDevBuild fills it in without logging so read-only
+	// reporters (checkSourceStaleness) gain no new log output; only
+	// CheckAndRebuildDev logs it.
+	Reason string
 
 	// ShaMismatch is true when BinarySHA is non-empty and does not prefix
 	// LocalRef — the running binary predates the checkout's own HEAD. When
@@ -117,9 +134,17 @@ type DevBuildStatus struct {
 // A non-nil error means the comparison could not be completed (HEAD or
 // origin/BaseBranch unresolvable, or the fetch itself failed); the returned
 // status is the partial result up to that point.
+//
+// R2 (#2234): a "+dirty" binary at the same SHA as HEAD is NOT rebuilt. The
+// decision keys on the SHA alone, so such a build is compared exactly like a
+// clean one. Rebuilding would pick up no committed change and the result
+// would be stamped dirty again — the dirt in the checkout, not the binary, is
+// what needs fixing. Instead the outcome line (Reason) says so, and
+// CheckAndRebuildDev reports the dirty paths once.
 func CompareDevBuild(cfg DevBuildConfig) (DevBuildStatus, error) {
 	var status DevBuildStatus
 	if !IsSourceCheckout(cfg.Dir, cfg.ExpectedRemote) {
+		status.Reason = fmt.Sprintf("self-upgrade not applicable: %s is not a source checkout of %s", cfg.Dir, cfg.ExpectedRemote)
 		return status, nil
 	}
 	status.Applicable = true
@@ -134,7 +159,13 @@ func CompareDevBuild(cfg DevBuildConfig) (DevBuildStatus, error) {
 		status.LocalCommitTime = t
 	}
 
-	status.BinarySHA = extractBinarySHA(cfg.Version)
+	status.BinarySHA, status.BinaryDirty = parseDevVersion(cfg.Version)
+	// notes are appended to whichever "no rebuild" outcome follows, so each
+	// check still logs exactly one line.
+	var notes string
+	if status.BinarySHA == "" {
+		notes = fmt.Sprintf("; note: version %q has no parseable commit SHA, binary-vs-HEAD check skipped", cfg.Version)
+	}
 	status.ShaMismatch = status.BinarySHA != "" && !strings.HasPrefix(localRef, status.BinarySHA)
 	if status.ShaMismatch {
 		status.NeedsRebuild = true
@@ -155,8 +186,12 @@ func CompareDevBuild(cfg DevBuildConfig) (DevBuildStatus, error) {
 		return status, fmt.Errorf("could not resolve origin/%s: %w", cfg.BaseBranch, err)
 	}
 	status.RemoteRef = remoteRef
+	if status.BinaryDirty && status.BinarySHA != "" {
+		notes += "; binary was built from a dirty tree at the current commit, rebuilding would not clear that"
+	}
 	if localRef == remoteRef {
 		cfg.statusClear()
+		status.Reason = fmt.Sprintf("up to date with origin/%s at %s%s", cfg.BaseBranch, shortRef(localRef), notes)
 		return status, nil // up to date
 	}
 	// Only "remote ahead" if remote is ahead of local. If local is ahead
@@ -169,6 +204,8 @@ func CompareDevBuild(cfg DevBuildConfig) (DevBuildStatus, error) {
 		// Either way, nothing to pull. The binary SHA check above already
 		// handled whether a rebuild is needed.
 		cfg.statusClear()
+		status.Reason = fmt.Sprintf("local %s is ahead of or diverged from origin/%s (%s), nothing to pull%s",
+			shortRef(localRef), cfg.BaseBranch, shortRef(remoteRef), notes)
 		return status, nil
 	}
 
@@ -195,8 +232,10 @@ func CheckAndRebuildDev(cfg DevBuildConfig) {
 		return
 	}
 	if !status.Applicable {
+		cfg.Logf("%s\n", status.Reason)
 		return
 	}
+	reportDirtyCheckout(cfg)
 
 	switch {
 	case status.ShaMismatch:
@@ -210,7 +249,9 @@ func CheckAndRebuildDev(cfg DevBuildConfig) {
 			return
 		}
 	default:
-		// Up to date, or local ahead of/diverged from remote — nothing to do.
+		// Up to date, or local ahead of/diverged from remote — nothing to do,
+		// but say so: a silent "checking ..." hid #2234.
+		cfg.Logf("%s\n", status.Reason)
 		return
 	}
 
@@ -252,12 +293,87 @@ func CheckAndRebuildDev(cfg DevBuildConfig) {
 }
 
 // extractBinarySHA extracts the short SHA from a dev version string like
-// "dev(abc1234)". Returns "" if the version is not a dev build or has no SHA.
+// "dev(abc1234)" or "dev(abc1234)+dirty". Returns "" if the version is not a
+// dev build or has no SHA.
 func extractBinarySHA(version string) string {
-	if !strings.HasPrefix(version, "dev(") || !strings.HasSuffix(version, ")") {
-		return ""
+	sha, _ := parseDevVersion(version)
+	return sha
+}
+
+// parseDevVersion parses "dev(<sha>)<suffix>". The SHA is everything up to the
+// first ")"; the suffix after it is opaque (the build stamps "+dirty" when the
+// tree had uncommitted or untracked files), and dirty reports whether it
+// contains "+dirty". An empty SHA, a missing ")" or a non-dev version yields
+// "" — an empty SHA must stay unparseable, since every ref has "" as a prefix
+// and the binary-vs-HEAD check would otherwise never fire.
+func parseDevVersion(version string) (sha string, dirty bool) {
+	rest, ok := strings.CutPrefix(version, "dev(")
+	if !ok {
+		return "", false
 	}
-	return version[4 : len(version)-1]
+	sha, suffix, ok := strings.Cut(rest, ")")
+	if !ok || sha == "" {
+		return "", false
+	}
+	return sha, strings.Contains(suffix, "+dirty")
+}
+
+func shortRef(ref string) string {
+	if len(ref) > 7 {
+		return ref[:7]
+	}
+	return ref
+}
+
+// maxDirtyPathsListed caps the dirty paths named in the one-time report.
+const maxDirtyPathsListed = 10
+
+// dirtyReported makes the dirty-checkout report once per process lifetime.
+// DevBuildConfig is rebuilt by value on every call in both daemons, so
+// caller-owned state would need shared pointers in each.
+var dirtyReported atomic.Bool
+
+func resetDirtyReportedForTest() { dirtyReported.Store(false) }
+
+// dirtyPaths returns the paths `git status --porcelain` lists in dir, or nil
+// on any error. Untracked directories are collapsed to one entry. Unscoped on
+// purpose: a dirty file anywhere in the repo is what stamps a build +dirty.
+func dirtyPaths(dir string) []string {
+	cmd := exec.Command("git", "status", "--porcelain", "--untracked-files=normal")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) > 3 {
+			paths = append(paths, line[3:])
+		}
+	}
+	return paths
+}
+
+// reportDirtyCheckout logs, once per process, that the source checkout has
+// uncommitted or untracked changes and names the first few paths — the usual
+// reason a dev daemon stops upgrading (#2234). A clean checkout or a git
+// failure logs nothing and does not consume the once-only report.
+func reportDirtyCheckout(cfg DevBuildConfig) {
+	if dirtyReported.Load() {
+		return
+	}
+	paths := dirtyPaths(cfg.Dir)
+	if len(paths) == 0 || !dirtyReported.CompareAndSwap(false, true) {
+		return
+	}
+	listed := paths
+	more := ""
+	if len(listed) > maxDirtyPathsListed {
+		more = fmt.Sprintf(", and %d more", len(listed)-maxDirtyPathsListed)
+		listed = listed[:maxDirtyPathsListed]
+	}
+	cfg.Logf("source checkout has uncommitted/untracked changes (%d paths): %s%s — builds from it are stamped +dirty and may not self-upgrade\n",
+		len(paths), strings.Join(listed, ", "), more)
 }
 
 // IsSourceCheckout reports whether dir is a git checkout whose origin remote

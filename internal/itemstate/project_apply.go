@@ -49,6 +49,7 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if item.Status != pi.Status {
 		item.Status = pi.Status
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = pi.StatusAtGitHub
 		flags |= StatusChanged
 	}
 
@@ -201,6 +202,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 		item.Status = view.Status
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = pi.StatusAtGitHub
 		flags |= StatusChanged
 	}
 
@@ -283,6 +285,7 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem, fetchedAt time.Time, 
 		item.Status = view.Status
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = pi.StatusAtGitHub
 		flags |= StatusChanged
 	}
 

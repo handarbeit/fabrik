@@ -82,21 +82,26 @@ func channelEngine(t *testing.T, ahead time.Duration, sub *channelevents.Subscri
 // time-driven events.
 func channelEngineTick(t *testing.T, ahead time.Duration, sub *channelevents.Subscription, tick time.Duration) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, tick
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-
-	return channelEngineOn(t, apiEngine(t, ahead), ahead, sub)
+	e := apiEngine(t, ahead)
+	e.SetChannelTimingForTest(20*time.Millisecond, tick)
+	return channelEngineOn(t, e, ahead, sub)
 }
 
 // channelEngineOn starts the channel hub on an already-built engine (one wired
 // with a mock GitHub client, say) and attaches subscriber "T" as channelEngine
-// does. The caller has set channelDebounce/channelTick.
+// does. A debounce or tick the caller has not set on e (SetChannelTimingForTest)
+// defaults to 20ms and an hour.
 func channelEngineOn(t *testing.T, e *Engine, ahead time.Duration, sub *channelevents.Subscription) (*Engine, *chanSink) {
 	t.Helper()
 	// An adjustable clock installed before any goroutine starts, so a test can
 	// move time (a deadline passing) without racing the deriver.
 	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
+	if e.chanTest.debounce.Load() == 0 {
+		e.chanTest.debounce.Store(int64(20 * time.Millisecond))
+	}
+	if e.chanTest.tick.Load() == 0 {
+		e.chanTest.tick.Store(int64(time.Hour))
+	}
 	e.fabrikDir = t.TempDir()
 	e.startChannelEventsIn(channelStateDir(e.fabrikDir), false)
 	t.Cleanup(e.closeChannelEvents)
@@ -339,13 +344,11 @@ func (c *adjClock) set(t time.Time) { c.mu.Lock(); c.t = t; c.mu.Unlock() }
 // events, delivers the held ones in order on re-attach, and does not replay a
 // settle episode it already announced.
 func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	dir := t.TempDir()
 
 	start := func() *Engine {
 		e := apiEngine(t, 0)
+		e.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 		e.fabrikDir = t.TempDir()
 		e.startChannelEventsIn(dir, false)
 		t.Cleanup(e.closeChannelEvents)
@@ -637,9 +640,6 @@ func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
 // #2112: on a multi-repo daemon (owner, no repo) a bare issue number in a
 // subscription resolves when the cached issues are all in one repo.
 func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	m := multiRepoAPIEngine()
 	seedRepoItem(m, "owner/repo", 7)
 	e, _ := channelEngineOn(t, m, 0, nil)

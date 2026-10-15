@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -19,15 +20,24 @@ import (
 //   - testlife.Guard installs the hard wall-time ceiling (SIM_TEST_CEILING,
 //     default 30m, ignoring -test.timeout), the owner watch (exit once the worker
 //     named by FABRIK_WORKER_OWNER is provably gone; a live worker with its
-//     launching shell long gone is left alone) and, for a helper started through
-//     testlife.ReExecCommand, the parent watch.
+//     launching shell long gone is left alone), for a helper started through
+//     testlife.ReExecCommand the parent watch, and (#2226) a main-binary parent
+//     watch (exit once the `go test` that started an unmarked binary is gone).
+//     Every bail is bounded: the process SIGKILLs itself if exit does not return.
 //   - testenv.ScrubProcess keeps the suite hermetic against a worker's inherited
 //     credentials (#2027), as the cmd and engine packages' TestMain do.
+//   - preferRealGit (#2210 R6) puts the real git ahead of macOS's xcrun shim on PATH.
 //   - testenv.IsolateWarningsProcess: the engine under test writes the warnings
 //     panel file, which must not land in the package directory.
 func TestMain(m *testing.M) {
 	testlife.Guard(testlife.Options{Name: "tests/sim"})
 	testenv.ScrubProcess()
+	// R6 (#2210): bypass Apple's xcrun git shim on macOS (realgit.go). After
+	// ScrubProcess, which leaves PATH alone; internal/testenv's IsolateGit only
+	// sets git config variables, so the two do not interact.
+	if g := preferRealGit(); g != "" {
+		fmt.Fprintf(os.Stderr, "tests/sim: using %s ahead of PATH's git (bypassing the xcrun shim)\n", g)
+	}
 	cleanupWarnings := testenv.IsolateWarningsProcess()
 	code := m.Run()
 	cleanupWarnings()

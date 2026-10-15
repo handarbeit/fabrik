@@ -69,7 +69,8 @@ Run these in any Claude Code session (the `fabrik` binary must be on your `PATH`
 
 `fabrik init` prints the same two commands. After install you get:
 
-- **Daemon-backed tools** — the plugin starts `fabrik mcp`: `fabrik_status`, `fabrik_board` and `fabrik_health` for state, plus audited overseer actions (promote, advance, set autonomy, re-run Validate, clear a Claude usage-limit hold). No action lifts a pause; a human comment does.
+- **Daemon-backed tools** — the plugin starts `fabrik mcp`: `fabrik_status`, `fabrik_board`, `fabrik_health` and the rolled-up `fabrik_situation` for state, plus audited overseer actions (promote, advance, set autonomy, re-run Validate, clear a Claude usage-limit hold). No action lifts a pause; a human comment does.
+- **Pushed events** — with a subscriber name set, `fabrik_subscribe` / `fabrik_unsubscribe` have the daemon push events into your session as they happen (a settled Validate, a pause, a stalled poll loop, a merge) instead of you polling.
 - **`fabrik:fabrik` skill** — auto-activates when `.fabrik/` is detected or Fabrik is mentioned: the PM mental model, the attention states and the steering labels.
 - **`fabrik:fabrik-setup` skill** — one-time onboarding walkthrough for setting up Fabrik from scratch.
 - **`/fabrik:status` command** — what needs you, what is in flight and daemon health, from the daemon.
@@ -104,6 +105,10 @@ GitHub Project Board (source of truth)
 > **Anthropic auth namespace scrub (v0.0.77):** Every worker invocation's environment is scrubbed of the Anthropic/Claude-Code auth namespace by default (`ANTHROPIC_*` wildcard, plus an enumerated `CLAUDE_CODE_*` auth-selector list) — an ambient `ANTHROPIC_API_KEY` in the engine's environment can no longer silently redirect a stage from subscription billing to metered API billing. `FABRIK_ANTHROPIC_API_KEY` is the only supported opt-in for API billing; `apiKeyHelper` is refused outright, both at startup and per-invocation. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide.
 >
 > **GitHub Enterprise Server support (v0.0.78):** Fabrik can run against a GHES instance instead of github.com — pure endpoint/host configuration, no adapter layer. Set `--ghes-host` / `FABRIK_GHES_HOST` (or `ghes_host` in `.fabrik/config.yaml`) and Fabrik independently derives the REST (`/api/v3/...`) and GraphQL (`/api/graphql`) endpoints, points bare-clone URLs and commit noreply emails at your host, and propagates `GH_HOST` to every stage worker's `gh` CLI calls so they target the same instance. Absent any GHES configuration, behavior is unchanged. See [GitHub Enterprise Server Support](docs/USER_GUIDE.md#github-enterprise-server-support) in the User Guide.
+>
+> **v0.0.84 highlights:** an **overseer MCP server** (`fabrik mcp`, bundled in the PM plugin) lets a Claude Code session read board and daemon state from the running daemon with no GitHub calls, act through audited tools, and receive pushed events — see [Overseer Tools](docs/USER_GUIDE.md#overseer-tools-fabrik-mcp). Stage skills are addressed as `plugin:skill` (`fabrik-stages:review`); the built-in plugin is now `fabrik-stages`, and `fabrik upgrade` moves your edits to `.fabrik/plugins/local-workflows/` — see [Skill references](docs/USER_GUIDE.md#skill-references) and [Workflow migration](docs/USER_GUIDE.md#workflow-migration-fabrik-upgrade). The [merge train](docs/USER_GUIDE.md#merge-train--queued) gains singleton catch-up, red-singleton auto-repair, overlap-aware batching and restart-safe runs. Three display-only board fields (`Fabrik`, `Last activity`, `Last run`) show what each item is doing — add them with `fabrik repair-board --apply` ([Project Board Status Line](docs/USER_GUIDE.md#project-board-status-line)) — and a TUI warnings panel lists operator-level faults. Upgrading? Follow the ordered steps in [Workflow migration](docs/USER_GUIDE.md#workflow-migration-fabrik-upgrade); GitHub App installations now require `actions: write`.
+
+> **v0.0.85 highlights:** a **stage now runs before a comment that was waiting when the item entered it**, so the stage's skill and stage comment are never skipped by a comment pass — see [Steering with Comments](docs/USER_GUIDE.md#steering-with-comments). **SIGHUP (or `ctrl+r`) is a graceful restart**: the first signal stops starting new work and waits for running workers to finish, and a second restarts now — see [Restarting](docs/USER_GUIDE.md#recovering-from-wedged-state). The TUI's In Progress panel lists items Fabrik is waiting on (CI, reviews, a retry, a rebase, the merge train, a human reply) instead of saying "nothing to do". No configuration changes are needed; a SIGHUP restart can now take as long as the longest running worker.
 
 ### Webhook Mode (Optional)
 
@@ -122,7 +127,9 @@ Two landing engines share one `Queued` board column, and Fabrik picks the engine
 - **GitHub's native merge queue** (ADR-058) — used automatically when the repo has one enabled (Enterprise Cloud or org-owned public repos). Kill-switch: `--merge-queue off`.
 - **Fabrik's internal merge train** (ADR-059) — the plan- and host-agnostic fallback for private Team and personal-account repos where GitHub's native queue isn't available. It stages a trial branch per `(repo, base)` partition — a single repo can run multiple concurrent trains when `base:<branch>` items target different branches — runs one combined Validate per partition, and lands the batch atomically; a red batch is isolated via halving bisection so a single poisoner doesn't block the rest. When exactly one item is queued for a partition, Fabrik skips the trial and lands that item's own PR directly once it's a fast-forward of its base, mergeable, and CI is green. It is opt-in via `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
 
-Native queue routing defaults to `auto` (it only engages on repos where GitHub's native queue is already enabled); the merge train defaults to `off`. Both leave the existing serial auto-merge path untouched unless explicitly turned on. See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
+Native queue routing defaults to `auto` (it only engages on repos where GitHub's native queue is already enabled); the merge train defaults to `off`. Both leave the existing serial auto-merge path untouched unless explicitly turned on. Since v0.0.84 a lone queued PR that is merely behind base is caught up in place rather than re-validated in a trial (`singleton_catch_up`), a red lone PR is sent back through Validate once before it is paused (`max_train_auto_repair_attempts`), PRs touching the same path are kept out of the same batch (list lockfiles and changelogs in `merge_train_overlap_ignore`), and trials survive a restart. These are on by default when `merge_train` is on; `singleton_catch_up: off` and `max_train_auto_repair_attempts: 0` turn the first two off.
+
+See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
 
 ### Comment Processing
 
@@ -141,6 +148,8 @@ Comments from all authors trigger processing — human colleagues, code-review b
 (Copilot, Gemini), and other Fabrik instances alike. Only two categories are skipped:
 comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments that already
 carry a 🚀 rocket reaction (already processed).
+
+If you comment on an item before it reaches a stage, the stage runs first and one comment pass applies your comment afterwards; the item does not advance until that pass has run (see [Steering with Comments](docs/USER_GUIDE.md#steering-with-comments)).
 
 This allows iterative refinement — comment to answer questions, provide feedback,
 or steer the work, and Fabrik incorporates the input into the issue.
@@ -213,8 +222,8 @@ for setup details and the self-mention caveat.
 
 ### In-Place Restart
 
-Sending `SIGHUP` to the Fabrik process drains in-flight Claude runs, then
-re-execs the binary in place — no terminal disruption, no lost state. Use it
+Sending `SIGHUP` to the Fabrik process stops new work, lets in-flight Claude runs
+finish, then re-execs the binary in place (a second `SIGHUP` restarts immediately) — no terminal disruption, no lost state. Use it
 to pick up a new binary after `go install` without restarting the session.
 The terminal alt-screen is properly restored on signal-driven exit, so no
 `reset` is needed after a SIGINT, SIGTERM, or SIGHUP. Plugin-skills are checked and
@@ -395,7 +404,8 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
-| `fabrik upgrade` | Self-update the Fabrik binary (release builds) and refresh plugin skills in `.fabrik/plugin/` from embedded defaults. Plain `fabrik upgrade` errors when local customizations are detected; use `--force` to overwrite unconditionally or `--reconcile` for a guided merge prompt. See the [User Guide](docs/USER_GUIDE.md#upgrade-protection-for-customized-skills) for details. |
+| `fabrik upgrade` | Refresh the plugin skills in `.fabrik/plugin/` from embedded defaults and qualify stage skill references (`fabrik-stages:review`). Local edits are no longer refused: they move to `.fabrik/plugins/local-workflows/`, which is where to customise from now on. Stop the daemon first and commit the result. `--no-migrate` keeps the old refuse-on-customization behaviour; `--force` overwrites unconditionally; an up-to-date install prints `fabrik upgrade: plugin already up to date`. See [Workflow migration](docs/USER_GUIDE.md#workflow-migration-fabrik-upgrade) in the User Guide. |
+| `fabrik mcp [--dir <fabrik-dir>]` | Stdio MCP server backed by the running daemon: read tools, audited overseer actions and pushed events. The [Fabrik PM plugin](#fabrik-pm-plugin-claude-code-companion) registers it for you. See [Overseer Tools](docs/USER_GUIDE.md#overseer-tools-fabrik-mcp). |
 
 ## Built-in Skills
 

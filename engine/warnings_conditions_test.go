@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,6 +134,56 @@ func TestCheckHTTPSCredentials_RecordsAndClears(t *testing.T) {
 	eng.checkHTTPSCredentials(false)
 	if k := warningKeys(t); len(k) != 0 {
 		t.Errorf("not cleared under SSH: %v", k)
+	}
+}
+
+// TestCheckHTTPSCredentials_IgnoresRepoLocalHelper (#2262): the check runs
+// `git config credential.helper` from the working directory, so a checkout (or
+// the main repository seen from a linked worktree) whose own local config sets a
+// helper must not change the result. The test starts inside exactly such a
+// worktree, so it proves the isolation instead of relying on the checkout it
+// happens to run from.
+func TestCheckHTTPSCredentials_IgnoresRepoLocalHelper(t *testing.T) {
+	skipIfNoGit(t)
+	isolateWarnings(t)
+	testenv.IsolateGit(t, "") // env only: keeps the fixture clear of ambient config
+
+	root := t.TempDir()
+	repo := filepath.Join(root, "main")
+	worktree := filepath.Join(root, "linked")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git(repo, "init", "-q")
+	git(repo, "config", "--local", "user.name", "fixture")
+	git(repo, "config", "--local", "user.email", "fixture@example.invalid")
+	git(repo, "config", "--local", "commit.gpgsign", "false")
+	git(repo, "config", "--local", "credential.helper", "store")
+	git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+	git(repo, "worktree", "add", "-q", "-b", "fixture-wt", worktree)
+
+	t.Chdir(worktree)
+	// Non-vacuity: from here, with no isolation of the repository layer, git
+	// does report the main repository's helper.
+	out, err := exec.Command("git", "config", "credential.helper").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "store" {
+		t.Fatalf("fixture does not leak: out=%q err=%v", out, err)
+	}
+
+	testenv.IsolateGit(t, "")
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.GitSSH = false
+	eng.checkHTTPSCredentials(false)
+	if k := warningKeys(t); len(k) != 1 || !k["git_credentials:https"] {
+		t.Fatalf("keys = %v; the repository-local helper leaked into the check", k)
 	}
 }
 

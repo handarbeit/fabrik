@@ -21,12 +21,13 @@ func writeLedger(t *testing.T, dir string, recs map[string]channelevents.Observa
 
 // downtimeEngine starts an engine on dir (warming per the argument) with the
 // subscriber "T" attached to everything.
-func downtimeEngine(t *testing.T, dir string, warming bool) (*Engine, *chanSink) {
+func downtimeEngine(t *testing.T, dir string, warming bool, pre ...func(*Engine)) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	e := apiEngine(t, 0)
+	e.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
+	for _, p := range pre {
+		p(e) // seams that are read at channel start
+	}
 	e.fabrikDir = t.TempDir()
 	e.startChannelEventsIn(dir, warming)
 	t.Cleanup(e.closeChannelEvents)
@@ -113,10 +114,10 @@ func TestDowntimeCheckCorruptLedgerIsAllBaselines(t *testing.T) {
 }
 
 func TestDowntimeDeltasDisabledIsPreChangeBehaviour(t *testing.T) {
-	defer SetDowntimeDeltasDisabledForTest()()
 	dir := t.TempDir()
 	writeLedger(t, dir, map[string]channelevents.Observation{"owner/repo#1": {Labels: []string{"a"}, LabelsKnown: true, Status: "Implement"}})
 	e, sink := downtimeEngine(t, dir, false)
+	defer e.SetDowntimeDeltasDisabledForTest()()
 	e.seedAPIItem(t, 1, "Review")
 	sink.quiet(t, 300*time.Millisecond)
 }
@@ -154,9 +155,8 @@ func TestRestartWarmingQueuesCatchUpBeforeDeltas(t *testing.T) {
 
 // An open item that is never deep-fetched must not hold the catch-up for ever.
 func TestRestartReadinessDeadline(t *testing.T) {
-	defer SetChannelReadyTimeoutForTest(150 * time.Millisecond)()
 	dir := t.TempDir()
-	e, sink := downtimeEngine(t, dir, true)
+	e, sink := downtimeEngine(t, dir, true, func(e *Engine) { e.SetChannelReadyTimeoutForTest(150 * time.Millisecond) })
 	e.boardPopulated.Store(true)
 	// An open Implement item whose labels never become known.
 	e.store.Reset([]gh.ProjectItem{{Number: 1, Repo: "owner/repo", Status: "Implement", LabelsAbsent: true}})

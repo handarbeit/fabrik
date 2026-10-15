@@ -75,7 +75,7 @@ Points `fabrik init` at a Project board that already exists (see Step 4 for buil
 Either way, `fabrik init` creates:
 
 - `.fabrik/stages/` — stage YAML configs (commit these to git if you want them version-controlled per project)
-- `.fabrik/plugin/` — the worker-side Claude Code plugin. **Not gitignored** — per-project skill customization here is a documented feature (`fabrik upgrade` detects local edits and refuses to clobber them rather than silently overwriting). Don't tell the user this directory is excluded from git tracking.
+- `.fabrik/plugin/` — the base worker-side Claude Code plugin (`fabrik-stages`), written from the binary. It is not gitignored, but it is not where customisations go: `fabrik upgrade` restores it, moving any local edits into `.fabrik/plugins/local-workflows/`. Project-specific skills live in `.fabrik/plugins/local-workflows/` and are referenced from stage YAML as `local-workflows:<skill>` (see the User Guide's workflow migration section).
 - `.fabrik/config.yaml` — project config template, populated with values from `--create-board` or the Project URL
 
 If the user runs `fabrik init` without `--create-board` or a URL, it falls back to interactive prompts, or writes a commented template if non-interactive.
@@ -85,7 +85,7 @@ If the user runs `fabrik init` without `--create-board` or a URL, it falls back 
 - `.git/info/exclude` is **machine-local** — it doesn't travel with the repo. A second machine or a fresh clone starts without any of it. If they want the exclusion to travel with the repo, recommend a `.gitignore` snippet instead (see below).
 - A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log` (plus its rotated `.fabrik/fabrik.log.N` backups), `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
 
-Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabrik/plugin/` is deliberately *not* in this list — see above):
+Suggested `.gitignore` snippet for anyone who wants this to travel (`.fabrik/plugin/` and `.fabrik/plugins/` are deliberately *not* in this list: commit the stage configs and any `local-workflows` skills):
 
 ```
 .fabrik/repos/
@@ -176,4 +176,4 @@ Once they're up:
 ## What this skill is not
 
 - **Not a runbook for Fabrik in production** — auth setup, multi-repo, SSH cloning, observability all live in the User Guide. Point users there when they ask.
-- **Not for users who already have `.fabrik/`** — if `.fabrik/` exists, Fabrik is already initialized; the user wants the supervisor skill, not setup. If they're trying to *re-init* or *upgrade*, point them at `fabrik upgrade` rather than re-running `fabrik init`.
+- **Not for users who already have `.fabrik/`** — if `.fabrik/` exists, Fabrik is already initialized; the user wants the supervisor skill, not setup. If they're trying to *re-init* or *upgrade*, point them at `fabrik upgrade` rather than re-running `fabrik init` (the supervisor skill's "Upgrading a project" has the full sequence: stop the daemon first).

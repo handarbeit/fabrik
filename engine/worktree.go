@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +22,63 @@ type WorktreeManager struct {
 
 	pureRebaseDisabled    atomic.Bool // test seam: neutralises PrepareCatchUp's pure-rebase tolerance (#2150)
 	restoreRebaseDisabled atomic.Bool // test seam: neutralises RestoreUnpushedRebase (#2150)
+
+	landedCheckDisabled atomic.Bool                                          // test seam: neutralises the landed-branch checks R1/R2 (#1917)
+	isAncestorFn        func(dir, ancestor, descendant string) (bool, error) // test seam: replaces gitIsAncestor (#1917)
+}
+
+// EnsureWorktreeOption carries caller-known facts into EnsureWorktree. The
+// WorktreeManager makes no GitHub call of its own (#1917 R2); callers that
+// already know something about the item's PRs pass it here. All options are
+// lazy: they are invoked only when adoption of an origin issue branch is about
+// to happen, under wm.mu, so the common path costs nothing.
+type EnsureWorktreeOption func(*ensureOpts)
+
+type ensureOpts struct {
+	landedPRHeads func() []string
+	prBaseProbe   func() (string, bool)
+}
+
+// WithLandedPRHeads supplies the head SHAs of merged PRs known for the item
+// (its linked PR, its fabrik:credited-pr:<N> PR). An origin issue branch whose
+// tip equals one of them is already landed and is not adopted (#1917 R2).
+func WithLandedPRHeads(fn func() []string) EnsureWorktreeOption {
+	return func(o *ensureOpts) { o.landedPRHeads = fn }
+}
+
+// WithPRBaseProbe supplies the base branch of the item's open PR, when known.
+// When an adopted branch's open PR targets a base other than the resolved one,
+// EnsureWorktree logs a warning (#1917 R3); adoption is unchanged.
+func WithPRBaseProbe(fn func() (string, bool)) EnsureWorktreeOption {
+	return func(o *ensureOpts) { o.prBaseProbe = fn }
+}
+
+// SetLandedBranchCheckDisabledForTest neutralises the #1917 landed-branch
+// checks (R1 and R2) so a test can show it fails without them.
+func (wm *WorktreeManager) SetLandedBranchCheckDisabledForTest(disabled bool) {
+	wm.landedCheckDisabled.Store(disabled)
+}
+
+// SetIsAncestorFnForTest replaces the ancestry check (#1917 R5 tests).
+func (wm *WorktreeManager) SetIsAncestorFnForTest(fn func(dir, ancestor, descendant string) (bool, error)) {
+	wm.isAncestorFn = fn
+}
+
+// gitIsAncestor reports whether ancestor is an ancestor of (or equal to)
+// descendant. Exit 0 = true, exit 1 = false; any other outcome is an error and
+// the caller must treat it as doubt.
+func gitIsAncestor(dir, ancestor, descendant string) (bool, error) {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor: %s: %w", strings.TrimSpace(string(out)), err)
 }
 
 // logf calls logfFn if set, otherwise prints directly.
@@ -373,7 +431,14 @@ func (wm *WorktreeManager) BaseDir() string {
 // Each issue gets its own branch (fabrik/issue-N) and worktree directory.
 // When skipUpdate is true (e.g. on retry attempts), the worktree is returned as-is
 // without rebasing onto main. This avoids introducing unrelated changes mid-session.
-func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, skipUpdate bool) (string, error) {
+//
+// An issue branch already on origin is adopted unless it is fully landed
+// (#1917): see adoptRemoteIssueBranch. opts carry caller-known PR facts.
+func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, skipUpdate bool, opts ...EnsureWorktreeOption) (string, error) {
+	var eo ensureOpts
+	for _, o := range opts {
+		o(&eo)
+	}
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
@@ -414,7 +479,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		if !wm.branchExists("origin/" + baseBranch) {
 			baseRef = baseBranch
 		}
-		if remoteRef, ok := wm.adoptRemoteIssueBranch(branch, issueNumber); ok {
+		if remoteRef, ok := wm.adoptRemoteIssueBranch(branch, issueNumber, baseRef, baseBranch, eo); ok {
 			baseRef = remoteRef
 		}
 		cmd := exec.Command("git", "branch", branch, baseRef)
@@ -451,7 +516,19 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 // (remoteBranchExists) rather than trusting a possibly stale remote-tracking
 // ref, and only that branch is fetched. Fails safe: any probe or fetch error
 // returns false and the caller forks from base as before.
-func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int) (string, bool) {
+//
+// Existence alone is not enough (#1917): a branch that has already landed must
+// not be adopted, or a revalidate/reopen works on merged history. After the
+// fetch (kept ahead of the decision so the tracking ref is current and a later
+// --force-with-lease push passes its lease) two checks decline adoption:
+//   - R1: the tip is an ancestor of baseRef (every commit is on base).
+//   - R2: the tip equals the head SHA of a merged PR the caller supplied
+//     (squash/rebase merges leave a tip that is not an ancestor).
+//
+// Polarity note: unlike the fetch-error path above (which forks from base),
+// doubt in the R1/R2 checks means ADOPT — adoption is lossless, whereas forking
+// on doubt reintroduces the stale-lease loop. Do not conflate the two.
+func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int, baseRef, baseBranch string, eo ensureOpts) (string, bool) {
 	remoteRef := "refs/remotes/origin/" + branch
 	if !wm.remoteBranchExists(branch) {
 		return "", false
@@ -466,8 +543,51 @@ func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int
 	if !wm.branchExists(remoteRef) {
 		return "", false
 	}
+
+	if !wm.landedCheckDisabled.Load() {
+		isAncestor := gitIsAncestor
+		if wm.isAncestorFn != nil {
+			isAncestor = wm.isAncestorFn
+		}
+		landed, err := isAncestor(wm.baseDir, remoteRef, baseRef)
+		switch {
+		case err != nil:
+			// R5: doubt means adopt.
+			wm.logf(issueNumber, "worktree", "warn: could not tell whether %s is already on %s (%v) — adopting it as before\n", branch, baseBranch, err)
+		case landed:
+			wm.logf(issueNumber, "worktree", "%s on origin is already contained in %s — not adopting it, forking from base\n", branch, baseBranch)
+			return "", false
+		}
+		if eo.landedPRHeads != nil {
+			if tip := wm.revParse(remoteRef); tip != "" {
+				for _, head := range eo.landedPRHeads() {
+					if head != "" && head == tip {
+						wm.logf(issueNumber, "worktree", "%s on origin is the head (%s) of a merged PR — not adopting it, forking from base\n", branch, shortSHA(tip))
+						return "", false
+					}
+				}
+			}
+		}
+	}
+
+	if eo.prBaseProbe != nil {
+		if prBase, ok := eo.prBaseProbe(); ok && prBase != "" && prBase != baseBranch {
+			wm.logf(issueNumber, "worktree", "warn: base mismatch — adopting %s whose open PR targets base %q but the item's resolved base is %q — the stage must rebase onto %q\n", branch, prBase, baseBranch, baseBranch)
+		}
+	}
 	wm.logf(issueNumber, "worktree", "%s already exists on origin — starting the local branch from it\n", branch)
 	return remoteRef, true
+}
+
+// revParse returns the commit SHA ref resolves to in the bare clone, or "".
+func (wm *WorktreeManager) revParse(ref string) string {
+	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
+	cmd.Dir = wm.baseDir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // CommitsAheadOfRef returns the literal number of commits on the issue

@@ -101,6 +101,9 @@ is untouched. `scripts/e2e/run.sh` builds it and `exec`s it, so the runner — n
 `go run` wrapper — receives INT/TERM and reaps everything it started. Every flag and
 environment variable below keeps its meaning. `scripts/e2e/reset.sh` is likewise a shim
 (`gate reset`). The shim builds into `${E2E_GATE_BIN_DIR:-$TMPDIR/fabrik-e2e-gate-<uid>}`.
+On every exit — pass, failure, watchdog or INT/TERM — the gate stops the bed engine it left
+running (SIGINT, then escalation) and logs one `bed engine:` line; see "Bed engine teardown on
+every exit" in the gate README (#2245).
 
 ## Test bed prerequisites
 
@@ -139,10 +142,14 @@ These tests assume:
    defaults above, which bed A normally keeps) — its own `FABRIK_TOKEN`, and, for app
    legs, its **own** App (`E2E_APP_*`; an App installs once per org, so a second bed needs
    a second App such as `fabrik-bed-2`). The gate refuses two beds that share an App
-   installation, a board or a repo. Give bed B a `FABRIK_TOKEN` for a **different** user
-   than bed A's to get real concurrency: two beds whose tokens resolve to the same login
-   share that user's 5,000/h GraphQL budget, so their overlapping cells serialize (safe,
-   but no faster). Pruefer must cover every bed's repos. Standing up the second bed is #1990.
+   installation, a board or a repo. Two beds whose tokens
+   resolve to the same login share that user's 5,000/h GraphQL budget. Since #2263 that
+   user is held **exclusively** only where a bed's engine spends it (a `pat` leg) and is
+   **shared** where only the harness does (every `app` leg), above a budget floor — so
+   same-login beds still overlap their app cells, and only pat cells serialize on the
+   user (a distinct `FABRIK_TOKEN` user per bed removes even that). Pruefer must cover
+   every bed's repos. Standing up the second bed is #1990; its prerequisites are listed
+   under "Second bed" below.
 
 The harness reads `FABRIK_TEST_DIR`, the repo pair, `FABRIK_TEST_PROJECT_OWNER` and
 `FABRIK_TEST_PROJECT_NUMBER` (default `2`; a non-positive or non-integer value fails the
@@ -577,7 +584,10 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
     the PR push, and Review's latency eats into it before `fabrik:awaiting-ci`
     appears, so the plain 10-minute marker is too short for this test. The
     test reads `slow-gate`'s real state and fails as a fixture problem, not an
-    engine regression, when too little window is left.
+    engine regression, when too little window is left. Either marker sleeps
+    only when the PR head is **not** a merge commit: a merge-train singleton
+    catch-up re-runs CI on a merge-commit head after the window has been used,
+    and a second sleep only stalls the `alpha:main` partition behind it.
 12. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
     identity** — no shell export shadowing it. `config.Token()`'s precedence
     is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
@@ -1691,18 +1701,68 @@ filtered or partial run) or under `E2E_MATRIX=full`, each bed takes the next cel
 GitHub's GraphQL budget belongs to an **identity** — a user, shared by all of that user's
 PATs, or an App installation — so identity, not bed, is what the gate schedules on. A cell
 charges its engine identity (the bed's App installation on an app leg, its token's user on a
-pat leg) plus the user of the harness token (the bed's `FABRIK_TOKEN`); it starts only when
-none of them is in use by another running leg, and otherwise waits and says why
-(`== waiting: app/off on bed B needs user:arbeithand, held by bed A (app/on) ==`). The
+pat leg) plus the user of the harness token (the bed's `FABRIK_TOKEN`). Since #2263 (ADR-2263)
+each carries a **role**: an *engine* identity is held exclusively — no other cell may hold it in
+any role — while a *harness* identity (the token's user when the engine is an App) is shared by
+any number of cells, provided its remaining GraphQL budget is at least
+`E2E_SHARED_IDENTITY_FLOOR` percent of its limit (default 40; `0` disables the floor). A cell
+that cannot start waits and says why — exclusive use
+(`== waiting: pat/on on bed B needs user:arbeithand exclusively, held by bed A (app/on) as harness ==`)
+or the budget floor (`… shares user:arbeithand (harness) with bed A (app/on), but its budget is
+below the floor: 1500 of 5000 remaining (floor 40%), resets … ==`, re-probed when a leg
+finishes or after five minutes; an unreadable budget counts as below the floor). So with one
+harness user on both beds, bed B's `app/off` runs beside bed A's baseline, while its `pat`
+cells wait for the baseline to release the user. The
 pre-gate runs once; a bed's engine is stopped while the bed waits or has nothing left to run,
 so an idle engine never polls on an identity another bed's leg holds; each bed is prepared,
 reset and probed on its own; beds that would run
 different engine SHAs are refused. A failed leg lets the other bed's running leg finish but
 starts nothing new; a RUN INVALID voids only that bed's cell and stops only the cells that
 would charge the exhausted identity. Both beds write the one per-SHA coverage ledger, each
-record naming its bed. Every leg logs `== identity budget (leg: …): <identity> — N remaining,
+record naming its bed. Every leg logs `== identity budget (leg: …): <identity> (engine|harness|engine+harness) — N remaining,
 resets … ==` for each identity it charges, at start and end (also on a single bed). Bed
 output is prefixed `[bed A]` / `[bed B]`. `tests/gate/README.md` has the mechanics.
+
+#### Second bed: prerequisites, verification, retirement (#2263, #1990)
+
+Bed B is a second full test bed. Everything below is manual, one-time operator setup that
+nothing in the gate can create for you (`bed-topology` and `bed-identity` only refuse a
+wrong one). Standing it up and certifying a live two-bed run is #1990.
+
+| Prerequisite | Value | How to verify |
+|---|---|---|
+| GitHub App | `fabrik-bed-2`, installed on the org that owns the repos, with `contents: write`, `actions: write` and the same grants as `fabrik-bed` | `gh api /orgs/handarbeit/installations --jq '.installations[] | {id, app_slug}'` (needs org admin) lists it; its installation id is the bed's `E2E_APP_INSTALLATION_ID` and must differ from bed A's |
+| Repos | `handarbeit/fabrik-test-gamma` (alpha role) and `handarbeit/fabrik-test-delta` (beta role), not shared with bed A | `gh repo view handarbeit/fabrik-test-gamma` and `…-delta`; the App's installation lists both |
+| Board | org project `handarbeit` #7, with the Status columns of the stage configs | `gh project view 7 --owner handarbeit`; `fabrik repair-board` (dry-run) in the bed reports nothing missing |
+| Checkout | `~/dev/fabrik-test-2`, a full bed directory like bed A's (`.fabrik/`, stage configs, `config.yaml` without `github_app_*`) | `ls ~/dev/fabrik-test-2/.fabrik` |
+| Pruefer | covers `fabrik-test-gamma` and `-delta` | Pruefer's configuration lists both; the reviewer-reachability precondition checks it |
+
+The bed's `.env` (`~/dev/fabrik-test-2/.env`) names everything bed-specific; the gate and
+the harness read nothing about bed B from anywhere else:
+
+```
+FABRIK_TOKEN=...                          # the bed token (arbeithand's PAT may be shared with bed A — see #2263)
+FABRIK_TEST_REPO_ALPHA=handarbeit/fabrik-test-gamma
+FABRIK_TEST_REPO_BETA=handarbeit/fabrik-test-delta
+FABRIK_TEST_PROJECT_OWNER=handarbeit
+FABRIK_TEST_PROJECT_NUMBER=7
+E2E_APP_ID=...                            # fabrik-bed-2
+E2E_APP_PRIVATE_KEY_PATH=.fabrik/github-app-key.pem
+E2E_APP_INSTALLATION_ID=...               # fabrik-bed-2's installation
+```
+
+A key missing from the bed `.env` falls back to the environment, then to bed A's defaults — a
+fallback that would make bed B aim at bed A's repos, which `bed-topology` refuses (exit 7)
+before anything runs. Dry-run the setup with `E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2
+scripts/e2e/run.sh coverage`, and run a real gate to see `== bed identity: FABRIK_TOKEN
+authenticates as … ==` for each bed.
+
+**Retiring a bed.** Drop it from `E2E_BEDS` (a one-entry list or unset is the single-bed gate,
+unchanged). First reset it, `scripts/e2e/reset.sh --bed ~/dev/fabrik-test-2`, and make sure its
+engine is stopped (the gate stops an idle bed's engine, but not a leftover one); then
+uninstall the App, archive the repos and close board #7 if it is not coming back, and remove
+the repos from Pruefer's configuration. Ledger records and archives it wrote stay valid: they
+carry the bed's directory, and a pair covered on any bed counts.
 
 #### Parallelism cap — the shared bed oversubscribes easily
 
@@ -2510,8 +2570,10 @@ that never got converted (`TestMergeTrainColdCacheBaseMember` is the one documen
 exemption: it files a cheap blocked primer to warm a cache).
 
 **Measuring.** `gate report [--sha S] [--baseline B]` totals each test's `go test -json`
-`Elapsed` per cell from the per-leg archive and joins the registry's `entry`/`traversal`
-columns; with `--baseline` it prints the per-test and total runtime delta, taking the
+`Elapsed` per cell from the per-leg archive — every `go-test.<phase>.json` stream and its
+`go-test.retry-N.<phase>.json` retries (a bare `go-test.json` only in the no-registry /
+pre-#1977 layout) — and joins the registry's `entry`/`traversal` columns. It also prints
+each cell invocation's per-phase wall-clock from its `phases.json`. With `--baseline` it prints the per-test and total runtime delta, taking the
 baseline's entry stages from the registry *as of the baseline SHA* (a baseline from before
 #1992 has none, so its entry column reads `-` and its proxy is omitted). Model-quota use
 is **not recorded** by the ledger or the archive (the engine log carries no token counts;

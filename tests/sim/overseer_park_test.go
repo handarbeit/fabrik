@@ -13,8 +13,8 @@ import (
 
 // The overseer's move_parked action (#2188, ADR 2188) against the real engine:
 // a board with two parking columns, the move, its audit comment, its
-// column-changed attribution and the absence of any dispatch. Serial for the
-// same reason as the other channel scenarios (SetChannelTimingForTest), and it
+// column-changed attribution and the absence of any dispatch. Parallel like
+// the other channel scenarios (the seams are per-Engine, #2210), and it
 // needs BoardCache: the action takes its project id from the board cache and the
 // requester only reaches the event through the cache write-through.
 
@@ -25,6 +25,7 @@ func triageStages() []*stages.Stage {
 }
 
 func TestOverseerMoveParkedTriageToBacklog(t *testing.T) {
+	t.Parallel()
 	yolo := false
 	env := NewEnv(t, EnvOptions{Stages: triageStages(), BoardCache: true, Yolo: &yolo})
 	num := FileIssue(t, env, "triage me", "body", "Triage", "fabrik:cruise")
@@ -42,7 +43,7 @@ func TestOverseerMoveParkedTriageToBacklog(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	RunPolls(t, env, 4)
-	settleWait()
+	settleWait(env)
 
 	if got := projectItem(t, env, num).Status; got != "Backlog" {
 		t.Fatalf("board status = %q, want Backlog", got)
@@ -72,6 +73,7 @@ func TestOverseerMoveParkedTriageToBacklog(t *testing.T) {
 // attributed to a human and carries no via, so the overseer/via assertions above
 // are not satisfied by any column-changed event.
 func TestOverseerMoveParkedAttributionIsNotVacuous(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: triageStages(), BoardCache: true})
 	num := FileIssue(t, env, "dragged", "body", "Triage", "fabrik:paused", "fabrik:awaiting-input")
 	RunPolls(t, env, 3)
@@ -79,7 +81,7 @@ func TestOverseerMoveParkedAttributionIsNotVacuous(t *testing.T) {
 
 	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, num, false, "Backlog")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	evs := sink.ofType(channelevents.ColumnChanged, num)
 	if len(evs) != 1 {
 		t.Fatalf("column-changed = %d, want 1 (all: %+v)", len(evs), sink.all())
@@ -93,6 +95,7 @@ func TestOverseerMoveParkedAttributionIsNotVacuous(t *testing.T) {
 }
 
 func TestOverseerMoveParkedRefusesAPipelineItemAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: triageStages(), BoardCache: true})
 	num := FileIssue(t, env, "in the pipeline", "body", "Specify", "fabrik:paused", "fabrik:awaiting-input")
 	RunPolls(t, env, 3)

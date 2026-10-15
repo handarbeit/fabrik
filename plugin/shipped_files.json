@@ -1,9 +1,11 @@
 {
   ".claude-plugin/plugin.json": [
     "6c0546eee96e8316d4d0f5db9ef54cbb6ad5b44870bee226e354e4fb00ff3890",
-    "c5ab845c11523c1855af4d27eb78b807a457c9a517fb7069ef6f4cb3eb7a76e9"
+    "c5ab845c11523c1855af4d27eb78b807a457c9a517fb7069ef6f4cb3eb7a76e9",
+    "ccf9b167ecb7f9fd114d67336a1e3c0e48aea1929c4de8e9f7f77c73edaa3aaf"
   ],
   "LABELS.md": [
+    "2593938e5086ccdcdb3bdd305bf22c4f9cf4058237e862d420914cc40dd7b85b",
     "4168bbdb03580f008f7b8bef5f0ea4b8f40b211226685957d6c4a1753a263242",
     "5722d5751191577cc3ca5cf3975f29aa17024c1fa81cde569c937ff1dd610d53",
     "5cdb30565632bb98cc9fc284dc0f44bdd0e0649ded3cbb526f6511367a234179",
@@ -14,7 +16,8 @@
   ],
   "README.md": [
     "1cb86558281c35b3f9e4e3ab6b848201b9970cef0e8d92c9660160fb61bd9ff1",
-    "6178410f76ff0f73485dc034083b868bb288d8b372d8e64943627048890efbc9"
+    "6178410f76ff0f73485dc034083b868bb288d8b372d8e64943627048890efbc9",
+    "ecee197a62eec1814ad3ac82a4ecca034cab5956173811503857d65d5a04d6e4"
   ],
   "skills/fabrik-implement-comment/SKILL.md": [
     "21d1e0d635adcdcde7134b7f0dc977586086dfec6ba4ff00fbe7b58dd305f123",
@@ -156,5 +159,41 @@
     "f190c31a3690b79faf59a62541db88092889520d36ad9255b45d6af51cb5cfb5",
     "f1beed2eec024346f20e54f70361f281b9445857b3f27a8adb76df5ed4a20dbf",
     "fed55ca2e8702f0f1e0d628c598a0c27eb482589f3c2c9458c63038c1ef850a6"
+  ],
+  "skills/implement-comment/SKILL.md": [
+    "a1b3fef921f3cea969e56f4073a39b2e5a0c54480850cbf40548bae54f2875a8"
+  ],
+  "skills/implement/SKILL.md": [
+    "a4197a9be99e381544dcbc3e3143b05ccb0effc975643ae7577dc676aafc1745"
+  ],
+  "skills/plan-comment/SKILL.md": [
+    "38b6b7d6689f26c24a561c619ef67f09cd9d9681c8ac4ae2f4d869ad6adbda73"
+  ],
+  "skills/plan/SKILL.md": [
+    "f2d35aec6533f18128025ee9d159a7bf000954d761b78ddd667ca8c73c555dfb"
+  ],
+  "skills/research-comment/SKILL.md": [
+    "49beb87507fda2451dc1ef7bb05978989a0bdf1b8d8c0a51dd4e780619c7d8a0"
+  ],
+  "skills/research/SKILL.md": [
+    "9af200c569857843d5c76724bbee375977fe41887dfc2fbd337f22ca945d1a97"
+  ],
+  "skills/review-comment/SKILL.md": [
+    "0deaefa2a9fcbdbd16daeae89a8832f543c3358939f57c8a2ec5d459f7699837"
+  ],
+  "skills/review/SKILL.md": [
+    "303026da38092ef5f6ca0cba7953d6ad9df00029241d8785396efe4ebf4b786f"
+  ],
+  "skills/specify-comment/SKILL.md": [
+    "4e8f158f675d008eeda5a0927602637532e96c93bd004abe0265119ab0a91e62"
+  ],
+  "skills/specify/SKILL.md": [
+    "44583fdc50c446306f5243aa4c9af3447edba3968cf040c54948fcb41e8ffcb4"
+  ],
+  "skills/validate-comment/SKILL.md": [
+    "e8bb4c188cf497befd180c70ec1c852e9b1d1934dff10ed533480b78f9a018ad"
+  ],
+  "skills/validate/SKILL.md": [
+    "d334e0b3d334e8b56171f1f7b3ed269b900ba6151f21c483dd53ae8283219e8c"
   ]
 }

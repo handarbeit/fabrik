@@ -12,6 +12,8 @@ The constraint a second bed must respect is GitHub's rate limiting, which is **p
 
 And the runner assumed one bed everywhere: the lock, the bed log, the archive's engine-log sampler, the pre-gate marker, bed start/stop, the board drain and reset, the competing-daemon check and the scheduler were all implicitly single-bed.
 
+> **Amended by ADR 2263.** §2's identity sets and §4's "a shared harness login serializes" no longer hold for harness-only sharing: a cell now holds its engine identity exclusively and the harness token's user as a shared, budget-floored identity. The atomic acquisition, assignment, failure and ledger rules below are unchanged.
+
 ## Decision
 
 ### 1. A bed is a view of the gate
@@ -55,7 +57,7 @@ With one bed — the default — there are no views, `SerialScheduler` stays (it
 
 ## Consequences
 
-- The wall-clock gain depends on bed B carrying a different harness user (and its own App). With a shared harness token every cell shares that user and the beds serialize — correct, but no faster. #1990 measures whether two beds pay off.
+- The wall-clock gain depends on bed B carrying a different harness user (and its own App). With a shared harness token every cell shared that user and the beds serialized — correct, but no faster (amended by ADR 2263: an app cell now shares the harness user as harness, so only pat cells serialize on it). #1990 measures whether two beds pay off.
 - Concurrency is new in the runner: per-bed views share only read-only fields or explicitly synchronized state, and every scheduler test is channel-driven and `-race`-clean. A field added to `Gate` must be classified in `newBedGate`.
 - The single-bed run makes one more REST call per invocation (the token's login) and a few GraphQL `rateLimit` reads per leg — negligible against a leg's ~4,000 points.
 - The second App's grants and rate limits, and real two-bed timing, are only provable live, in #1990.

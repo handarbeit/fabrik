@@ -163,16 +163,27 @@ func TestConvergenceRace(t *testing.T) {
 	// Both must reach closed (merged). Wait in parallel — one will close
 	// well before the other; the second is the interesting one because it
 	// had to rebase through a conflict.
+	//
+	// Plain WaitForIssueClosed, not the review-check variant: both PRs are
+	// seeded with pruefer:ignore and expected-reviewers:none, so no review is
+	// ever expected, and the review fail-fast window is anchored on the PR's
+	// creation, which the slow-gate wait above already spends (both are 10m).
+	// In the v0.0.84 gate it fired before either item reached Validate.
 	var closeWg sync.WaitGroup
 	for _, num := range nums {
 		closeWg.Add(1)
 		go func(num int) {
 			defer closeWg.Done()
-			WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 90*time.Minute)
+			WaitForIssueClosed(t, env, env.RepoAlpha, num, 90*time.Minute)
 			t.Logf("%s#%d closed", env.RepoAlpha, num)
 		}(num)
 	}
 	closeWg.Wait()
+	// A t.Fatalf inside a wait goroutine ends only that goroutine; stop here
+	// so a timed-out wait is not reported as a missing label below.
+	if t.Failed() {
+		t.FailNow()
+	}
 
 	// The fabrik:auto-merge-enabled contract diverges by mode: under "off",
 	// attemptMergeOnValidate enables GitHub's native auto-merge and applies

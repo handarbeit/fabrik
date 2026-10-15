@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/attention"
@@ -35,9 +34,8 @@ import (
 // consumer. Store observers run outside the Store's lock, so the consumer may
 // call Peek while holding mu without inverting the order.
 
-// anomalyDisabled neutralises one detector so a test can show it is not vacuous
-// (FR-014). Production never sets it.
-var anomalyDisabled struct{ retry, wedge, divergence atomic.Bool }
+// The anomaly*Off seams (channel_settings.go) neutralise one detector so a test
+// can show it is not vacuous (FR-014). Production never sets them.
 
 const (
 	defaultRetryStarvedThreshold = 5 * time.Minute
@@ -222,7 +220,7 @@ func (a *anomalyState) nextSeq() uint64 {
 }
 
 func (ce *channelEvents) recordRetry(repo string, number int, stage, cause string, due time.Time) {
-	if anomalyDisabled.retry.Load() {
+	if ce.e.chanTest.anomalyRetryOff.Load() {
 		return
 	}
 	a := &ce.anom
@@ -255,7 +253,7 @@ func (ce *channelEvents) recordDeferred(refs []string, now time.Time) {
 }
 
 func (ce *channelEvents) recordGateHold(repo string, number int, status, gate, reason string, ids []string, now time.Time) {
-	if anomalyDisabled.wedge.Load() {
+	if ce.e.chanTest.anomalyWedgeOff.Load() {
 		return
 	}
 	a := &ce.anom
@@ -315,7 +313,7 @@ func (ce *channelEvents) noteWorkerEntered(ref string) {
 // returns the cache-divergence events for this change, in order, and whether the
 // label events derived from the change must be marked unverified.
 func (ce *channelEvents) noteChangeForDivergence(c itemstate.Change, st *itemstate.ItemState, now time.Time) []channelevents.Event {
-	if anomalyDisabled.divergence.Load() {
+	if ce.e.chanTest.anomalyDivOff.Load() {
 		return nil
 	}
 	e := ce.e
@@ -517,10 +515,10 @@ func (ce *channelEvents) checkAnomalies() {
 	}
 	pollOverdue := e.pollVerdictFor(e.health.snapshot(), now).Overdue
 	var out []channelevents.Event
-	if !anomalyDisabled.retry.Load() {
+	if !e.chanTest.anomalyRetryOff.Load() {
 		out = append(out, ce.checkRetriesLocked(now, pollOverdue, !until.IsZero())...)
 	}
-	if !anomalyDisabled.wedge.Load() {
+	if !e.chanTest.anomalyWedgeOff.Load() {
 		out = append(out, ce.checkWedgesLocked(now, pollOverdue)...)
 	}
 	a.mu.Unlock()

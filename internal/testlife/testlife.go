@@ -13,24 +13,47 @@
 //     sets it for every Claude worker, and every descendant inherits it), the
 //     binary exits once the recorded worker is provably gone — its PID absent,
 //     or held by a process with a different start token (a recycled PID). It
-//     never exits on parent death: a `go test -c` binary run directly, or a
-//     background run whose launching shell exited, legitimately has ppid 1.
+//     never infers death from process-tree shape (ppid 1): a worker-launched
+//     `go test -c` binary whose shell exited legitimately has ppid 1.
 //     Anything unresolved or unreadable means "keep running".
 //   - Parent watch: when SIM_TEST_PARENT=<pid>:<start token> is set — only by
 //     ReExecCommand, for a helper the test itself re-execs — the helper exits
 //     once that parent is gone. This covers the re-exec'd helpers that survived
 //     a `go test -timeout` panic of their parent.
+//   - Main parent watch (#2226): a binary with no explicit parent and no owner
+//     marker watches the process that started it (PID plus start token captured
+//     at install), so a `sim.test` reparented to init when its `go test` is gone
+//     exits too. An owner marker takes precedence — the owner watch is then the
+//     authoritative lifetime — and an unreadable identity means "keep running".
+//
+// All three share one bail path with a bounded exit (#2226): before it asks the
+// process to exit it arms a watchdog that SIGKILLs the process itself after
+// KillGrace, so an exit that blocks or spins (seen under -race) cannot leave an
+// orphan.
+//
+// Goroutine dump (#2247): after the watchdog is armed and the reason printed,
+// the bail path writes every goroutine's stack (runtime/pprof goroutine profile,
+// debug=2) to a file (DumpEnv, else the temp directory — never the working
+// directory, which is the package source tree) and then to stderr, so a hang and
+// a merely slow run no longer look the same. The dump is built in its own
+// goroutine and waited for at most DumpBudget (inside KillGrace): a stop-the-world
+// profile under a stuck runtime is skipped, never allowed to delay the exit. A
+// failed dump is reported and ignored.
 //
 // The package is a leaf: stdlib plus internal/sessionreap, internal/workerenv
 // and internal/workerowner. It never signals another process.
 package testlife
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,13 +83,25 @@ const (
 	// re-executing parent.
 	ParentEnv = "SIM_TEST_PARENT"
 
+	// DumpEnv names the file the goroutine dump is written to when the bail path
+	// fires (#2247); the process ID is inserted before its extension so binaries
+	// sharing one value do not overwrite each other. Unset: a file in the temp
+	// directory.
+	DumpEnv = "SIM_TEST_DUMP_FILE"
+
+	// DumpHeaderPrefix begins the first line of every dump, so a reader of the
+	// output stream can find it.
+	DumpHeaderPrefix = "=== testlife goroutine dump"
+
 	// ExitCode is the process exit status for every watchdog exit.
 	ExitCode = 2
 
 	defaultOwnerPoll    = 5 * time.Second
 	defaultParentPoll   = time.Second
+	defaultKillGrace    = 5 * time.Second
 	defaultResolveEvery = 500 * time.Millisecond
 	defaultResolveFor   = 30 * time.Second
+	defaultDumpBudget   = 3 * time.Second
 )
 
 // Options configures Guard. The zero value is production behaviour.
@@ -79,17 +114,37 @@ type Options struct {
 	ParentPoll    time.Duration // 0: 1s
 	ResolveWindow time.Duration // 0: 30s; how long to wait for the engine to write the owner file
 
+	KillGrace time.Duration // 0: 5s; how long exit may take before the process kills itself
+
+	DumpPath   string        // "": DumpEnv with the PID inserted before its extension, else <tmp>/<name>-goroutines-<pid>.txt
+	DumpBudget time.Duration // 0: 3s (never more than 3/5 of KillGrace); how long the bail path waits for the dump
+
 	// Seams. Zero values use the real process, environment and clock.
-	Getenv func(string) string
-	Exit   func(code int)
-	Stderr io.Writer
-	Start  func(pid int) string // process start-time token; nil: sessionreap.StartToken
+	Getenv  func(string) string
+	Exit    func(code int)
+	Kill    func()     // forced termination of this process; nil: SIGKILL to os.Getpid()
+	Getppid func() int // nil: os.Getppid
+	Stderr  io.Writer
+	Start   func(pid int) string  // process start-time token; nil: sessionreap.StartToken
+	Profile func(io.Writer) error // writes the goroutine dump; nil: pprof goroutine profile, debug=2
 
 	// Neutralisation seams: a test sets one to prove the mechanism it covers is
 	// load-bearing. Production never sets them.
 	DisableCeiling     bool
 	DisableOwnerWatch  bool
 	DisableParentWatch bool
+
+	DisableKillFallback    bool
+	DisableMainParentWatch bool
+	DisableDump            bool
+}
+
+// selfKill terminates this process and only this process: os.Process.Kill is
+// SIGKILL on unix and TerminateProcess on Windows, and the PID is our own.
+func selfKill() {
+	if p, err := os.FindProcess(os.Getpid()); err == nil {
+		_ = p.Kill()
+	}
 }
 
 func (o Options) getenv(k string) string {
@@ -104,6 +159,92 @@ func (o Options) stderr() io.Writer {
 		return o.Stderr
 	}
 	return os.Stderr
+}
+
+// dumpPath is where the goroutine dump goes. Never the working directory: a
+// test binary's cwd is its package directory, and a file there would dirty the
+// tree the gate records a pass against.
+func (o Options) dumpPath() string {
+	if o.DumpPath != "" {
+		return o.DumpPath
+	}
+	if v := strings.TrimSpace(o.getenv(DumpEnv)); v != "" {
+		// `go test ./...` runs several test binaries at once, all inheriting this
+		// one path: a shared name would let the second hung binary truncate the
+		// first's dump. The PID goes before the extension, so every binary keeps
+		// its own file and the gate (which reads the "written to" line) finds each.
+		ext := filepath.Ext(v)
+		return fmt.Sprintf("%s.%d%s", strings.TrimSuffix(v, ext), os.Getpid(), ext)
+	}
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			return r
+		}
+		return '_'
+	}, o.name())
+	return filepath.Join(os.TempDir(), fmt.Sprintf("%s-goroutines-%d.txt", name, os.Getpid()))
+}
+
+// dumpBudget is how long the bail path waits for the dump. It stays inside the
+// self-kill grace so the dump can never extend it.
+func (o Options) dumpBudget() time.Duration {
+	b := dur(o.DumpBudget, defaultDumpBudget)
+	if !o.DisableKillFallback {
+		if max := dur(o.KillGrace, defaultKillGrace) * 3 / 5; b > max {
+			b = max
+		}
+	}
+	return b
+}
+
+// dump writes the goroutine dump to a file and then stderr (#2247). Every
+// failure is reported and swallowed: the caller is about to exit and must.
+func (o Options) dump(reason string) {
+	if o.DisableDump {
+		return
+	}
+	path := o.dumpPath()
+	profile := o.Profile
+	if profile == nil {
+		profile = func(w io.Writer) error {
+			p := pprof.Lookup("goroutine")
+			if p == nil {
+				return errors.New("no goroutine profile")
+			}
+			return p.WriteTo(w, 2)
+		}
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var buf bytes.Buffer
+		fmt.Fprintf(&buf, "%s (%s) pid %d: %s ===\n", DumpHeaderPrefix, o.name(), os.Getpid(), reason)
+		err := profile(&buf)
+		ch <- result{buf.Bytes(), err}
+	}()
+	budget := time.NewTimer(o.dumpBudget())
+	defer budget.Stop()
+	var r result
+	select {
+	case r = <-ch:
+	case <-budget.C:
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump skipped: not produced within %s\n", o.name(), o.dumpBudget())
+		return
+	}
+	if r.err != nil {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump incomplete: %v\n", o.name(), r.err)
+	}
+	if err := os.WriteFile(path, r.data, 0o644); err != nil {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump not written to %s: %v\n", o.name(), path, err)
+	} else {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump written to %s\n", o.name(), path)
+	}
+	// File first: stderr may be a broken pipe once the parent is gone.
+	_, _ = o.stderr().Write(r.data) // a broken pipe changes nothing: we are exiting
 }
 
 func (o Options) name() string {
@@ -143,8 +284,24 @@ func Guard(o Options) (stop func()) {
 	var once sync.Once
 	bail := func(format string, args ...any) {
 		once.Do(func() {
-			fmt.Fprintf(o.stderr(), "%s: %s\n", o.name(), fmt.Sprintf(format, args...))
+			// Armed before anything that can block (the message, the exit), so a
+			// hang in either cannot stop the process being killed (#2226). Only a
+			// fake exit returns; that disarms it.
+			var wd *time.Timer
+			if !o.DisableKillFallback {
+				kill := o.Kill
+				if kill == nil {
+					kill = selfKill
+				}
+				wd = time.AfterFunc(dur(o.KillGrace, defaultKillGrace), kill)
+			}
+			reason := fmt.Sprintf(format, args...)
+			fmt.Fprintf(o.stderr(), "%s: %s\n", o.name(), reason)
+			o.dump(reason)
 			exit(ExitCode)
+			if wd != nil {
+				wd.Stop()
+			}
 		})
 	}
 	done := make(chan struct{})
@@ -173,7 +330,41 @@ func Guard(o Options) (stop func()) {
 			go watchIdentity(o, workerowner.Info{PID: pid, StartToken: tok}, "re-exec parent", dur(o.ParentPoll, defaultParentPoll), done, bail)
 		}
 	}
+	if info, ok := mainParent(o); ok {
+		go watchIdentity(o, info, "parent process", dur(o.ParentPoll, defaultParentPoll), done, bail)
+	}
 	return stop
+}
+
+// mainParent returns the identity of the process that started this binary, when
+// the main parent watch applies: not neutralised, no explicit ReExecCommand
+// parent (that watch covers it), no owner marker (the owner watch is then the
+// authoritative lifetime), and a parent that is not init with a readable start
+// token. Anything else means no watch, never an exit.
+func mainParent(o Options) (workerowner.Info, bool) {
+	if o.DisableMainParentWatch || o.getenv(workerenv.OwnerVar) != "" {
+		return workerowner.Info{}, false
+	}
+	if _, _, ok := parseParent(o.getenv(ParentEnv)); ok {
+		return workerowner.Info{}, false
+	}
+	getppid := o.Getppid
+	if getppid == nil {
+		getppid = os.Getppid
+	}
+	ppid := getppid()
+	if ppid <= 1 {
+		return workerowner.Info{}, false
+	}
+	start := o.Start
+	if start == nil {
+		start = sessionreap.StartToken
+	}
+	tok := start(ppid)
+	if tok == "" {
+		return workerowner.Info{}, false
+	}
+	return workerowner.Info{PID: ppid, StartToken: tok}, true
 }
 
 func parseParent(v string) (pid int, tok string, ok bool) {

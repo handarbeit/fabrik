@@ -85,7 +85,6 @@ var logOnlyExceptions = []logOnly{
 	{"engine/startup.go", `board has columns with no matching stage`, "extra columns neither block nor degrade work"},
 	{"engine/startup.go", `board drift detected`, "per-item state (FR-001), not operator-level"},
 	{"engine/startup.go", `has no matching board column`, "holding stage with merge_train off: nothing is queued there, so no work is blocked or degraded"},
-	{"engine/status_line.go", `could not look up the`, "optional display field (`off` is valid); retried every poll and the daemon works without it"},
 	{"engine/webhook.go", `hook-coverage check failed for`, "transient lookup error: logged only and deliberately kept out of webhook_coverage (an unknown repo is not a missing one; a prior entry is left untouched)"},
 	{"engine/webhook.go", `orphan webhook cleanup failed`, "transient cleanup; proceeding is safe"},
 	{"engine/webhook.go", `projects_v2_item may have caused subprocess crash`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},
@@ -166,6 +165,24 @@ func TestOperatorWarningsReachThePanel(t *testing.T) {
 		}
 		if strings.TrimSpace(ex.reason) == "" {
 			t.Errorf("log-only exception %s %q has no reason", ex.file, ex.substring)
+		}
+	}
+}
+
+// FR-004 (#2218): the scan must catch a warning written through the engine's
+// logf as well as the bracketed literal. These are the shapes it has to flag
+// (and one it must leave alone), so a regex edit cannot silently narrow it.
+func TestOperatorWarnLiteralCatchesLogfShape(t *testing.T) {
+	for line, want := range map[string]bool{
+		`e.logf(0, "startup", "warning: could not look up the %q field: %v\n", n, err)`: true,
+		`e.logf(0, "startup", "warning: project board has no ID\n")`:                    true,
+		`fmt.Fprintf(w, "[startup] warning: x\n")`:                                      true,
+		`e.logf(0, "startup", "WARNING: x\n")`:                                          true,
+		`e.logf(0, "startup", "status-line field unavailable — %s\n", why)`:             false,
+		`e.logf(item.Number, "warn", "per-item state\n")`:                               false,
+	} {
+		if got := operatorWarnLiteral.MatchString(line); got != want {
+			t.Errorf("operatorWarnLiteral.MatchString(%q) = %v, want %v", line, got, want)
 		}
 	}
 }

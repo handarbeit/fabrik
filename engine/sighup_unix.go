@@ -4,50 +4,56 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 )
 
-// registerSighupHandler registers a SIGHUP signal handler. On receipt, it logs,
-// sets the sighupRequested flag, and cancels the context so the main loop drains
-// workers before re-execing. A second SIGHUP during the drain window force-exits.
-// restartDone is closed by the caller after performSighupRestart returns (exec
-// failure path); on exec success the process is replaced before it can be closed.
-// Using restartDone instead of ctx.Done() in the second select keeps the goroutine
-// alive for the full drain window, because ctx.Done() fires immediately when
-// cancel() is called on the first SIGHUP.
+// registerSighupHandler registers the two-phase SIGHUP handler (#2259, ADR 2259).
+//
+//   - First SIGHUP: begin a drain (Engine.onFirstSighup). Dispatch stops, polling
+//     stops, in-flight workers keep their context and run to their own end, and
+//     the main loop re-execs once none is left. Nothing is cancelled.
+//   - Second SIGHUP: cancel the run context. The main loop then reaches
+//     drainAndExit, which runs the bounded drain (drainDeadline) and re-execs. It
+//     no longer force-quits with exit 1.
+//   - Third and later SIGHUPs: no effect beyond the restart already under way.
+//
+// One long-lived Notify channel counts the signals, so there is no window in which
+// a SIGHUP would hit the default (terminating) action. restartDone is closed by
+// Run() when it returns and ends the goroutine (and the in-flight log repeater).
+// SIGINT/SIGTERM are handled in Run() and are unchanged (ADR-1393).
 func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *Engine, restartDone <-chan struct{}) {
-	sighupCh := make(chan os.Signal, 1)
+	sighupCh := make(chan os.Signal, 4)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	go func() {
-		select {
-		case <-sighupCh:
-			e.logf(0, "signal", "received SIGHUP — restarting in place to clear in-memory state\n")
-			e.sighupRequested.Store(true)
-			cancel()
-		case <-ctx.Done():
-			signal.Stop(sighupCh)
-			return
-		}
-		signal.Stop(sighupCh)
-		// Listen for a second SIGHUP during the drain window and force-exit.
-		sighup2Ch := make(chan os.Signal, 1)
-		signal.Notify(sighup2Ch, syscall.SIGHUP)
-		select {
-		case <-sighup2Ch:
-			fmt.Fprintln(os.Stderr, "\nSecond SIGHUP received during drain — force-quitting...")
-			// Release the terminal before exiting so the shell is not left in
-			// alt-screen mode. See also: #692 — any new os.Exit added there must
-			// invoke this hook too.
-			if fn := e.cleanupHook; fn != nil {
-				fn()
+		defer signal.Stop(sighupCh)
+		count := 0
+		for {
+			select {
+			case <-sighupCh:
+			case <-restartDone:
+				return
 			}
-			os.Exit(1)
-		case <-restartDone:
-			signal.Stop(sighup2Ch)
+			if ctx.Err() != nil {
+				// A stop (SIGINT/SIGTERM, lock loss) or the second SIGHUP's cancel is
+				// already under way; a further SIGHUP changes nothing.
+				continue
+			}
+			count++
+			switch {
+			case e.drain.cancelOnFirst.Load():
+				// Test seam: the pre-#2259 behaviour.
+				e.logf(0, "signal", "received SIGHUP — restarting in place to clear in-memory state\n")
+				e.sighupRequested.Store(true)
+				cancel()
+			case count == 1:
+				e.onFirstSighup(restartDone)
+			case count == 2:
+				e.logf(0, "signal", "received second SIGHUP — cancelling remaining workers and restarting now\n")
+				cancel()
+			}
 		}
 	}()
 }

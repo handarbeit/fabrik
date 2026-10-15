@@ -9,10 +9,18 @@ import (
 )
 
 // driftAllowedPrefixes are the paths whose change cannot alter engine behaviour:
-// the live suite, its scripts, and the gate runner itself (#1994's tests/gate,
-// which #1973–#1977 all change). A diff confined to them leaves the ledger valid
-// (R2); anything else means a new engine SHA and a new, empty ledger.
-var driftAllowedPrefixes = []string{"tests/e2e/", "scripts/e2e/", "tests/gate/"}
+// the live suite, its scripts, the gate runner itself (#1994's tests/gate,
+// which #1973–#1977 all change) and the sim pre-gate's script (scripts/sim/,
+// which only decides how the pre-gate runs the sim; the pre-gate itself is
+// re-run for every new HEAD). A diff confined to them, and to driftAllowedFiles,
+// leaves the ledger valid (R2); anything else means a new engine SHA and a new,
+// empty ledger.
+var driftAllowedPrefixes = []string{"tests/e2e/", "scripts/e2e/", "tests/gate/", "scripts/sim/"}
+
+// driftAllowedFiles are single files that are never compiled or embedded into
+// the binary. CLAUDE.md is the repository's development guide; the embedded
+// documents live under plugin/ and stages/, which stay outside the allowlist.
+var driftAllowedFiles = map[string]bool{"CLAUDE.md": true}
 
 // Drift is the R2 verdict: is the ledger recorded for an engine SHA still a
 // valid certificate for the tree being gated?
@@ -118,6 +126,9 @@ func (g *Gate) declaredDirtyPaths(ctx context.Context) (map[string]bool, error) 
 }
 
 func driftAllowed(path string) bool {
+	if driftAllowedFiles[path] {
+		return true
+	}
 	for _, p := range driftAllowedPrefixes {
 		if strings.HasPrefix(path, p) {
 			return true

@@ -44,9 +44,15 @@ description: >-
     </div>
 
     <p style="margin-top: 24px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      Or — just want Claude to know about your Fabrik board? <strong>No binary install needed.</strong>
-      Install the <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">companion Claude Code plugin</a>
-      in three commands and start asking "what's on the board?", "why is #42 stuck?" right in your interactive session.
+      Or — just want Claude to know about your Fabrik board? Install the
+      <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">companion Claude Code plugin</a>
+      (it talks to your running <code>fabrik</code> daemon, so the binary must be on your <code>PATH</code>) and start asking "what's on the board?", "why is #42 stuck?" right in your interactive session.
+    </p>
+
+    <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
+      New in v0.0.84: a Claude Code session can oversee a running daemon. It reads the daemon's state at no GitHub API cost, takes audited actions (promote, advance, set autonomy, revalidate) and receives pushed events. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#overseer-tools-fabrik-mcp">Overseer Tools</a>
+      and the <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">PM plugin install</a>.
     </p>
 
     <div class="hero-diagram">
@@ -386,7 +392,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">🔌</span>
         <div class="feature-title">Interactive PM Plugin</div>
         <div class="feature-desc">
-          A Claude Code plugin for your own session — ask "what's on the board?" or "why is #42 stuck?" and steer Fabrik from inside interactive Claude Code. No binary install needed.
+          A Claude Code plugin for your own session — ask "what's on the board?" or "why is #42 stuck?" and steer Fabrik from inside interactive Claude Code. Backed by the running daemon through <code>fabrik mcp</code>: read tools, audited actions and pushed events. Needs the <code>fabrik</code> binary on your <code>PATH</code>.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#git-repositories-and-worktrees" aria-label="Isolated Git Worktrees — open documentation">
@@ -505,7 +511,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">🔃</span>
         <div class="feature-title">In-Place Restart</div>
         <div class="feature-desc">
-          SIGHUP drains in-flight runs and re-execs the binary in place — pick up a new build without terminal disruption.
+          SIGHUP lets in-flight runs finish (a second SIGHUP restarts now) and re-execs the binary in place — pick up a new build without terminal disruption.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#command-line-flags" aria-label="Big-Board Efficiency — open documentation">
@@ -526,7 +532,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">🚂</span>
         <div class="feature-title">Merge Train &amp; Merge Queue</div>
         <div class="feature-desc">
-          Batches ready PRs and validates the combined result once, killing the O(N²) rebase-and-retest cascade — GitHub's native queue where available, an internal plan-agnostic merge train everywhere else.
+          Batches ready PRs and validates the combined result once, killing the O(N²) rebase-and-retest cascade — GitHub's native queue where available, an internal plan-agnostic merge train everywhere else, with in-place catch-up for lone PRs and auto-repair of red ones.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#anthropic-auth-namespace-scrub--apikeyhelper-refusal" aria-label="Anthropic Auth Namespace Scrub — open documentation">
@@ -629,7 +635,7 @@ fabrik --auto-upgrade</pre>
         <span class="link-icon">🔌</span>
         <div>
           <div class="link-title">Interactive PM Plugin</div>
-          <div class="link-desc">Ask Claude "what's on the board?" from your own session — no binary install</div>
+          <div class="link-desc">Ask Claude "what's on the board?" from your own session, backed by the running daemon</div>
         </div>
       </a>
       <a href="{{ '/stage-lifecycle' | relative_url }}" class="link-card">

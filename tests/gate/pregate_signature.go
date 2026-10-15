@@ -33,7 +33,10 @@ var (
 	// Evidence of a REAL failure. Any one of these on any line vetoes the retry,
 	// whatever else matched: an engine panic, a Go runtime fatal error, a
 	// data-race report (an engine verdict) or a goroutine dump.
-	pregateVetoRE = regexp.MustCompile(`^(?:panic: |fatal error: |WARNING: DATA RACE|goroutine \d+ \[)|\[signal SIGSEGV`)
+	//
+	// The testlife ceiling and its dump (#2247) are evidence too, and unanchored:
+	// a hang that hit its wall-time ceiling is a real failure, never a TSan crash.
+	pregateVetoRE = regexp.MustCompile(`^(?:panic: |fatal error: |WARNING: DATA RACE|goroutine \d+ \[)|\[signal SIGSEGV|exceeded its hard wall-time ceiling|=== testlife goroutine dump`)
 )
 
 // maxScanLine bounds a single line held while scanning; a longer one is scanned

@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -33,10 +34,58 @@ query($projectId: ID!, $name: String!) {
   }
 }`
 
+// fieldNotFoundMessage is the message GitHub gives for a ProjectV2.field(name:)
+// lookup of a name the project does not have. GitHub reports that as a GraphQL
+// error (not a null field): "Could not resolve to a
+// Unions::ProjectV2FieldConfiguration with the name '<name>'" (#2218).
+const fieldNotFoundMessage = "Could not resolve to a Unions::ProjectV2FieldConfiguration with the name"
+
+// isFieldNotFoundError reports whether err is GitHub's "no such field" error
+// for the field lookup. The match is deliberately narrow: the GraphQL error's
+// message must carry the exact shape above and, when GitHub reports a path, the
+// path must end in "field". Any other error — a bad project node id ("Could not
+// resolve to a node with the global id"), a 5xx, a transport failure — is not a
+// missing field.
+func isFieldNotFoundError(err error) bool {
+	var ge *GraphQLError
+	if !errors.As(err, &ge) {
+		return false
+	}
+	if !strings.Contains(ge.Message, fieldNotFoundMessage) {
+		return false
+	}
+	if len(ge.Path) == 0 {
+		return true
+	}
+	last, ok := ge.Path[len(ge.Path)-1].(string)
+	return ok && last == "field"
+}
+
+// FieldTypeMismatchError reports that the project has a field with the
+// requested name but not of the requested type: either a plain field of another
+// dataType, or a single-select / iteration field (which the ProjectV2Field
+// fragment returns as an empty object). Found is the dataType when known, ""
+// otherwise. fabrik repair-board never writes such a field (ADR 2110), so the
+// engine surfaces it separately from an absent one.
+type FieldTypeMismatchError struct {
+	Name  string
+	Want  string
+	Found string
+}
+
+func (e *FieldTypeMismatchError) Error() string {
+	if e.Found == "" {
+		return fmt.Sprintf("project field %q exists but is not a %s field", e.Name, strings.ToLower(e.Want))
+	}
+	return fmt.Sprintf("project field %q exists but is a %s field, not %s", e.Name, strings.ToLower(e.Found), strings.ToLower(e.Want))
+}
+
 // fetchProjectFieldID looks a plain project field up by name and returns its
 // id and name when its dataType is want (case-insensitive). It returns
-// ("", "", nil) when the field is absent or has another type. Shared by
-// FetchTextField and FetchDateField so there is one query call site.
+// ("", "", nil) when the field is absent — including GitHub's "could not
+// resolve ... with the name" error — and a *FieldTypeMismatchError when a field
+// of that name exists with another type. Shared by FetchTextField and
+// FetchDateField so there is one query call site.
 func (c *Client) fetchProjectFieldID(projectID, name, want string) (id, fieldName string, err error) {
 	vars := map[string]interface{}{
 		"projectId": projectID,
@@ -55,20 +104,32 @@ func (c *Client) fetchProjectFieldID(projectID, name, want string) (id, fieldNam
 		} `json:"data"`
 	}
 	if err := c.graphqlRequest(fetchTextFieldQuery, vars, &result); err != nil {
+		if isFieldNotFoundError(err) {
+			return "", "", nil
+		}
 		return "", "", fmt.Errorf("fetching %s field %q for project %s: %w", strings.ToLower(want), name, projectID, err)
 	}
 
 	f := result.Data.Node.Field
-	if f == nil || f.ID == "" || !strings.EqualFold(f.DataType, want) {
+	if f == nil {
 		return "", "", nil
+	}
+	if f.ID == "" {
+		// A same-named single-select or iteration field: the union member
+		// carries no id through the ProjectV2Field fragment.
+		return "", "", &FieldTypeMismatchError{Name: name, Want: want}
+	}
+	if !strings.EqualFold(f.DataType, want) {
+		return "", "", &FieldTypeMismatchError{Name: name, Want: want, Found: f.DataType}
 	}
 	return f.ID, f.Name, nil
 }
 
 // FetchTextField returns the project's text field with the given name. It
-// returns (nil, nil) when no such field exists or the field is not a TEXT
-// field — an absent display field is a normal, silent condition, not an
-// error. A transport or GraphQL failure is returned as an error.
+// returns (nil, nil) when no such field exists — an absent display field is a
+// normal condition, not an error — and a *FieldTypeMismatchError when the name
+// is taken by a field that is not TEXT. A transport or GraphQL failure is
+// returned as an error.
 func (c *Client) FetchTextField(projectID, name string) (*TextField, error) {
 	id, fieldName, err := c.fetchProjectFieldID(projectID, name, "TEXT")
 	if err != nil || id == "" {
@@ -144,6 +205,27 @@ func (c *Client) ClearProjectItemField(projectID, itemID, fieldID string) error 
 // #2048: nothing reads the value back).
 type statusLineValue struct {
 	UpdatedAt string `json:"updatedAt"`
+}
+
+// statusValue is the Status single-select value selected by the shallow board
+// and probe queries: its name and its own updatedAt, which only a Status write
+// bumps (unlike the project item's updatedAt, which every field write bumps).
+type statusValue struct {
+	Name      string `json:"name"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// movedAt is GitHub's time for the Status value, or the zero time when the
+// timestamp is absent or unparseable (unknown, never epoch) (#2246).
+func (v *statusValue) movedAt() time.Time {
+	if v == nil || v.UpdatedAt == "" {
+		return time.Time{}
+	}
+	t, err := parseTime(v.UpdatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // statusLineUpdatedAtTolerance absorbs timestamp skew between the field

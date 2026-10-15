@@ -3,7 +3,6 @@ package sim
 import (
 	"testing"
 
-	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 )
@@ -19,11 +18,11 @@ func settleCruiseItem(t *testing.T, env *Env, sink *simSink, title string) (int,
 	num := FileIssue(t, env, title, "Re-settle.", "Implement", "fabrik:cruise")
 	driveToSettled(t, env, num)
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 1
 	}, 40)
 	RunPolls(t, env, 4)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.ValidateSettled, num)
 	if len(got) != 1 {
 		t.Fatalf("want exactly one first settle, got %d", len(got))
@@ -53,7 +52,7 @@ func settleOnCruise(t *testing.T, env *Env, num int) {
 	t.Helper()
 	driveToSettled(t, env, num)
 	RunPolls(t, env, 12)
-	settleWait()
+	settleWait(env)
 }
 
 // swapAutonomy replaces the cruise label with yolo the way a human would: on
@@ -73,6 +72,7 @@ func swapAutonomy(t *testing.T, env *Env, num int, sender string) {
 // A human swaps cruise for yolo on a settled item: the item settles again at the
 // same head, and the second validate-settled says why and who.
 func TestChannelReSettleCauseAutonomyChangedByHuman(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	_, sink := startChannel(t, env)
 	num, first := settleCruiseItem(t, env, sink, "re-settle cause: autonomy")
@@ -86,7 +86,7 @@ func TestChannelReSettleCauseAutonomyChangedByHuman(t *testing.T) {
 
 	swapAutonomy(t, env, num, "alice")
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) >= 2
 	}, 40)
 	got := sink.ofType(channelevents.ValidateSettled, num)
@@ -113,13 +113,14 @@ func TestChannelReSettleCauseAutonomyChangedByHuman(t *testing.T) {
 // (the open episode suppressed it), so there was no cause and no actor for a
 // semantic-only subscriber to see. With the cause neutralised the swap is silent.
 func TestChannelReSettleCauseNonVacuous(t *testing.T) {
-	defer engine.SetSettleCauseDisabledForTest()()
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
+	defer env.Engine.SetSettleCauseDisabledForTest()()
 	_, sink := startChannel(t, env)
 	num, _ := settleCruiseItem(t, env, sink, "re-settle cause: non-vacuous")
 	swapAutonomy(t, env, num, "alice")
 	RunPolls(t, env, 10)
-	settleWait()
+	settleWait(env)
 	for _, ev := range sink.ofType(channelevents.ValidateSettled, num) {
 		if ev.Meta["cause"] != "" || ev.Meta["actor"] != "" {
 			t.Fatalf("neutralised: no event may carry a cause or actor: %+v", ev.Meta)
@@ -133,6 +134,7 @@ func TestChannelReSettleCauseNonVacuous(t *testing.T) {
 // A revalidated item that settles again says so; the head moves too (the sim
 // worker pushes a commit), and revalidated outranks new-head.
 func TestChannelReSettleCauseRevalidated(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	_, sink := startChannel(t, env)
 	num, first := settleCruiseItem(t, env, sink, "re-settle cause: revalidate")
@@ -148,7 +150,7 @@ func TestChannelReSettleCauseRevalidated(t *testing.T) {
 	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, pr.Number, pr.HeadSHA)
 	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) >= 2
 	}, 80)
 	got := sink.ofType(channelevents.ValidateSettled, num)

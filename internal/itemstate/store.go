@@ -505,6 +505,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			item.Status = v.NewStatus
 			item.Terminal = false
 			item.StatusEnteredAt = time.Now()
+			item.StatusAtGitHub = time.Time{} // the engine is the writer: daemon time is the move time
 			return StatusChanged | EngineWriteRecordedChanged
 		}
 		return EngineWriteRecordedChanged
@@ -599,6 +600,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LastAttemptAt[v.StageName] = v.At
+		if v.Slice {
+			item.StageState.BackoffExempt[v.StageName] = true
+		} else {
+			delete(item.StageState.BackoffExempt, v.StageName)
+		}
 		return StageStateChanged
 
 	case StageRetryIncremented:
@@ -1233,6 +1239,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		item.Status = v.NewStatus
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = v.At // zero when the payload carried no updated_at
 		s.stampEligibility(item, before)
 	}
 	if reflect.DeepEqual(before, *item) {
@@ -1665,6 +1672,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.LastAttemptAt == nil {
 		ss.LastAttemptAt = make(map[string]time.Time)
+	}
+	if ss.BackoffExempt == nil {
+		ss.BackoffExempt = make(map[string]bool)
 	}
 	if ss.PausedByEngine == nil {
 		ss.PausedByEngine = make(map[string]bool)

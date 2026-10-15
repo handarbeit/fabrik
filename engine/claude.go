@@ -109,6 +109,9 @@ const apiErrorTerminalReason = "api_error"
 // (#1458 R5 could not empirically verify CostUSD on a real api_error sample,
 // so this guard is reused unchanged rather than dropped — see ADR-1458).
 //
+// usage must be this invocation's own (see invocationGuardUsage, #1949): on a
+// resumed session the result's figures are cumulative.
+//
 // This function does not itself inspect api_error_status: the caller
 // (interpretClaudeResult) tries classifyUsageLimitExit first, which claims the
 // 429 subset (ADR-1811), leaving only non-429 api_errors for this path.
@@ -140,7 +143,9 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // over from the original prose-based guard (#1184): a genuine usage-limit
 // exit terminates the invocation immediately (0 turns, $0.00), so an
 // invocation that consumed turns and incurred cost is never classified as
-// one, regardless of what TerminalReason says.
+// one, regardless of what TerminalReason says. usage must be this
+// invocation's own, not a resumed session's cumulative totals (see
+// invocationGuardUsage, #1949).
 //
 // A second structural trigger is terminal_reason "api_error" together with
 // api_error_status 429 (ADR-1811): the CLI reports a session limit that way
@@ -1962,14 +1967,18 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// payload to trust, so it falls through to the generic error below
 		// rather than being classified by any means.
 		if ok {
-			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
+			// On --resume the result's turns/cost are the session's cumulative
+			// figures; the classifiers' real-work guard must judge this
+			// invocation's own usage (#1949). Display and accounting keep usage.
+			guardUsage := invocationGuardUsage(usage, rawOutput, resumeSessionID != "")
+			if msg, detected := classifyUsageLimitExit(resp, guardUsage); detected {
 				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
 				// The reset instant lives on a separate rate_limit_event stream line,
 				// not on the result object (ADR-1815); a best-effort raw-stream scan
 				// that can never affect the classification above.
 				resetAt, resetReason := extractUsageLimitReset(rawOutput)
 				return text, false, usage, &claudeUsageLimitError{Message: msg, ResetAt: resetAt, ResetFallbackReason: resetReason}
-			} else if _, detected := classifyAPIErrorExit(resp, usage); detected {
+			} else if _, detected := classifyAPIErrorExit(resp, guardUsage); detected {
 				claudeLog(issueNumber, "claude", "api_error exit detected (turns=%d, cost=$%.4f) — stage did not run, not charged against max_retries\n", usage.TurnsUsed, usage.CostUSD)
 				return text, false, usage, &claudeAPIErrorExit{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 			} else if resp.TerminalReason != "" && resp.TerminalReason != usageLimitTerminalReason {

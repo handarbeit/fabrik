@@ -110,6 +110,12 @@ type Config struct {
 
 	TmpDir string // $TMPDIR, default /tmp
 
+	// The sim pre-gate's diagnostics (#2247, ADR-2247). A zero interval disables
+	// that watcher, so a Config built by hand (the tests') runs none.
+	PregateHeartbeat time.Duration // how often the running tests are listed (3m)
+	PregateReapPoll  time.Duration // how often the stuck-binary reaper looks (30s)
+	PregateReapGrace time.Duration // how long past SIM_TEST_CEILING a binary may live before it is killed (2m)
+
 	// The per-SHA coverage ledger (#1972, ADR-1972).
 	CoverageDir        string        // E2E_COVERAGE_DIR, default <RepoRoot>/.e2e-coverage ("" disables the ledger)
 	CoverageKeepSHAs   int           // E2E_COVERAGE_KEEP_SHAS: SHAs whose bulky archive logs are kept (default 5)
@@ -119,6 +125,17 @@ type Config struct {
 	// The INCONCLUSIVE outcome (#1973, ADR-1973).
 	InconclusiveRetries int // E2E_INCONCLUSIVE_RETRIES: in-leg re-runs of the inconclusive tests (default 2; 0 disables)
 	InconclusiveWarn    int // E2E_INCONCLUSIVE_WARN: a leg with MORE inconclusives than this warns, pointing at #1974 (default 3)
+
+	// Shared identities on a multi-bed run (#2263, ADR-2263). A cell may join an
+	// identity another bed's cell already uses as its harness only while that
+	// identity's remaining GraphQL budget is at least SharedIdentityFloor percent
+	// of its limit. 0 disables the floor (and its probe), so a Config built by
+	// hand (the tests') shares without probing.
+	SharedIdentityFloor int // E2E_SHARED_IDENTITY_FLOOR: percent of the limit (default 40; 0-100)
+	// SharedIdentityReprobe is how long a bed waiting on the floor sleeps before
+	// re-reading the budget when no leg finishes first (5m). A field so tests can
+	// shrink it.
+	SharedIdentityReprobe time.Duration
 
 	// The environment probes (#1974, ADR-1974). A zero threshold disables that
 	// probe, so a Config built by hand (the tests') probes nothing.
@@ -152,6 +169,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		BannerWait:         90 * time.Second,
 		StopWait:           60 * time.Second,
 		KillGrace:          10 * time.Second,
+		PregateHeartbeat:   3 * time.Minute,
+		PregateReapPoll:    30 * time.Second,
+		PregateReapGrace:   2 * time.Minute,
 		TmpDir:             orDefault(getenv("TMPDIR"), "/tmp"),
 
 		CoverageDir:        orDefault(getenv("E2E_COVERAGE_DIR"), filepath.Join(repoRoot, ".e2e-coverage")),
@@ -161,6 +181,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 
 		InconclusiveRetries: 2,
 		InconclusiveWarn:    3,
+
+		SharedIdentityFloor:   defaultSharedIdentityFloor,
+		SharedIdentityReprobe: 5 * time.Minute,
 
 		LoadProbeFactor: 2,
 		LagPollInterval: 3 * time.Second,
@@ -195,6 +218,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		return c, err
 	}
 	if c.InconclusiveWarn, err = countEnv(getenv, "E2E_INCONCLUSIVE_WARN", c.InconclusiveWarn); err != nil {
+		return c, err
+	}
+	if c.SharedIdentityFloor, err = percentEnv(getenv, "E2E_SHARED_IDENTITY_FLOOR", c.SharedIdentityFloor); err != nil {
 		return c, err
 	}
 	if c.GHAPITimeout, err = secsEnv(getenv, "E2E_GH_API_TIMEOUT", 30); err != nil {
@@ -298,6 +324,18 @@ func countEnv(getenv func(string) string, key string, def int) (int, error) {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
 		return 0, fmt.Errorf("%s=%q is not a non-negative integer", key, v)
+	}
+	return n, nil
+}
+
+// defaultSharedIdentityFloor is E2E_SHARED_IDENTITY_FLOOR's default (#2263).
+const defaultSharedIdentityFloor = 40
+
+// percentEnv parses an integer percentage in 0-100; unset keeps def.
+func percentEnv(getenv func(string) string, key string, def int) (int, error) {
+	n, err := countEnv(getenv, key, def)
+	if err != nil || n > 100 {
+		return 0, fmt.Errorf("%s=%q is not a percentage from 0 to 100", key, strings.TrimSpace(getenv(key)))
 	}
 	return n, nil
 }

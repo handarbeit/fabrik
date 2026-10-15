@@ -16,10 +16,9 @@ import (
 // to record a label time right after seeding an item.
 func decisionChannel(t *testing.T) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 120*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-	return channelEngineOn(t, apiEngine(t, 0), 0, nil)
+	e := apiEngine(t, 0)
+	e.SetChannelTimingForTest(120*time.Millisecond, time.Hour)
+	return channelEngineOn(t, e, 0, nil)
 }
 
 func (e *Engine) seedSpecifyComplete(t *testing.T, n int, age time.Duration) {
@@ -75,9 +74,9 @@ func (s *chanSink) snapshotOfType(typ channelevents.EventType) []channelevents.E
 }
 
 func TestDecisionPending_NeutralisedByTheSeam(t *testing.T) {
-	restore := SetDecisionPendingDisabledForTest()
-	defer restore()
 	e, sink := decisionChannel(t)
+	restore := e.SetDecisionPendingDisabledForTest()
+	defer restore()
 	e.seedSpecifyComplete(t, 1, time.Hour)
 	time.Sleep(400 * time.Millisecond)
 	if n := len(sink.snapshotOfType(channelevents.DecisionPending)); n != 0 {
@@ -124,9 +123,9 @@ func TestDecisionPending_WithdrawnWhenTheEngineTakesItBack(t *testing.T) {
 }
 
 func TestDecisionPending_WithdrawalNeutralised(t *testing.T) {
-	restore := SetSettlementWithdrawalDisabledForTest()
-	defer restore()
 	e, sink := decisionChannel(t)
+	restore := e.SetSettlementWithdrawalDisabledForTest()
+	defer restore()
 	e.seedSpecifyComplete(t, 1, time.Hour)
 	sink.nextOfType(t, channelevents.DecisionPending)
 	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:rebase-needed"})
@@ -137,9 +136,9 @@ func TestDecisionPending_WithdrawalNeutralised(t *testing.T) {
 }
 
 func TestDecisionPending_UnknownTimeWaitsForTheRecorder(t *testing.T) {
-	restore := SetDecisionAnchorGraceForTest(time.Hour)
-	defer restore()
 	e, sink := decisionChannel(t)
+	restore := e.SetDecisionAnchorGraceForTest(time.Hour)
+	defer restore()
 	e.seedAPIItem(t, 1, "Specify", "stage:Specify:complete") // no GitHub time recorded
 	time.Sleep(400 * time.Millisecond)
 	if n := len(sink.snapshotOfType(channelevents.DecisionPending)); n != 0 {
@@ -155,9 +154,9 @@ func TestDecisionPending_UnknownTimeWaitsForTheRecorder(t *testing.T) {
 }
 
 func TestDecisionPending_UnknownTimeIsAnnouncedAsALowerBoundAfterTheGrace(t *testing.T) {
-	restore := SetDecisionAnchorGraceForTest(0)
-	defer restore()
 	e, sink := decisionChannel(t)
+	restore := e.SetDecisionAnchorGraceForTest(0)
+	defer restore()
 	e.seedAPIItem(t, 1, "Specify", "stage:Specify:complete")
 	ev := sink.nextOfType(t, channelevents.DecisionPending)
 	if ev.Meta["since_basis"] != attention.SinceFirstSeen || !strings.Contains(ev.Content, "at least since") {
@@ -338,9 +337,9 @@ func TestValidateSettledMovingOnIsNotAWithdrawal(t *testing.T) {
 }
 
 func TestValidateSettledWithdrawalNeutralised(t *testing.T) {
-	restore := SetSettlementWithdrawalDisabledForTest()
-	defer restore()
 	e, sink := channelEngine(t, 0, settledAndWithdrawn())
+	restore := e.SetSettlementWithdrawalDisabledForTest()
+	defer restore()
 	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
 	hook(e, 1)
 	sink.nextOfType(t, channelevents.ValidateSettled)

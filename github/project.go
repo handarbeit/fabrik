@@ -82,12 +82,10 @@ func toMergeQueueEntry(raw *mergeQueueEntryData) *MergeQueueEntry {
 // included. Body, URL, Author, Assignees, and BlockedBy are fetched in the
 // deep phase via FetchItemDetails to reduce GraphQL rate limit cost.
 type itemNode struct {
-	ID               string `json:"id"`
-	UpdatedAt        string `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
-	FieldValueByName *struct {
-		Name string `json:"name"`
-	} `json:"fieldValueByName"`
-	StatusLine *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
+	ID               string           `json:"id"`
+	UpdatedAt        string           `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
+	FieldValueByName *statusValue     `json:"fieldValueByName"`
+	StatusLine       *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
 	// LastActivity / LastRun: the other display fields' own updatedAt (#2049).
 	LastActivity *statusLineValue `json:"lastActivity"`
 	LastRun      *statusLineValue `json:"lastRun"`
@@ -270,6 +268,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!,
           fieldValueByName(name: "Status") {
             ... on ProjectV2ItemFieldSingleSelectValue {
               name
+              updatedAt
             }
           }
           statusLine: fieldValueByName(name: $statusLine) @include(if: $withStatusLine) {
@@ -464,6 +463,7 @@ func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, owner
 
 		if node.FieldValueByName != nil {
 			item.Status = node.FieldValueByName.Name
+			item.StatusAtGitHub = node.FieldValueByName.movedAt()
 		}
 
 		item.Milestone, item.MilestoneKnown = parseMilestone(node.Content.Milestone)
@@ -505,12 +505,10 @@ func parseMilestone(raw json.RawMessage) (*Milestone, bool) {
 // No labels are included; only scalar identity fields and one linked-PR node,
 // which is sufficient to detect updatedAt drift without the per-item label cost.
 type probeItemNode struct {
-	ID               string `json:"id"`
-	UpdatedAt        string `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
-	FieldValueByName *struct {
-		Name string `json:"name"`
-	} `json:"fieldValueByName"`
-	StatusLine *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
+	ID               string           `json:"id"`
+	UpdatedAt        string           `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
+	FieldValueByName *statusValue     `json:"fieldValueByName"`
+	StatusLine       *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
 	// LastActivity / LastRun: the other display fields' own updatedAt (#2049).
 	LastActivity *statusLineValue `json:"lastActivity"`
 	LastRun      *statusLineValue `json:"lastRun"`
@@ -602,6 +600,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!,
           fieldValueByName(name: "Status") {
             ... on ProjectV2ItemFieldSingleSelectValue {
               name
+              updatedAt
             }
           }
           statusLine: fieldValueByName(name: $statusLine) @include(if: $withStatusLine) {
@@ -735,6 +734,7 @@ func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, owner
 		}
 		if node.FieldValueByName != nil {
 			item.Status = node.FieldValueByName.Name
+			item.StatusAtGitHub = node.FieldValueByName.movedAt()
 		}
 
 		// effectiveUpdatedAt = max(content.updatedAt, projectItem.updatedAt, linkedPR.updatedAt)

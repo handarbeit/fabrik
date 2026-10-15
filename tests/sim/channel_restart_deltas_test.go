@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/handarbeit/fabrik/engine"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
@@ -36,10 +35,8 @@ type restartRun struct {
 // same state directory and returns what the attached subscriber received.
 func runRestartScenario(t *testing.T, mode restartMode, downtime func(env *Env, open []int) map[string]int) restartRun {
 	t.Helper()
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
-	t.Cleanup(restore)
-
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour) // carried to the restarted engine by RestartEnv
 	open, _ := restartWorld(t, env)
 	// A label a person owns, to be removed while the daemon is down.
 	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, open[0], "triage-hold"); err != nil {
@@ -59,7 +56,7 @@ func runRestartScenario(t *testing.T, mode restartMode, downtime func(env *Env, 
 	RunPolls(t, env, 4)
 	reconcile(t, env)
 	RunPolls(t, env, 2)
-	settleWait()
+	settleWait(env)
 	env.Engine.StopChannelEventsForTest() // flushes the ledger, as Close or the pre-exec hook does
 
 	changed := downtime(env, open)
@@ -70,7 +67,7 @@ func runRestartScenario(t *testing.T, mode restartMode, downtime func(env *Env, 
 	if mode == restartNew {
 		hub = r.Engine.StartChannelEventsWarmingForTest(dir)
 	} else {
-		restoreD := engine.SetDowntimeDeltasDisabledForTest()
+		restoreD := r.Engine.SetDowntimeDeltasDisabledForTest()
 		t.Cleanup(restoreD)
 		hub = r.Engine.StartChannelEventsForTest(dir)
 	}
@@ -90,8 +87,8 @@ func runRestartScenario(t *testing.T, mode restartMode, downtime func(env *Env, 
 	RunPolls(t, r, 4)
 	reconcile(t, r)
 	RunPolls(t, r, 2)
-	settleWait()
-	settleWait()
+	settleWait(r)
+	settleWait(r)
 	return restartRun{sink: sink, open: open, downtimeID: changed}
 }
 
@@ -136,6 +133,7 @@ func catchUpPrefix(evs []channelevents.Event) (catchUp, rest []channelevents.Eve
 // in particular no label or column event, which the pre-#2169 legacy flood and a
 // naive replay would both produce.
 func TestChannelRestartDeliversCatchUpOnlyWhenNothingChanged(t *testing.T) {
+	t.Parallel()
 	run := runRestartScenario(t, restartNew, func(env *Env, open []int) map[string]int { return nil })
 	evs := run.sink.all()
 	catchUp, rest := catchUpPrefix(evs)
@@ -156,6 +154,7 @@ func TestChannelRestartDeliversCatchUpOnlyWhenNothingChanged(t *testing.T) {
 // snapshot first, then exactly those two changes marked downtime-delta, and
 // nothing else.
 func TestChannelRestartDeliversCatchUpThenExactlyTheDowntimeDeltas(t *testing.T) {
+	t.Parallel()
 	run := runRestartScenario(t, restartNew, downtimeChanges)
 	evs := run.sink.all()
 	catchUp, rest := catchUpPrefix(evs)
@@ -195,6 +194,7 @@ func TestChannelRestartDeliversCatchUpThenExactlyTheDowntimeDeltas(t *testing.T)
 // deltas and the catch-up above are the new behaviour, not an accident of the
 // fixture.
 func TestChannelRestartPreChangeLosesDowntimeChanges(t *testing.T) {
+	t.Parallel()
 	run := runRestartScenario(t, restartPreChange, downtimeChanges)
 	if evs := run.sink.all(); len(evs) != 0 {
 		t.Fatalf("before #2169 a restart delivered nothing (the downtime changes were lost):%s", describe(evs))
@@ -204,9 +204,9 @@ func TestChannelRestartPreChangeLosesDowntimeChanges(t *testing.T) {
 // A reconnect that is not a daemon restart gets no catch-up and no delta (the
 // hub stays up, the ledger is untouched).
 func TestChannelPlainReconnectGetsNoCatchUp(t *testing.T) {
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
-	t.Cleanup(restore)
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 	restartWorld(t, env)
 	hub := env.Engine.StartChannelEventsWarmingForTest(t.TempDir())
 	t.Cleanup(env.Engine.StopChannelEventsForTest)
@@ -222,15 +222,15 @@ func TestChannelPlainReconnectGetsNoCatchUp(t *testing.T) {
 	RunPolls(t, env, 4)
 	reconcile(t, env)
 	RunPolls(t, env, 2)
-	settleWait()
-	settleWait()
+	settleWait(env)
+	settleWait(env)
 	before := len(sink.all())
 	detach()
 	again := &simSink{}
 	if _, err := st.Attach(localapi.AttachParams{Subscriber: "S"}, again); err != nil {
 		t.Fatal(err)
 	}
-	settleWait()
+	settleWait(env)
 	if got := again.all(); len(got) != 0 {
 		t.Fatalf("a reconnect without a restart must receive nothing new (first session saw %d):%s", before, describe(got))
 	}

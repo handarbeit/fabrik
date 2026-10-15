@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,16 +60,32 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 
 	// Queue 4 all-poison members. Every trial branch — combined or bisection —
 	// will contain at least one POISON file, so train-poison-guard always fails.
+	//
+	// They are queued PAUSED and released together once the engine has cached all
+	// four, as in TestMergeTrainBisectionEjectsPoisoner: queuing each as it was
+	// created let the first batch alone as a red singleton and be paused by that
+	// path, so it never got the guard's alert (0.0.84 gate, #471).
+	ensurePausedLabelExists(t, env, env.RepoBeta)
+	discoverOffset := LogOffset(t, env)
 	var members [4]int
 	for i := 0; i < 4; i++ {
 		n := i + 1
-		issue, _ := QueueMember(t, env, env.RepoBeta, base,
+		issue, _ := QueueMemberPaused(t, env, env.RepoBeta, base,
 			fmt.Sprintf("runaway%d", n),
 			fmt.Sprintf("e2e/train/entries/runaway-%d.txt", n),
 			fmt.Sprintf("POISON — runaway guard e2e member %d\n", n),
 		)
 		members[i] = issue
-		t.Logf("queued poison member #%d (issue #%d)", n, issue)
+		t.Logf("queued paused poison member #%d (issue #%d)", n, issue)
+	}
+	for _, n := range members {
+		discovered := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		stale := fmt.Sprintf("[#%d cache] probe: stale", n)
+		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
+			func(l string) bool { return strings.Contains(l, discovered) || strings.Contains(l, stale) })
+	}
+	if errs := removePausedConcurrently(env, env.RepoBeta, members[:]); len(errs) > 0 {
+		t.Fatalf("could not release the members (they stay paused; nothing has formed): %v", errs)
 	}
 	t.Logf("all 4 poison members queued on %s; awaiting runaway guard", env.RepoBeta)
 

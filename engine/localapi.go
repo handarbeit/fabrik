@@ -825,7 +825,7 @@ func (b localAPIBackend) trainRows() []trainRow {
 		if it.IsPR || it.Status != hs.Name || it.IsClosed || hasLabelStr(it.Labels, "fabrik:paused") || it.LastDeepFetchAt.IsZero() {
 			return
 		}
-		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: it.StatusEnteredAt})
+		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: queueOrderTime(it.StatusAtGitHub, it.StatusEnteredAt)})
 	})
 	sort.Slice(rows, func(i, j int) bool {
 		if !rows[i].entered.Equal(rows[j].entered) {
@@ -847,12 +847,31 @@ func (b localAPIBackend) trainWorkerActive(repo, base string) bool {
 }
 
 func (b localAPIBackend) trainPosition(st *itemstate.ItemState) *localapi.TrainPosition {
-	if st.IsClosed || hasLabelStr(st.Labels, "fabrik:paused") || st.LastDeepFetchAt.IsZero() {
-		return nil // not a batchable member as far as the cache can tell
+	pos, total, ok := trainSlot(b.trainRows(), st)
+	if !ok {
+		return nil
 	}
 	base := trainBase(st.Labels)
-	pos, total := 0, 0
-	for _, r := range b.trainRows() {
+	return &localapi.TrainPosition{
+		Partition:      mergeTrainKey(st.Repo, base),
+		Position:       pos,
+		Of:             total,
+		WorkerInFlight: b.trainWorkerActive(st.Repo, base),
+		Basis:          "cached base: label; ordered by daemon-observed time in the holding stage, then issue number",
+	}
+}
+
+// trainSlot is the pure core of trainPosition (#2238): the 1-based position and
+// partition size of st among rows (already ordered by trainRows). ok is false
+// when the cache cannot place st as a batchable member. It takes the rows rather
+// than scanning, so a caller already inside a Store.Scan can pass rows built
+// beforehand.
+func trainSlot(rows []trainRow, st *itemstate.ItemState) (pos, total int, ok bool) {
+	if st.IsClosed || hasLabelStr(st.Labels, "fabrik:paused") || st.LastDeepFetchAt.IsZero() {
+		return 0, 0, false // not a batchable member as far as the cache can tell
+	}
+	base := trainBase(st.Labels)
+	for _, r := range rows {
 		if r.repo != st.Repo || r.base != base {
 			continue
 		}
@@ -862,15 +881,9 @@ func (b localAPIBackend) trainPosition(st *itemstate.ItemState) *localapi.TrainP
 		}
 	}
 	if pos == 0 {
-		return nil
+		return 0, 0, false
 	}
-	return &localapi.TrainPosition{
-		Partition:      mergeTrainKey(st.Repo, base),
-		Position:       pos,
-		Of:             total,
-		WorkerInFlight: b.trainWorkerActive(st.Repo, base),
-		Basis:          "cached base: label; ordered by daemon-observed time in the holding stage, then issue number",
-	}
+	return pos, total, true
 }
 
 // ---- board ----
@@ -1217,6 +1230,11 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions(now, h)
+	if h.Draining {
+		// The count is read live from the Store: the mirror's value is only refreshed
+		// by awaitDrain, which starts once the poll in progress at the SIGHUP returns.
+		res.Draining = &localapi.DrainHealth{Since: localapi.KnownTime(h.DrainSince), WorkersRemaining: len(b.e.drainWorkers())}
+	}
 	return res, nil
 }
 

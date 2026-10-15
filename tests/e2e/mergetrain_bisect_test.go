@@ -74,10 +74,13 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	repauseOnFailure(t, env, repo, poisonIssue)
 	members := []int{clean1Issue, clean2Issue, poisonIssue}
 
+	// The probe logs "new item discovered" for a member it caches first, and
+	// "stale" for one a light reconcile cached first (0.0.84 gate: #7761).
 	for _, n := range members {
-		seen := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		discovered := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		stale := fmt.Sprintf("[#%d cache] probe: stale", n)
 		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
-			func(l string) bool { return strings.Contains(l, seen) })
+			func(l string) bool { return strings.Contains(l, discovered) || strings.Contains(l, stale) })
 	}
 	t.Logf("engine has discovered all three paused members %v; releasing them together", members)
 

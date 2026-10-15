@@ -2943,3 +2943,29 @@ func TestDeltaIssueClosedCarriesSenderButNoEcho(t *testing.T) {
 		t.Fatalf("closed change = %+v", got)
 	}
 }
+
+// TestStatusAtGitHubReachesProjectItem (#2246): GitHub's Status-value time
+// survives the probe bootstrap and the snapshot-to-ProjectItem translation, so
+// the merge-train sort can use it; an item with no time stays zero.
+func TestStatusAtGitHubReachesProjectItem(t *testing.T) {
+	at := time.Date(2026, 10, 14, 21, 43, 5, 0, time.UTC)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Queued", StatusAtGitHub: at},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Queued"},
+	}, "PID")
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	got := map[int]time.Time{}
+	for _, it := range board.Items {
+		got[it.Number] = it.StatusAtGitHub
+	}
+	if !got[1].Equal(at) {
+		t.Errorf("#1 StatusAtGitHub = %v, want %v", got[1], at)
+	}
+	if !got[2].IsZero() {
+		t.Errorf("#2 StatusAtGitHub = %v, want zero", got[2])
+	}
+}
