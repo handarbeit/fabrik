@@ -70,8 +70,10 @@ func TestCIStatus_VerdictMapping(t *testing.T) {
 		{"suite hold is pending", []gh.CheckRun{passRun("test", 1)},
 			[]gh.CheckSuite{{ID: 9, Status: "in_progress", LatestCheckRunsCount: 1}}, nil, "pending"},
 		{"suite read error is not green", []gh.CheckRun{passRun("test", 1)}, nil, errors.New("boom"), "pending"},
-		{"cancelled demoted", []gh.CheckRun{passRun("a", 1), {ID: 2, Name: "b", Status: "completed", Conclusion: "cancelled"}}, nil, nil, "pending"},
-		{"unknown conclusion demoted", []gh.CheckRun{{ID: 1, Name: "a", Status: "completed", Conclusion: "stale"}}, nil, nil, "pending"},
+		{"cancelled is red (#2296)", []gh.CheckRun{passRun("a", 1), {ID: 2, Name: "b", Status: "completed", Conclusion: "cancelled"}}, nil, nil, "red"},
+		{"stale is red (#2296)", []gh.CheckRun{{ID: 1, Name: "a", Status: "completed", Conclusion: "stale"}}, nil, nil, "red"},
+		{"empty conclusion is red (#2296)", []gh.CheckRun{{ID: 1, Name: "a", Status: "completed"}}, nil, nil, "red"},
+		{"unrecognised conclusion is red (#2296)", []gh.CheckRun{{ID: 1, Name: "a", Status: "completed", Conclusion: "future_value"}}, nil, nil, "red"},
 		{"superseded failure with newer success", []gh.CheckRun{
 			{ID: 1, Name: "test", Status: "completed", Conclusion: "failure"}, passRun("test", 2)}, nil, nil, "green"},
 		{"neutral is passing", []gh.CheckRun{
@@ -260,5 +262,22 @@ func TestCIStatus_ListsEveryRun(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Errorf("missing %q in:\n%s", want, content)
 		}
+	}
+}
+
+// #2296: a cancelled latest run is listed under its real conclusion with a note
+// that it is not a test failure, so a worker does not hunt for a regression.
+func TestCIStatus_CancelledListedUnderRealConclusion(t *testing.T) {
+	client := ciStatusClient([]gh.CheckRun{passRun("lint", 1),
+		{ID: 2, Name: "test", Status: "completed", Conclusion: "cancelled"}})
+	content, _ := runCIStatus(t, client, &stages.Stage{Name: "Validate", Order: 5}, false)
+	wantVerdict(t, content, "red")
+	for _, want := range []string{"## Failing checks", "### test", "- conclusion: cancelled", "not a test failure"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "no failing check run identified") {
+		t.Errorf("a cancelled run must be identified, not reported as an unidentified failure:\n%s", content)
 	}
 }

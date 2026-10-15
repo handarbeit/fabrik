@@ -37,6 +37,15 @@ const (
 	// trial counters, and the (repo, base) partition's train is held off for
 	// trainInfraAbandonCooldown. Placed last so existing iota values do not shift.
 	TrainCIInfra
+	// TrainCINotPassed means the head's check runs include a cancelled, stale,
+	// empty or unrecognised latest conclusion and no genuine failure (#2296):
+	// the check was supposed to run and has no result. It is returned only by
+	// classifyLandingCI — never green and never a code failure — so each caller
+	// picks its own disposition: the fast path declines, admission defers
+	// (uncharged), the landing poll does not proceed, the catch-up falls
+	// through to the trial. Never charged, ejected or paused. Appended last so
+	// existing iota values do not shift.
+	TrainCINotPassed
 )
 
 // trainMember pairs a batch member's ProjectItem with its linked PR number and head SHA.
@@ -161,7 +170,7 @@ func renderFailedChecks(checks []gh.CheckRun) string {
 		for _, cr := range checks[inlineCount:] {
 			rest = append(rest, cr.Name)
 		}
-		fmt.Fprintf(&b, "\n\n...and %d more failing check(s): %s", len(rest), strings.Join(rest, ", "))
+		fmt.Fprintf(&b, "\n\n...and %d more check(s) that did not pass: %s", len(rest), strings.Join(rest, ", "))
 	}
 	return b.String()
 }
@@ -4277,6 +4286,9 @@ func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, 
 		if status == gh.CheckRunsFailed {
 			return TrainCIRed, fmt.Sprintf("failed check(s): %s", describeCheckRuns(failed))
 		}
+		if status == gh.CheckRunsNonPassing {
+			return TrainCINotPassed, fmt.Sprintf("check(s) did not pass: %s", describeNonPassing(gh.NonPassingCheckRuns(checkRuns)))
+		}
 		if status == gh.CheckRunsReady {
 			rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, headSHA, checkRuns)
 			switch rcStatus {
@@ -4393,6 +4405,12 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 					return true
 				case TrainCIRed:
 					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
+					return false
+				case TrainCINotPassed:
+					// #2296: a cancelled run will not finish on its own, so polling to
+					// CIBackstopTimeout would only stall. Not landable now; members stay
+					// Queued and nothing is charged.
+					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not landable — %s\n", prNum, detail)
 					return false
 				default: // TrainCIPending — keep polling
 					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not yet ready — %s\n", prNum, detail)

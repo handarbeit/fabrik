@@ -168,11 +168,13 @@ func (e *Engine) collectFailingChecks(item gh.ProjectItem, owner, repo string, r
 }
 
 // failingCheckRuns returns the latest run of each check name that
-// gh.ClassifyCheckRuns reports as failed (failure, timed_out, action_required),
-// so this section and the verdict cannot disagree about what is failing.
+// gh.ClassifyCheckRuns reports as failed (failure, timed_out, action_required)
+// followed by those it reports as non-passing (cancelled, stale, empty,
+// unrecognised — #2296), so this section and the verdict cannot disagree about
+// what is not green. Each is listed under its real conclusion.
 func failingCheckRuns(runs []gh.CheckRun) []gh.CheckRun {
 	_, _, failed := gh.ClassifyCheckRuns(runs)
-	return failed
+	return append(append([]gh.CheckRun(nil), failed...), gh.NonPassingCheckRuns(runs)...)
 }
 
 // ciStatusVerdictFor maps a head's check runs to a verdict using the landing
@@ -186,12 +188,17 @@ func (e *Engine) ciStatusVerdictFor(owner, repo, mergeableState, headSHA string,
 	}
 	result, _ := e.classifyLandingCI(owner, repo, mergeableState, headSHA, runs)
 	switch result {
-	case TrainCIRed:
+	case TrainCIRed, TrainCINotPassed:
+		// #2296: a cancelled/stale/unrecognised latest run is red for the worker
+		// too, so the status file never disagrees with the gates. The entries are
+		// listed under their real conclusion (failingCheckRuns).
 		return ciVerdictRed
 	case TrainCIGreen:
-		// gh.ClassifyCheckRuns only fails failure/timed_out/action_required, so
-		// a cancelled or unrecognised conclusion classifies as ready. "green"
-		// means complete and passing, so demote unless every latest run passed.
+		// A cancelled/stale/unrecognised conclusion no longer classifies as ready
+		// (#2296: TrainCINotPassed → red above). What is left to demote is
+		// skipped: it is a pass for the gates, but "green" here means a check
+		// actually ran, so a skipped latest run must never license a local test
+		// skip. Demote unless every latest run is success or neutral.
 		if !allCheckRunsPassed(runs) {
 			return ciVerdictPending
 		}
@@ -281,7 +288,10 @@ func renderFailingChecks(b *strings.Builder, extras *ciStatusExtras) {
 	}
 	for _, f := range extras.failing {
 		name := strings.ReplaceAll(f.run.Name, "\n", " ")
-		fmt.Fprintf(b, "### %s\n\n- conclusion: %s\n", name, f.run.Conclusion)
+		fmt.Fprintf(b, "### %s\n\n- conclusion: %s\n", name, nonPassingConclusion(f.run))
+		if !gh.IsFailureConclusion(f.run.Conclusion) {
+			fmt.Fprintf(b, "- note: %s\n", nonPassingNote)
+		}
 		if f.run.DetailsURL != "" {
 			fmt.Fprintf(b, "- details: %s\n", f.run.DetailsURL)
 		} else if f.run.HTMLURL != "" {
