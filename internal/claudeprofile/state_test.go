@@ -40,3 +40,27 @@ func TestEnvEntry_ConfiguredEmptyRemoves(t *testing.T) {
 		t.Errorf("ApplyToEnv = %v", got)
 	}
 }
+
+func TestCommand_CarriesResolvedProfileNotAmbient(t *testing.T) {
+	t.Cleanup(Reset)
+	t.Setenv(BareEnv, "/profiles/a")
+	Set(Resolution{Dir: "/profiles/c"})
+	cmd := Command("claude", "--version")
+	n := 0
+	for _, kv := range cmd.Env {
+		if kv == "CLAUDE_CONFIG_DIR=/profiles/c" {
+			n++
+		} else if len(kv) >= len(BareEnv) && kv[:len(BareEnv)] == BareEnv {
+			t.Errorf("stray entry %q", kv)
+		}
+	}
+	if n != 1 {
+		t.Errorf("want exactly one resolved entry, got %d", n)
+	}
+	Set(Resolution{})
+	for _, kv := range Command("claude").Env {
+		if len(kv) >= len(BareEnv) && kv[:len(BareEnv)] == BareEnv {
+			t.Errorf("nothing resolved: ambient leaked: %q", kv)
+		}
+	}
+}

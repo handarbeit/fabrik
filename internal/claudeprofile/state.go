@@ -1,6 +1,8 @@
 package claudeprofile
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 )
@@ -77,4 +79,15 @@ func ApplyToEnv(env []string) []string {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// Command is exec.Command for an interactive claude launch (TUI resume, the
+// warnings-panel fix session, fabrik watch): its environment is os.Environ()
+// with the resolved profile applied. Because .env's value is no longer exported
+// into the process environment, a plain exec.Command("claude") would silently
+// run under the ambient account instead of the resolved one.
+func Command(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Env = ApplyToEnv(os.Environ())
+	return cmd
 }
