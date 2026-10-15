@@ -879,3 +879,23 @@ func TestSessionJanitorIntegration(t *testing.T) {
 		t.Errorf("session file for in-flight issue should be retained: %v", err)
 	}
 }
+
+// TestPruneSessions_RemovesSessionMetaWithPointer: the ADR 2300 sidecar goes
+// with the pruned .session file.
+func TestPruneSessions_RemovesSessionMetaWithPointer(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	issueDir := filepath.Join(root, "issue-1")
+	old := seedSessionFile(t, issueDir, "Implement.session", now.Add(-15*24*time.Hour))
+	if err := os.WriteFile(sessionMetaPath(old), []byte(`{"closed":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	noResolve := func(string) (string, bool) { return "", false }
+	notInFlight := func(string, int) bool { return false }
+	if _, removed, _, _, err := pruneSessions(root, 14, now, "owner/repo", noResolve, notInFlight); err != nil || removed != 1 {
+		t.Fatalf("pruneSessions removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(sessionMetaPath(old)); !os.IsNotExist(err) {
+		t.Fatalf("meta should be pruned with its pointer, stat err = %v", err)
+	}
+}

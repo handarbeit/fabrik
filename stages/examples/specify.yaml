@@ -14,5 +14,8 @@ allowed_tools:
   - TodoWrite
   - WebSearch
   - WebFetch
+# resume_session: resume | fresh | auto — see implement.yaml and
+# docs/USER_GUIDE.md. Default resume; auto is worth considering for long stages.
+# resume_session: auto
 completion:
   type: claude

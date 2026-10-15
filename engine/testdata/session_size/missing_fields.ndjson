@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "session_id": "sess-A"}
+{"type": "assistant", "session_id": "sess-A", "parent_tool_use_id": null, "message": {"role": "assistant", "usage": {"input_tokens": 4, "output_tokens": 5}, "content": [{"type": "text", "text": "x"}]}}

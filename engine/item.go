@@ -864,9 +864,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Decide whether this run resumes the stage's saved session (ADR 2300). It is
+	// computed here so a fresh re-entry also gets the stage's own previous output
+	// as context (R4), and logged just before the invoke below.
+	sessDecision := e.decideSessionResume(item, stage, sessionStageDispatch, !lastAttempt.IsZero())
+
 	// Write context files after any stash so they are present for Claude but
 	// not captured in the stash. Errors are non-fatal.
-	e.writeContextFiles(item, stage, workDir, false)
+	e.writeContextFilesWithCurrent(item, stage, workDir, false, sessDecision.freshOverSaved())
 	e.symlinkEnvIfEnabled(item.Number, workDir)
 
 	// Pre-Implement step: spawn child issues declared in the Plan output before
@@ -890,7 +895,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	// Invoke Claude Code in the issue's worktree.
-	resume := !lastAttempt.IsZero() // resume session if we've processed this before
+	resume := sessDecision.Resume
+	e.applySessionDecision(item, sessDecision)
 
 	// Pre-audit snapshot: capture refs in all registered repos before Claude runs.
 	// Only taken for non-read-only, non-unrestricted stages (write-capable stages).
@@ -1365,6 +1371,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	}
 
 	if err != nil {
+		// Several outcomes below return before the end-of-run bookkeeping that
+		// records the durable continuation signal (ADR 2300). A run that really
+		// executed Claude and ended without the stage-complete marker leaves the
+		// session open, so record that here too: otherwise a stage re-entered
+		// under resume_session: fresh/auto whose new session dies on a usage
+		// limit, an api_error, a skill load failure or a cancellation would still
+		// read as closed and discard the new session again. A pre-spawn refusal
+		// (apiKeyHelper, unresolved skill) touched no session and is left alone.
+		var preSpawnAPIKey *apiKeyHelperDetectedError
+		var preSpawnSkill *skillUnresolvedError
+		if claudeRan && !errors.As(err, &preSpawnAPIKey) && !errors.As(err, &preSpawnSkill) {
+			e.markSessionClosed(item, stage.Name, false)
+		}
 		if p.ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
 			// R8 (#1393): commit and push any uncommitted work before releasing
@@ -1729,6 +1748,11 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			At:        time.Now(),
 			Slice:     isTimeSlice(err, turnLimited),
 		})
+		// Durable continuation-vs-re-entry signal (ADR 2300): a run that ended
+		// without the stage-complete marker leaves the session open, so the next
+		// run of this stage resumes it whatever resume_session says — also after
+		// a restart, which the in-memory LastAttemptAt cannot promise.
+		e.markSessionClosed(item, stage.Name, completed)
 	}
 
 	// Warn the user when Claude ran without error but produced no output at all.
@@ -2347,6 +2371,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.markSessionReset(item, stage.Name)
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 
 	// Circuit breaker (#1089): a manual unpause is "a human investigated and is
@@ -2419,6 +2444,7 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.markSessionReset(item, "Validate")
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	// Circuit breaker (#1089, #1575): reset together with the cycle counters,
 	// on the success side of the deferral returns above (as clearFailedStage).
@@ -2470,6 +2496,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.markSessionReset(item, "Validate")
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	// Circuit breaker (#1089, #1575): every resume path clears both breakers
 	// together; this sits after the hasError return so a deferred attempt
@@ -2549,6 +2576,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	// and reset retry/pause state that may have accumulated before the block.
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.markSessionReset(item, stage.Name)
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 

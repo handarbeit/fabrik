@@ -654,6 +654,12 @@ func SessionDir(issueNumber int) string {
 //   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
 func sessionDirForItem(issue gh.ProjectItem) string {
 	cwd, _ := os.Getwd()
+	return sessionDirForItemUnder(cwd, issue)
+}
+
+// sessionDirForItemUnder is sessionDirForItem rooted at base instead of the
+// working directory.
+func sessionDirForItemUnder(cwd string, issue gh.ProjectItem) string {
 	issuePart := fmt.Sprintf("issue-%d", issue.Number)
 	if issue.Repo == "" {
 		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)
@@ -1720,6 +1726,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	}
 
 	text, completed, usage, err := interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
+	recordSessionContextSize(issueNumber, sessFilePath, rawOutput)
 	if sle := skillLoadOverride(ctx, rawOutput, expectedSkill, wasTimedOut, completed, err); sle != nil {
 		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
 		return text, false, usage, sle
@@ -1829,6 +1836,7 @@ func classifyResumeFailure(issueNumber int, sessFilePath, resumeSessionID string
 	if abandoned {
 		claudeLog(issueNumber, "resume", "abandoning session %s after %d consecutive resume failures (threshold %d), last error: %v — branch work on disk is unaffected, only the resume pointer is discarded; next invocation will cold-start\n", resumeSessionID, count, maxResumeFailures, lastErr)
 		os.Remove(sessFilePath)
+		removeSessionMeta(sessFilePath)
 		resetResumeFailureCount(sessFilePath)
 	} else {
 		writeResumeFailureCount(issueNumber, sessFilePath, count)
@@ -1885,6 +1893,7 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 					staleSessionDetected = true
 					claudeLog(issueNumber, "warn", "session expired (stale session ID %q) — removing %s so the next invocation starts a fresh session\n", resp.SessionID, sessFilePath)
 					os.Remove(sessFilePath)
+					removeSessionMeta(sessFilePath)
 					break
 				}
 			}

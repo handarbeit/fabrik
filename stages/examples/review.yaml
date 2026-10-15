@@ -20,6 +20,9 @@ wait_for_reviews: true
 #
 # Or, if no unrequested reviewer runs on this repo:
 # expected_reviewers: []
+# resume_session: resume | fresh | auto — see implement.yaml and
+# docs/USER_GUIDE.md. Default resume; auto is worth considering for long stages.
+# resume_session: auto
 kill_grace:
   sigint: 10s
   sigterm: 10s

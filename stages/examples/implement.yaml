@@ -7,6 +7,16 @@ max_turns: 50
 create_draft_pr: true
 mark_pr_ready_on_complete: true
 post_to_pr: true
+# resume_session governs whether a comment-review pass (and a re-entry of this
+# stage) resumes the stage's saved Claude session: resume (default) | fresh |
+# auto. auto resumes only while the saved session's measured context is at or
+# below resume_threshold_tokens (default 250000) and starts fresh above it —
+# recommended for long stages, whose resumed context is most of a comment
+# review's cost. A continuation (the next run after a turn cap, time slice or
+# incomplete run) always resumes. Off by default; see docs/USER_GUIDE.md.
+#
+# resume_session: auto
+# resume_threshold_tokens: 250000
 kill_grace:
   sigint: 10s
   sigterm: 10s

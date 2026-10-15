@@ -469,6 +469,13 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		invokeOpts.OnPIDReady = onPIDReady[0]
 	}
 
+	// Resume the stage's saved session, or start a fresh one, per the stage's
+	// resume_session option (ADR 2300). Decided and logged once per pass; the
+	// extension loop resumes from its second iteration on.
+	sessDecision := e.decideSessionResume(item, stage, sessionCommentReview, false)
+	invokeOpts.NoResume = !sessDecision.Resume
+	e.applySessionDecision(item, sessDecision)
+
 	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
@@ -912,6 +919,9 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 		var invOutput string
 		var invUsage TokenUsage
 		invOutput, completed, invUsage, err = e.claude.InvokeForComments(ctx, stage, *item, comments, workDir, invokeOpts)
+		// Only the pass's first invocation may start a fresh session; an
+		// extension iteration continues the session that call just saved.
+		invokeOpts.NoResume = false
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
 

@@ -462,8 +462,12 @@ func pruneSessions(
 				continue // skip unreadable file metadata; treat as still present
 			}
 			if info.ModTime().Before(cutoff) {
-				if rmErr := os.Remove(filepath.Join(issueDirPath, fe.Name())); rmErr == nil {
+				sessPath := filepath.Join(issueDirPath, fe.Name())
+				if rmErr := os.Remove(sessPath); rmErr == nil {
 					removed++
+					// The size/closed/reset record (ADR 2300) describes the pointer
+					// just pruned; it goes with it.
+					removeSessionMeta(sessPath)
 				}
 			}
 		}

@@ -1016,3 +1016,72 @@ func TestWarnStageDrift_BareVsQualifiedSkillIsNotDrift(t *testing.T) {
 		t.Errorf("bare-vs-qualified skill reported as drift: %q", got)
 	}
 }
+
+func TestLoadAll_ResumeSession_DefaultAndAccessors(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Implement
+prompt: "Do it"
+`)
+	st, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if st[0].ResumeSession != "" {
+		t.Errorf("ResumeSession = %q, want empty when absent", st[0].ResumeSession)
+	}
+	if got := st[0].ResumeMode(); got != ResumeSessionResume {
+		t.Errorf("ResumeMode() = %q, want %q", got, ResumeSessionResume)
+	}
+	if got := st[0].ResumeThreshold(); got != DefaultResumeThresholdTokens {
+		t.Errorf("ResumeThreshold() = %d, want %d", got, DefaultResumeThresholdTokens)
+	}
+}
+
+func TestLoadAll_ResumeSession_ExplicitValues(t *testing.T) {
+	for _, val := range []string{"resume", "fresh", "auto"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Implement
+prompt: "Do it"
+resume_session: `+val+`
+resume_threshold_tokens: 120000
+`)
+		st, err := LoadAll(dir)
+		if err != nil {
+			t.Fatalf("resume_session %q: LoadAll: %v", val, err)
+		}
+		if got := st[0].ResumeMode(); got != val {
+			t.Errorf("ResumeMode() = %q, want %q", got, val)
+		}
+		if got := st[0].ResumeThreshold(); got != 120000 {
+			t.Errorf("ResumeThreshold() = %d, want 120000", got)
+		}
+	}
+}
+
+func TestLoadAll_ResumeSession_Invalid(t *testing.T) {
+	for _, val := range []string{"always", "AUTO", "never"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Implement
+prompt: "Do it"
+resume_session: `+val+`
+`)
+		if _, err := LoadAll(dir); err == nil {
+			t.Errorf("resume_session %q: expected error, got nil", val)
+		}
+	}
+}
+
+func TestLoadAll_ResumeThresholdTokens_NegativeRefused(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Implement
+prompt: "Do it"
+resume_threshold_tokens: -1
+`)
+	if _, err := LoadAll(dir); err == nil {
+		t.Fatal("expected error for negative resume_threshold_tokens")
+	}
+}
