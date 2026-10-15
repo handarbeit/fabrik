@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "session_id": "sess-A"}
+{"type": "assistant", "session_id": "sess-A", "parent_tool_use_id": null, "message": {"role": "assistant", "usage": {"input_tokens": 3, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 2000, "output_tokens": 5}, "content": [{"type": "text", "text": "x"}]}}
+{"type": "assistant", "session_id": "sess-A", "parent_tool_use_id": null, "message": {"role": "assistant", "usage": {"input_tokens": 2, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 50000, "output_tokens": 5}, "content": [{"type": "text", "text": "x"}]}}
+{"type": "assistant", "session_id": "sess-A", "parent_tool_use_id": null, "message": {"role": "assistant", "usage": {"input_tokens": 1, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 60000, "output_tokens": 5}, "content": [{"type": "text", "text": "x"}]}}
+{"type": "result", "session_id": "sess-A", "result": "ok", "usage": {"input_tokens": 999999, "output_tokens": 1}}
