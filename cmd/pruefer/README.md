@@ -195,7 +195,19 @@ When GitHub answers a listing with a rate limit and says when it resets, that in
 **One App, one Pruefer daemon, per account you want reviewed — this is the supported answer for an operator serving several accounts**, not a single App spanning them. Running several daemons is deliberately cheap, and buys you more than isolation:
 
 - **Separate rate-limit budgets.** GitHub's primary limits are per *installation*, so each App/installation pair gets its own REST and GraphQL budget, independent of every other daemon's.
-- **Separate Claude accounts.** Each daemon can point `CLAUDE_CONFIG_DIR` at a different logged-in profile, billing to a different subscription and isolating usage limits per account. `CLAUDE_CONFIG_DIR` is one of the few variables the scrubbed review environment carries through to `claude` (see [What the reviewer can read](#what-the-reviewer-can-read)); if you authenticate through a token variable instead of a profile, name it in `PRUEFER_REVIEW_ENV_PASSTHROUGH`.
+- **Separate Claude accounts.** Each daemon declares its own logged-in Claude profile with `claude_config_dir`, billing to a different subscription and isolating usage limits per account — see [Choosing the Claude account](#choosing-the-claude-account). The scrubbed review environment carries exactly that resolved directory to `claude` (see [What the reviewer can read](#what-the-reviewer-can-read)); if you authenticate through a token variable instead of a profile, name it in `PRUEFER_REVIEW_ENV_PASSTHROUGH`.
+
+  ```yaml
+  # daemon A: ~/pruefer-a/.pruefer/config.yaml
+  claude_config_dir: ~/.claude-personal
+  ```
+
+  ```yaml
+  # daemon B: ~/pruefer-b/.pruefer/config.yaml
+  claude_config_dir: ~/.claude-work
+  ```
+
+  No wrapper script, and no `export CLAUDE_CONFIG_DIR=…` before `exec`, is needed any more.
 
 To add a second account: repeat [First run: automatic setup](#first-run-automatic-setup-recommended) (or [Manual setup](#manual-setup-compat-mode)) in a **separate working directory**, with its own `.pruefer/` state — this naturally produces its own App, its own key, and its own `served_accounts`/`watched_repos`. No code or config sharing is needed or supported between the two.
 
@@ -308,6 +320,31 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
     **Deleting the App instead — Settings → Developer settings → GitHub Apps → your app → Delete GitHub App — is *not* equivalent to flipping it to private**, and should only be done if the owner account has *also* been independently migrated (steps 3–9 repeated for `handarbeit` itself, registering a separate new App for it). There is no code path anywhere in this repo that performs deletion — it is exclusively a manual GitHub UI action, and it removes every remaining installation with it, with no undo. At this point in the runbook that remaining installation is the owner's own: deleting without first giving the owner account a replacement App strands every repo that still declares only `handarbeit-pruefer` in `expected_reviewers` — including this repo — with a reviewer identity that can no longer review, the exact hazard this whole runbook exists to prevent, at the one step with no way back.
 
     *Flipping to private is reversible* — the App can be flipped back to public later if needed, so this default action is not the point of no return the rest of this runbook has been building toward. *Deleting it instead has no rollback* — that branch, and only that branch, is the one truly irreversible action in this runbook.
+
+### Choosing the Claude account
+
+Every review runs `claude` under one Claude profile directory, and that directory decides which account the review bills to. Declare it with `claude_config_dir` rather than relying on whatever the daemon happened to inherit from its parent shell (a tmux server, a login shell, a service manager). Pruefer resolves it from these sources, highest precedence first:
+
+1. `-claude-config-dir` flag
+2. `PRUEFER_CLAUDE_CONFIG_DIR` from the shell environment
+3. `.env` — read as data; `PRUEFER_CLAUDE_CONFIG_DIR` beats a bare `CLAUDE_CONFIG_DIR` within it
+4. `claude_config_dir:` in `.pruefer/config.yaml`
+5. a bare `CLAUDE_CONFIG_DIR` inherited from the environment (the *ambient* value)
+6. unset — `claude` uses its default profile
+
+The ambient variable sits **below** the YAML key because it belongs to Claude Code, not to Pruefer: unrelated tools and shells export it, and a tmux server pins whatever value was current when it started. Pruefer config you wrote on purpose should win over a variable you may not know is set. The cost is a behavior change: a one-shot `CLAUDE_CONFIG_DIR=x pruefer` no longer beats `.env` or YAML — use `PRUEFER_CLAUDE_CONFIG_DIR=x pruefer` or `-claude-config-dir x` for that. A `.env` line is also no longer silently overridden by an inherited value (that was the original failure this resolves). A leading `~` is expanded and a relative path is anchored at the daemon's working directory, since reviews run in a temporary clone.
+
+The resolved directory is handed to every review as `CLAUDE_CONFIG_DIR=<dir>`, replacing whatever the daemon itself inherited; when nothing resolved, the review process carries no `CLAUDE_CONFIG_DIR` at all. `PRUEFER_CLAUDE_CONFIG_DIR` itself is never forwarded to the review. Neither `.env` name is ever exported into the daemon's environment, which is what lets a self-upgrade restart (which re-executes with the daemon's environment) still tell a `.env` value from an inherited one.
+
+**What gets logged.** At startup, and on a [reload](#config-reload-sighup) that changes the directory, one line states the effective directory, the account email read from `<dir>/.claude.json` (omitted when unreadable) and the source it came from; when nothing resolved it says reviews use Claude Code's default profile:
+
+```
+2026-10-15T02:31:09Z [pr#0 startup] Claude profile "/home/me/.claude-work" (me@example.com) (from .pruefer/config.yaml claude_config_dir)
+```
+
+When two or more sources name different directories, a `warning: Claude profile sources disagree` line names every source with its directory and account, and the winner — at startup and on every reload while the disagreement persists. With the TUI on, the footer shows the effective account and refreshes it after a reload. The profile's login state is not validated.
+
+`claude_config_dir` is operator-only: a reviewed repo's `.pruefer/config.yaml` cannot set it (see [What a repo may and may not set](#what-a-repo-may-and-may-not-set)).
 
 ### Run it
 
@@ -434,6 +471,7 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `poll_interval_seconds` | Live, effective starting the next cycle. |
 | `model` | Live. |
 | `effort` | Live. |
+| `claude_config_dir` | Live. `.env` is re-read as data; the ambient `CLAUDE_CONFIG_DIR` stays the value captured at process start and is not re-read. Reviews dispatched after the reload use the new directory; a review already running keeps the one it started with. Logs the new effective account when the directory changed. See [Choosing the Claude account](#choosing-the-claude-account). |
 | `concurrency_cap` | Live. Growing or shrinking the semaphore never disturbs a review already holding a slot — a shrink only reduces future admission, so concurrency can transiently run above the new cap (bounded by the old cap) until the existing holders drain. See [adrs/1640-pruefer-config-reload.md](../../adrs/1640-pruefer-config-reload.md). |
 | `max_diff_bytes` | Live. |
 | `max_wall_time_seconds` | Live. |
@@ -582,7 +620,7 @@ A repo's config can only **narrow** the operator's settings — it can never wid
 | `catch_up_marker_authors` | No | Operator-only trust anchor (the engine's login); a repo naming its own trusted marker author would let it mute its own review. See [Skipping a pure merge-train catch-up](#skipping-a-pure-merge-train-catch-up). |
 | `patch_skip` | No | Operator-only kill switch; a repo turning it on or off for itself would decide whether its own changes are re-reviewed. See [Skipping a head whose change was already reviewed](#skipping-a-head-whose-change-was-already-reviewed). |
 | `cadence` / `repo_cadence` | No | Operator-only, never repo-narrowable — reducing review cadence is a *widening* of what can reach `main` unreviewed, not a narrowing of scope, and it spends the operator's own Claude budget. See [Review cadence](#review-cadence) and [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md). |
-| Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `served_accounts`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
+| Everything else | No | `model`, `effort`, `claude_config_dir` (the review billing account), `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `served_accounts`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
 
 A rejected widening attempt (e.g. a repo trying to raise `max_diff_bytes` or unset an operator-configured `request_changes_threshold`) is logged and ignored for that field alone — the operator's value holds, and the rest of the repo's config (any other, valid narrowing) still applies.
 
@@ -653,7 +691,7 @@ A PR is unreviewed, attacker-controllable input, so each review session is confi
 - **Paths.** `Read`, `Grep` and `Glob` are path-scoped permission rules covering only the symlink-resolved PR clone and the staged diff directory. A read of anything else — `.pruefer/app-private-key.pem`, `.env`, `~/.claude*`, a symlink inside the PR that points out of the clone — is denied. If the clone or staged diff directory cannot be resolved, the review fails and posts nothing.
 - **Shell.** Only `cat`, `head`, `tail` and `ls`, on those same paths. Not available: `find` and `wc` (explicitly denied), `rg`, `git`, and anything that writes, runs code (tests, builds, linters, package managers) or uses the network. `sed` has no rule of its own (a prefix rule cannot exclude `sed -i`); the CLI's built-in read-only analysis may still admit a plain `sed -n 'Np' file` on an in-scope path, and denies the write and execute forms.
 - **Subagents.** The `Task` tool is allowed so the reviewer can split a large diff. Subagents inherit the same rules; only the reviewer's own final message is parsed as the review. A file a subagent opens counts toward coverage (see [Diff coverage](#diff-coverage)).
-- **Environment.** The `claude` process receives an explicit allowlist — `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, locale (`LANG`, `LC_*`), `CLAUDE_CONFIG_DIR`, `XDG_*_HOME`, proxy and CA variables — and nothing else. `GH_TOKEN`, `GITHUB_TOKEN`, `FABRIK_TOKEN`, `.env` values, `PRUEFER_*`, `HOOKDECK_*` and `ANTHROPIC_*` are not passed. Pruefer's Go code submits the review, so the session needs no GitHub credential. A host that authenticates `claude` through a variable names it in `PRUEFER_REVIEW_ENV_PASSTHROUGH`.
+- **Environment.** The `claude` process receives an explicit allowlist — `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TMPDIR`, locale (`LANG`, `LC_*`), `CLAUDE_CONFIG_DIR` (always the resolved `claude_config_dir`, never the daemon's inherited value — see [Choosing the Claude account](#choosing-the-claude-account)), `XDG_*_HOME`, proxy and CA variables — and nothing else. `GH_TOKEN`, `GITHUB_TOKEN`, `FABRIK_TOKEN`, `.env` values, `PRUEFER_*`, `HOOKDECK_*` and `ANTHROPIC_*` are not passed. Pruefer's Go code submits the review, so the session needs no GitHub credential. A host that authenticates `claude` through a variable names it in `PRUEFER_REVIEW_ENV_PASSTHROUGH`.
 
 Pruefer never runs the PR's code.
 
@@ -670,7 +708,7 @@ A review of a large diff used to read only part of it and say so only in prose, 
 
 ## Configuration reference
 
-Precedence, highest to lowest: **flag > environment variable > YAML config file > default.** Most of these fields can also be changed on a running daemon via `SIGHUP` — see [Config reload (SIGHUP)](#config-reload-sighup) for which ones, and what happens to the rest.
+Precedence, highest to lowest: **flag > environment variable > YAML config file > default** (the one exception is `claude_config_dir`, which also reads `.env` and an inherited `CLAUDE_CONFIG_DIR` — see [Choosing the Claude account](#choosing-the-claude-account)). Most of these fields can also be changed on a running daemon via `SIGHUP` — see [Config reload (SIGHUP)](#config-reload-sighup) for which ones, and what happens to the rest.
 
 | Flag | Env var | YAML key | Default | Notes |
 |---|---|---|---|---|
@@ -681,6 +719,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--poll-interval` | `PRUEFER_POLL_INTERVAL` | `poll_interval_seconds` | `120` | Seconds |
 | `--model` | `PRUEFER_MODEL` | `model` | `sonnet` | Claude model |
 | `--effort` | `PRUEFER_EFFORT` | `effort` | `medium` | `low`, `medium`, `high`, or `max` |
+| `--claude-config-dir` | `PRUEFER_CLAUDE_CONFIG_DIR` | `claude_config_dir` | (none — Claude Code's default profile) | Claude profile directory the review `claude` processes run under, so the account they bill to. Order: flag > env var > `.env` > YAML > an inherited bare `CLAUDE_CONFIG_DIR` > unset — the inherited variable ranks **below** YAML; see [Choosing the Claude account](#choosing-the-claude-account). Operator-only. |
 | `--concurrency` | `PRUEFER_CONCURRENCY` | `concurrency_cap` | `3` | Max simultaneous `claude` invocations |
 | `--max-diff-bytes` | `PRUEFER_MAX_DIFF_BYTES` | `max_diff_bytes` | `500000` | Compared against the diff **after** `excluded_paths` filtering; if still over, Pruefer trims further (largest files first) and reviews the remainder rather than skipping, disclosing what was dropped to both the model and a PR comment. Skips only if nothing reviewable survives. |
 | `--max-wall-time` | `PRUEFER_MAX_WALL_TIME` | `max_wall_time_seconds` | `0` (no cap) | Seconds; caps a single `claude` review invocation's wall-clock duration on top of the fixed 15-minute inactivity watchdog |
