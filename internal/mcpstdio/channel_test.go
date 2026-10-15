@@ -138,20 +138,67 @@ func (b *syncBuf) notifications() []map[string]any {
 	return out
 }
 
-func waitNotifications(t *testing.T, b *syncBuf, n int) []map[string]any {
+// notifyBackstop bounds every wait in the end-to-end tests. It is a failure
+// backstop only (generous enough for a starved CI host); the success path
+// returns as soon as the awaited notification arrives.
+const notifyBackstop = 30 * time.Second
+
+// waitForNotification blocks until a notification satisfying pred has been
+// written and returns it. Waiting on content rather than a count keeps the
+// test independent of any unrelated notification arriving around it.
+func waitForNotification(t *testing.T, b *syncBuf, what string, pred func(map[string]any) bool) map[string]any {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(notifyBackstop)
 	for time.Now().Before(deadline) {
-		if got := b.notifications(); len(got) >= n {
-			return got
+		for _, n := range b.notifications() {
+			if pred(n) {
+				return n
+			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("only %d of %d notifications: %v", len(b.notifications()), n, b.notifications())
+	t.Fatalf("timed out waiting for %s; received: %v", what, b.notifications())
 	return nil
 }
 
+func eventIs(name string) func(map[string]any) bool {
+	return func(n map[string]any) bool { return metaOf(n)["event"] == name }
+}
+
+func mergedIssue(issue string) func(map[string]any) bool {
+	return func(n map[string]any) bool {
+		return metaOf(n)["event"] == "merged" && metaOf(n)["issue"] == issue
+	}
+}
+
+// mergedIssues lists the issue of every merged notification in arrival order.
+func mergedIssues(b *syncBuf) []string {
+	var out []string
+	for _, n := range b.notifications() {
+		if metaOf(n)["event"] == "merged" {
+			out = append(out, metaOf(n)["issue"].(string))
+		}
+	}
+	return out
+}
+
 func metaOf(n map[string]any) map[string]any { return n["meta"].(map[string]any) }
+
+// attachSignalStreamer reports every attach on a channel, so a test can wait
+// for the shim's (re)attach itself instead of a duration.
+type attachSignalStreamer struct {
+	hubStreamer
+	attached chan struct{}
+}
+
+func (a attachSignalStreamer) Attach(p localapi.AttachParams, sink channelevents.Sink) (func(), error) {
+	detach, err := a.hubStreamer.Attach(p, sink)
+	select {
+	case a.attached <- struct{}{}:
+	default:
+	}
+	return detach, err
+}
 
 func openTestHub(t *testing.T, dir string) *channelevents.Hub {
 	t.Helper()
@@ -164,9 +211,21 @@ func openTestHub(t *testing.T, dir string) *channelevents.Hub {
 
 func startDaemon(t *testing.T, sock string, hub *channelevents.Hub) *localapi.Server {
 	t.Helper()
+	return startDaemonWith(t, sock, hubStreamer{hub}, 50*time.Millisecond)
+}
+
+// calmHeartbeat is for tests that hold a stream across several steps: the shim
+// drops a stream silent for 3 heartbeats, so a short interval lets one
+// scheduler stall on a loaded host turn a healthy connection into an extra
+// unreachable/reachable cycle. Daemon shutdown is detected by the socket
+// closing, not by a missed heartbeat, so these tests do not need it short.
+const calmHeartbeat = 2 * time.Second
+
+func startDaemonWith(t *testing.T, sock string, st localapi.Streamer, hb time.Duration) *localapi.Server {
+	t.Helper()
 	srv := localapi.NewServer(sock, &stubBackend{}, nil)
-	srv.Streamer = hubStreamer{hub}
-	srv.HeartbeatInterval = 50 * time.Millisecond
+	srv.Streamer = st
+	srv.HeartbeatInterval = hb
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +256,7 @@ func TestShimReconnectsAfterDaemonRestartAndDeliversHeldThenLive(t *testing.T) {
 	state := t.TempDir()
 
 	hub := openTestHub(t, state)
-	daemon := startDaemon(t, sock, hub)
+	daemon := startDaemonWith(t, sock, hubStreamer{hub}, calmHeartbeat)
 	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "topic"}); err != nil {
 		t.Fatal(err)
 	}
@@ -206,8 +265,8 @@ func TestShimReconnectsAfterDaemonRestartAndDeliversHeldThenLive(t *testing.T) {
 	defer stop()
 
 	hub.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: 1, Content: "live one", Meta: map[string]string{"pr": "9"}})
-	first := waitNotifications(t, out, 1)[0]
-	if first["content"] != "live one" || metaOf(first)["event"] != "merged" || metaOf(first)["issue"] != "1" {
+	first := waitForNotification(t, out, "the first live push", mergedIssue("1"))
+	if first["content"] != "live one" || metaOf(first)["event"] != "merged" {
 		t.Fatalf("first push: %v", first)
 	}
 
@@ -215,43 +274,54 @@ func TestShimReconnectsAfterDaemonRestartAndDeliversHeldThenLive(t *testing.T) {
 	daemon.Close()
 	hub.Close()
 	// Down past the grace period -> daemon-unreachable, live in the session.
-	un := waitNotifications(t, out, 2)[1]
-	if metaOf(un)["event"] != "daemon-unreachable" {
-		t.Fatalf("want daemon-unreachable, got %v", un)
-	}
+	waitForNotification(t, out, "daemon-unreachable", eventIs("daemon-unreachable"))
 
 	hub2 := openTestHub(t, state)
 	defer hub2.Close()
 	for i := 2; i <= 4; i++ { // three events while no session is attached
 		hub2.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: i, Content: "held"})
 	}
-	daemon2 := startDaemon(t, sock, hub2)
+	attached := make(chan struct{}, 8)
+	daemon2 := startDaemonWith(t, sock, attachSignalStreamer{hubStreamer{hub2}, attached}, calmHeartbeat)
 	defer daemon2.Close()
 
-	all := waitNotifications(t, out, 6) // first, unreachable, reachable, then 3 held
-	events := []string{}
-	issues := []string{}
-	for _, n := range all[2:] {
-		events = append(events, metaOf(n)["event"].(string))
-		if v, ok := metaOf(n)["issue"].(string); ok {
-			issues = append(issues, v)
-		}
+	// Wait for the shim's re-attach itself, however long the jittered backoff
+	// takes, then publish a live event at once so it overlaps the drain of the
+	// held ones: it must still arrive after them.
+	select {
+	case <-attached:
+	case <-time.After(notifyBackstop):
+		t.Fatalf("shim never re-attached; received: %v", out.notifications())
 	}
-	if events[0] != "daemon-reachable" {
-		t.Fatalf("expected daemon-reachable first after reconnect: %v", events)
-	}
-	if strings.Join(issues, ",") != "2,3,4" {
-		t.Fatalf("held events must arrive in order after reconnect: %v (events %v)", issues, events)
-	}
-	if v := metaOf(all[2])["down_for_seconds"]; v == nil {
-		t.Errorf("daemon-reachable should say how long it was down: %v", metaOf(all[2]))
+	hub2.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: 5, Content: "live two"})
+	live := waitForNotification(t, out, "the live push after reconnect", mergedIssue("5"))
+	if live["content"] != "live two" {
+		t.Fatalf("live push after reconnect: %v", live)
 	}
 
-	// And live events keep flowing, with no action from the session.
-	hub2.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: 5, Content: "live two"})
-	got := waitNotifications(t, out, 7)
-	if got[len(got)-1]["content"] != "live two" {
-		t.Fatalf("live push after reconnect: %v", got[len(got)-1])
+	if got := strings.Join(mergedIssues(out), ","); got != "1,2,3,4,5" {
+		t.Fatalf("held events must arrive in order after reconnect, and before the live one: merged issues %s (all: %v)", got, out.notifications())
+	}
+
+	// daemon-reachable follows the outage that was reported and precedes the
+	// first held event.
+	all := out.notifications()
+	unreachable, reachable, held := -1, -1, -1
+	for i, n := range all {
+		switch {
+		case metaOf(n)["event"] == "daemon-unreachable" && unreachable < 0:
+			unreachable = i
+		case metaOf(n)["event"] == "daemon-reachable" && unreachable >= 0 && reachable < 0:
+			reachable = i
+		case mergedIssue("2")(n) && held < 0:
+			held = i
+		}
+	}
+	if reachable < 0 || held < 0 || reachable > held {
+		t.Fatalf("expected daemon-reachable before the first held event (reachable=%d held=%d): %v", reachable, held, all)
+	}
+	if v := metaOf(all[reachable])["down_for_seconds"]; v == nil {
+		t.Errorf("daemon-reachable should say how long it was down: %v", metaOf(all[reachable]))
 	}
 }
 
@@ -296,7 +366,7 @@ func TestShimTellsItsSessionWhenAnotherSessionTakesTheName(t *testing.T) {
 	sock := filepath.Join(shortDir(t), "d.sock")
 	hub := openTestHub(t, t.TempDir())
 	defer hub.Close()
-	daemon := startDaemon(t, sock, hub)
+	daemon := startDaemonWith(t, sock, hubStreamer{hub}, calmHeartbeat)
 	defer daemon.Close()
 	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "topic"}); err != nil {
 		t.Fatal(err)
@@ -305,13 +375,13 @@ func TestShimTellsItsSessionWhenAnotherSessionTakesTheName(t *testing.T) {
 	out, stop := runShim(t, sock, "topic", 100*time.Millisecond)
 	defer stop()
 	hub.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: 1, Content: "first"})
-	waitNotifications(t, out, 1) // attached and live
+	waitForNotification(t, out, "the first push", mergedIssue("1")) // attached and live
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go localapi.RunStream(ctx, localapi.StreamOptions{Path: sock, Subscriber: "topic", OnEvent: func(channelevents.Event) {}}) //nolint:errcheck
 
-	n := waitNotifications(t, out, 2)[1]
+	n := waitForNotification(t, out, "stream-superseded", eventIs("stream-superseded"))
 	meta := metaOf(n)
 	if meta["event"] != "stream-superseded" || meta["subscriber"] != "topic" {
 		t.Fatalf("want a stream-superseded notice, got %v", n)
