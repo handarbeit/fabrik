@@ -369,3 +369,41 @@ func TestDeferredRedMember_ReclaimedByCIGate_NotReadvanced(t *testing.T) {
 		t.Errorf("expected fabrik:awaiting-ci applied on confirmed CI failure, got %+v", client.addLabelCalls)
 	}
 }
+
+// #2296: a member whose own latest run was cancelled is deferred off Queued like
+// a red one (uncharged, unpaused), but the comment says cancelled, not failing.
+func TestAdmitTrainMembers_CancelledDeferredWithCancelledWording(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCheckRunsFn: func(_, _, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{{ID: 1, Name: "test", Status: "completed", Conclusion: "cancelled"}}, nil
+		},
+	}
+	eng := admissionEngine(t, client)
+	got := eng.admitTrainMembers(context.Background(), &mergeTrainWorkerState{projectID: "PVT_1"}, "owner", "repo", admissionMembers(1))
+	if len(got) != 0 {
+		t.Fatalf("expected cancelled member excluded, got %v", numbersOf(got))
+	}
+	if len(client.updateStatusCalls) != 1 || client.updateStatusCalls[0].optionID != "opt-implement" {
+		t.Fatalf("expected reroute to Implement, got %+v", client.updateStatusCalls)
+	}
+	client.mu.Lock()
+	comments := client.addCommentCalls
+	client.mu.Unlock()
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(comments))
+	}
+	body := comments[0].body
+	for _, want := range []string{"deferred (own CI did not pass)", "test (cancelled)", "not a test failure", "not** been paused"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("comment missing %q:\n%s", want, body)
+		}
+	}
+	for _, bad := range []string{"CI failing", "checks are failing", "failing check"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("comment must not contain %q:\n%s", bad, body)
+		}
+	}
+	if pl := pauseLabelsFor(client, 1); len(pl) != 0 {
+		t.Errorf("deferral must never pause, got %v", pl)
+	}
+}

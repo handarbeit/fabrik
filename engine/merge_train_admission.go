@@ -67,6 +67,15 @@ func (e *Engine) admitTrainMembers(ctx context.Context, state *mergeTrainWorkerS
 		// required-context failure is red unconditionally), and it only ever matters
 		// for a zero-run GREEN, which this gate treats identically to pending — admit.
 		result, detail := e.classifyLandingCI(owner, repo, "", m.headSHA, runs)
+		if result == TrainCINotPassed {
+			// #2296: the member's own latest run was cancelled/stale/unrecognised.
+			// Deferred exactly like a red member (so the stage gate gets a fresh run
+			// via its flake re-run / CI-fix path), but the comment names the
+			// conclusion and never calls it failing.
+			e.logf(m.item.Number, "merge-train", "deferring #%d (own PR CI did not pass at %s): %s\n", m.item.Number, m.headSHA, detail)
+			e.deferMember(state.projectID, owner, repo, m, runs, detail, true)
+			continue
+		}
 		if result != TrainCIRed {
 			reason := "pending"
 			if result == TrainCIGreen {
@@ -105,6 +114,15 @@ func (e *Engine) admitTrainMembers(ctx context.Context, state *mergeTrainWorkerS
 // the finding, and the member must not be double-routed), then the comment is posted —
 // unless the same head SHA was already deferred (the in-memory ping-pong backstop).
 func (e *Engine) deferRedMember(projectID, owner, repo string, m trainMember, runs []gh.CheckRun, detail string) {
+	e.deferMember(projectID, owner, repo, m, runs, detail, false)
+}
+
+// deferMember is deferRedMember's shared body. notPassed selects the #2296
+// wording for a cancelled/stale/unrecognised latest run: the same reroute and
+// the same uncharged, unpaused disposition, but a comment that says the check
+// was cancelled rather than failing, and a dedup key that cannot collide with a
+// red deferral at the same head.
+func (e *Engine) deferMember(projectID, owner, repo string, m trainMember, runs []gh.CheckRun, detail string, notPassed bool) {
 	n := m.item.Number
 	if !e.rerouteQueuedMemberOffHolding(projectID, m.item) {
 		e.logf(n, "merge-train", "#%d is confirmed red but could not be rerouted off Queued — excluded from this batch, retrying on the next poll\n", n)
@@ -125,12 +143,20 @@ func (e *Engine) deferRedMember(projectID, owner, repo string, m trainMember, ru
 		targetName = target.Name
 	}
 
-	if !e.recordCIDeferred(owner, repo, n, m.headSHA) {
+	dedupKey := m.headSHA
+	if notPassed {
+		dedupKey += "|not-passed"
+	}
+	if !e.recordCIDeferred(owner, repo, n, dedupKey) {
 		e.logf(n, "merge-train", "#%d already deferred at head %s — rerouted again without a repeat comment\n", n, m.headSHA)
 		return
 	}
 
-	msg := fmt.Sprintf("🏭 **Fabrik merge-train — deferred (own CI failing)**\n\n%s", composeCIDeferralBody(n, m.prNum, m.headSHA, targetName, runs, detail))
+	header, body := "deferred (own CI failing)", composeCIDeferralBody(n, m.prNum, m.headSHA, targetName, runs, detail)
+	if notPassed {
+		header, body = "deferred (own CI did not pass)", composeCINotPassedDeferralBody(n, m.prNum, m.headSHA, targetName, runs)
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — %s**\n\n%s", header, body)
 	if _, err := e.client.AddComment(owner, repo, n, msg); err != nil {
 		e.logf(n, "merge-train", "warn: could not post CI deferral comment: %v\n", err)
 	}
@@ -158,6 +184,18 @@ func composeCIDeferralBody(issueNum, prNum int, headSHA, targetName string, runs
 		fmt.Sprintf("#%d's own PR checks are failing at `%s` — this failure is the PR's own and is not a merge-train interaction, so it was kept out of the batch instead of being assembled into a trial that would fail for the same reason.", issueNum, headSHA),
 		fmt.Sprintf("**Diagnostic** (PR #%d, head %s)\n\n%s", prNum, headSHA, diag),
 		fmt.Sprintf("This issue has left the Queued column for %s and has **not** been paused. The ordinary CI gate will pick up the failing check(s) from %s and dispatch a fix automatically. Once CI is green and %s completes again, this issue will re-queue and rejoin a later batch.", targetName, targetName, targetName),
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+// composeCINotPassedDeferralBody is composeCIDeferralBody for a member whose own
+// latest run was cancelled, stale or had an unrecognised conclusion (#2296): no
+// result was produced, so nothing is described as failing.
+func composeCINotPassedDeferralBody(issueNum, prNum int, headSHA, targetName string, runs []gh.CheckRun) string {
+	sections := []string{
+		fmt.Sprintf("#%d's own PR has check(s) with no passing result at `%s` — they were cancelled or otherwise did not complete. This is not a test failure and not a merge-train interaction, so the member was kept out of the batch instead of being assembled into a trial or landed on a run that never finished.", issueNum, headSHA),
+		fmt.Sprintf("**Diagnostic** (PR #%d, head %s)\n\n%s", prNum, headSHA, describeNonPassing(gh.NonPassingCheckRuns(runs))),
+		fmt.Sprintf("This issue has left the Queued column for %s and has **not** been paused. The ordinary CI gate will re-run the cancelled check(s) from %s (or dispatch a fix if a fresh run is not produced). Once CI is green and %s completes again, this issue will re-queue and rejoin a later batch.", targetName, targetName, targetName),
 	}
 	return strings.Join(sections, "\n\n")
 }
