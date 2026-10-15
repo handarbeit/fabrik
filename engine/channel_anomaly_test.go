@@ -43,6 +43,35 @@ func checkAndDrain(ce *channelEvents, sink *chanSink) []channelevents.Event {
 	return drain(sink, 120*time.Millisecond)
 }
 
+// checkAndFlush evaluates the detectors and returns everything the hub has
+// delivered, waiting on DrainChannelEventsForTest (#2210) instead of a wall-clock
+// window: once it returns, the hub owes the sink nothing, so a non-blocking read
+// of the sink sees every event. A stuck consumer fails the test, never hangs it.
+func checkAndFlush(t *testing.T, e *Engine, ce *channelEvents, sink *chanSink) []channelevents.Event {
+	t.Helper()
+	ce.checkAnomalies()
+	ce.checkAnomalies()
+	flushChannel(t, e)
+	var out []channelevents.Event
+	for {
+		select {
+		case ev := <-sink.ch:
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
+
+// flushChannel waits until the channel consumer has processed everything
+// enqueued so far, including the debounced pass a seeded item schedules.
+func flushChannel(t *testing.T, e *Engine) {
+	t.Helper()
+	if err := e.DrainChannelEventsForTest(10 * time.Second); err != nil {
+		t.Fatalf("draining the channel: %v", err)
+	}
+}
+
 func TestRetryStarved_NoWorkerSlotThenResumedOnDispatch(t *testing.T) {
 	e, sink, clk, ce := anomalyEngine(t)
 	e.seedAPIItem(t, 1, "Implement")
@@ -97,15 +126,23 @@ func TestRetryStarved_NotRaisedWhenDispatchedInTime(t *testing.T) {
 	}
 }
 
+// TestRetryStarved_Reasons: the real consumer goroutine runs alongside these
+// tests and ends every debounced pass with checkAnomalies. A reason is chosen once,
+// at announcement, so a consumer pass that sees a retry past the threshold before
+// its deferral is recorded freezes "unknown" (#2283). Each subtest therefore
+// flushes the consumer's seeding pass first, and the deferred-dispatch subtest
+// records the deferral before the clock crosses the threshold, so no consumer pass
+// at any moment can observe the retry overdue without its deferral.
 func TestRetryStarved_Reasons(t *testing.T) {
 	t.Run("poll overdue", func(t *testing.T) {
 		e, sink, clk, ce := anomalyEngineWithPoll(t, 30)
 		e.seedAPIItem(t, 1, "Implement")
+		flushChannel(t, e)
 		t0 := clk.Now()
 		e.health.beginPoll(t0, pollVerdict{}) // a poll that never finishes
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "error", t0.Add(time.Minute))
 		clk.set(t0.Add(8 * time.Minute))
-		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+		evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved)
 		if len(evs) != 1 || evs[0].Meta["reason"] != "poll overdue" {
 			t.Fatalf("got %+v", evs)
 		}
@@ -113,10 +150,11 @@ func TestRetryStarved_Reasons(t *testing.T) {
 	t.Run("unknown", func(t *testing.T) {
 		e, sink, clk, ce := anomalyEngine(t)
 		e.seedAPIItem(t, 1, "Implement")
+		flushChannel(t, e)
 		t0 := clk.Now()
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "incomplete", t0)
 		clk.set(t0.Add(8 * time.Minute))
-		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+		evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved)
 		if len(evs) != 1 || evs[0].Meta["reason"] != "unknown" {
 			t.Fatalf("got %+v", evs)
 		}
@@ -124,11 +162,41 @@ func TestRetryStarved_Reasons(t *testing.T) {
 	t.Run("deferred dispatch counts as no worker slot", func(t *testing.T) {
 		e, sink, clk, ce := anomalyEngine(t)
 		e.seedAPIItem(t, 1, "Implement")
+		flushChannel(t, e)
 		t0 := clk.Now()
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "max-turns", t0)
-		clk.set(t0.Add(8 * time.Minute))
+		// The deferral lands while the retry is still short of the 5 minute
+		// threshold and the clock then crosses it, within the deferral's lapse.
+		clk.set(t0.Add(4*time.Minute + 30*time.Second))
 		e.emitDispatchDeferred([]string{"owner/repo#1"}) // the poll that still cannot get a slot
-		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+		clk.set(t0.Add(5*time.Minute + 30*time.Second))
+		evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved)
+		if len(evs) != 1 || evs[0].Meta["reason"] != "no worker slot" {
+			t.Fatalf("got %+v", evs)
+		}
+	})
+	// A consumer pass between any two of the facts cannot freeze the wrong reason:
+	// nothing is announced before the threshold, and the one announcement after it
+	// has the deferral behind it (#2283).
+	t.Run("a consumer pass between the facts cannot freeze the wrong reason", func(t *testing.T) {
+		e, sink, clk, ce := anomalyEngine(t)
+		e.seedAPIItem(t, 1, "Implement")
+		flushChannel(t, e)
+		t0 := clk.Now()
+		step := func(what string) {
+			t.Helper()
+			if evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved); len(evs) != 0 {
+				t.Fatalf("retry-starved announced after %s: %+v", what, evs)
+			}
+		}
+		e.emitRetryScheduled(anomalyItem(1), implementStage(), "max-turns", t0)
+		step("the retry was scheduled")
+		clk.set(t0.Add(4*time.Minute + 30*time.Second))
+		step("the clock moved short of the threshold")
+		e.emitDispatchDeferred([]string{"owner/repo#1"})
+		step("the deferral was recorded")
+		clk.set(t0.Add(5*time.Minute + 30*time.Second))
+		evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved)
 		if len(evs) != 1 || evs[0].Meta["reason"] != "no worker slot" {
 			t.Fatalf("got %+v", evs)
 		}
@@ -138,11 +206,12 @@ func TestRetryStarved_Reasons(t *testing.T) {
 	t.Run("a stale deferral does not mask unknown", func(t *testing.T) {
 		e, sink, clk, ce := anomalyEngine(t)
 		e.seedAPIItem(t, 1, "Implement")
+		flushChannel(t, e)
 		t0 := clk.Now()
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "max-turns", t0)
 		e.emitDispatchDeferred([]string{"owner/repo#1"})
 		clk.set(t0.Add(8 * time.Minute))
-		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+		evs := ofType(checkAndFlush(t, e, ce, sink), channelevents.RetryStarved)
 		if len(evs) != 1 || evs[0].Meta["reason"] != "unknown" {
 			t.Fatalf("got %+v", evs)
 		}
