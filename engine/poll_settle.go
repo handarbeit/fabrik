@@ -108,52 +108,64 @@ func (e *Engine) settleSHAInvalidationScan(candidates []gh.ProjectItem) {
 		if !hasLabel(item.Labels, "stage:Validate:complete") {
 			continue
 		}
-		owner, repo := itemOwnerRepo(item, e.defaultRepo())
-		repoStr := itemOwnerRepoString(item, e.defaultRepo())
-		snap, snapErr := e.store.Get(repoStr, item.Number)
-		if snapErr != nil {
-			continue
-		}
-		completedSHA := snap.ValidateCompletedSHA()
-		if completedSHA == "" {
-			// FR-5: no recorded SHA (pre-feature item or worktree HEAD unavailable) — do nothing.
-			continue
-		}
-		lpr := snap.LinkedPR()
-		if lpr == nil || lpr.HeadSHA == "" || lpr.HeadSHA == completedSHA {
-			continue
-		}
-		// FR-6: in-flight guard — let the active Validate worker finish.
-		if snap.Worker() != nil {
-			e.logf(item.Number, "validate-sha", "Validate worker in-flight — deferring SHA invalidation to next poll\n")
-			continue
-		}
-		// #2158 R1: landed or terminal items keep their Validate completion.
-		if reason := e.validateItemLanded(item, snap, lpr); reason != "" {
-			e.logf(item.Number, "validate-sha", "head differs from Validate completion SHA but item is landed/terminal (%s) — leaving completion labels\n", reason)
-			continue
-		}
-		// A catch-up pushes first and posts its marker after, so mid-catch-up the moved
-		// head has no marker yet. Defer until the marker is out; an external push in that
-		// window is detected one poll late.
-		if lpr.Number != 0 && e.catchUpPushInFlight(owner, repo, lpr.Number) {
-			e.logf(item.Number, "validate-sha", "merge-train catch-up of PR #%d in flight — deferring SHA invalidation to next poll\n", lpr.Number)
-			continue
-		}
-		// #2158 R2: the engine's own pure catch-up merge is not an external push.
-		// Re-record the head so a later real push still differs from the recorded SHA.
-		pure, merr := e.headIsPureCatchUp(owner, repo, lpr)
-		if merr != nil {
-			e.logf(item.Number, "warn", "validate-sha: could not read PR #%d comments for catch-up marker: %v — deferring SHA invalidation to next poll\n", lpr.Number, merr)
-			continue
-		}
-		if pure {
-			e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: lpr.HeadSHA})
-			e.logf(item.Number, "validate-sha", "head %s is the engine's pure catch-up merge — keeping Validate completion, recording it as the completion SHA\n", lpr.HeadSHA)
-			continue
-		}
-		e.handleValidateSHAInvalidation(item, owner, repo)
+		e.checkValidateSHAInvalidation(item)
 	}
+}
+
+// checkValidateSHAInvalidation evaluates one stage:Validate:complete item against its
+// recorded completion SHA and strips the stale completion labels when the linked PR's
+// head moved on. It returns true when it invalidated the item (the caller must then
+// treat the item's label copy as stale). The #2158 exemptions, FR-5 empty-SHA skip and
+// FR-6 worker guard all live here, so the scan and the pre-landing hydrate (#2343)
+// apply exactly the same rule.
+func (e *Engine) checkValidateSHAInvalidation(item gh.ProjectItem) bool {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, snapErr := e.store.Get(repoStr, item.Number)
+	if snapErr != nil {
+		return false
+	}
+	completedSHA := snap.ValidateCompletedSHA()
+	if completedSHA == "" {
+		// FR-5: no recorded SHA (pre-feature item or worktree HEAD unavailable) — do nothing.
+		// After a restart the pre-landing hydrate (#2343) fills or handles this case.
+		return false
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil || lpr.HeadSHA == "" || lpr.HeadSHA == completedSHA {
+		return false
+	}
+	// FR-6: in-flight guard — let the active Validate worker finish.
+	if snap.Worker() != nil {
+		e.logf(item.Number, "validate-sha", "Validate worker in-flight — deferring SHA invalidation to next poll\n")
+		return false
+	}
+	// #2158 R1: landed or terminal items keep their Validate completion.
+	if reason := e.validateItemLanded(item, snap, lpr); reason != "" {
+		e.logf(item.Number, "validate-sha", "head differs from Validate completion SHA but item is landed/terminal (%s) — leaving completion labels\n", reason)
+		return false
+	}
+	// A catch-up pushes first and posts its marker after, so mid-catch-up the moved
+	// head has no marker yet. Defer until the marker is out; an external push in that
+	// window is detected one poll late.
+	if lpr.Number != 0 && e.catchUpPushInFlight(owner, repo, lpr.Number) {
+		e.logf(item.Number, "validate-sha", "merge-train catch-up of PR #%d in flight — deferring SHA invalidation to next poll\n", lpr.Number)
+		return false
+	}
+	// #2158 R2: the engine's own pure catch-up merge is not an external push.
+	// Re-record the head so a later real push still differs from the recorded SHA.
+	pure, merr := e.headIsPureCatchUp(owner, repo, lpr)
+	if merr != nil {
+		e.logf(item.Number, "warn", "validate-sha: could not read PR #%d comments for catch-up marker: %v — deferring SHA invalidation to next poll\n", lpr.Number, merr)
+		return false
+	}
+	if pure {
+		e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: lpr.HeadSHA})
+		e.logf(item.Number, "validate-sha", "head %s is the engine's pure catch-up merge — keeping Validate completion, recording it as the completion SHA\n", lpr.HeadSHA)
+		return false
+	}
+	e.handleValidateSHAInvalidation(item, owner, repo)
+	return true
 }
 
 // settleChildPlacements retries the outstanding project Status placement for
