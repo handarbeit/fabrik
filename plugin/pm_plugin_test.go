@@ -43,7 +43,13 @@ func TestPMPluginManifestsParseAndUserConfigReferencesExist(t *testing.T) {
 	if manifest.Name != "fabrik" || manifest.Version == "" {
 		t.Errorf("manifest name/version = %q/%q", manifest.Name, manifest.Version)
 	}
-	for _, key := range []string{"subscriber", "fabrik_dir"} {
+	// The subscriber is deliberately not a plugin setting (#2322): one setting is
+	// shared by every session, and an .mcp.json env entry would override a
+	// per-session FABRIK_SUBSCRIBER or CLAUDE_TOPIC the session exports.
+	if _, ok := manifest.UserConfig["subscriber"]; ok {
+		t.Error("userConfig must not declare a subscriber setting (#2322)")
+	}
+	for _, key := range []string{"fabrik_dir"} {
 		opt, ok := manifest.UserConfig[key]
 		if !ok {
 			t.Errorf("userConfig lacks %q", key)
@@ -77,9 +83,16 @@ func TestPMPluginManifestsParseAndUserConfigReferencesExist(t *testing.T) {
 	}
 	// Configuration travels in the environment: an unset setting is an empty
 	// variable, never an empty argument.
-	for _, k := range []string{"FABRIK_SUBSCRIBER", "FABRIK_MCP_DIR", "CLAUDE_PROJECT_DIR"} {
+	for _, k := range []string{"FABRIK_MCP_DIR", "CLAUDE_PROJECT_DIR"} {
 		if _, ok := srv.Env[k]; !ok {
 			t.Errorf(".mcp.json env lacks %s", k)
+		}
+	}
+	// FABRIK_SUBSCRIBER and CLAUDE_TOPIC must reach the server only from the
+	// session's own environment, never from this file (#2322).
+	for _, k := range []string{"FABRIK_SUBSCRIBER", "CLAUDE_TOPIC"} {
+		if _, ok := srv.Env[k]; ok {
+			t.Errorf(".mcp.json env must not set %s: it would override the session's own value", k)
 		}
 	}
 
