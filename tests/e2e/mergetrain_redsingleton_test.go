@@ -48,8 +48,7 @@ import (
 // so it is the only Queued item in its (repo, base) partition (ADR-1648) however many
 // other train tests run alongside, and the arity guard it exists to exercise cannot be
 // bypassed by a sibling's clean members joining the batch. Before #1977 the test was
-// non-parallel on RepoAlpha/main for exactly that reason. A private base also stops
-// the "advance the base past the member" step from writing to shared main. The
+// non-parallel on RepoAlpha/main for exactly that reason. The
 // train-poison-guard workflow fires on any pull_request and is only REQUIRED on main
 // (assertTrainPoisonGuardRequired still checks main: it proves the workflow is
 // enrolled); the trial's red result comes from the check run either way.
@@ -70,18 +69,21 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	logStart := LogOffset(t, env)
 
 	// The member's own PR CI is pending at queue time (train-poison-guard delays its
-	// member-branch failure so #1821's admission gate admits it), which already makes
-	// the singleton fast path ineligible. Advancing main past the member's head
-	// before queuing makes that structural rather than timing-dependent: the fast
-	// path is refused ("pinned base is N commit(s) ahead of the member's head"), so
-	// the train must build the single-member trial whose red result this tests.
+	// member-branch failure so #1821's admission gate admits it), which makes the
+	// singleton fast path ineligible: it needs the member's own CI green and complete.
+	// The member is up to date with its base, so the train builds the single-member
+	// trial whose red result this tests.
+	//
+	// The base is deliberately NOT advanced past the member (it was, from #1913 until
+	// the v0.0.84 gate): since #2044 a singleton behind its pinned base goes to the
+	// singleton catch-up — merge the base into its own branch, wait for its own CI —
+	// instead of a trial, so the bump routed the member around the arity guard this
+	// test exists for. The catch-up's own red disposition is covered by its own tests.
 	stamp := time.Now().UTC().Format("20060102-150405.000")
 	issue, _, itemID := PrepareMemberExactPathOnBase(t, env, repo, base, "redsingleton",
 		fmt.Sprintf("e2e/train/entries/redsingleton-%s.txt", stamp),
 		"POISON — #1545 red-singleton e2e member\n",
 	)
-	AdvanceBaseBranch(t, env, repo, base,
-		fmt.Sprintf("e2e/train/entries/redsingleton-basebump-%s.txt", stamp), "base bump for the red-singleton member\n")
 	SetIssueStatus(t, env, itemID, "Queued")
 	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	t.Logf("queued single poison member (issue #%d); awaiting red-singleton disposition", issue)

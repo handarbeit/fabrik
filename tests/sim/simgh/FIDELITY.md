@@ -1527,6 +1527,17 @@ production's live `unlabeled` events read. It is what the CI settle scan's
 removal of `fabrik:paused`). Because `RemoveLabelFromIssue` deletes the
 applied-at entry, the log is the only place the removal time survives.
 
+### Probe linked-PR scalars (#2122)
+
+`ProbeProjectBoard` carries `BoardProbeItem.LinkedPRFacts` (state, draft,
+merged) for the linked PR, as the real probe query's `state isDraft merged`
+selection does. **Mergeability is always reported as UNKNOWN** (`Mergeable` nil,
+`MergeableState` empty): GitHub computes `mergeable`/`mergeStateStatus` lazily and
+answers UNKNOWN on a cold read, and the sim does not run a merge simulation per
+probed PR per poll. A scenario that needs a mergeable fact reads it through
+`FetchPRMergeableFields`/`FetchPRDetails`, which the engine's REST fallback also
+uses. The probe is therefore not a source of mergeability in the sim.
+
 ---
 
 ## Time

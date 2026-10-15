@@ -15,14 +15,11 @@ import (
 // subscriber to the merge-train events.
 func trainChannelEngine(t *testing.T) (*Engine, *chanSink, *mockGitHubClient) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	eng.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 	eng.fabrikDir = t.TempDir()
-	eng.startChannelEvents()
+	eng.startChannelEventsIn(channelStateDir(eng.fabrikDir), false)
 	t.Cleanup(eng.closeChannelEvents)
 	ce := eng.channelEvents()
 	if _, err := ce.hub.Subscribe(channelevents.Subscription{Subscriber: "T", Events: []channelevents.EventType{

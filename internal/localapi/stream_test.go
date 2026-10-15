@@ -175,7 +175,8 @@ func TestStreamStopsWhenSuperseded(t *testing.T) {
 	if st := sts.next(t); !st.Connected {
 		t.Fatalf("%+v", st)
 	}
-	rawAttach(t, sock, "X") // a second session takes the name
+	waitAttached(t, hub, "X") // the ack precedes the bind; the raw session must bind after the stream's
+	rawAttach(t, sock, "X")   // a second session takes the name
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
@@ -388,6 +389,7 @@ func TestStreamReportsSupersededBeforeStopping(t *testing.T) {
 	if st := sts.next(t); !st.Connected {
 		t.Fatalf("%+v", st)
 	}
+	waitAttached(t, hub, "X") // the ack precedes the bind; the raw session must bind after the stream's
 	rawAttach(t, sock, "X")
 	if st := sts.next(t); st.Connected || !st.Superseded {
 		t.Fatalf("want a Superseded state, got %+v", st)

@@ -541,3 +541,15 @@ func TestUpdate_CtrlR_HistoryPane_ReturnsSighupCmd(t *testing.T) {
 		t.Error("expected non-nil cmd from ctrl+r in history pane")
 	}
 }
+
+// #2259: the In Progress title says the daemon is draining for a SIGHUP restart.
+func TestSlotsSuffix_Draining(t *testing.T) {
+	a := ActivePaneComponent{slots: &WorkerSlotsEvent{InUse: 2, Max: 5, Draining: true, DrainLeft: 2}}
+	if got := a.slotsSuffix(); !strings.Contains(got, "draining for restart (2 left)") || !strings.Contains(got, "slots 2/5") {
+		t.Fatalf("slotsSuffix = %q", got)
+	}
+	a.slots.Draining = false
+	if got := a.slotsSuffix(); strings.Contains(got, "draining") {
+		t.Fatalf("slotsSuffix = %q, want no draining segment", got)
+	}
+}

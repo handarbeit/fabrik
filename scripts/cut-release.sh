@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/cut-release.sh v0.0.67
-#   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
+#   scripts/cut-release.sh v0.0.67 --skip-tests       # no-op (the local race suite was removed)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
 #   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the marketplace plugin version auto-bumps
 #   scripts/cut-release.sh v0.0.67 --skip-integration=<reason>
@@ -28,10 +28,8 @@
 #   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
 #      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
 #      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
-#   4. go build + go test -race, -parallel capped via scripts/lib/parallel.sh
-#      (REQ3, #1677 — same cap scripts/sim/run.sh uses, since this run covers
-#      the same git-forking tests/sim package; skippable with --skip-tests,
-#      the pre-gate above never is)
+#   4. go build, plugin hash and shipped-file table. No local go test -race:
+#      CI runs it on every PR, and on macOS it only flaked (removed in v0.0.84)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454). Always
 #      passes --clean (REQ1, #1677) to reset the shared bed first — a release cut and
@@ -54,10 +52,14 @@
 #      "Fidelity-drift policy" section). This is a release-checklist step, not
 #      something left to memory.
 #   6. Commit release-notes.md (if dirty) as arbeithand
-#   6b. For each plugin listed in .claude-plugin/marketplace.json whose source
-#       changed since the previous tag, patch-bump its .claude-plugin/plugin.json
-#       and commit them together as arbeithand (skippable with --no-plugin-bump)
-#   7. Tag, push tag with credential helpers nuked + PAT-in-URL
+#   6b. Plugin release pinning (#2141, ADR 2141): set the binary-paired plugin
+#       (plugin/fabrik) to the release version, patch-bump every other plugin
+#       listed in .claude-plugin/marketplace.json whose source changed since the
+#       previous tag, pin every marketplace entry's ref to the release tag, and
+#       commit that together as arbeithand — locally only; step 7 publishes it
+#       (skippable with --no-plugin-bump)
+#   7. Tag, then push main and the tag in ONE atomic push (credential helpers
+#      nuked + PAT-in-URL), so main never names a tag that does not exist
 #   8. Watch the release workflow run; fail loudly on non-success
 #   9. Verify the published release author and discussion author are both arbeithand
 #   10. File doc-update issue and add to project at Status=Specify
@@ -86,9 +88,6 @@ BOT_EMAIL="handarbeit@handarbeit.io"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-
-# shellcheck source=lib/parallel.sh
-source "$REPO_ROOT/scripts/lib/parallel.sh"
 
 step() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
@@ -149,15 +148,16 @@ insert_notes_line() {
 # invocation; plugin/known_embedded_versions.go is step 4's own conditional
 # write (only when a new plugin hash isn't already recorded); the
 # plugin/*/.claude-plugin/plugin.json pattern covers step 6b's marketplace
-# version bumps (not yet run when this fires for the gate runner's pre-gate,
-# but a retry after a partial step 6b could legitimately see it dirty too).
+# version bumps and .claude-plugin/marketplace.json its ref pinning (not yet run
+# when this fires for the gate runner's pre-gate, but a retry after a partial
+# step 6b could legitimately see them dirty too).
 # Nothing outside this declared, named set is ever treated as expected —
 # any other dirty file still fails both checks exactly as before this was
 # extracted (see RunPregate's own comment on the TOCTOU gap this
 # preserves).
 allowed_dirty_regex() {
   local version="$1"
-  printf '%s' "^\\?\\? release-notes/${version}\\.md\$| M release-notes/${version}\\.md\$|^M  release-notes/${version}\\.md\$| M plugin/known_embedded_versions\\.go\$|^M  plugin/known_embedded_versions\\.go\$| M plugin/[^/]+/\\.claude-plugin/plugin\\.json\$|^M  plugin/[^/]+/\\.claude-plugin/plugin\\.json\$"
+  printf '%s' "^\\?\\? release-notes/${version}\\.md\$| M release-notes/${version}\\.md\$|^M  release-notes/${version}\\.md\$| M plugin/known_embedded_versions\\.go\$|^M  plugin/known_embedded_versions\\.go\$| M plugin/shipped_files\\.json\$|^M  plugin/shipped_files\\.json\$| M plugin/[^/]+/\\.claude-plugin/plugin\\.json\$|^M  plugin/[^/]+/\\.claude-plugin/plugin\\.json\$| M \\.claude-plugin/marketplace\\.json\$|^M  \\.claude-plugin/marketplace\\.json\$"
 }
 
 # export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA (and
@@ -321,7 +321,8 @@ BRANCH="$(git branch --show-current)"
 ok "on main"
 
 # Allow uncommitted release-notes/<version>.md, plugin/known_embedded_versions.go,
-# and any plugin/*/.claude-plugin/plugin.json (all are updated by this script
+# any plugin/*/.claude-plugin/plugin.json and .claude-plugin/marketplace.json
+# (all are updated by this script
 # itself, after the build step and in step 6b). The manifest pattern is
 # deliberately not pinned to one plugin: step 6b bumps every marketplace-listed
 # plugin, so a run that dies partway through can leave any of them modified but
@@ -387,8 +388,7 @@ PAT_OWNER="$(GH_TOKEN="$FABRIK_TOKEN" gh api user --jq .login)"
 ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 
 # ─── 3. sim + wire-contract pre-gate (unconditional — R1/R2, #1454) ──────────
-# Unlike the full go test -race ./... below, this step is NEVER skippable —
-# not even by --skip-tests. It's the same free, fast pre-gate
+# This step is NEVER skippable. It's the same free, fast pre-gate
 # scripts/e2e/run.sh runs ahead of its own live suite (see the gate runner's
 # RunPregate in tests/gate/pregate.go), re-run here so a release cut through this script pays the
 # same "cheap layers first" ordering even if someone hand-invokes
@@ -403,9 +403,18 @@ ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 # own comment. This does NOT weaken the check: it still runs here, in full,
 # exactly as before; it only stops step 5 from paying for it a second time.
 step "Sim + wire-contract pre-gate"
-if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
-  die "sim suite failed — fix it before cutting a release (scripts/sim/run.sh --all to reproduce)"
+# The sim runs through the gate runner's `sim` entry (#2247), not scripts/sim/run.sh
+# directly: same suite, but decoded per test, with a heartbeat naming the tests
+# still running, a goroutine-dump pointer and an archive under
+# .e2e-coverage/pregate/ if it hangs. Built and exec'd (not `go run`) so the
+# runner itself receives INT/TERM and reaps the tree, like scripts/e2e/run.sh.
+SIM_GATE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/cut-release-gate.XXXXXX")/gate"
+go build -o "$SIM_GATE_BIN" ./tests/gate/cmd/gate || die "building the gate runner (./tests/gate/cmd/gate) failed"
+if ! "$SIM_GATE_BIN" sim; then
+  rm -rf "$(dirname "$SIM_GATE_BIN")"
+  die "sim suite failed — fix it before cutting a release (the output above names the tests still running and the archive; scripts/sim/run.sh --all to reproduce)"
 fi
+rm -rf "$(dirname "$SIM_GATE_BIN")"
 ok "sim suite passed"
 if ! go test -race -count=1 ./github/... >/tmp/cut-release-pregate-test.log 2>&1; then
   tail -40 /tmp/cut-release-pregate-test.log >&2
@@ -431,27 +440,26 @@ else
   ok "appended $PLUGIN_HASH to $KNOWN_VERSIONS_FILE"
 fi
 
+# The per-file companion to KnownEmbeddedVersions (#2139): `fabrik upgrade`
+# tells an operator's edit from an older shipped file by this table, so every
+# released file version must be in it before the tag exists. -add-current is a
+# no-op when the embed is unchanged; -check fails the release if any tag's file
+# or the current embed is missing.
+step "Record shipped plugin file versions for $VERSION"
+SHIPPED_FILES_FILE="plugin/shipped_files.json"
+go run ./tools/gen-shipped-files -add-current || die "gen-shipped-files -add-current failed"
+go run ./tools/gen-shipped-files -check || die "$SHIPPED_FILES_FILE does not cover every release and the current embed"
+ok "$SHIPPED_FILES_FILE covers every release and the current embed"
+
+# No local `go test -race ./...` (dropped for v0.0.84). CI's "Test and vet" job
+# runs the whole module under -race on Linux for every PR, and every landing is
+# CI-checked (the merge train's trial or fast path). Here, on macOS, a -race
+# binary forking git dies or hangs intermittently between fork and exec, so the
+# local run only added a ~20-minute flake source. The sim + wire-contract
+# pre-gate above and the live gate below still run. --skip-tests is accepted
+# and ignored so existing invocations keep working.
 if [ "$SKIP_TESTS" -eq 1 ]; then
-  warn "--skip-tests was passed; go test -race ./... was NOT run (the sim + wire-contract pre-gate above still ran unconditionally)"
-else
-  step "Race-tested suite"
-  # -parallel capped (REQ3, #1677): this repo-wide invocation includes the
-  # same git-forking tests/sim package that scripts/sim/run.sh's own
-  # SIM_PARALLEL caps — left uncapped here, it inherits GOMAXPROCS (28 on
-  # the host that produced #1677) and reliably reproduces the TSan
-  # fork/exec SIGSEGV #1624's cap was meant to prevent, just via a
-  # different entry point. FABRIK_RACE_PARALLEL is a narrow override (for
-  # experimentation); default_race_parallel (scripts/lib/parallel.sh) is
-  # the same helper scripts/sim/run.sh uses, so the two never drift into
-  # incoherent caps for overlapping concurrency. -timeout matches
-  # scripts/sim/run.sh's own SIM_TIMEOUT rationale — see that script's
-  # header comment.
-  RACE_PARALLEL="${FABRIK_RACE_PARALLEL:-$(default_race_parallel)}"
-  if ! go test -race -parallel "$RACE_PARALLEL" -timeout 20m ./... >/tmp/cut-release-test.log 2>&1; then
-    tail -40 /tmp/cut-release-test.log >&2
-    die "go test -race ./... failed (full log: /tmp/cut-release-test.log)"
-  fi
-  ok "all tests pass with -race (-parallel $RACE_PARALLEL)"
+  warn "--skip-tests has no effect any more: the local race suite was removed (CI runs it on every PR)"
 fi
 
 # Capture the previous release tag now, before this release's tag exists,
@@ -463,8 +471,7 @@ PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
 # The live suite is the only layer that exercises real Claude, real review
 # bots, and real GitHub wire behaviour — nothing else in this pipeline can
 # substitute for it, and it is never retired or reduced (see
-# adrs/1454-sim-pre-gate-not-replacement.md). So unlike --skip-tests above,
-# there is no quiet default here: either the suite runs, or a human
+# adrs/1454-sim-pre-gate-not-replacement.md). So there is no quiet default here: either the suite runs, or a human
 # explicitly said why not, and that "why not" ships in the release notes
 # where anyone reading them can see it. A --skip-integration that silently
 # produced an unvalidated release was rejected outright (R2's option (a) vs
@@ -543,6 +550,7 @@ step "Commit release notes"
 # The workflow reads release-notes/<version>.md directly — no copy step needed.
 git add "$NOTES_FILE"
 git add "$KNOWN_VERSIONS_FILE"
+git add "$SHIPPED_FILES_FILE"
 if git diff --cached --quiet; then
   warn "no release-notes changes to commit — skipping commit step"
 else
@@ -565,24 +573,35 @@ else
   ok "release-notes commit pushed"
 fi
 
-# ─── 6b. auto-bump marketplace plugin versions if source changed ─────────────
-# Claude Code's /plugin update compares plugin.json's version field against
-# marketplace.json@main; same version number means no refresh fires even if the
-# plugin's source changed. Patch-bump the manifest of every plugin whose source
-# changed since the previous tag, so users always get fresh content.
+# ─── 6b. plugin release pinning (#2141, ADR 2141; supersedes ADR 816 for fabrik)
+# What marketplace users receive is decided here, in one commit that step 7 then
+# tags and pushes together with main:
+#
+#   - Binary-paired plugins (BINARY_PAIRED_PLUGINS) get their manifest version
+#     set to the release version on EVERY release, changed or not: the plugin
+#     and the binary are one product, their versions are compared by the plugin's
+#     SessionStart hook, and a changed version string is what makes Claude Code
+#     see an update at all.
+#   - Every other plugin keeps ADR 816's rule: patch-bump the manifest only if
+#     its source changed since the previous tag.
+#   - Every git-subdir entry's `ref` in marketplace.json is pinned to the release
+#     tag, so users get exactly the tagged plugin and never unreleased commits
+#     from main. (A `sha` pin cannot work: the commit that contains it cannot
+#     know its own SHA.)
 #
 # The plugin list is derived from marketplace.json rather than hardcoded: a
 # plugin listed there is bumpable from that moment on, with no matching edit
-# here. That coupling is deliberate — marketplace.json membership is exactly
-# what makes /plugin update's version comparison apply to a plugin, so the two
-# cannot drift apart. plugin/fabrik-workflows is out of scope for the same
-# reason: it isn't listed, isn't served by /plugin update, and has its own
-# content-hash-based change detection.
-step "Plugin version bump"
+# here. plugin/fabrik-workflows is out of scope: it isn't listed, isn't served
+# by /plugin update, and has its own content-hash-based change detection.
+#
+# The commit made here is NOT pushed here. main would then name a tag that does
+# not exist yet, and every marketplace refresh in that window would fail to
+# resolve the plugin. Step 7 pushes main and the tag atomically.
+BINARY_PAIRED_PLUGINS="plugin/fabrik"
+PIN_COMMITTED=0
+step "Plugin release pinning"
 if [ "$NO_PLUGIN_BUMP" -eq 1 ]; then
-  warn "--no-plugin-bump was passed; skipping plugin version bumps"
-elif [ -z "$PREV_TAG" ]; then
-  warn "no previous release tag found — skipping plugin version bumps (first release?)"
+  warn "--no-plugin-bump was passed; skipping plugin version bumps and ref pinning — marketplace refs stay on the previous release"
 else
   MARKETPLACE_JSON=".claude-plugin/marketplace.json"
   [ -f "$MARKETPLACE_JSON" ] || die "$MARKETPLACE_JSON not found"
@@ -594,6 +613,7 @@ else
   if ! PLUGIN_DIRS="$(go run ./tools/list-marketplace-plugins/ "$MARKETPLACE_JSON")"; then
     die "failed to enumerate plugins from $MARKETPLACE_JSON"
   fi
+  [ -n "$PREV_TAG" ] || warn "no previous release tag found — skipping change-based plugin version bumps (first release?); binary-paired versions and ref pins still apply"
 
   BUMPED_MANIFESTS=""
   BUMPED_SUMMARY=""
@@ -602,7 +622,23 @@ else
     PLUGIN_MANIFEST="$PLUGIN_DIR/.claude-plugin/plugin.json"
     [ -f "$PLUGIN_MANIFEST" ] \
       || die "$PLUGIN_MANIFEST not found (listed in $MARKETPLACE_JSON)"
+    PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
 
+    case " $BINARY_PAIRED_PLUGINS " in
+      *" $PLUGIN_DIR "*)
+        if ! PIN_OUTPUT="$(go run ./tools/pin-plugin-release/ version "$PLUGIN_MANIFEST" "${VERSION#v}")"; then
+          die "pin-plugin-release version failed for $PLUGIN_MANIFEST"
+        fi
+        OLD_PLUGIN_VER="$(printf '%s' "$PIN_OUTPUT" | cut -d' ' -f1)"
+        ok "$PLUGIN_DIR is binary-paired: $OLD_PLUGIN_VER -> ${VERSION#v}"
+        BUMPED_MANIFESTS="$BUMPED_MANIFESTS $PLUGIN_MANIFEST"
+        BUMPED_SUMMARY="$BUMPED_SUMMARY $PLUGIN_NAME@${VERSION#v}"
+        insert_notes_line "$NOTES_FILE" "- Set $PLUGIN_NAME plugin to ${VERSION#v} (paired with the binary)"
+        continue
+        ;;
+    esac
+
+    [ -n "$PREV_TAG" ] || continue
     if ! BUMP_OUTPUT="$(go run ./tools/bump-plugin-version/ "$PLUGIN_DIR" "$PLUGIN_MANIFEST" "$PREV_TAG")"; then
       die "bump-plugin-version failed for $PLUGIN_DIR (prev tag: $PREV_TAG)"
     fi
@@ -613,7 +649,6 @@ else
 
     OLD_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f1)"
     NEW_PLUGIN_VER="$(printf '%s' "$BUMP_OUTPUT" | cut -d' ' -f2)"
-    PLUGIN_NAME="$(basename "$PLUGIN_DIR")"
     ok "bumped $PLUGIN_DIR $OLD_PLUGIN_VER -> $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
 
     BUMPED_MANIFESTS="$BUMPED_MANIFESTS $PLUGIN_MANIFEST"
@@ -626,29 +661,29 @@ else
     insert_notes_line "$NOTES_FILE" "- Auto-bumped $PLUGIN_NAME plugin to $NEW_PLUGIN_VER (source changed since $PREV_TAG)"
   done
 
-  if [ -z "$BUMPED_MANIFESTS" ]; then
-    ok "no marketplace plugin source changed since $PREV_TAG — nothing to bump"
+  if ! PINNED_COUNT="$(go run ./tools/pin-plugin-release/ refs "$MARKETPLACE_JSON" "$VERSION")"; then
+    die "pin-plugin-release refs failed for $MARKETPLACE_JSON"
+  fi
+  ok "pinned $PINNED_COUNT marketplace entr(ies) to $VERSION"
+  insert_notes_line "$NOTES_FILE" "- Pinned the marketplace plugin entries to $VERSION"
+
+  # Intentionally unquoted: BUMPED_MANIFESTS is a space-separated path list.
+  # Plugin paths come from marketplace.json and contain no spaces.
+  # shellcheck disable=SC2086
+  git add $BUMPED_MANIFESTS "$MARKETPLACE_JSON" "$NOTES_FILE"
+  if git diff --cached --quiet; then
+    ok "plugin manifests and marketplace refs already at $VERSION — nothing to commit"
   else
-    # Intentionally unquoted: BUMPED_MANIFESTS is a space-separated path list.
-    # Plugin paths come from marketplace.json and contain no spaces.
-    git add $BUMPED_MANIFESTS "$NOTES_FILE"
     GIT_AUTHOR_NAME="$BOT_LOGIN" \
     GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
     GIT_COMMITTER_NAME="$BOT_LOGIN" \
     GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
-    git commit -m "Bump plugin versions:$BUMPED_SUMMARY" --quiet
+    git commit -m "Pin plugins to $VERSION:$BUMPED_SUMMARY" --quiet
     COMMIT_AUTHOR="$(git log -1 --pretty=format:'%an <%ae>')"
     [ "$COMMIT_AUTHOR" = "$BOT_LOGIN <$BOT_EMAIL>" ] \
-      || die "plugin-bump commit author wrong (got: $COMMIT_AUTHOR)"
-    ok "committed as $COMMIT_AUTHOR"
-
-    step "Push plugin-bump commit as @$BOT_LOGIN"
-    git \
-      -c credential.helper= \
-      -c credential.https://github.com.helper= \
-      push "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" main >/dev/null 2>&1 \
-      || die "plugin-bump push failed — the release-notes commit for $VERSION was already pushed to main, but this plugin-bump commit ($(git rev-parse HEAD)) is still local only. Push it manually (git push origin main) or discard it (git reset --hard HEAD~1) before retrying."
-    ok "plugin-bump commit pushed"
+      || die "plugin-pin commit author wrong (got: $COMMIT_AUTHOR)"
+    ok "committed as $COMMIT_AUTHOR (published with the tag in step 7)"
+    PIN_COMMITTED=1
   fi
 fi
 
@@ -657,14 +692,23 @@ step "Tag and push as @$BOT_LOGIN"
 TAG_COMMIT="$(git rev-parse HEAD)"
 git tag "$VERSION" "$TAG_COMMIT"
 
+# main and the tag go in ONE atomic push (#2141): the plugin-pin commit made in
+# step 6b names $VERSION in marketplace.json, so main must never be visible
+# without the tag. If the push is rejected, neither ref is published.
+#
 # Nuke credential helpers explicitly: the default gh-CLI helper points at the
 # wrong user. PAT-in-URL alone is not enough on this machine.
+if [ "$PIN_COMMITTED" -eq 1 ]; then
+  PIN_RECOVERY="Retry the same push (git push --atomic origin main $VERSION, as the release bot), or discard with: git tag -d $VERSION && git reset --hard HEAD~1 (the plugin-pin commit is the local tip; the release-notes commit before it is already on main)."
+else
+  PIN_RECOVERY="Retry the same push, or discard the local tag with: git tag -d $VERSION."
+fi
 git \
   -c credential.helper= \
   -c credential.https://github.com.helper= \
-  push "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" "$VERSION" >/dev/null 2>&1 \
-  || die "tag push failed — local tag $VERSION still present, remove with: git tag -d $VERSION"
-ok "tag $VERSION pushed (commit $TAG_COMMIT)"
+  push --atomic "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" main "$VERSION" >/dev/null 2>&1 \
+  || die "atomic push of main + tag $VERSION failed — nothing was published (neither main nor the tag). $PIN_RECOVERY"
+ok "main and tag $VERSION pushed atomically (commit $TAG_COMMIT)"
 
 # ─── 8. watch workflow ────────────────────────────────────────────────────────
 step "Locate release workflow run"

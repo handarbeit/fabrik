@@ -19,15 +19,14 @@ import (
 // by Clock.Advance and nothing sleeps for a stall; the only real time spent is
 // the deriver's shortened tick (startChannel).
 //
-// Serial for the same reason as channel_events_test.go.
+// Parallel like the rest of the channel family: the seams are per-Engine (#2210).
 
 // startPipelineChannel is startChannel with a short deriver tick: the stall
 // events are tick-driven (the deriver never depends on the poll loop making
 // progress), so the tick has to fire within the test.
 func startPipelineChannel(t *testing.T, env *Env) (*channelevents.Hub, *simSink) {
 	t.Helper()
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
-	t.Cleanup(restore)
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
 	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
 	if hub == nil {
 		t.Fatal("channel hub did not start")
@@ -60,9 +59,9 @@ func waitForEvents(t *testing.T, sink *simSink, typ channelevents.EventType, n i
 		if len(sink.ofType(typ, 0)) >= n {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		waitRealTime(t, 20*time.Millisecond, "the awaited anomaly is tick-driven (25 ms deriver ticker), not a consequence of an enqueued change: no drain point")
 	}
-	time.Sleep(150 * time.Millisecond)
+	waitRealTime(t, 150*time.Millisecond, "a few ticker periods, so a duplicate publication from a later tick would be counted")
 	got := sink.ofType(typ, 0)
 	if len(got) != n {
 		t.Fatalf("%s events = %d, want exactly %d: %+v", typ, len(got), n, got)
@@ -89,6 +88,7 @@ func holdBoardFetch(env *Env) (entered <-chan struct{}, release func()) {
 }
 
 func TestPipelineStalledWhilePollInProgress(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: boolPtr(false)})
 	_, sink := startPipelineChannel(t, env)
 	RunPoll(t, env) // a healthy baseline poll
@@ -136,6 +136,7 @@ func TestPipelineStalledWhilePollInProgress(t *testing.T) {
 }
 
 func TestPipelineOverdueWithNoPollStarted(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: boolPtr(false)})
 	_, sink := startPipelineChannel(t, env)
 	RunPoll(t, env)
@@ -160,6 +161,7 @@ func TestPipelineOverdueWithNoPollStarted(t *testing.T) {
 }
 
 func TestPipelineGaugeAsOfMovesOnlyWhenPollRefreshes(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: boolPtr(false)})
 	if g := healthOf(t, env).Backoff; g.AsOf.Valid {
 		t.Fatalf("a never-refreshed gauge must be unknown, got %+v", g.AsOf)
@@ -188,9 +190,11 @@ func TestPipelineGaugeAsOfMovesOnlyWhenPollRefreshes(t *testing.T) {
 	}
 }
 
-// stuckItemEnv files an item at a completed stage under a manual pipeline (yolo
-// off) and polls twice, so it is cached with a short dispatch cooldown. Only the
-// passage of time can then make it overdue.
+// stuckItemEnv files an item at a completed Validate stage under a manual
+// pipeline (yolo off) and polls twice, so it is cached with a short dispatch
+// cooldown. Only the passage of time can then make it overdue. It is filed at
+// Validate because a completed earlier stage with no autonomy is a pending
+// decision (suspended, #2120), which is never stalled; Validate is excluded.
 func stuckItemEnv(t *testing.T) (*Env, string) {
 	t.Helper()
 	env := NewEnv(t, EnvOptions{
@@ -202,7 +206,7 @@ func stuckItemEnv(t *testing.T) (*Env, string) {
 			cfg.StallThreshold = 20 * time.Second
 		},
 	})
-	num := FileIssue(t, env, "stuck item", "body", "Specify", "stage:Specify:complete")
+	num := FileIssue(t, env, "stuck item", "body", "Validate", "stage:Validate:complete")
 	ref := env.OwnerRepo + "#" + strconv.Itoa(num)
 	for i := 0; i < 2; i++ {
 		if err := env.Engine.PollOnce(context.Background()); err != nil {
@@ -226,6 +230,7 @@ func attentionOf(t *testing.T, env *Env, ref string) localapi.AttentionInfo {
 // stalled/overdue and pushes a stalled event; with it, the poll is blamed once
 // (pipeline-stalled) and the item waits for it.
 func TestStalledPollIsBlamedNotTheItem(t *testing.T) {
+	t.Parallel()
 	env, ref := stuckItemEnv(t)
 	_, sink := startPipelineChannel(t, env)
 	env.Clock.Advance(time.Minute) // cooldown (10 s) expired 50 s ago: past the 20 s stall threshold

@@ -63,6 +63,24 @@ func APIErrorExit() Script {
 	}
 }
 
+// WallTimeKilled returns a Script mirroring a stage the engine killed on its
+// max_wall_time deadline before it completed (#2170): partial output with no
+// marker, completed=false, and the generic kill error production returns wrapped
+// in a *claudeerr.KilledError naming the wall-time cause. runClaude's timeout
+// path itself never runs in the sim (the script replaces the whole invoker), so
+// the typed error is how the sim reaches finalizeStageOutcome's retry branch
+// with the cause attached; engine/claude_killed_test.go covers the real wrap.
+func WallTimeKilled() Script {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		output := fmt.Sprintf("working on %s...\n(killed at max_wall_time)\n", stage.Name)
+		usage := engine.TokenUsage{TurnsUsed: 12, MaxTurns: 50, CostUSD: 0.5}
+		return output, false, usage, &claudeerr.KilledError{
+			Cause: claudeerr.KillWallTime,
+			Err:   fmt.Errorf("claude exited with error: signal: killed"),
+		}
+	}
+}
+
 // PartialOutputThenKilled returns a Script mirroring the case where Claude's
 // process exited non-zero but had already written FABRIK_STAGE_COMPLETE to
 // its output beforehand (engine/claude.go:1392-1398's
@@ -109,6 +127,22 @@ func NoOpCommentReview() CommentScript {
 		output := fmt.Sprintf("Reviewed the latest feedback on %s — nothing actionable, no changes made.\n", stage.Name)
 		usage := engine.TokenUsage{TurnsUsed: 2, MaxTurns: 50, CostUSD: 0.03}
 		return output, false, usage, nil
+	}
+}
+
+// CommentReviewNoMarker returns a CommentScript for a comment-review run that
+// does the requested work (a real commit, so headChanged is true) but, like the
+// shipped comment skills, never signals FABRIK_STAGE_COMPLETE and never emits
+// FABRIK_BLOCKED_ON_INPUT: completed=false. CommentReviewCompleted always emits
+// the completion marker, which reaches handleStageComplete and hides the
+// stale-fabrik:awaiting-input class this shape exposes (#1970).
+func CommentReviewNoMarker() CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		if err := commitStageMarker(workDir, stage.Name+"-comment", issue.Number); err != nil {
+			return "", false, engine.TokenUsage{}, err
+		}
+		output := fmt.Sprintf("Applied the requested change on %s.\n", stage.Name)
+		return output, false, defaultUsage(), nil
 	}
 }
 

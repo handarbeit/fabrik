@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -567,7 +568,12 @@ func TestExtractBinarySHA(t *testing.T) {
 		want    string
 	}{
 		{"dev(abc1234)", "abc1234"},
+		{"dev(abc)+dirty", "abc"},
+		{"dev(abc)+other", "abc"},
 		{"dev()", ""},
+		{"dev()+dirty", ""},
+		{"v0.0.84", ""},
+		{"garbage", ""},
 		{"v1.2.3", ""},
 		{"", ""},
 		{"dev(abc1234", ""},
@@ -576,6 +582,302 @@ func TestExtractBinarySHA(t *testing.T) {
 		if got := extractBinarySHA(tc.version); got != tc.want {
 			t.Errorf("extractBinarySHA(%q) = %q, want %q", tc.version, got, tc.want)
 		}
+	}
+}
+
+func TestParseDevVersion_Dirty(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		sha     string
+		dirty   bool
+	}{
+		{"dev(abc)", "abc", false},
+		{"dev(abc)+dirty", "abc", true},
+		{"dev(abc)+other", "abc", false},
+		{"dev()+dirty", "", false},
+		{"v0.0.84+dirty", "", false},
+	} {
+		sha, dirty := parseDevVersion(tc.version)
+		if sha != tc.sha || dirty != tc.dirty {
+			t.Errorf("parseDevVersion(%q) = (%q, %v), want (%q, %v)", tc.version, sha, dirty, tc.sha, tc.dirty)
+		}
+	}
+}
+
+// headOf returns the full HEAD SHA of dir.
+func headOf(t *testing.T, dir string) string {
+	t.Helper()
+	sha, err := gitRevParse(dir, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha
+}
+
+// TestCompareDevBuild_DirtyBinaryOldSHARebuilds is the #2234 regression: a
+// "+dirty" binary older than HEAD, with HEAD == origin/main, must be flagged
+// for rebuild. With the old suffix-rejecting parser BinarySHA was "" and the
+// check fell through to "up to date".
+func TestCompareDevBuild_DirtyBinaryOldSHARebuilds(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if !status.ShaMismatch || !status.NeedsRebuild {
+		t.Errorf("expected ShaMismatch and NeedsRebuild for dev(old)+dirty, got %+v", status)
+	}
+	if !status.BinaryDirty {
+		t.Error("expected BinaryDirty=true")
+	}
+}
+
+func TestCompareDevBuild_DirtyBinarySameSHANoRebuild(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+	head := headOf(t, localDir)
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if status.NeedsRebuild {
+		t.Error("expected no rebuild for a dirty binary at the current commit (R2)")
+	}
+	if !status.BinaryDirty {
+		t.Error("expected BinaryDirty=true")
+	}
+	if !strings.Contains(status.Reason, "dirty tree at the current commit") {
+		t.Errorf("Reason should explain the dirty build at the current commit, got %q", status.Reason)
+	}
+}
+
+func TestCompareDevBuild_DirtyBinaryRemoteAheadRebuilds(t *testing.T) {
+	skipIfNoGit(t)
+	originDir, localDir := initOriginAndClone(t)
+	head := headOf(t, localDir)
+	runGit(t, originDir, "commit", "--allow-empty", "-m", "second")
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	status, err := CompareDevBuild(cfg)
+	if err != nil {
+		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
+	}
+	if !status.RemoteAhead || !status.NeedsRebuild {
+		t.Errorf("expected RemoteAhead and NeedsRebuild, got %+v", status)
+	}
+	if status.Reason != "" {
+		t.Errorf("Reason must be empty when a rebuild is needed, got %q", status.Reason)
+	}
+}
+
+// TestCompareDevBuild_NoRebuildReasons checks that every silent-exit shape
+// carries a Reason (R3).
+func TestCompareDevBuild_NoRebuildReasons(t *testing.T) {
+	skipIfNoGit(t)
+
+	t.Run("up to date", func(t *testing.T) {
+		originDir, localDir := initOriginAndClone(t)
+		head := headOf(t, localDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		status, err := CompareDevBuild(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(status.Reason, "up to date") {
+			t.Errorf("Reason = %q, want it to say up to date", status.Reason)
+		}
+	})
+	t.Run("local ahead", func(t *testing.T) {
+		originDir, localDir := initOriginAndClone(t)
+		runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
+		head := headOf(t, localDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		status, err := CompareDevBuild(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(status.Reason, "ahead of or diverged") {
+			t.Errorf("Reason = %q, want it to say ahead/diverged", status.Reason)
+		}
+	})
+	t.Run("diverged", func(t *testing.T) {
+		originDir, localDir := initOriginAndClone(t)
+		runGit(t, originDir, "commit", "--allow-empty", "-m", "remote-only")
+		runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
+		head := headOf(t, localDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		status, err := CompareDevBuild(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(status.Reason, "ahead of or diverged") {
+			t.Errorf("Reason = %q, want it to say ahead/diverged", status.Reason)
+		}
+	})
+	for _, version := range []string{"", "v0.0.84", "dev()", "garbage"} {
+		t.Run("unparseable "+version, func(t *testing.T) {
+			originDir, localDir := initOriginAndClone(t)
+			cfg, _, _, _ := testDevBuildConfig(t, localDir, version, originDir)
+			status, err := CompareDevBuild(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(status.Reason, "no parseable commit SHA") {
+				t.Errorf("Reason = %q, want the unparseable-version note", status.Reason)
+			}
+		})
+	}
+	t.Run("not a source checkout", func(t *testing.T) {
+		cfg, _, _, _ := testDevBuildConfig(t, t.TempDir(), "dev(abc)", "handarbeit/fabrik")
+		status, err := CompareDevBuild(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Applicable || !strings.Contains(status.Reason, "not a source checkout") {
+			t.Errorf("got %+v, want Applicable=false with a not-a-source-checkout Reason", status)
+		}
+	})
+}
+
+// TestCheckAndRebuildDev_LogsOneOutcomeLine verifies R3: every no-rebuild
+// decision produces exactly one log line saying why.
+func TestCheckAndRebuildDev_LogsOneOutcomeLine(t *testing.T) {
+	skipIfNoGit(t)
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+
+	t.Run("up to date", func(t *testing.T) {
+		originDir, localDir := initOriginAndClone(t)
+		head := headOf(t, localDir)
+		cfg, _, execCalled, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		CheckAndRebuildDev(cfg)
+		if *execCalled {
+			t.Error("unexpected re-exec")
+		}
+		if len(*logs) != 1 || !strings.Contains((*logs)[0], "up to date") {
+			t.Errorf("logs = %q, want exactly one up-to-date line", *logs)
+		}
+	})
+	t.Run("not a source checkout", func(t *testing.T) {
+		cfg, _, _, logs := testDevBuildConfig(t, t.TempDir(), "dev(abc)", "handarbeit/fabrik")
+		CheckAndRebuildDev(cfg)
+		if len(*logs) != 1 || !strings.Contains((*logs)[0], "not a source checkout") {
+			t.Errorf("logs = %q, want exactly one not-applicable line", *logs)
+		}
+	})
+	t.Run("dirty binary at current commit", func(t *testing.T) {
+		originDir, localDir := initOriginAndClone(t)
+		head := headOf(t, localDir)
+		cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+		CheckAndRebuildDev(cfg)
+		if len(*logs) != 1 || !strings.Contains((*logs)[0], "dirty tree at the current commit") {
+			t.Errorf("logs = %q, want one line explaining the dirty build", *logs)
+		}
+	})
+}
+
+// TestCheckAndRebuildDev_DirtyBinaryOldSHAFromPulledCheckout is the incident:
+// the checkout was pulled to origin/main by something else, so only the
+// binary-vs-HEAD comparison can notice the stale "+dirty" binary.
+func TestCheckAndRebuildDev_DirtyBinaryOldSHAFromPulledCheckout(t *testing.T) {
+	skipIfNoGit(t)
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+	originDir, localDir := initOriginAndClone(t)
+
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", originDir)
+	CheckAndRebuildDev(cfg)
+	if !*postBuildCalled || !*execCalled {
+		t.Errorf("expected rebuild and re-exec, logs: %q", *logs)
+	}
+}
+
+func TestCheckAndRebuildDev_ReportsDirtyPathsOncePerProcess(t *testing.T) {
+	skipIfNoGit(t)
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+	originDir, localDir := initOriginAndClone(t)
+	head := headOf(t, localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "stray.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(logs []string) (n int) {
+		for _, l := range logs {
+			if strings.Contains(l, "uncommitted/untracked changes") {
+				n++
+				if !strings.Contains(l, "stray.txt") {
+					t.Errorf("dirty line should name stray.txt: %q", l)
+				}
+			}
+		}
+		return n
+	}
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	CheckAndRebuildDev(cfg)
+	if n := count(*logs); n != 1 {
+		t.Fatalf("first check: %d dirty lines, want 1; logs: %q", n, *logs)
+	}
+	*logs = nil
+	CheckAndRebuildDev(cfg)
+	if n := count(*logs); n != 0 {
+		t.Errorf("second check repeated the dirty line; logs: %q", *logs)
+	}
+	if len(*logs) != 1 {
+		t.Errorf("second check should still log its outcome line, logs: %q", *logs)
+	}
+}
+
+func TestCheckAndRebuildDev_CleanCheckoutLogsNoDirtyLine(t *testing.T) {
+	skipIfNoGit(t)
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+	originDir, localDir := initOriginAndClone(t)
+	head := headOf(t, localDir)
+
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+	CheckAndRebuildDev(cfg)
+	for _, l := range *logs {
+		if strings.Contains(l, "uncommitted") {
+			t.Errorf("clean checkout logged a dirty line: %q", l)
+		}
+	}
+	if dirtyReported.Load() {
+		t.Error("a clean check must not consume the once-only report")
+	}
+}
+
+func TestReportDirtyCheckout_CapsPaths(t *testing.T) {
+	skipIfNoGit(t)
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+	originDir, localDir := initOriginAndClone(t)
+	for i := 0; i < maxDirtyPathsListed+3; i++ {
+		if err := os.WriteFile(filepath.Join(localDir, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	reportDirtyCheckout(cfg)
+	if len(*logs) != 1 || !strings.Contains((*logs)[0], "and 3 more") || !strings.Contains((*logs)[0], "(13 paths)") {
+		t.Errorf("logs = %q, want one capped line with 'and 3 more'", *logs)
+	}
+}
+
+func TestReportDirtyCheckout_GitFailureIsSilent(t *testing.T) {
+	resetDirtyReportedForTest()
+	t.Cleanup(resetDirtyReportedForTest)
+	var logs []string
+	cfg := DevBuildConfig{Dir: filepath.Join(t.TempDir(), "missing"), Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
+	reportDirtyCheckout(cfg)
+	if len(logs) != 0 {
+		t.Errorf("git failure should log nothing, got %q", logs)
 	}
 }
 

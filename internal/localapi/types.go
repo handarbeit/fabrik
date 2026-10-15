@@ -1,6 +1,8 @@
 package localapi
 
 import (
+	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -62,6 +64,9 @@ type Place struct {
 	StatusEnteredBasis string   `json:"status_entered_basis"`
 	StageLabels        []string `json:"stage_labels"`
 	FabrikLabels       []string `json:"fabrik_labels"`
+	// OtherLabels is every label that is neither a stage: nor a fabrik: label
+	// (bug, model:opus, base:x, ...), so status shows every label the item has (#2127).
+	OtherLabels []string `json:"other_labels"`
 	// Autonomy is "cruise", "yolo" or "none" (cruise wins when both are set).
 	Autonomy string `json:"autonomy"`
 }
@@ -75,12 +80,26 @@ type Limit struct {
 
 // WorkerInfo describes the in-flight worker, if any.
 type WorkerInfo struct {
-	InFlight   bool             `json:"in_flight"`
-	Stage      string           `json:"stage,omitempty"`
+	// InFlight is true only while the worker HOLDS a worker slot. A worker that
+	// is dispatched but still waiting for one is Queued, not in flight (#2121).
+	InFlight bool   `json:"in_flight"`
+	Stage    string `json:"stage,omitempty"`
+	// Kind is what the worker is: stage-run, comment-review, review-reinvoke,
+	// ci-fix-reinvoke, rebase-reinvoke or merge-train-conflict; absent when the
+	// engine does not know. Trigger names what it is addressing (comment or
+	// review-body ids, comma separated), absent when none or unknown (#2121).
+	Kind    string `json:"kind,omitempty"`
+	Trigger string `json:"trigger,omitempty"`
+	// Queued is true while the worker waits for a worker slot; QueuedSince is when
+	// it began waiting and is present only then (#2121).
+	Queued      bool              `json:"queued,omitempty"`
+	QueuedSince *Known[time.Time] `json:"queued_since,omitempty"`
+	// StartedAt is the time the worker acquired its slot and began running;
+	// unknown while it is queued.
 	StartedAt  Known[time.Time] `json:"started_at"`
 	LastSignAt Known[time.Time] `json:"last_sign_at"`
-	// TurnsUsed is always unknown for an in-flight worker: the daemon tracks
-	// turns only for the last completed invocation.
+	// TurnsUsed is the live worker's turns so far when the engine knows them,
+	// otherwise unknown — never zero for "not known" (#2121).
 	TurnsUsed Known[int] `json:"turns_used"`
 	MaxTurns  Known[int] `json:"max_turns"`
 	// LastTurnsUsed is the last completed invocation's turn count for the
@@ -95,7 +114,29 @@ type InvocationInfo struct {
 	IsComment       bool           `json:"is_comment"`
 	DurationSeconds Known[float64] `json:"duration_seconds"`
 	Tokens          Known[Tokens]  `json:"tokens"`
+	// FigureBasis labels what each figure above measures (#2127): the engine
+	// records duration as wall-clock time of this invocation, while tokens, cost
+	// and turns are the totals the Claude CLI reports for the session it ran.
+	// The labels describe the field, not whether the numbers differ: on a first,
+	// non-resumed invocation the two coincide.
+	FigureBasis FigureBasis `json:"figure_basis"`
 }
+
+// FigureBasis names, per figure of an InvocationInfo, what it measures.
+type FigureBasis struct {
+	DurationSeconds string `json:"duration_seconds"`
+	Tokens          string `json:"tokens"`
+	CostUSD         string `json:"cost_usd"`
+	TurnsUsed       string `json:"turns_used"`
+	// Note is the caveat: the bases are as reported by the CLI.
+	Note string `json:"note"`
+}
+
+// Figure bases (InvocationInfo.FigureBasis).
+const (
+	BasisPerInvocation     = "per-invocation"
+	BasisSessionCumulative = "session-cumulative"
+)
 
 // Tokens is token consumption for one invocation.
 type Tokens struct {
@@ -108,7 +149,14 @@ type Tokens struct {
 	MaxTurns      int     `json:"max_turns"`
 }
 
-// PRInfo is the linked PR as the cache holds it.
+// PRInfo is the linked PR as the daemon holds it.
+//
+// The facts come from the engine's own poll (the board probe, plus a bounded
+// REST read for PRs the probe cannot see) and the CI verdict from the gates'
+// classifier run on the poll goroutine; this API makes no GitHub call. Each
+// group carries when it was last observed and whether that is older than one
+// poll interval. unknown means never observed since the daemon started; stale
+// means observed, but not recently: the value is shown, not trusted.
 type PRInfo struct {
 	// State is "linked", "none" (the cache has fully read the item and it has
 	// no PR) or "unknown" (never deep-fetched).
@@ -119,10 +167,56 @@ type PRInfo struct {
 	Merged         Known[bool]   `json:"merged"`
 	Mergeable      Known[string] `json:"mergeable"`
 	MergeableState Known[string] `json:"mergeable_state"`
-	// CI is green, red, pending or none, from the cached check runs only.
-	CI         Known[string]  `json:"ci"`
-	HeadSHA    Known[string]  `json:"head_sha"`
-	MergeTrain *TrainPosition `json:"merge_train,omitempty"`
+	// CI is the green-and-complete verdict for CIHeadSHA, as the gates compute
+	// it: green, red, pending, none or unknown. It is never shown for a head
+	// other than the PR's current one.
+	CI      Known[string] `json:"ci"`
+	HeadSHA Known[string] `json:"head_sha"`
+	// FactsAsOf is when the state/draft/merged/mergeable facts were last read
+	// from GitHub; FactsStale is true when that is older than one poll interval
+	// (unknown when never observed or the interval is not known).
+	FactsAsOf  Known[time.Time] `json:"facts_as_of"`
+	FactsStale Known[bool]      `json:"facts_stale"`
+	// CIAsOf, CIStale and CIHeadSHA are the same for the CI verdict and name the
+	// head it was computed for. CIFailing lists the failing checks when red.
+	CIAsOf    Known[time.Time] `json:"ci_as_of"`
+	CIStale   Known[bool]      `json:"ci_stale"`
+	CIHeadSHA Known[string]    `json:"ci_head_sha"`
+	CIFailing []string         `json:"ci_failing"`
+	// URL is the PR's web address, derived from the repo and number.
+	URL Known[string] `json:"url"`
+	// Reviewers is one verdict per reviewer, evaluated at the PR head (#2127).
+	Reviewers  []ReviewerVerdict `json:"reviewers"`
+	MergeTrain *TrainPosition    `json:"merge_train,omitempty"`
+}
+
+// ReviewerVerdict is what one reviewer's latest review says, evaluated at the
+// PR head (#2127). A COMMENTED review is the same state for a clean pass and for
+// findings (a bot reviewer always submits COMMENTED), so the state alone cannot
+// tell them apart; these fields can. Every field the cache cannot establish is
+// unknown, and CleanPass is true only when it is established.
+type ReviewerVerdict struct {
+	Reviewer string `json:"reviewer"`
+	// State is the reviewer's latest non-dismissed, non-pending review state.
+	State string `json:"state"`
+	// AtHead is whether that review is at the PR's current head SHA.
+	AtHead Known[bool] `json:"at_head"`
+	// InlineAtHead is how many unresolved inline comments the reviewer has at the
+	// head. A thread comment carries no review id, so the link is author plus
+	// commit.
+	InlineAtHead Known[int] `json:"inline_at_head"`
+	// Outstanding is the findings still open from this reviewer: unresolved,
+	// non-outdated review threads plus the reviewer's review body when it is
+	// actionable and not durably addressed. It counts a thread whether or not the
+	// engine has already processed it.
+	Outstanding Known[int] `json:"outstanding"`
+	// CleanPass is true only when the latest review is at the head and nothing is
+	// outstanding. A pass on an older head is false.
+	CleanPass Known[bool] `json:"clean_pass"`
+	// Unaddressed is whether the feedback gate would hold on this reviewer's
+	// findings (the same predicate as the gate, so it differs from Outstanding).
+	Unaddressed bool   `json:"unaddressed"`
+	PRURL       string `json:"pr_url"`
 }
 
 // TrainPosition is the item's place in its (repo, base) merge-train partition.
@@ -161,6 +255,53 @@ type AttentionInfo struct {
 	Progress            ProgressInfo  `json:"progress"`
 	// StallThresholdSeconds is the threshold the classification used.
 	StallThresholdSeconds int64 `json:"stall_threshold_seconds"`
+	// Pending describes a suspended item's decision; absent otherwise (#2120).
+	Pending *PendingInfo `json:"pending,omitempty"`
+	// Options lists how a human can act on a decision-bearing item, each with
+	// the MCP tool that performs it when one exists (#2120 R-options-1).
+	Options []OptionInfo `json:"options,omitempty"`
+	// Cause says why the item is in this state, from a fixed vocabulary
+	// (daemon-stop, slot-starved, wall-time-kill, max-turns, gate-hold:<gate>,
+	// rebase-conflict-after-landing); absent when the engine does not know
+	// (#2121).
+	Cause string `json:"cause,omitempty"`
+	// CIFailing names the failing checks of the red CI verdict this item
+	// carries; present only when attention surfaced one (#2122).
+	CIFailing []string `json:"ci_failing,omitempty"`
+}
+
+// OptionInfo is one way a human can act on a decision-bearing item. Tool is
+// empty when no MCP tool performs it (the human acts directly, e.g. a merge).
+type OptionInfo struct {
+	Action string `json:"action"`
+	Tool   string `json:"tool,omitempty"`
+}
+
+// PendingInfo describes a suspended item (#2120): a completed stage that does
+// not auto-advance, or a dependency parked in an unmanaged column.
+type PendingInfo struct {
+	// Kind is "decision" or "parked-blocker".
+	Kind           string `json:"kind"`
+	CompletedStage string `json:"completed_stage"`
+	// NextStage is the stage an advance would move to (decision kind only).
+	NextStage string `json:"next_stage,omitempty"`
+	// Since is when the wait began. SinceBasis says where it came from:
+	// github-label, stage-comment, eligibility-change (all exact) or
+	// first-seen (the daemon's first sight: the wait is at least this long).
+	Since      Known[time.Time] `json:"since"`
+	SinceBasis string           `json:"since_basis"`
+	// AgeSeconds is the wait's age; unknown when Since is only a lower bound,
+	// in which case AtLeastAgeSeconds carries that bound.
+	AgeSeconds        Known[int64] `json:"age_seconds"`
+	AtLeastAgeSeconds Known[int64] `json:"at_least_age_seconds"`
+	// Blockers are the parked items (parked-blocker kind only).
+	Blockers []PendingBlocker `json:"blockers,omitempty"`
+}
+
+// PendingBlocker is one parked item blocking another.
+type PendingBlocker struct {
+	Issue  string `json:"issue"`
+	Column string `json:"column"`
 }
 
 // ReasonInfo is one label (or condition) with its one-line meaning.
@@ -229,6 +370,9 @@ type BoardResult struct {
 	StallThresholdSeconds int64       `json:"stall_threshold_seconds"`
 	// ItemsScanned is how many cached items were considered before filtering.
 	ItemsScanned int `json:"items_scanned"`
+	// Matched is how many of those passed the filter, before closed items are
+	// left out of the flow: sum(flow.count) + excluded.closed == matched (#2127).
+	Matched int `json:"matched"`
 	// Excluded counts items a filter could not evaluate because the cache lacks
 	// the field (never silently treated as a non-match or a match).
 	Excluded ExcludedCounts `json:"excluded"`
@@ -243,6 +387,9 @@ type BoardResult struct {
 type ExcludedCounts struct {
 	UnknownMilestone int `json:"unknown_milestone"`
 	NotDeepFetched   int `json:"not_deep_fetched"`
+	// Closed counts matched items left out of the flow because their issue is
+	// closed (the Done column), so the columns reconcile with Matched (#2127).
+	Closed int `json:"closed"`
 }
 
 // AttentionEntry is one item in the attention view.
@@ -258,6 +405,10 @@ type AttentionEntry struct {
 	NextAction string           `json:"next_action"`
 	NextAt     Known[time.Time] `json:"next_at"`
 	Cache      CacheInfo        `json:"cache"`
+	// Pending and Options mirror AttentionInfo's, for suspended and other
+	// decision-bearing entries (#2120).
+	Pending *PendingInfo `json:"pending,omitempty"`
+	Options []OptionInfo `json:"options,omitempty"`
 }
 
 // ColumnFlow is one board column in the flow view.
@@ -295,6 +446,16 @@ type HealthResult struct {
 	Backoff    BackoffHealth    `json:"graphql_backoff"`
 	Workers    WorkerSlots      `json:"workers"`
 	MergeTrain []TrainPartition `json:"merge_train"`
+	// Draining is present only while the daemon drains for a SIGHUP restart
+	// (#2259, ADR 2259).
+	Draining *DrainHealth `json:"draining,omitempty"`
+}
+
+// DrainHealth describes a SIGHUP drain: the first SIGHUP stops dispatch and polling
+// and waits for the in-flight workers; a second SIGHUP restarts now.
+type DrainHealth struct {
+	Since            Known[time.Time] `json:"since"`
+	WorkersRemaining int              `json:"workers_remaining"`
 }
 
 // PollHealth describes the poll loop.
@@ -372,7 +533,10 @@ type BackoffHealth struct {
 
 // WorkerSlots is worker concurrency.
 type WorkerSlots struct {
+	// InUse is the number of item workers holding a slot (never more than
+	// MaxConcurrent); Queued the number dispatched and waiting for one (#2121).
 	InUse         int        `json:"in_use"`
+	Queued        int        `json:"queued"`
 	MaxConcurrent Known[int] `json:"max_concurrent"`
 	// TrainInUse / TrainMax describe the reserved merge-train slot (#2115, ADR 2115),
 	// which sits on top of MaxConcurrent and is not counted in InUse. Both are a
@@ -424,6 +588,13 @@ type SubscribeParams struct {
 	// ProgressViaColumn drops stage:*:complete / stage:*:in_progress label
 	// events when column-changed is also taken (#2123).
 	ProgressViaColumn bool `json:"progress_via_column,omitempty"`
+	// RemindAfterSeconds opts into reminders for a still-pending
+	// decision-pending episode (#2120 R6a); 0 = never.
+	RemindAfterSeconds int `json:"remind_after_seconds,omitempty"`
+	// SituationSeconds opts into the situation digest on a cadence (#2171);
+	// 0 = off. The digest is sent only when the view changed since the last
+	// one this subscriber received.
+	SituationSeconds int `json:"situation_seconds,omitempty"`
 }
 
 // EventMapping reports a requested event type the daemon rewrote to its current
@@ -442,6 +613,9 @@ type SubscribeResult struct {
 	Subscriptions []channelevents.Subscription `json:"subscriptions"`
 	Mapped        []EventMapping               `json:"mapped,omitempty"`
 	Rejected      []string                     `json:"rejected,omitempty"`
+	// Notes are advisories about the request, e.g. label filters given without
+	// label events being in effect (#2169).
+	Notes []string `json:"notes,omitempty"`
 }
 
 // UnsubscribeParams removes one subscription by id, or all of a subscriber's
@@ -463,6 +637,8 @@ type AttachParams struct {
 	// CatchUp asks for a snapshot of what is waiting on a human right now (items
 	// settled at Validate, needs-human, escalated), tagged catch_up=true. The
 	// client sets it on the first attach of a session only, never on a reconnect.
+	// After a daemon restart the daemon queues one to every subscriber itself
+	// once its state is ready (#2169), whatever this says.
 	CatchUp bool `json:"catch_up,omitempty"`
 }
 
@@ -506,6 +682,14 @@ type AdvanceParams struct {
 	Issue      string `json:"issue"`
 }
 
+// MoveParkedParams moves an item from one unmanaged parking column to another
+// (#2188). It starts no work and never touches a pipeline column.
+type MoveParkedParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+	To         string `json:"to"`
+}
+
 // ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
 type ClearClaudeLimitParams struct {
 	Subscriber string `json:"subscriber"`
@@ -542,9 +726,39 @@ type RefusalState struct {
 	Status string `json:"status,omitempty"`
 	// Labels are the item's fabrik-relevant labels.
 	Labels []string `json:"labels,omitempty"`
-	// ValidTargets lists the columns a promote could name. It is set only when
+	// ValidTargets lists the columns the requested action could name (promote:
+	// pipeline columns; move_parked: other parking columns). It is set only when
 	// the item is in a parking column; a refusal because the item is not parked
 	// omits it, since no move is possible.
 	ValidTargets []string `json:"valid_targets,omitempty"`
 	Autonomy     string   `json:"autonomy,omitempty"`
+}
+
+// legacyAttentionKey restores the pre-#2127 behaviour (an empty attention list
+// is left out) so a test can show the always-present key is not vacuous.
+var legacyAttentionKey atomic.Bool
+
+// SetLegacyAttentionKeyForTest drops an empty attention list from the wire
+// again and returns the function that restores the key. Tests only.
+func SetLegacyAttentionKeyForTest() (restore func()) {
+	legacyAttentionKey.Store(true)
+	return func() { legacyAttentionKey.Store(false) }
+}
+
+// MarshalJSON makes an attention view always carry an attention list, empty
+// when nothing matched, so "no attention-worthy items" is distinguishable from
+// "no such field" (#2127). The flow view keeps no attention key.
+func (r BoardResult) MarshalJSON() ([]byte, error) {
+	type plain BoardResult
+	if r.View == ViewFlow || legacyAttentionKey.Load() {
+		return json.Marshal(plain(r))
+	}
+	list := r.Attention
+	if list == nil {
+		list = []AttentionEntry{}
+	}
+	return json.Marshal(struct {
+		plain
+		Attention []AttentionEntry `json:"attention"`
+	}{plain(r), list})
 }

@@ -102,6 +102,9 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 
 	eng := engine.NewWithDeps(env.cfg, restored, env.Claude, env.WM)
 	eng.SetClock(env.Clock)
+	// Channel test seams (timing, neutralisations) the scenario set on the old
+	// engine carry over: they are per-engine now (#2210).
+	eng.CopyChannelTestSettingsFrom(env.Engine)
 	if env.TrainStateDir != "" {
 		// The persisted merge-train runs survive a restart; the in-memory state does not.
 		eng.EnableTrainRunsForTest(env.TrainStateDir)

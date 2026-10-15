@@ -10,6 +10,7 @@
 package sim
 
 import (
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,10 @@ type Env struct {
 // EnvOptions configures NewEnv. Every field has a working default; a
 // scenario only sets what it cares about.
 type EnvOptions struct {
+	// LogOut receives the engine's attributed, timestamped log lines (#2247).
+	// Default os.Stdout.
+	LogOut io.Writer
+
 	// Owner/Repo identify the managed repo. Default "acme"/"widgets".
 	Owner string
 	Repo  string
@@ -164,6 +169,9 @@ type EnvOptions struct {
 	// StatusLineFieldMissing leaves the board without the field (the "operator
 	// never created it" case).
 	StatusLineFieldMissing bool
+
+	// OwnerType overrides the config's owner type ("User" by default).
+	OwnerType string
 
 	// LastActivityField / LastRunField, when non-empty, turn on the display-only
 	// Last activity (DATE) and Last run (TEXT) fields (#2049) under that name,
@@ -358,11 +366,15 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		// Multi-repo instance topology — see SecondRepoOptions' doc comment.
 		cfgRepo = ""
 	}
+	ownerType := "User"
+	if opts.OwnerType != "" {
+		ownerType = opts.OwnerType
+	}
 	cfg := engine.Config{
 		Owner:         owner,
 		Repo:          cfgRepo,
 		ProjectNum:    projectNum,
-		OwnerType:     "User",
+		OwnerType:     ownerType,
 		User:          "fabrik-sim-bot",
 		Token:         "sim-token",
 		Yolo:          yolo,
@@ -398,6 +410,7 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	installLogSink(t, eng, opts.LogOut)
 	var boardCache *boardcache.CacheImpl
 	var wake <-chan struct{}
 	if opts.BoardCache {

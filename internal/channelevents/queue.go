@@ -79,6 +79,23 @@ func (q *queueFile) push(ev Event, digest bool, due time.Time, away bool, max in
 	return true
 }
 
+// dropType discards every queued entry of type t, reporting whether any was
+// there. It is how a newer situation digest supersedes an undelivered one
+// (#2171): the queue holds at most one, however long the subscriber is away.
+func (q *queueFile) dropType(t EventType) bool {
+	changed := false
+	out := q.Entries[:0:0]
+	for _, e := range q.Entries {
+		if e.Event.Type == t {
+			changed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	q.Entries = out
+	return changed
+}
+
 // remove deletes the entries with the given sequence numbers.
 func (q *queueFile) remove(seqs map[uint64]bool) {
 	out := q.Entries[:0:0]

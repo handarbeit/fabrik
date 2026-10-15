@@ -164,3 +164,82 @@ func TestSkillResolver_RebuildIfStaleCoalesces(t *testing.T) {
 		t.Error("rebuild with a stale snapshot rescanned instead of reusing the newer one")
 	}
 }
+
+// SC-003 (#2140): a deployment that upgraded the binary — so .fabrik/plugin was
+// refreshed to fabrik-stages with the short skill names — but has not yet run
+// `fabrik upgrade` still has stage files saying fabrik:fabrik-<stage>, or the
+// bare fabrik-<stage>. Every one of them must resolve, flagged deprecated.
+func TestSkillCatalogueResolve_PreRenameReferencesOnRenamedPlugin(t *testing.T) {
+	root := t.TempDir()
+	var shipped []string
+	for _, old := range plugin.LegacySkillNames() {
+		n, _ := plugin.LegacySkillTarget(old)
+		shipped = append(shipped, n)
+	}
+	base := skillPlugin(t, root, "base", plugin.BasePluginName, shipped...)
+	cat := buildSkillCatalogue([]string{base})
+
+	for _, old := range plugin.LegacySkillNames() {
+		want, _ := plugin.LegacyRef(old)
+		for _, ref := range []string{plugin.Qualify(plugin.LegacyBasePluginName, old), old} {
+			res, why, ok := cat.resolve(ref)
+			if !ok {
+				t.Errorf("%s did not resolve: %s", ref, why)
+				continue
+			}
+			if res.Name != want || !res.Deprecated {
+				t.Errorf("%s = %+v, want %q deprecated", ref, res, want)
+			}
+		}
+	}
+	// The current form is not deprecated.
+	if res, _, ok := cat.resolve("fabrik-stages:review"); !ok || res.Deprecated {
+		t.Errorf("fabrik-stages:review = %+v ok=%v", res, ok)
+	}
+	// Unknown names stay unresolved; nothing is remapped blindly.
+	for _, ref := range []string{"fabrik:fabrik-nope", "fabrik-nope", "fabrik:review", "local-workflows:fabrik-review"} {
+		if _, _, ok := cat.resolve(ref); ok {
+			t.Errorf("%s resolved, want unresolved", ref)
+		}
+	}
+}
+
+// An operator-customised, unmigrated copy of the old base plugin (still named
+// "fabrik", still carrying fabrik-review) keeps winning: the as-is lookup runs
+// first and the legacy mapping is only a fallback.
+func TestSkillCatalogueResolve_CustomisedLegacyBaseWinsOverMapping(t *testing.T) {
+	root := t.TempDir()
+	old := skillPlugin(t, root, "old", plugin.LegacyBasePluginName, "fabrik-review")
+	cat := buildSkillCatalogue([]string{old})
+
+	res, why, ok := cat.resolve("fabrik:fabrik-review")
+	if !ok || res.Name != "fabrik:fabrik-review" || res.Deprecated {
+		t.Fatalf("got %+v %q ok=%v, want the customised plugin's own skill, not deprecated", res, why, ok)
+	}
+	if res, _, ok := cat.resolve("fabrik-review"); !ok || res.Name != "fabrik:fabrik-review" {
+		t.Errorf("bare = %+v ok=%v, want fabrik:fabrik-review", res, ok)
+	}
+
+	// With both loaded, the as-is hit still wins over the mapped one.
+	cur := skillPlugin(t, root, "cur", plugin.BasePluginName, "review")
+	cat = buildSkillCatalogue([]string{cur, old})
+	if res, _, ok := cat.resolve("fabrik:fabrik-review"); !ok || res.Name != "fabrik:fabrik-review" {
+		t.Errorf("both loaded: %+v ok=%v", res, ok)
+	}
+}
+
+// Migrated layout: local-workflows keeps the pre-rename skill names and its
+// references are never remapped.
+func TestSkillCatalogueResolve_LocalWorkflowsNeverRemapped(t *testing.T) {
+	root := t.TempDir()
+	base := skillPlugin(t, root, "base", plugin.BasePluginName, "review")
+	lw := skillPlugin(t, root, "lw", plugin.LocalWorkflowsName, "fabrik-review")
+	cat := buildSkillCatalogue([]string{base, lw})
+	if res, _, ok := cat.resolve("local-workflows:fabrik-review"); !ok || res.Name != "local-workflows:fabrik-review" || res.Deprecated {
+		t.Errorf("got %+v ok=%v", res, ok)
+	}
+	cat = buildSkillCatalogue([]string{base})
+	if _, _, ok := cat.resolve("local-workflows:fabrik-review"); ok {
+		t.Error("local-workflows reference resolved against the base plugin")
+	}
+}

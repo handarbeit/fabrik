@@ -70,8 +70,13 @@ func TestPregate(t *testing.T) {
 		if err := g.RunPregate(ctx); err != nil {
 			t.Fatal(err)
 		}
-		lines := fe.lines()
-		if len(lines) != 2 || !strings.HasSuffix(lines[0], "scripts/sim/run.sh --all") || lines[1] != "go test -race -count=1 ./github/..." {
+		var lines []string
+		for _, l := range fe.lines() {
+			if !strings.HasPrefix(l, "git ") { // the archive resolves HEAD for its file names
+				lines = append(lines, l)
+			}
+		}
+		if len(lines) != 2 || !strings.HasSuffix(lines[0], "scripts/sim/run.sh --all -json") || lines[1] != "go test -race -count=1 ./github/..." {
 			t.Errorf("calls: %v", lines)
 		}
 	})

@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -17,20 +19,147 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
-// reviewAllowedTools is the fixed, read-only tool allowlist for every review
-// invocation. Unlike a Fabrik stage's configurable allowed_tools, this list
-// is hardcoded and non-configurable: the reviewer must never mutate the
-// working tree or the repo, and Claude never submits the review itself —
-// Pruefer's Go code calls github.Client.SubmitPRReview directly once Claude
-// has produced review text. Bash(gh:*) is deliberately excluded even though
-// the issue's own illustrative example includes it: gh pr review --approve
-// / gh pr merge are reachable through an unscoped grant, which would make
-// "never approve" a prompt-level policy rather than a code-level guarantee
-// (see adrs/1113-pruefer-v1-architecture.md).
-var reviewAllowedTools = []string{
-	"Read", "Grep", "Glob",
-	"Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-	"Bash(git blame:*)", "Bash(git grep:*)", "Bash(git status:*)",
+// reviewShellAllow lists the read-only shell commands the reviewer may run
+// (#2192, R2). Each is a prefix rule; Claude Code path-checks the operands of
+// these commands (and redirect targets) against the Read rules, so they reach
+// only the clone and the staged diff. Deliberately absent, each with a form a
+// prefix rule cannot exclude (probed against claude 2.1.296, adrs/2192):
+//   - sed: `sed -n -i 1p file` passed `Bash(sed -n *)`; `w`/`e` script commands
+//     write and execute.
+//   - rg: `--pre <cmd>` executes a program.
+//   - find: `-exec`/`-delete`; Glob covers it. (The CLI's built-in read-only
+//     set would otherwise allow it in the clone, hence reviewShellDeny.)
+//   - wc: `--files0-from=<file>` reads a NUL-separated file list from an
+//     arbitrary path, and GNU getopt_long accepts any unambiguous prefix of the
+//     option (`--files0=`, `--files0-f=`), so no deny on one spelling can close
+//     it. Read offset/limit, head and tail cover paging; wc is denied outright
+//     (reviewShellDeny) because the CLI's built-in read-only set would
+//     otherwise still admit it.
+//   - git: diff/grep `--no-index` and `blame --contents` read outside the
+//     scope, `--output=`/`-O<cmd>` write or execute, and the depth-1 clone has
+//     no history for log/blame/diff to report.
+var reviewShellAllow = []string{"cat", "head", "tail", "ls"}
+
+// reviewShellDeny are deny rules passed via --disallowedTools. Deny beats
+// allow, so these only remove capability the CLI would otherwise grant.
+var reviewShellDeny = []string{
+	"Bash(find *)",
+	"Bash(wc *)", // --files0-from (and its abbreviations) reads a file list from any path
+}
+
+// escapeRulePath escapes a resolved absolute path for use inside a Claude Code
+// permission rule: gitignore metacharacters (\ [ ] * ? !, leading #) and the
+// rule delimiters ( ).
+func escapeRulePath(p string) string {
+	var b strings.Builder
+	for i, r := range p {
+		switch r {
+		case '\\', '[', ']', '*', '?', '!', '(', ')':
+			b.WriteByte('\\')
+		case '#':
+			if i == 0 {
+				b.WriteByte('\\')
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// resolveScopePaths returns the symlink-resolved absolute clone directory and
+// (when non-empty) staged diff directory. The CLI applies an allow rule only
+// when both the requested path and its resolved target match, and on macOS the
+// temp dir is a symlink (/var -> /private/var), so unresolved paths would
+// match nothing and every read would fail. Any failure is returned: Review
+// fails closed rather than running without a scope.
+func resolveScopePaths(workDir, stagedDir string) (clone, staged string, err error) {
+	if workDir == "" {
+		return "", "", errors.New("review scope: empty work dir")
+	}
+	clone, err = resolveAbs(workDir)
+	if err != nil {
+		return "", "", fmt.Errorf("review scope: resolving clone %q: %w", workDir, err)
+	}
+	if stagedDir != "" {
+		staged, err = resolveAbs(stagedDir)
+		if err != nil {
+			return "", "", fmt.Errorf("review scope: resolving staged diff dir %q: %w", stagedDir, err)
+		}
+	}
+	for _, p := range []string{clone, staged} {
+		if strings.ContainsAny(p, "\n\r\x00") {
+			return "", "", fmt.Errorf("review scope: path %q contains a control character", p)
+		}
+	}
+	return clone, staged, nil
+}
+
+func resolveAbs(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+// buildReviewToolRules builds the permission rules for a review from the
+// already-resolved clone and staged-diff-directory paths (#2192, R1-R3; the
+// diff is a directory of entries since #2190). Scope is expressed as
+// path-scoped ALLOWS only — Claude Code's deny rules beat allows, so "deny
+// everything, allow the clone" cannot be written. There is deliberately no
+// bare Read, Grep or Glob entry: an unscoped allow admits every path, and
+// probing showed Read(...) rules do not scope the Grep/Glob tools, so each
+// gets its own path rule. Task (subagents) inherits these rules.
+func buildReviewToolRules(clone, stagedDir string) (allow, deny []string) {
+	root := "//" + strings.TrimPrefix(escapeRulePath(clone), "/") + "/**"
+	allow = append(allow, "Read("+root+")", "Grep("+root+")", "Glob("+root+")")
+	if stagedDir != "" {
+		staged := "//" + strings.TrimPrefix(escapeRulePath(stagedDir), "/") + "/**"
+		allow = append(allow, "Read("+staged+")", "Grep("+staged+")", "Glob("+staged+")")
+	}
+	for _, c := range reviewShellAllow {
+		allow = append(allow, "Bash("+c+" *)")
+	}
+	allow = append(allow, "Task")
+	return allow, append([]string(nil), reviewShellDeny...)
+}
+
+// checkReviewArgsScoped reports an error when args grant anything beyond the
+// scoped read-only set: a bare Read/Grep/Glob/Bash, an unanchored path rule,
+// a write/execute/network tool, or a missing --disallowedTools for find. The
+// tests apply it to the built args and, for non-vacuity, to the legacy
+// unscoped list, where it must report a violation.
+func checkReviewArgsScoped(args []string) error {
+	var allows, denies []string
+	for i, a := range args {
+		if i+1 >= len(args) {
+			break
+		}
+		switch a {
+		case "--allowedTools":
+			allows = append(allows, args[i+1])
+		case "--disallowedTools":
+			denies = append(denies, args[i+1])
+		}
+	}
+	shell := map[string]bool{}
+	for _, c := range reviewShellAllow {
+		shell["Bash("+c+" *)"] = true
+	}
+	for _, r := range allows {
+		switch {
+		case r == "Task" || shell[r]:
+		case strings.HasPrefix(r, "Read(//") || strings.HasPrefix(r, "Grep(//") || strings.HasPrefix(r, "Glob(//"):
+		default:
+			return fmt.Errorf("allow rule %q is not a scoped read-only rule", r)
+		}
+	}
+	for _, want := range reviewShellDeny {
+		if !slices.Contains(denies, want) {
+			return fmt.Errorf("missing --disallowedTools %q", want)
+		}
+	}
+	return nil
 }
 
 // reviewInactivityTimeout mirrors engine/claude.go's hardcoded 15-minute
@@ -105,20 +234,20 @@ type ReviewRequest struct {
 	// most repos have no skill file at all.
 	RepoGuidance     string
 	RepoGuidanceMode string
-	// DiffPath is the absolute path to a file holding the PR's unified diff
-	// — the same bytes review.go already fetched for the size guard, after
-	// exclusion and trimming, so it is exactly the change the model is
-	// being asked to review and nothing more.
+	// Staged describes the directory the PR's diff is staged in — the same
+	// bytes review.go already fetched for the size guard, after exclusion and
+	// trimming, so it is exactly the change the model is being asked to review
+	// and nothing more. One entry file per changed path (or bounded chunk of a
+	// large one) plus an index, so no part of the diff sits behind a single
+	// Read call's limit (#2190, see diffstage.go).
 	//
 	// It exists because the review clone structurally cannot produce that
 	// diff itself: CloneForReview does a depth-1 fetch of
 	// refs/pull/<N>/head and nothing else, so the base branch is not a ref
-	// in that repository and `git diff <base>...HEAD` cannot resolve. The
-	// prompt used to instruct exactly that command; it failed on every
-	// review, and the model was left to infer the change by reading whole
-	// files. Empty (the degraded case) falls back to that older wording so
-	// a review still runs.
-	DiffPath string
+	// in that repository and `git diff <base>...HEAD` cannot resolve. nil (the
+	// degraded case: no diff text, or staging failed) falls back to the older
+	// wording so a review still runs, and its coverage is `partial`.
+	Staged *StagedDiff
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -137,6 +266,17 @@ type ReviewResult struct {
 	Text     string
 	NumTurns int
 	CostUSD  float64
+	// Opened is the set of staged entry IDs the invocation's transcript proves
+	// were read in full, and OpenedAuthoritative whether that transcript shows
+	// every subagent's traffic (see deriveOpened). Both are zero for an
+	// invoker that cannot observe a transcript, which leaves coverage resting
+	// on the model's own report.
+	Opened              map[string]bool
+	OpenedAuthoritative bool
+	// UnobservedSubagents is set when a Task/Agent call's traffic was not
+	// visible in the transcript (see deriveOpened): coverage then refuses to
+	// credit what only an invisible subagent could have read.
+	UnobservedSubagents bool
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -262,33 +402,20 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, thread
 // renderOmittedPaths writes a short, additive prompt section naming files
 // review.go's diff-size guard omitted from what it measured and from
 // inline-comment anchoring (R4). This is load-bearing, not cosmetic: unlike
-// the diff text itself, Claude never receives it as prompt content — it
-// independently re-derives its own view via git tool calls against the full
-// clone, so a passive "FYI, these were excluded" note would not by itself
-// stop it from reading (or diffing) an omitted file directly, which in the
-// motivating scenario (a 17 MB JSONL corpus) could blow its own context. The
-// concrete `git diff ... -- . ':!path'` pathspec gives it an actionable way
-// to exclude the same files from its own inspection, backstopped by
-// validRightAnchors demoting any finding Claude reports on an omitted file
-// anyway (R6) rather than trusting the instruction alone.
-func renderOmittedPaths(b *strings.Builder, baseBranch string, excluded, trimmed []string) {
+// the diff text itself, Claude never receives it as prompt content — it reads
+// the clone and the staged diff with its own tools, so a passive "FYI,
+// these were excluded" note is what stops it from reading an omitted file
+// directly, which in the motivating scenario (a 17 MB JSONL corpus) could blow
+// its own context. It is backstopped by validRightAnchors demoting any finding
+// Claude reports on an omitted file anyway (R6) rather than trusting the
+// instruction alone. (#2192: the old `git diff ... -- . ':!path'` example is
+// gone — git is not available to the reviewer and the clone has no base ref.)
+func renderOmittedPaths(b *strings.Builder, excluded, trimmed []string) {
 	if len(excluded) == 0 && len(trimmed) == 0 {
 		return
 	}
 	b.WriteString("## Files omitted from this review\n\n")
-	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. Do not review them, and exclude them from your own `git diff` invocations with a pathspec, e.g.:\n\n")
-	ref := "HEAD"
-	if baseBranch != "" {
-		ref = baseBranch + "...HEAD"
-	}
-	fmt.Fprintf(b, "```\ngit diff %s -- .", ref)
-	for _, p := range excluded {
-		fmt.Fprintf(b, " %s", shellQuotePathspec(":!"+p))
-	}
-	for _, p := range trimmed {
-		fmt.Fprintf(b, " %s", shellQuotePathspec(":!"+p))
-	}
-	b.WriteString("\n```\n\n")
+	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. They are not in the staged diff. Do not review them, and do not read them from the working tree:\n\n")
 	for _, p := range excluded {
 		fmt.Fprintf(b, "- %s (excluded by `excluded_paths`)\n", p)
 	}
@@ -296,18 +423,6 @@ func renderOmittedPaths(b *strings.Builder, baseBranch string, excluded, trimmed
 		fmt.Fprintf(b, "- %s (dropped to fit within max_diff_bytes)\n", p)
 	}
 	b.WriteString("\n")
-}
-
-// shellQuotePathspec wraps a git pathspec (e.g. ":!some/path") in single
-// quotes suitable for verbatim copy-paste into a POSIX shell, escaping any
-// single quote the path itself contains. A naive `'%s'` wrap (the prior
-// behavior) breaks the moment an omitted path contains a literal quote
-// character — the generated example closes its quote early and produces a
-// syntactically broken command. The standard POSIX technique instead closes
-// the quoted string, emits a backslash-escaped literal quote, then reopens
-// the quoted string, so the shell sees one unbroken token either way.
-func shellQuotePathspec(pathspec string) string {
-	return "'" + strings.ReplaceAll(pathspec, "'", `'\''`) + "'"
 }
 
 // defaultReviewGuidance is the embedded default review-guidance text (C2):
@@ -377,6 +492,31 @@ func composeGuidanceLayer(base, overlay, mode string) string {
 	return base + "\n\n" + overlay
 }
 
+// renderReviewTools writes the exact tools and shell forms the reviewer has
+// (#2192, R5), so it does not guess at commands that will be denied. The shell
+// command list is generated from reviewShellAllow, and a test asserts every
+// command form offered here is covered by the permission rules.
+func renderReviewTools(b *strings.Builder, req ReviewRequest) {
+	b.WriteString("The PR's head commit is already checked out in your working directory. You are a read-only reader and have exactly these tools; anything else is denied:\n\n")
+	b.WriteString("- Read: read a file by absolute path. Use its offset and limit to page through a large file.\n")
+	b.WriteString("- Grep and Glob: search file contents and file names.\n")
+	b.WriteString("- Shell, only these read-only commands, one plain command at a time: ")
+	for i, c := range reviewShellAllow {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(b, "`%s`", c)
+	}
+	b.WriteString(". Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n")
+	b.WriteString("- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\n")
+	b.WriteString("Path limits: Read, Grep, Glob and the shell commands reach only the working directory")
+	if req.Staged != nil {
+		b.WriteString(" and the staged diff directory named below")
+	}
+	b.WriteString(". Any other path, including `..` or symlinks that lead outside, is denied.\n\n")
+	b.WriteString("Not available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n")
+}
+
 // renderDynamicContext writes buildReviewPrompt's Go-supplied dynamic
 // context (C7): the reviewer-identity/instructions preamble, the base-branch
 // diff instruction, omitted-paths disclosure, the PR body, and prior review-
@@ -387,21 +527,22 @@ func composeGuidanceLayer(base, overlay, mode string) string {
 // behavior change.
 func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 	fmt.Fprintf(b, "You are Pruefer, an automated code reviewer for pull request %s/%s#%d: %q.\n\n", req.Owner, req.Repo, req.PRNumber, req.Title)
-	b.WriteString("The PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\n")
-	switch {
-	case req.DiffPath != "":
+	renderReviewTools(b, req)
+	if req.Staged != nil {
 		// The clone has no base ref (depth-1 head-only fetch), so a
 		// three-dot diff against the base cannot resolve here. Hand over
 		// the diff Pruefer already has instead of naming a command that
 		// will fail.
-		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is written to %s. Read that file first: it is the authoritative statement of what changed. The working directory holds the PR's head commit, so use git/Grep/Glob/Read on it for surrounding context the diff alone doesn't give you.\n\n", req.DiffPath)
+		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is staged as %d entries in %s. Read %s first: it lists every entry with its ID, file, original path, chunk and size. Each entry is one small file holding one changed path's diff (a large path is cut into numbered chunks that each repeat the file header, and hunk headers carry the true line numbers). Together they are the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", len(req.Staged.Entries), req.Staged.Dir, req.Staged.IndexPath)
+		fmt.Fprintf(b, "Entry files are named <ID>.diff, IDs 0001 through %04d, so if INDEX.txt itself is cut off you can still open the rest by name.\n\n", len(req.Staged.Entries))
+		b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
 		if req.BaseBranch != "" {
-			fmt.Fprintf(b, "The PR targets %q. Note the checkout is a shallow, single-commit fetch of the PR head: %q is not a ref here, so `git diff %s...HEAD` and `git log` against the base will not resolve. Use the diff file above rather than trying to reconstruct the change from git history.\n\n", req.BaseBranch, req.BaseBranch, req.BaseBranch)
+			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the staged diff above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
 		}
-	case req.BaseBranch != "":
-		fmt.Fprintf(b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
+	} else if req.BaseBranch != "" {
+		fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, and no staged diff is available: read the changed files in the working tree directly.\n\n", req.BaseBranch)
 	}
-	renderOmittedPaths(b, req.BaseBranch, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
+	renderOmittedPaths(b, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")
 		b.WriteString(req.Body)
@@ -418,9 +559,13 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 // either append or replace mode — can reach this function's output;
 // buildReviewPrompt calls it unconditionally, after resolveGuidance. Moved
 // verbatim from the pre-#1446 buildReviewPrompt, no behavior change.
-func renderContract(b *strings.Builder) {
+func renderContract(b *strings.Builder, withCoverage bool) {
 	b.WriteString("You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\n")
-	b.WriteString("Output has two parts, in this exact order:\n\n")
+	if withCoverage {
+		b.WriteString("Output has three parts, in this exact order:\n\n")
+	} else {
+		b.WriteString("Output has two parts, in this exact order:\n\n")
+	}
 	b.WriteString("1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\n")
 	b.WriteString("PRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n")
 	b.WriteString("2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n")
@@ -431,6 +576,11 @@ func renderContract(b *strings.Builder) {
 	b.WriteString("- \"high\": a bug or design issue that will likely cause incorrect behavior.\n")
 	b.WriteString("- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\n")
 	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\n")
+	if withCoverage {
+		b.WriteString("3. After the findings block, a coverage block listing the ID of every staged diff entry that was opened and read in full, by you or by a subagent you delegated it to. Put each marker alone on its own line, with a JSON object between them:\n\n")
+		b.WriteString("PRUEFER_COVERAGE_BEGIN\n{\"opened\": [\"0001\", \"0002\"]}\nPRUEFER_COVERAGE_END\n\n")
+		b.WriteString("List only entries you actually read in full; an entry you do not list is reported to the PR as unread, and listing one you did not read defeats the review. If you delegate entries to subagents, give each the entry IDs it must open and tell it to report back the IDs it opened in full, and include in your list exactly the IDs the subagents report. If you opened nothing, report an empty list.\n\n")
+	}
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 }
 
@@ -444,7 +594,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 	renderDynamicContext(&b, req)
 	b.WriteString(resolveGuidance(req))
 	b.WriteString("\n\n")
-	renderContract(&b)
+	renderContract(&b, req.Staged != nil)
 	return b.String()
 }
 
@@ -453,7 +603,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 // the fixed read-only allowlist — there is no unrestricted/label-driven
 // escape hatch, unlike Fabrik stages.
 //
-// Together with reviewAllowedTools above and --permission-mode dontAsk
+// Together with buildReviewToolRules above and --permission-mode dontAsk
 // below, an empty --setting-sources is the third piece of Pruefer's
 // security posture: it loads NO settings layer at all — not the reviewed
 // PR's .claude/settings.json or settings.local.json, and not the
@@ -482,7 +632,16 @@ func buildReviewPrompt(req ReviewRequest) string {
 // --permission-mode), so loading none makes a review a function of the PR
 // and Pruefer's own config alone. Authentication is unaffected: it comes
 // from the config directory, not from any settings layer.
-func buildReviewArgs(req ReviewRequest) []string {
+func buildReviewArgs(req ReviewRequest) ([]string, error) {
+	stagedDir := ""
+	if req.Staged != nil {
+		stagedDir = req.Staged.Dir
+	}
+	clone, staged, err := resolveScopePaths(req.WorkDir, stagedDir)
+	if err != nil {
+		return nil, err
+	}
+	allow, deny := buildReviewToolRules(clone, staged)
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -492,10 +651,13 @@ func buildReviewArgs(req ReviewRequest) []string {
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
-	for _, tool := range reviewAllowedTools {
+	for _, tool := range allow {
 		args = append(args, "--allowedTools", tool)
 	}
-	return args
+	for _, tool := range deny {
+		args = append(args, "--disallowedTools", tool)
+	}
+	return args, nil
 }
 
 // buildReviewEnv returns the environment variable overrides applied on top
@@ -612,9 +774,32 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	lastActivity.Store(time.Now().UnixNano())
 	var stdoutWriter io.Writer = &activityWriter{inner: &stdout, lastActivity: &lastActivity}
 
-	cmd := exec.CommandContext(stageCtx, "claude", buildReviewArgs(req)...)
+	// Fail closed: never run a review without its path scope. The resolved
+	// paths replace the request's so the prompt, the cwd and the rules all
+	// name the same symlink-free paths (macOS /var -> /private/var).
+	stagedDir := ""
+	if req.Staged != nil {
+		stagedDir = req.Staged.Dir
+	}
+	clone, staged, err := resolveScopePaths(req.WorkDir, stagedDir)
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
+	}
+	req.WorkDir = clone
+	if req.Staged != nil {
+		resolvedStaged := *req.Staged
+		resolvedStaged.Dir = staged
+		resolvedStaged.IndexPath = filepath.Join(staged, stagedIndexName)
+		req.Staged = &resolvedStaged
+	}
+	args, err := buildReviewArgs(req)
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
+	}
+	logf(req.PRNumber, "claude", "review tool rules: %s\n", strings.Join(args, " "))
+	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = req.WorkDir
-	cmd.Env = mergeEnv(os.Environ(), buildReviewEnv(req))
+	cmd.Env = reviewProcessEnv(os.Environ(), req)
 	cmd.Stdin = strings.NewReader(buildReviewPrompt(req))
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = stdoutWriter
@@ -701,5 +886,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	if strings.TrimSpace(resp.Result) == "" {
 		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
 	}
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}, nil
+	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
+		UnobservedSubagents: req.Staged != nil && !authoritative}, nil
 }

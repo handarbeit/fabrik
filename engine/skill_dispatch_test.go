@@ -43,7 +43,7 @@ func TestSkillDispatch_ResolvedStageCarriesQualifiedName(t *testing.T) {
 	skipIfNoGit(t)
 	isolateWarningsFile(t)
 	repoDir := initBareRepo(t)
-	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName, "fabrik-research")
+	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName, "research")
 
 	var seen string
 	claude := &mockClaudeInvoker{
@@ -54,17 +54,17 @@ func TestSkillDispatch_ResolvedStageCarriesQualifiedName(t *testing.T) {
 	}
 	client := &mockGitHubClient{}
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
-		Stages: skillStages("fabrik-research", "")}, client, claude, NewWorktreeManager(repoDir))
+		Stages: skillStages("research", "")}, client, claude, NewWorktreeManager(repoDir))
 	eng.skillResolver = newSkillResolver([]string{pdir})
 
 	item := gh.ProjectItem{Number: 300, Title: "t", Status: "Research", ItemID: "PVTI_300"}
 	if err := eng.processItem(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item); err != nil {
 		t.Fatal(err)
 	}
-	if want := plugin.Qualify(plugin.BasePluginName, "fabrik-research"); seen != want {
+	if want := plugin.Qualify(plugin.BasePluginName, "research"); seen != want {
 		t.Errorf("invoker saw Skill %q, want %q", seen, want)
 	}
-	if eng.cfg.Stages[0].Skill != "fabrik-research" {
+	if eng.cfg.Stages[0].Skill != "research" {
 		t.Errorf("configured stage mutated: %q", eng.cfg.Stages[0].Skill)
 	}
 }
@@ -75,7 +75,7 @@ func TestSkillDispatch_SeparatePluginSkill(t *testing.T) {
 	isolateWarningsFile(t)
 	repoDir := initBareRepo(t)
 	root := t.TempDir()
-	base := skillPlugin(t, root, "base", plugin.BasePluginName, "fabrik-research")
+	base := skillPlugin(t, root, "base", plugin.BasePluginName, "research")
 	org := skillPlugin(t, root, "org", "myorg", "review")
 
 	var seen string
@@ -104,7 +104,7 @@ func TestSkillDispatch_UnresolvedNeverSpawnsWorker(t *testing.T) {
 	skipIfNoGit(t)
 	isolateWarningsFile(t)
 	repoDir := initBareRepo(t)
-	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName, "fabrik-research")
+	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName, "research")
 
 	claude := &mockClaudeInvoker{}
 	client := &mockGitHubClient{}
@@ -175,7 +175,7 @@ func TestSkillDispatch_RecoveryClearsLabelAndPanel(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	client := &mockGitHubClient{}
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
-		Stages: skillStages("fabrik-research", "")}, client, claude, NewWorktreeManager(repoDir))
+		Stages: skillStages("research", "")}, client, claude, NewWorktreeManager(repoDir))
 	eng.skillResolver = newSkillResolver([]string{pdir})
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -188,7 +188,7 @@ func TestSkillDispatch_RecoveryClearsLabelAndPanel(t *testing.T) {
 	}
 
 	// The plugin gains the skill on disk; the resolver rebuilds on the miss.
-	writeSkill(t, filepath.Join(pdir, "skills", "fabrik-research", "SKILL.md"))
+	writeSkill(t, filepath.Join(pdir, "skills", "research", "SKILL.md"))
 	recovered := item
 	recovered.Labels = []string{skillUnresolvedLabel}
 	if err := eng.processItem(context.Background(), board, recovered); err != nil {
@@ -219,12 +219,12 @@ func TestSkillDispatch_StageRunKeepsLabelWhileCommentSkillUnresolved(t *testing.
 	isolateWarningsFile(t)
 	repoDir := initBareRepo(t)
 	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName)
-	writeSkill(t, filepath.Join(pdir, "skills", "fabrik-research", "SKILL.md"))
+	writeSkill(t, filepath.Join(pdir, "skills", "research", "SKILL.md"))
 
 	claude := &mockClaudeInvoker{}
 	client := &mockGitHubClient{}
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
-		Stages: skillStages("fabrik-research", "myorg:nope")}, client, claude, NewWorktreeManager(repoDir))
+		Stages: skillStages("research", "myorg:nope")}, client, claude, NewWorktreeManager(repoDir))
 	eng.skillResolver = newSkillResolver([]string{pdir})
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}

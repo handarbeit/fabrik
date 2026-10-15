@@ -7,7 +7,15 @@ import "time"
 type EventType string
 
 const (
-	ValidateSettled           EventType = "validate-settled"
+	ValidateSettled EventType = "validate-settled"
+	// DecisionPending: an item became Suspended — a completed stage that does
+	// not auto-advance, or a dependency parked in an unmanaged column — and only
+	// a human moves it (#2120).
+	DecisionPending EventType = "decision-pending"
+	// SettlementWithdrawn: an item that announced validate-settled or
+	// decision-pending stopped meeting that predicate before a human acted
+	// (#2120 R-unsettle).
+	SettlementWithdrawn       EventType = "settlement-withdrawn"
 	LabelApplied              EventType = "label-applied"
 	LabelRemoved              EventType = "label-removed"
 	Paused                    EventType = "paused"
@@ -33,9 +41,19 @@ const (
 	// ItemAdded, ColumnChanged and Closed are the lifecycle events (#2123): a new
 	// managed open item arrived on the board after startup; an item's board
 	// Status changed; an issue was closed.
-	ItemAdded     EventType = "item-added"
-	ColumnChanged EventType = "column-changed"
-	Closed        EventType = "closed"
+	ItemAdded       EventType = "item-added"
+	ColumnChanged   EventType = "column-changed"
+	Closed          EventType = "closed"
+	RetryStarved    EventType = "retry-starved"
+	RetryResumed    EventType = "retry-resumed"
+	ItemWedged      EventType = "item-wedged"
+	ItemUnwedged    EventType = "item-unwedged"
+	CacheDivergence EventType = "cache-divergence"
+	// Situation is the rolled-up "what needs you" digest (#2171): one
+	// account-scoped event carrying every section of the situation view. It is
+	// published on a subscription's cadence, on request and as the catch-up on
+	// attach, and is deduplicated per subscriber by the hub (PublishSituation).
+	Situation EventType = "situation"
 
 	// EventsDropped is synthetic: the hub inserts it at the head of a
 	// subscriber's queue when overflow discarded the oldest events.
@@ -45,6 +63,42 @@ const (
 	// StreamSuperseded is synthetic and shim-generated: another session attached
 	// under the same subscriber name, so this session's push has stopped.
 	StreamSuperseded EventType = "stream-superseded"
+)
+
+// MetaUnverified is the meta key marking an event derived from a cache change
+// that reverted a recent engine write (#2170): the label change it reports may
+// be a phantom and is expected to be reverted. The value is "true"; absent means
+// nothing is known against it. Defined here once so every producer shares it.
+const MetaUnverified = "unverified"
+
+// MetaSource is the meta key naming where an event came from (#2169 R3a), with
+// one of the Source* values. There is deliberately no replay value: a restart
+// delivers a catch-up snapshot and real downtime deltas, never a replay.
+const MetaSource = "source"
+
+// Event sources.
+const (
+	// SourceLive: published as the daemon observed the transition (a held event
+	// delivered late is still live).
+	SourceLive = "live"
+	// SourceCatchUp: part of a current-state snapshot, not a transition.
+	SourceCatchUp = "catch_up"
+	// SourceDowntimeDelta: a difference between the persisted last-observed
+	// state and the first observation after a daemon start.
+	SourceDowntimeDelta = "downtime-delta"
+)
+
+// MetaCause is the meta key on a validate-settled that is not the first of its
+// episode chain (#2169 R3a): why the item settled again. The first settle
+// carries no cause.
+const MetaCause = "cause"
+
+// Re-settle causes, in the precedence the engine applies when several hold.
+const (
+	CauseRevalidated     = "revalidated"
+	CauseNewHead         = "new-head"
+	CauseAutonomyChanged = "autonomy-changed"
+	CauseOther           = "other"
 )
 
 // Event is one thing that happened, ready to route and deliver.
@@ -98,6 +152,8 @@ type Info struct {
 
 var catalog = map[EventType]Info{
 	ValidateSettled:           {Immediate: true},
+	DecisionPending:           {},
+	SettlementWithdrawn:       {Immediate: true},
 	LabelApplied:              {},
 	LabelRemoved:              {},
 	Paused:                    {Immediate: true},
@@ -123,6 +179,12 @@ var catalog = map[EventType]Info{
 	ItemAdded:                 {},
 	ColumnChanged:             {},
 	Closed:                    {},
+	RetryStarved:              {Immediate: true},
+	RetryResumed:              {Immediate: true},
+	ItemWedged:                {Immediate: true},
+	ItemUnwedged:              {Immediate: true},
+	CacheDivergence:           {},
+	Situation:                 {Immediate: true, AccountWide: true},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
 	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
@@ -143,15 +205,38 @@ func IsAccountWide(t EventType) bool { return catalog[t].AccountWide }
 // Subscribable lists every event type a subscription may name, in catalogue order.
 func Subscribable() []EventType {
 	order := []EventType{
-		ValidateSettled, LabelApplied, LabelRemoved, Paused, AwaitingInput, AwaitingInputStale,
+		ValidateSettled, DecisionPending, SettlementWithdrawn, LabelApplied, LabelRemoved, Paused, AwaitingInput, AwaitingInputStale,
 		Escalated, Stalled, CycleLimitNear, MergeTrainEjected, MergeTrainFailed, CITimeout,
 		ReviewTimeout, Merged, BlockerCleared, ChildrenSpawned, LandingVerificationFailed,
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
 		PipelineStalled, PipelineResumed,
 		ItemAdded, ColumnChanged, Closed,
+		RetryStarved, RetryResumed, ItemWedged, ItemUnwedged,
+		CacheDivergence,
+		Situation,
 	}
 	return order
 }
 
 // IsLabelEvent reports whether label patterns apply to t.
 func IsLabelEvent(t EventType) bool { return t == LabelApplied || t == LabelRemoved }
+
+// Situation meta keys and values (#2171). The digest's Content is the readable
+// rendering; Meta carries the counts a session can branch on.
+const (
+	// MetaTrigger says why a situation event was sent: one of the Trigger*
+	// values.
+	MetaTrigger = "trigger"
+)
+
+// Situation triggers.
+const (
+	// TriggerCatchUp: the snapshot a new subscription or a session's first attach
+	// receives, and the restart snapshot (#2169).
+	TriggerCatchUp = "catch_up"
+	// TriggerCadence: the subscription's situation_seconds elapsed and the view
+	// had changed since the last digest sent to the subscriber.
+	TriggerCadence = "cadence"
+	// TriggerRequest: the subscriber asked for one (fabrik_situation push).
+	TriggerRequest = "request"
+)

@@ -217,3 +217,87 @@ func TestProgressViaColumnPersistedCompat(t *testing.T) {
 		t.Error("option-off canonical form must omit the key")
 	}
 }
+
+func TestAnomalyEventsAreItemScopedAndSubscribable(t *testing.T) {
+	immediate := []EventType{RetryStarved, RetryResumed, ItemWedged, ItemUnwedged}
+	for _, e := range append(append([]EventType{}, immediate...), CacheDivergence) {
+		if IsAccountWide(e) {
+			t.Errorf("%s must be item-scoped, not account-wide", e)
+		}
+		if IsImmediate(e) != (e != CacheDivergence) {
+			t.Errorf("%s immediacy = %v", e, IsImmediate(e))
+		}
+		found := false
+		for _, s := range Subscribable() {
+			found = found || s == e
+		}
+		if !found {
+			t.Errorf("%s must be subscribable", e)
+		}
+		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(0); err != nil {
+			t.Errorf("%s must validate: %v", e, err)
+		}
+		other := Subscription{Subscriber: "x", Repos: []string{"o/x"}}
+		if other.Matches(Event{Type: e, Repo: "o/other", Issue: 1}) {
+			t.Errorf("%s must respect the repo scope", e)
+		}
+	}
+}
+
+func TestSubscribableHasNoDuplicates(t *testing.T) {
+	seen := map[EventType]bool{}
+	for _, e := range Subscribable() {
+		if seen[e] {
+			t.Errorf("%s is listed twice in Subscribable()", e)
+		}
+		seen[e] = true
+	}
+}
+
+func TestSemanticDefaultFamily(t *testing.T) {
+	semantic := Subscription{Subscriber: "S", EventsDefault: true}
+	legacy := Subscription{Subscriber: "S"}
+	named := Subscription{Subscriber: "S", Events: []EventType{LabelApplied}, EventsDefault: true}
+	label := Event{Type: LabelApplied, Label: "x"}
+	unlabel := Event{Type: LabelRemoved, Label: "x"}
+	settled := Event{Type: ValidateSettled}
+	if semantic.Matches(label) || semantic.Matches(unlabel) {
+		t.Error("a semantic-default subscription must not receive raw label events")
+	}
+	if !semantic.Matches(settled) || !semantic.Matches(Event{Type: ColumnChanged}) || !semantic.Matches(Event{Type: DaemonReachable}) {
+		t.Error("a semantic-default subscription must receive every other type")
+	}
+	if !legacy.Matches(label) || !legacy.Matches(unlabel) {
+		t.Error("a grandfathered subscription (no marker) keeps receiving every type")
+	}
+	if !named.Matches(label) || named.Matches(unlabel) {
+		t.Error("naming label-applied delivers exactly it")
+	}
+	if semantic.TakesLabelEvents() || !legacy.TakesLabelEvents() || !named.TakesLabelEvents() {
+		t.Error("TakesLabelEvents disagrees with Matches")
+	}
+	if !semantic.TakesColumnChanged() {
+		t.Error("the default family includes column-changed")
+	}
+}
+
+func TestEventsDefaultIsNotPartOfIdentityAndRoundTrips(t *testing.T) {
+	a := Subscription{ID: "1", Subscriber: "S", EventsDefault: true}
+	b := Subscription{ID: "2", Subscriber: "S"}
+	if a.canonical() != b.canonical() {
+		t.Fatal("EventsDefault must not change the canonical key (re-subscribe must stay idempotent)")
+	}
+	// A subscription persisted before the field existed has no marker.
+	var old Subscription
+	if err := json.Unmarshal([]byte(`{"id":"1","subscriber":"S"}`), &old); err != nil || old.EventsDefault {
+		t.Fatalf("legacy JSON: %+v %v", old, err)
+	}
+	data, _ := json.Marshal(a)
+	var back Subscription
+	if err := json.Unmarshal(data, &back); err != nil || !back.EventsDefault {
+		t.Fatalf("round trip: %s %+v %v", data, back, err)
+	}
+	if data, _ := json.Marshal(b); json.Valid(data) && string(data) != `{"id":"2","subscriber":"S"}` {
+		t.Fatalf("an unmarked subscription must serialise as before: %s", data)
+	}
+}

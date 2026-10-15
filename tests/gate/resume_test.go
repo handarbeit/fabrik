@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -258,5 +259,26 @@ func TestResumeReRunsInconclusiveAndNeverCountsItCovered(t *testing.T) {
 	}
 	if !strings.Contains(rep.Format(), "inconclusive") {
 		t.Errorf("the summary must name the inconclusive count:\n%s", rep.Format())
+	}
+}
+
+// The restart step is run by RunLeg outside the recorder and is never in a phase,
+// so it can never be recorded; requiring it made the baseline cell incompletable.
+func TestRequiredTestsExcludeTheRestartStep(t *testing.T) {
+	ctx := context.Background()
+	live := []string{"TestSmoke", switchTrainModeTest}
+	cells := PlanCells(PlanInput{AuthModes: []string{"app"}, Parallel: "4", ParallelOn: "2"})
+	_, req, err := RequiredTests(live, cells)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for leg, ts := range req {
+		if slices.Contains(ts, switchTrainModeTest) {
+			t.Errorf("%s requires %s: %v", leg, switchTrainModeTest, ts)
+		}
+	}
+	out, _, err := ResumeCells(ctx, []Cell{appOff}, live, evaluatorFor(testLedger(t), fakeStates{}))
+	if err != nil || len(out) != 1 || runArg(out[0]) != "^(TestSmoke)$" {
+		t.Fatalf("resume must not select the restart step: %v err=%v", out, err)
 	}
 }

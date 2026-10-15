@@ -5,6 +5,8 @@ package testlife
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +37,17 @@ func TestMain(m *testing.M) {
 		// Starts a guarded child via ReExecCommand, reports its PID, then idles.
 		cmd, _ := ReExecCommand(time.Minute)
 		cmd.Env = append(cmd.Env, "TESTLIFE_HELPER=guard", "TESTLIFE_PARENT_POLL=100ms")
+		if os.Getenv("TESTLIFE_MAINPARENT") == "1" {
+			// Arm the child through os.Getppid instead of an explicit parent.
+			var env []string
+			for _, e := range cmd.Env {
+				if strings.HasPrefix(e, ParentEnv+"=") || strings.HasPrefix(e, workerenv.OwnerVar+"=") {
+					continue
+				}
+				env = append(env, e)
+			}
+			cmd.Env = env
+		}
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		if err := cmd.Start(); err != nil {
 			os.Stderr.WriteString("start: " + err.Error() + "\n")
@@ -64,6 +77,8 @@ func helperOptions() Options {
 			o.DisableOwnerWatch = true
 		case "parent":
 			o.DisableParentWatch = true
+		case "mainparent":
+			o.DisableMainParentWatch = true
 		}
 	}
 	return o
@@ -220,11 +235,21 @@ func TestGuard_ExitsWhenOwnerPIDIsRecycled(t *testing.T) {
 
 // Acceptance 3: the ceiling names itself in the exit message.
 func TestGuard_CeilingExitsWithClearMessage(t *testing.T) {
-	h := startHelper(t, "guard", CeilingEnv+"=400ms")
+	dump := filepath.Join(t.TempDir(), "dump.txt")
+	h := startHelper(t, "guard", CeilingEnv+"=400ms", DumpEnv+"="+dump)
 	if !h.exited(10 * time.Second) {
 		t.Fatal("helper outlived its ceiling")
 	}
 	msg := h.stderrString()
+	// The binary's PID goes before the extension, so binaries sharing DumpEnv
+	// (go test runs several at once) each keep their own file.
+	dump = strings.TrimSuffix(dump, ".txt") + "." + strconv.Itoa(h.cmd.Process.Pid) + ".txt"
+	if !strings.Contains(msg, DumpHeaderPrefix) || !strings.Contains(msg, "goroutine dump written to "+dump) {
+		t.Fatalf("ceiling exit carries no goroutine dump: %q", msg)
+	}
+	if b, err := os.ReadFile(dump); err != nil || !strings.Contains(string(b), "goroutine ") {
+		t.Fatalf("dump file = %q, %v", b, err)
+	}
 	if !strings.Contains(msg, "hard wall-time ceiling of 400ms") || !strings.Contains(msg, CeilingEnv) {
 		t.Fatalf("exit message does not name the ceiling: %q", msg)
 	}
@@ -259,9 +284,9 @@ func TestReExecCommand_NeutralisedParentWatchLeavesChild(t *testing.T) {
 	}
 }
 
-func startParentAndChild(t *testing.T, env string) (int, *helper) {
+func startParentAndChild(t *testing.T, env ...string) (int, *helper) {
 	t.Helper()
-	p := startHelper(t, "parent", env)
+	p := startHelper(t, "parent", env...)
 	childPID, err := strconv.Atoi(p.cmd.Args[len(p.cmd.Args)-1])
 	if err != nil {
 		t.Fatalf("parent did not report a child pid: %v (%v)", err, p.cmd.Args)
@@ -359,10 +384,462 @@ func TestCeilingEnvParsing(t *testing.T) {
 	}
 }
 
+// recorder is a fake Exit/Kill pair. blockExit makes Exit never return, the
+// "exit does not return" of the incident.
+type recorder struct {
+	exits, kills chan int
+	release      chan struct{}
+}
+
+func newRecorder(blockExit bool) *recorder {
+	r := &recorder{exits: make(chan int, 4), kills: make(chan int, 4), release: make(chan struct{})}
+	if !blockExit {
+		close(r.release)
+	}
+	return r
+}
+
+func (r *recorder) opts(o Options) Options {
+	o.Exit = func(c int) { r.exits <- c; <-r.release }
+	o.Kill = func() { r.kills <- 1 }
+	o.Stderr = &bytes.Buffer{}
+	o.KillGrace = 150 * time.Millisecond
+	o.DisableDump = true // the dump tests build their own Options; do not litter the temp dir
+	return o
+}
+
+func (r *recorder) cleanup(t *testing.T) { t.Cleanup(func() { close(r.release) }) }
+
+// sleeper starts a process and returns its PID and a kill func.
+func sleeper(t *testing.T) (int, func()) {
+	t.Helper()
+	cmd := exec.Command("sleep", "120")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-done })
+	if sessionreap.StartToken(cmd.Process.Pid) == "" {
+		t.Skip("no start token on this platform")
+	}
+	return cmd.Process.Pid, func() { _ = cmd.Process.Kill(); <-done }
+}
+
+func noEnv(string) string { return "" }
+
+// bailTriggers drive each of the three bail paths with a fake Exit. Each returns
+// the Options that make the trigger fire quickly.
+func bailTriggers() map[string]func(t *testing.T) Options {
+	return map[string]func(t *testing.T) Options{
+		"ceiling": func(t *testing.T) Options {
+			return Options{Getenv: noEnv, Ceiling: 50 * time.Millisecond, DisableMainParentWatch: true}
+		},
+		"owner watch": func(t *testing.T) Options {
+			owner, _ := standIn(t)
+			info, _ := workerowner.Read(owner)
+			info.StartToken += "-recycled"
+			if err := workerowner.Write(owner, info); t.Failed() || err != nil {
+				t.Fatal(err)
+			}
+			return Options{
+				Getenv:    func(k string) string { return map[string]string{workerenv.OwnerVar: owner}[k] },
+				OwnerPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+		"re-exec parent watch": func(t *testing.T) Options {
+			pid, _ := sleeper(t)
+			return Options{
+				Getenv: func(k string) string {
+					return map[string]string{ParentEnv: strconv.Itoa(pid) + ":not-its-token"}[k]
+				},
+				ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+		"main parent watch": func(t *testing.T) Options {
+			pid, kill := sleeper(t)
+			kill()
+			return Options{
+				Getenv:  noEnv,
+				Getppid: func() int { return pid },
+				Start: func(p int) string {
+					if p == pid {
+						return "tok"
+					}
+					return sessionreap.StartToken(p)
+				},
+				ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+	}
+}
+
+// R3 / FR-007: with an Exit that never returns, every bail path still ends in a
+// forced kill, and not before the grace.
+func TestBail_ExitThatNeverReturnsIsKilled(t *testing.T) {
+	for name, mk := range bailTriggers() {
+		t.Run(name, func(t *testing.T) {
+			r := newRecorder(true)
+			r.cleanup(t)
+			stop := Guard(r.opts(mk(t)))
+			defer stop()
+			select {
+			case c := <-r.exits:
+				if c != ExitCode {
+					t.Fatalf("exit code = %d, want %d", c, ExitCode)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("trigger never fired")
+			}
+			select {
+			case <-r.kills:
+			case <-time.After(10 * time.Second):
+				t.Fatal("exit never returned and the process was not killed")
+			}
+		})
+	}
+}
+
+// FR-008: with the fallback neutralised, the same hang is never killed — the
+// test above is non-vacuous.
+func TestBail_NeutralisedKillFallbackNeverKills(t *testing.T) {
+	r := newRecorder(true)
+	r.cleanup(t)
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.DisableKillFallback = true
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	select {
+	case <-r.kills:
+		t.Fatal("kill fired with the fallback neutralised: the fallback test is vacuous")
+	case <-time.After(700 * time.Millisecond):
+	}
+}
+
+// FR-005: a prompt exit is unchanged, and the fallback never acts.
+func TestBail_ReturningExitDisarmsFallback(t *testing.T) {
+	r := newRecorder(false)
+	var buf bytes.Buffer
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.Stderr = &buf
+	stop := Guard(o)
+	defer stop()
+	if c := <-r.exits; c != ExitCode {
+		t.Fatalf("exit code = %d", c)
+	}
+	if !strings.Contains(buf.String(), "hard wall-time ceiling") {
+		t.Fatalf("message = %q", buf.String())
+	}
+	select {
+	case <-r.kills:
+		t.Fatal("fallback fired although exit returned")
+	case <-time.After(600 * time.Millisecond):
+	}
+}
+
+func TestBail_KillNotBeforeGrace(t *testing.T) {
+	r := newRecorder(true)
+	r.cleanup(t)
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.KillGrace = 600 * time.Millisecond
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	select {
+	case <-r.kills:
+		t.Fatal("killed before the grace elapsed")
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case <-r.kills:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never killed after the grace")
+	}
+}
+
+func mainParentOpts(getppid func() int, start func(int) string) Options {
+	return Options{Getenv: noEnv, Getppid: getppid, Start: start, ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour}
+}
+
+// US4: a live parent, an unchanged identity and an unreadable identity never bail.
+func TestMainParent_LiveOrUnreadableNeverBails(t *testing.T) {
+	pid, _ := sleeper(t)
+	var calls int
+	var mu sync.Mutex
+	cases := map[string]Options{
+		"live parent":           mainParentOpts(func() int { return pid }, nil),
+		"unreadable at install": mainParentOpts(func() int { return pid }, func(int) string { return "" }),
+		"ppid 1":                mainParentOpts(func() int { return 1 }, nil),
+		"unreadable later": mainParentOpts(func() int { return pid }, func(p int) string {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			if calls == 1 {
+				return sessionreap.StartToken(p)
+			}
+			return ""
+		}),
+	}
+	for name, o := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newRecorder(false)
+			stop := Guard(r.opts(o))
+			defer stop()
+			select {
+			case <-r.exits:
+				t.Fatal("bailed although the parent was alive or unreadable")
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestMainParent_GoneParentBails(t *testing.T) {
+	pid, kill := sleeper(t)
+	r := newRecorder(false)
+	var buf bytes.Buffer
+	o := r.opts(mainParentOpts(func() int { return pid }, nil))
+	o.Stderr = &buf
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+		t.Fatal("bailed with a live parent")
+	case <-time.After(300 * time.Millisecond):
+	}
+	kill()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("did not bail after the parent was killed")
+	}
+	if !strings.Contains(buf.String(), "parent process") {
+		t.Fatalf("message = %q", buf.String())
+	}
+}
+
+// A recycled parent PID (same PID, different start token) is gone.
+func TestMainParent_RecycledPIDBails(t *testing.T) {
+	pid, _ := sleeper(t)
+	var mu sync.Mutex
+	first := true
+	r := newRecorder(false)
+	o := r.opts(mainParentOpts(func() int { return pid }, func(p int) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if first {
+			first = false
+			return "captured-at-install"
+		}
+		return sessionreap.StartToken(p)
+	}))
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a recycled parent PID was mistaken for the parent")
+	}
+}
+
+// FR-014: neutralising the watch, or an owner marker, leaves a gone parent alone.
+func TestMainParent_NeutralisedOrOwnerMarkedDoesNotBail(t *testing.T) {
+	for name, mod := range map[string]func(*Options){
+		"neutralised": func(o *Options) { o.DisableMainParentWatch = true },
+		"owner marker": func(o *Options) {
+			o.Getenv = func(k string) string {
+				if k == workerenv.OwnerVar {
+					return filepath.Join(t.TempDir(), "never.json")
+				}
+				return ""
+			}
+			o.ResolveWindow = 50 * time.Millisecond
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pid, kill := sleeper(t)
+			kill()
+			r := newRecorder(false)
+			o := mainParentOpts(func() int { return pid }, func(p int) string { return "tok" })
+			mod(&o)
+			stop := Guard(r.opts(o))
+			defer stop()
+			select {
+			case <-r.exits:
+				t.Fatal("bailed: the main parent watch should not be armed")
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// Real processes: killing the process that started a binary ends the binary.
+func TestMainParent_ChildExitsWhenParentIsKilled(t *testing.T) {
+	childPID, parent := startParentAndChild(t, "TESTLIFE_MAINPARENT=1")
+	_ = parent.cmd.Process.Kill()
+	if !waitGone(childPID, 10*time.Second) {
+		t.Fatal("binary outlived the process that started it")
+	}
+}
+
+func TestMainParent_NeutralisedLeavesChild(t *testing.T) {
+	childPID, parent := startParentAndChild(t, "TESTLIFE_MAINPARENT=1", "TESTLIFE_DISABLE=mainparent")
+	_ = parent.cmd.Process.Kill()
+	if waitGone(childPID, 1500*time.Millisecond) {
+		t.Fatal("child exited with the main parent watch neutralised: the test is vacuous")
+	}
+}
+
+func TestMainParent_ChildSurvivesLiveParent(t *testing.T) {
+	childPID, _ := startParentAndChild(t, "TESTLIFE_MAINPARENT=1")
+	if waitGone(childPID, 1500*time.Millisecond) {
+		t.Fatal("child exited while its parent was alive")
+	}
+}
+
 func errorsAs(err error, target **exec.ExitError) bool {
 	ee, ok := err.(*exec.ExitError)
 	if ok {
 		*target = ee
 	}
 	return ok
+}
+
+// dumpOpts is the ceiling trigger with a dump-capable recorder.
+func dumpOpts(t *testing.T, r *recorder) (Options, *bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.DisableDump = false
+	o.Stderr = &buf
+	o.DumpPath = filepath.Join(t.TempDir(), "dump.txt")
+	return o, &buf, o.DumpPath
+}
+
+// blocked is a goroutine the dump must show, parked in a recognisable function.
+func testlifeBlockedGoroutineMarker(release <-chan struct{}) { <-release }
+
+// R3 (#2247): the ceiling writes every goroutine's stack to a file and stderr
+// before it exits, and the message names the file.
+func TestBail_CeilingWritesGoroutineDumpBeforeExit(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	go testlifeBlockedGoroutineMarker(release)
+
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	exited := make(chan struct{})
+	inner := o.Exit
+	o.Exit = func(c int) {
+		// The dump must already be on disk when exit is requested.
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("dump not written before exit: %v", err)
+		}
+		close(exited)
+		inner(c)
+	}
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ceiling never fired")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{"file": string(b), "stderr": buf.String()} {
+		if !strings.Contains(got, DumpHeaderPrefix) || !strings.Contains(got, "testlifeBlockedGoroutineMarker") {
+			t.Errorf("%s lacks the header or the blocked goroutine:\n%.400s", name, got)
+		}
+	}
+	if !strings.Contains(buf.String(), "goroutine dump written to "+path) {
+		t.Errorf("message does not name the dump path: %q", buf.String()[:min(len(buf.String()), 400)])
+	}
+}
+
+// The neutralisation seam: with the dump disabled nothing is written, so the
+// test above is non-vacuous.
+func TestBail_DisableDumpWritesNothing(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	o.DisableDump = true
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("dump file written with the dump disabled")
+	}
+	if strings.Contains(buf.String(), DumpHeaderPrefix) {
+		t.Fatal("dump on stderr with the dump disabled")
+	}
+}
+
+// A dump that does not finish inside its budget is skipped; exit still happens
+// and the self-kill grace is not extended.
+func TestBail_SlowDumpIsSkippedAndExitStillHappens(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	o.Profile = func(io.Writer) error { <-release; return nil }
+	o.DumpBudget = 50 * time.Millisecond
+	o.KillGrace = time.Second
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stuck dump blocked the exit")
+	}
+	if !strings.Contains(buf.String(), "goroutine dump skipped") {
+		t.Fatalf("no skip note: %q", buf.String())
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("dump file written although the profile never finished")
+	}
+}
+
+// An unwritable path is reported and ignored.
+func TestBail_UnwritableDumpPathStillExits(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, _ := dumpOpts(t, r)
+	o.DumpPath = filepath.Join(t.TempDir(), "no-such-dir", "dump.txt")
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exit never requested")
+	}
+	if !strings.Contains(buf.String(), "goroutine dump not written") {
+		t.Fatalf("failure not reported: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), DumpHeaderPrefix) {
+		t.Fatal("stderr dump should still be attempted")
+	}
+}
+
+// The default path is in the temp dir, never the working directory, and DumpEnv
+// overrides it.
+func TestDumpPath_DefaultsOutsideWorkingDirectory(t *testing.T) {
+	o := Options{Getenv: noEnv, Name: "tests/sim"}
+	got := o.dumpPath()
+	if filepath.Dir(got) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("default dump path %q is not in %q", got, os.TempDir())
+	}
+	if !strings.Contains(filepath.Base(got), "tests_sim-goroutines-") {
+		t.Fatalf("unexpected name %q", got)
+	}
+	o.Getenv = func(k string) string { return map[string]string{DumpEnv: "/x/y.txt"}[k] }
+	want := fmt.Sprintf("/x/y.%d.txt", os.Getpid())
+	if o.dumpPath() != want {
+		t.Fatalf("DumpEnv path = %q, want %q (PID before the extension, so concurrent binaries do not overwrite each other)", o.dumpPath(), want)
+	}
+	o.Getenv = func(k string) string { return map[string]string{DumpEnv: "/x/noext"}[k] }
+	if want := fmt.Sprintf("/x/noext.%d", os.Getpid()); o.dumpPath() != want {
+		t.Fatalf("extensionless DumpEnv path = %q, want %q", o.dumpPath(), want)
+	}
 }

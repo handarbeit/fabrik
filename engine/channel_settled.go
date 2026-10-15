@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -145,7 +146,14 @@ func (f cachedFeedback) any() bool { return f.Comments+f.Threads+f.Bodies > 0 }
 // rather than fetched live. TestCachedFeedbackMatchesLiveGate pins the
 // agreement.
 func (e *Engine) cachedPendingFeedback(snap itemstate.Snapshot, st *itemstate.ItemState) cachedFeedback {
-	processed := func(id string) bool { return !snap.CommentProcessed(id).IsZero() }
+	return e.cachedPendingFeedbackOf(st)
+}
+
+// cachedPendingFeedbackOf is cachedPendingFeedback over the item state alone
+// (the processed-comment map is part of it), so attentionInput can ask it from
+// inside a Store.Scan visitor, where no Snapshot is at hand.
+func (e *Engine) cachedPendingFeedbackOf(st *itemstate.ItemState) cachedFeedback {
+	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
 	var f cachedFeedback
 	f.Comments = len(filterNewComments(st.Comments, processed))
 	if lpr := st.LinkedPR; lpr != nil {
@@ -248,22 +256,74 @@ func vsKeys(ref string) (started, closed string) { return "vs:" + ref, "vsclosed
 // label is not (yet) there.
 func vsRelaxedKey(ref string) string { return "vsrelaxed:" + ref }
 
-// closeSettleEpisode closes an open episode whose ending conditions hold.
-// Consumer goroutine only.
+// validateWithdrawalReason says why the engine took a validate-settled item back
+// (#2120 R-unsettle-1): the PR needs a rebase, its head moved so CI must run
+// again, a worker was dispatched, or new feedback arrived. "" when the item
+// merely moved on, was closed or was sent back through Validate on purpose
+// (fabrik:revalidate) — a human or engine decision, not a withdrawal.
+func (e *Engine) validateWithdrawalReason(st *itemstate.ItemState, rebaseSeen bool) string {
+	if st.IsClosed || st.Status != "Validate" || hasLabelStr(st.Labels, "fabrik:revalidate") {
+		return ""
+	}
+	switch {
+	case hasLabelStr(st.Labels, "fabrik:rebase-needed") || rebaseSeen:
+		return reasonRebaseNeeded
+	case func() bool {
+		lpr := st.LinkedPR
+		return lpr != nil && lpr.ValidateCompletedSHA != "" && lpr.HeadSHA != "" && lpr.ValidateCompletedSHA != lpr.HeadSHA
+	}():
+		return reasonCIOnNewHead
+	case st.Worker != nil || hasReworkingLabel(st.Labels):
+		return reasonWorkerDispatched
+	case e.cachedPendingFeedbackOf(st).any():
+		return reasonNewFeedback
+	}
+	return ""
+}
+
+// closeSettleEpisode closes an open episode whose ending conditions hold, and
+// announces one settlement-withdrawn event when the reason is that the engine
+// took the item back. Consumer goroutine only.
 func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState) {
 	started, closed := vsKeys(ref)
 	n := ce.hub.Counter(started)
 	if n <= ce.hub.Counter(closed) {
 		return
 	}
+	relaxed := ce.hub.Counter(vsRelaxedKey(ref)) == n
 	ended := validateSettledEpisodeEnded(st)
-	if ce.hub.Counter(vsRelaxedKey(ref)) == n && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
+	if relaxed && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
 		!st.IsClosed && st.Status == "Validate" && !hasLabelStr(st.Labels, "fabrik:revalidate") &&
 		!hasLabelStr(st.Labels, "fabrik:rebase-needed") {
 		ended = false
 	}
-	if ended {
-		ce.hub.SetCounter(closed, n)
+	m := ce.memo[ref]
+	if m == nil {
+		m = &itemMemo{} // closing an episode never creates the item's memo (derive owns the first-sight baseline)
+	}
+	reason := ce.e.validateWithdrawalReason(st, m.rebaseSeen)
+	// A worker dispatch or new feedback also withdraw a settlement that the
+	// older end conditions do not cover. An episode opened at the landing
+	// decision (yolo) still has its worker, so it is exempt.
+	if !ended && !relaxed && (reason == reasonWorkerDispatched || reason == reasonNewFeedback) {
+		ended = true
+	}
+	// A change of autonomy while the item stays settled (cruise to yolo, a label
+	// removed) is a decision about the merge, not a withdrawal: it ends the
+	// episode so the next settle point announces the item again with its cause
+	// (#2169 R3a). No settlement-withdrawn follows, because the item is still
+	// settled.
+	if !ended && !relaxed && ce.autonomyChangedSinceSettle(ref, n, st) {
+		ended = true
+	}
+	if !ended {
+		return
+	}
+	ce.hub.SetCounter(closed, n)
+	if reason != "" && !ce.e.chanTest.withdrawalOff.Load() {
+		ev := ce.e.withdrawnEvent(st, string(channelevents.ValidateSettled), reason)
+		ev.DedupKey = fmt.Sprintf("swvs:%s:%d", ref, n)
+		ce.enqueueDerived([]channelevents.Event{ce.withComment(m, st, ev)})
 	}
 }
 
@@ -292,6 +352,7 @@ func (ce *channelEvents) settleCandidate(ref string, cand settleCandidate) {
 		ce.hub.SetCounter(vsRelaxedKey(ref), ep)
 	}
 	ev.DedupKey = started + ":" + strconv.Itoa(ep)
+	ce.stampSettleCause(ref, &ev, ep)
 	m := ce.memoFor(ref)
 	var st itemstate.ItemState
 	if snap, ok := ce.e.store.Peek(repo, n); ok {
@@ -390,6 +451,12 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 		unresolved = len(dropOutdatedThreadComments(lpr.ThreadComments))
 	}
 	ev.Meta["next"] = next
+	if next == "waiting-for-human" {
+		// Decision-bearing: say how to act (R-options-1).
+		if o := optionsJSON(attention.MergeDecisionOptions(ev.PR)); o != "" {
+			ev.Meta["options"] = o
+		}
+	}
 	ev.Meta["ci"] = ci
 	if stage != nil && stage.WaitForCI != nil && *stage.WaitForCI {
 		// Reaching the settle point means the engine's own CI gate cleared.
@@ -398,6 +465,17 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 		ev.Meta["ci_gate"] = "not-gated"
 	}
 	ev.Meta["reviews"] = reviews
+	// Per-reviewer verdicts at the PR head (#2127 R5): a COMMENTED review reads the
+	// same for a clean pass and for findings, these fields tell them apart.
+	if j := reviewersJSON(e.reviewerVerdicts(st)); j != "" {
+		ev.Meta["reviewers"] = j
+	}
+	// A green that follows a flake re-run on this head says so (#2127 R7).
+	if lpr != nil && ci == "green" {
+		if names := e.flakeRerunChecks(st.Repo, lpr.Number, lpr.HeadSHA); len(names) > 0 {
+			ev.Meta["ci_rerun"] = strings.Join(names, ", ")
+		}
+	}
 	ev.Meta["unresolved_threads"] = strconv.Itoa(unresolved)
 	ev.Meta["autonomy"] = e.autonomyMode(st)
 	if lpr != nil && lpr.HeadSHA != "" {
@@ -411,4 +489,97 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 	ev.Content = fmt.Sprintf("%s settled at Validate: PR #%d CI %s, reviews %s; %s",
 		issueRef(st.Repo, st.Number), ev.PR, ci, reviews, action)
 	return ev
+}
+
+// The settleCauseOff seam (channel_settings.go) neutralises the re-settle cause
+// (tests only): no cause, no actor, and an autonomy change no longer ends the
+// episode, which is how an item behaved before #2169.
+
+// autonomyActor is who last wrote the item's autonomy label, as attributed by
+// the observer; added says whether that write was an addition.
+type autonomyActor struct {
+	attr  labelAttribution
+	added bool
+}
+
+// noteAutonomyWrite remembers the attribution of a fabrik:cruise / fabrik:yolo
+// delta (observer goroutine). An added label wins over a removed one: a cruise to
+// yolo swap is two deltas and the actor of the new mode is the decision.
+func (ce *channelEvents) noteAutonomyWrite(key string, d itemstate.LabelDelta, attr labelAttribution) {
+	if d.Label != "fabrik:cruise" && d.Label != "fabrik:yolo" {
+		return
+	}
+	ce.dmu.Lock()
+	defer ce.dmu.Unlock()
+	if ce.autonomy == nil {
+		ce.autonomy = map[string]autonomyActor{}
+	}
+	if prev, ok := ce.autonomy[key]; ok && prev.added && !d.Added {
+		return
+	}
+	ce.autonomy[key] = autonomyActor{attr: attr, added: d.Added}
+}
+
+// takeAutonomyWrite returns and forgets the remembered autonomy actor.
+func (ce *channelEvents) takeAutonomyWrite(key string) (autonomyActor, bool) {
+	ce.dmu.Lock()
+	defer ce.dmu.Unlock()
+	a, ok := ce.autonomy[key]
+	delete(ce.autonomy, key)
+	return a, ok
+}
+
+// autonomyChangedSinceSettle reports whether the open episode n was announced
+// under a different autonomy than the item has now, while it is otherwise still
+// settled.
+func (ce *channelEvents) autonomyChangedSinceSettle(ref string, n int, st *itemstate.ItemState) bool {
+	if ce.e.chanTest.settleCauseOff.Load() || ce.ledger == nil {
+		return false
+	}
+	rec, ok := ce.ledger.Settle(ref)
+	if !ok || rec.Episode != n || rec.Autonomy == "" {
+		return false
+	}
+	if st.IsClosed || st.Status != "Validate" || !hasLabelStr(st.Labels, "stage:Validate:complete") {
+		return false
+	}
+	return rec.Autonomy != ce.e.autonomyMode(st)
+}
+
+// stampSettleCause records the announced settle in the ledger and, when this is
+// not the first one, says why the item settled again: revalidated, new-head,
+// autonomy-changed (with the autonomy writer's attribution) or other, in that
+// precedence. The first settle carries no cause: after a lost ledger the daemon
+// cannot honestly claim "initial" (ADR 2169).
+func (ce *channelEvents) stampSettleCause(ref string, ev *channelevents.Event, episode int) {
+	if ce.ledger == nil {
+		return
+	}
+	prev, havePrev := ce.ledger.Settle(ref)
+	actor, haveActor := ce.takeAutonomyWrite(ref)
+	head, autonomy := ev.Meta["head_sha"], ev.Meta["autonomy"]
+	ce.ledger.SetSettle(ref, channelevents.SettleRecord{Episode: episode, HeadSHA: head, Autonomy: autonomy})
+	if !havePrev || ce.e.chanTest.settleCauseOff.Load() {
+		return
+	}
+	cause := channelevents.CauseOther
+	switch {
+	case prev.Revalidated:
+		cause = channelevents.CauseRevalidated
+	case prev.HeadSHA != "" && head != "" && prev.HeadSHA != head:
+		cause = channelevents.CauseNewHead
+	case prev.Autonomy != "" && prev.Autonomy != autonomy:
+		cause = channelevents.CauseAutonomyChanged
+	}
+	ev.Meta[channelevents.MetaCause] = cause
+	if cause == channelevents.CauseAutonomyChanged {
+		attr := labelAttribution{Actor: "unknown"}
+		if haveActor {
+			attr = actor.attr
+		}
+		by := attributionMeta(ev, attr)
+		ev.Content += fmt.Sprintf(" (settled again: autonomy changed from %s to %s by %s)", prev.Autonomy, autonomy, by)
+		return
+	}
+	ev.Content += fmt.Sprintf(" (settled again: %s)", cause)
 }

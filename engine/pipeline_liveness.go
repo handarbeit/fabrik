@@ -91,6 +91,11 @@ func computePollVerdict(in pollVerdictInput) pollVerdict {
 
 // pollVerdictFor computes the verdict from a health snapshot.
 func (e *Engine) pollVerdictFor(h healthSnapshot, now time.Time) pollVerdict {
+	// A SIGHUP drain stops the poll on purpose (#2259): that is not a stall, and
+	// the verdict is unknown rather than overdue.
+	if h.Draining {
+		return pollVerdict{}
+	}
 	return computePollVerdict(pollVerdictInput{
 		Now:             now,
 		Interval:        e.pollInterval(),

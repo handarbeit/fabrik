@@ -19,9 +19,12 @@ import (
 // validate-settled anchor (runCatchUpPhase2's settle point) is exercised against
 // the real gate chain rather than a hand-built snapshot.
 //
-// These tests are deliberately NOT t.Parallel: SetChannelTimingForTest changes
-// package-level timing the deriver reads, and serial tests finish before any
-// parallel test resumes.
+// These tests are t.Parallel (#2210): every channel test seam is scoped to the
+// Env's own Engine (Engine.SetChannelTimingForTest and the Set*DisabledForTest
+// neutralisations), so no test can see another's timing or neutralisation.
+// Waits are driven by settleWait, which blocks on the consumer and the hub having
+// drained rather than sleeping; waitRealTime is the documented fallback for
+// time-driven work that has no drain point.
 
 type simSink struct {
 	mu  sync.Mutex
@@ -56,8 +59,7 @@ func (s *simSink) ofType(typ channelevents.EventType, issue int) []channelevents
 // included) and attaches a sink.
 func startChannel(t *testing.T, env *Env) (*channelevents.Hub, *simSink) {
 	t.Helper()
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
-	t.Cleanup(restore)
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
 	if hub == nil {
 		t.Fatal("channel hub did not start")
@@ -72,8 +74,36 @@ func startChannel(t *testing.T, env *Env) (*channelevents.Hub, *simSink) {
 	return hub, sink
 }
 
-// settleWait gives the consumer goroutine a moment to publish after a poll.
-func settleWait() { time.Sleep(150 * time.Millisecond) }
+// drainCap bounds every drain wait in real time. It is generous because a
+// healthy drain returns in milliseconds, but parallel -race runs share CPU; it
+// exists so a stuck consumer fails the test with a message instead of hanging.
+const drainCap = 30 * time.Second
+
+// settleWait blocks until the channel consumer has processed everything the last
+// poll enqueued and the hub has delivered it to the attached sinks (#2210),
+// replacing a fixed 150 ms sleep. PollOnce has returned by the time it is
+// called, and a poll's store observers run synchronously, so the change sequence
+// it waits for is already enqueued. It is a no-op when no hub is running.
+func settleWait(env *Env) {
+	env.T.Helper()
+	if err := env.Engine.DrainChannelEventsForTest(drainCap); err != nil {
+		env.T.Fatalf("settleWait: %v", err)
+	}
+}
+
+// waitRealTime sleeps for d of real time. It is for work that is driven by a
+// clock the test cannot advance: the deriver's own ticker, the decision anchor
+// grace, a debounce on a path with no drain point, or asserting that nothing
+// further is published in a window. why states which, and is required so every
+// remaining sleep documents itself (R3). Prefer settleWait wherever the awaited
+// effect is a consequence of an enqueued change.
+func waitRealTime(t *testing.T, d time.Duration, why string) {
+	t.Helper()
+	if why == "" {
+		t.Fatal("waitRealTime needs a reason")
+	}
+	time.Sleep(d)
+}
 
 func newChannelGateEnv(t *testing.T, yolo bool, mod func(*engine.Config)) *Env {
 	t.Helper()
@@ -103,6 +133,7 @@ func newChannelGateEnv(t *testing.T, yolo bool, mod func(*engine.Config)) *Env {
 // the review gate holds; it fires exactly once when both gates have cleared,
 // and says a human decides next.
 func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	_, sink := startChannel(t, env)
 
@@ -112,7 +143,7 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 
 	// FABRIK_STAGE_COMPLETE has been emitted but awaiting-ci holds.
 	RunPolls(t, env, 5)
-	settleWait()
+	settleWait(env)
 	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
 		t.Fatalf("validate-settled emitted while fabrik:awaiting-ci is present: %+v", got)
 	}
@@ -127,7 +158,7 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-ci", 80)
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
 	RunPolls(t, env, 8)
-	settleWait()
+	settleWait(env)
 	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
 		t.Fatalf("validate-settled emitted while the review gate holds: %+v", got)
 	}
@@ -135,12 +166,12 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 	// The review arrives; both gates clear.
 	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) > 0
 	}, 40)
 
 	RunPolls(t, env, 10)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.ValidateSettled, num)
 	if len(got) != 1 {
 		t.Fatalf("want exactly one validate-settled, got %d: %+v", len(got), got)
@@ -157,6 +188,14 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 	if ev.Meta["reviews"] == "" || ev.Meta["reviews"] == "none" {
 		t.Errorf("reviews summary missing the approval: %q", ev.Meta["reviews"])
 	}
+	// The push stands on its own (#2127): it names the item and the verdict of
+	// each reviewer.
+	if ev.Meta["title"] != "channel validate-settled (cruise)" {
+		t.Errorf("meta.title = %q, want the issue title", ev.Meta["title"])
+	}
+	if !strings.Contains(ev.Meta["reviewers"], `"reviewer":"reviewer-human"`) {
+		t.Errorf("meta.reviewers = %q, want a verdict for reviewer-human", ev.Meta["reviewers"])
+	}
 	if projectItem(t, env, num).IsClosed {
 		t.Fatal("cruise must not land the PR")
 	}
@@ -166,6 +205,7 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 // train the settle event is captured before the engine lands the PR in the very
 // same pass, and says the engine will auto-merge.
 func TestChannelValidateSettledYoloNextIsAutoMerge(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, true, nil)
 	_, sink := startChannel(t, env)
 
@@ -179,7 +219,7 @@ func TestChannelValidateSettledYoloNextIsAutoMerge(t *testing.T) {
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
 	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
 	WaitForIssueClosed(t, env, num, 80)
-	settleWait()
+	settleWait(env)
 
 	got := sink.ofType(channelevents.ValidateSettled, num)
 	if len(got) != 1 {
@@ -193,6 +233,7 @@ func TestChannelValidateSettledYoloNextIsAutoMerge(t *testing.T) {
 // TestChannelValidateSettledAgainAfterRevalidate: fabrik:revalidate starts a new
 // settle episode, announced again once the item re-settles.
 func TestChannelValidateSettledAgainAfterRevalidate(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	_, sink := startChannel(t, env)
 
@@ -206,7 +247,7 @@ func TestChannelValidateSettledAgainAfterRevalidate(t *testing.T) {
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
 	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 1
 	}, 40)
 
@@ -223,11 +264,11 @@ func TestChannelValidateSettledAgainAfterRevalidate(t *testing.T) {
 	}
 	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr2.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 2
 	}, 80)
 	RunPolls(t, env, 6)
-	settleWait()
+	settleWait(env)
 	if n := len(sink.ofType(channelevents.ValidateSettled, num)); n != 2 {
 		t.Fatalf("want exactly two validate-settled events across two episodes, got %d", n)
 	}
@@ -265,6 +306,7 @@ func runCruiseToSettled(t *testing.T, withHub bool) (mutations []string, labels 
 // subscriber makes exactly the same GitHub mutations, in the same order, and
 // ends in the same label state as a run without any hub.
 func TestChannelEventsAreObservationOnly(t *testing.T) {
+	t.Parallel()
 	baseMut, baseLabels := runCruiseToSettled(t, false)
 	hubMut, hubLabels := runCruiseToSettled(t, true)
 	if strings.Join(baseMut, "\n") != strings.Join(hubMut, "\n") {
@@ -290,6 +332,7 @@ func strconvItoa(n int) string { return strconv.Itoa(n) }
 // auto-merge"; the settle that follows the recovered landing is announced
 // exactly once.
 func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, true, nil)
 	_, sink := startChannel(t, env)
 
@@ -316,7 +359,7 @@ func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.
 		}
 		return fired > 0
 	}, 80)
-	settleWait()
+	settleWait(env)
 	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
 		t.Fatalf("validate-settled announced before the landing succeeded: %+v", got)
 	}
@@ -326,7 +369,7 @@ func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.
 		env.Sim.Faults().Clear(m)
 	}
 	WaitForIssueClosed(t, env, num, 120)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.ValidateSettled, num)
 	if len(got) != 1 {
 		t.Fatalf("want exactly one validate-settled after the landing succeeded, got %d: %+v", len(got), got)

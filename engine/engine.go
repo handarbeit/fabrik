@@ -44,6 +44,9 @@ type Config struct {
 	ReconcileInterval          time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles            int                 // Max review re-invocation cycles per issue before pausing (default 5)
 	ChannelHeldMax             int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
+	RetryStarvedThreshold      time.Duration       // how long a due stage retry may go undispatched before a retry-starved channel event (default 5m; #2170, docs/state-machine.md §7.14). Never below 2 × the poll interval.
+	ItemWedgedThreshold        time.Duration       // how long a gate may hold an item with no worker dispatched or queued before an item-wedged channel event (default 10m; #2170). Never below 2 × the poll interval.
+	CacheDivergenceWindow      time.Duration       // how recent an engine label/column write must be for a reverting reconcile, deep fetch or probe to be reported as cache-divergence (default 5m; #2170)
 	StallThreshold             time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
@@ -256,6 +259,8 @@ type Engine struct {
 	localAPI   *localapi.Server
 	// channel is the MCP channel-event deriver and hub (#1968); nil until Run()
 	// starts it (and when the hub failed to open). Guarded by channelMu.
+	// chanTest holds the channel test seams, per engine (#2210, channel_settings.go).
+	chanTest  channelTestSettings
 	channelMu sync.Mutex
 	channel   *channelEvents
 	// boardPopulated is set once the first poll has completed successfully: the
@@ -263,6 +268,9 @@ type Engine struct {
 	// afterwards is an arrival (item-added, #2123). Items created before it —
 	// the startup population, whichever path delivers it — are never announced.
 	boardPopulated atomic.Bool
+	// decisionAnchors is the poll-side recorder's retry memory (#2120,
+	// decision_anchor.go).
+	decisionAnchors decisionAnchorState
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window
@@ -299,6 +307,8 @@ type Engine struct {
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
+	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
@@ -307,10 +317,14 @@ type Engine struct {
 	startupWatches                        map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
 	probeDriftConvergenceDisabledForTest  bool                          // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
 	probeTerminalDriftSkipDisabledForTest bool                          // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
+	prFactsRotation                       atomic.Int64                  // polls one full settlePRFacts rotation takes (#2122): ceil(candidates that can spend check budget / check budget), >= 1; attention tolerates a verdict that old
+	prFactsAttemptAt                      map[string]time.Time          // last poll a candidate spent REST/check budget, keyed repo#number; poll goroutine only (#2122), so a failing or closed item rotates to the back instead of holding the front
+	prFactsRefreshDisabledForTest         bool                          // neutralisation seam (#2122): the overseer PR-fact writers (probe scalar apply, settlePRFacts) are off
 	probeDrift                            probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
 	statusLine                            displayFieldState             // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
 	lastActivity                          displayFieldState             // display-only "Last activity" date field writer state (#2049) — in memory only
 	lastRun                               displayFieldState             // display-only "Last run" text field writer state (#2049) — in memory only
+	displayFieldWarn                      displayFieldWarnState         // last display-field panel aggregate (#2218) — in memory only; a restart recomputes it
 	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
 	layer1OffBoardMu                      sync.Mutex                    // guards layer1OffBoard
 	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
@@ -338,6 +352,7 @@ type Engine struct {
 	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
+	logSink                               atomic.Pointer[LogSink]       // optional per-Engine plain-text sink (#2247); nil: print to stdout
 	webhookMgr                            eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
@@ -402,6 +417,11 @@ type Engine struct {
 	// sighupRequested is set by the SIGHUP handler goroutine to signal that the
 	// main loop should re-exec after draining workers (Unix only).
 	sighupRequested atomic.Bool
+
+	// drain is the two-phase SIGHUP state (#2259, ADR 2259): the first SIGHUP
+	// begins a drain that gates every dispatch and cancels nothing, the second
+	// cancels. The zero value is usable.
+	drain drainState
 
 	// lockLost is set by Run() when per-poll verification finds a held instance
 	// lock replaced or removed (#2097). drainAndExit then skips lock-label cleanup
@@ -1116,7 +1136,12 @@ func (e *Engine) logfRepo(repoKey string, tag, format string, args ...any) {
 // logEvent is the shared implementation behind logf and logfRepo.
 func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	if e.events != nil {
+	if sink := e.logSink.Load(); sink != nil && e.events == nil {
+		// A per-Engine sink (the sim bed, #2247) replaces the shared stdout. It is
+		// a branch ahead of the TUI and stdout paths, not nested inside the stdout
+		// one, so the plain-text block below stays exactly as it was on main.
+		(*sink)(issueNumber, tag, msg)
+	} else if e.events != nil {
 		select {
 		case e.events <- tui.LogEvent{IssueNumber: issueNumber, Repo: repo, Tag: tag, Message: msg}:
 		default:

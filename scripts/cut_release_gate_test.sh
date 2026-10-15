@@ -228,8 +228,16 @@ assert_eq "allowed_dirty_regex: modified release-notes/<version>.md is filtered 
   "filtered" "$(allowed_line_survives " M release-notes/${SAMPLE_VERSION}.md")"
 assert_eq "allowed_dirty_regex: modified plugin/known_embedded_versions.go is filtered (allowed)" \
   "filtered" "$(allowed_line_survives " M plugin/known_embedded_versions.go")"
+assert_eq "allowed_dirty_regex: modified plugin/shipped_files.json is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives " M plugin/shipped_files.json")"
 assert_eq "allowed_dirty_regex: modified plugin/*/.claude-plugin/plugin.json is filtered (allowed)" \
-  "filtered" "$(allowed_line_survives " M plugin/entwurf/.claude-plugin/plugin.json")"
+  "filtered" "$(allowed_line_survives " M plugin/fabrik/.claude-plugin/plugin.json")"
+assert_eq "allowed_dirty_regex: modified .claude-plugin/marketplace.json is filtered (allowed, #2141 ref pinning)" \
+  "filtered" "$(allowed_line_survives " M .claude-plugin/marketplace.json")"
+assert_eq "allowed_dirty_regex: staged .claude-plugin/marketplace.json is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives "M  .claude-plugin/marketplace.json")"
+assert_eq "allowed_dirty_regex: another file under .claude-plugin/ is NOT filtered" \
+  "kept" "$(allowed_line_survives " M .claude-plugin/other.json")"
 assert_eq "allowed_dirty_regex: an unrelated dirty file is NOT filtered (still counts as dirty)" \
   "kept" "$(allowed_line_survives " M engine/poll.go")"
 assert_eq "allowed_dirty_regex: a different version's release-notes is NOT filtered" \

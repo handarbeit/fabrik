@@ -36,7 +36,11 @@ type prFlakeState struct {
 	// dispatch and the re-run is never retried for it (R4).
 	degraded bool
 	pending  *flakeRerunRecord
-	touched  time.Time
+	// rerunChecks names the failed checks whose jobs were actually re-run on this
+	// head (R1 and R2, never a refused re-run); validate-settled reports it as
+	// ci_rerun when the head is green afterwards (#2127 R7).
+	rerunChecks []string
+	touched     time.Time
 }
 
 // flakeAction is what ciFlakeRerun's decision tells its caller to do.
@@ -113,6 +117,40 @@ func (e *Engine) flakeStateForLocked(repoStr string, prNum int, headSHA string, 
 	}
 	st.touched = now
 	return st
+}
+
+// mergeCheckNames adds the names of failed to names, without duplicates, in
+// first-seen order.
+func mergeCheckNames(names []string, failed []gh.CheckRun) []string {
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		seen[n] = true
+	}
+	for _, c := range failed {
+		if c.Name != "" && !seen[c.Name] {
+			seen[c.Name] = true
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
+// flakeRerunChecks returns the names of the checks the stage gate re-ran on the
+// PR's head, or nil when no re-run was made on that head (#2127 R7). It is a
+// read: unlike flakeStateForLocked it never resets, creates or touches an entry.
+// The state is in memory only, so it is nil after a restart and after
+// startupStateTTL without a gate touch.
+func (e *Engine) flakeRerunChecks(repoStr string, prNum int, headSHA string) []string {
+	if headSHA == "" || readPolishDisabled(7) {
+		return nil
+	}
+	e.flakeRerunMu.Lock()
+	defer e.flakeRerunMu.Unlock()
+	st := e.flakeReruns[startupWatchKey(repoStr, prNum)]
+	if st == nil || st.headSHA != headSHA || len(st.rerunChecks) == 0 {
+		return nil
+	}
+	return append([]string(nil), st.rerunChecks...)
 }
 
 // SetCIFlakeRerunDisabledForTest turns the stage-gate flake re-run off, so a
@@ -233,6 +271,7 @@ func (e *Engine) ciFlakeRerun(pctx *phase1Ctx, settle PRSettleResult) bool {
 		if st.pending != nil {
 			st.pending.runIDs = runIDs
 		}
+		st.rerunChecks = mergeCheckNames(st.rerunChecks, failed)
 		e.flakeRerunMu.Unlock()
 		e.logf(pctx.item.Number, "ci-gate", "flake re-run (%s): re-ran failed jobs of workflow run(s) %v on PR #%d head %s — waiting instead of dispatching a CI-fix worker\n", label, runIDs, pr.Number, short)
 		return true

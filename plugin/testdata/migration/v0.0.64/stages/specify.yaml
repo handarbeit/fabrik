@@ -1,0 +1,17 @@
+name: Specify
+order: 0
+skill: fabrik-specify
+comment_skill: fabrik-specify-comment
+auto_advance: false
+model: sonnet
+max_turns: 50
+read_only: true
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - TodoWrite
+  - WebSearch
+  - WebFetch
+completion:
+  type: claude

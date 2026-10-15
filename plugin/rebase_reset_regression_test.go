@@ -9,19 +9,19 @@ import (
 
 // TestBeforeYouStartRebaseIsConditionalAndPushesNotResets guards against the
 // rebase-reset loop reported in #1254/#1253 and fixed by #1554: the earlier
-// "Before You Start" rebase step in fabrik-review and fabrik-validate used to
+// "Before You Start" rebase step in review and validate used to
 // be unconditional and had no push step, so a stage agent whose rebase
 // produced SHAs that didn't match the remote would reach for
 // `git reset --hard origin/<branch>` — discarding the rebase (and its
 // commits) it had just performed.
 //
 // This is scoped to the "## Before You Start" section specifically, not the
-// whole file: fabrik-validate/SKILL.md's later Pre-Completion Gate (Checks
+// whole file: validate/SKILL.md's later Pre-Completion Gate (Checks
 // A/B/C, added by ADR-1364/#1364) already contains "behind_count" and
 // "rev-list --count" for a *different*, untouched rebase point. A whole-file
 // substring test would false-pass against pre-fix text there. See ADR-1554.
 func TestBeforeYouStartRebaseIsConditionalAndPushesNotResets(t *testing.T) {
-	for _, skill := range []string{"fabrik-review", "fabrik-validate"} {
+	for _, skill := range []string{"review", "validate"} {
 		t.Run(skill, func(t *testing.T) {
 			content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/" + skill + "/SKILL.md")
 			if err != nil {
@@ -57,11 +57,11 @@ func TestBeforeYouStartRebaseIsConditionalAndPushesNotResets(t *testing.T) {
 // itself) into a persisted one (the wrong-base rebase now gets
 // force-pushed onto the PR's actual, different base — silent corruption).
 // The fix resolves the base branch dynamically via `gh pr view --json
-// baseRefName` (the same mechanism fabrik-validate's own, untouched
+// baseRefName` (the same mechanism validate's own, untouched
 // Pre-Completion Gate already uses ~230 lines below) and uses it
 // throughout, instead of a literal `origin/main`.
 func TestBeforeYouStartResolvesBaseBranchDynamically(t *testing.T) {
-	for _, skill := range []string{"fabrik-review", "fabrik-validate"} {
+	for _, skill := range []string{"review", "validate"} {
 		t.Run(skill, func(t *testing.T) {
 			content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/" + skill + "/SKILL.md")
 			if err != nil {
@@ -75,16 +75,16 @@ func TestBeforeYouStartResolvesBaseBranchDynamically(t *testing.T) {
 		})
 	}
 
-	// fabrik-review's "Read the diff, not just the code" step (under "## How
+	// review's "Read the diff, not just the code" step (under "## How
 	// You Review", not "## Before You Start") had the same hardcoded-origin/main
 	// defect flagged by the same review — verify it was swept too.
-	t.Run("fabrik-review/read-the-diff", func(t *testing.T) {
-		content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/fabrik-review/SKILL.md")
+	t.Run("review/read-the-diff", func(t *testing.T) {
+		content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/review/SKILL.md")
 		if err != nil {
-			t.Fatalf("reading fabrik-review/SKILL.md from embed: %v", err)
+			t.Fatalf("reading review/SKILL.md from embed: %v", err)
 		}
 		if hardcodedDiffRe.MatchString(string(content)) {
-			t.Errorf("fabrik-review/SKILL.md still has a hardcoded `git diff origin/main..HEAD` — should diff against the resolved $base_branch")
+			t.Errorf("review/SKILL.md still has a hardcoded `git diff origin/main..HEAD` — should diff against the resolved $base_branch")
 		}
 	})
 }

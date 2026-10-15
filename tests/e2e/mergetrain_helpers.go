@@ -533,7 +533,10 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 // member PR directly rather than minting a landing PR — so callers comparing
 // the captured number against the member PR must treat equality as legitimate
 // there. See waitForLandingPRNumber's contract below.
-var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton|via singleton fast path) PR #(\d+)\.`)
+// The fast-path form after a singleton catch-up (#2044) reads "PR #N after a
+// catch-up." — without the optional group the wait timed out on a correct landing
+// (TestYoloAutoMergeLabel/train-mode=on, 0.0.85 gate).
+var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton|via singleton fast path) PR #(\d+)(?: after a catch-up)?\.`)
 
 // waitForLandingPRNumber polls the member's own PR comments (memberPRNum) for
 // the engine's "landed via ..." comment and returns the distinct
@@ -1115,4 +1118,67 @@ func parseTrainPRs(out string, since time.Time, members []int) ([]trainPR, error
 	}
 	sort.Slice(prs, func(i, j int) bool { return prs[i].Number < prs[j].Number })
 	return prs, nil
+}
+
+// prepareMemberExactPathSuffix is prepareMemberExactPath with prBodySuffix
+// appended to the member PR's body (e.g. slowCIEveryHeadMarker). It is a copy,
+// not a refactor of prepareMemberExactPath, so the gate ledger's per-test source
+// hashes of every other caller stay unchanged.
+func prepareMemberExactPathSuffix(t *testing.T, env *Env, repo, baseBranch, marker, path, content, prBodySuffix string, labels ...string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	stamp := time.Now().UTC().Format("150405.000")
+	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
+	issueNum = FileIssue(t, env, repo, title,
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker), labels...)
+	itemID = AddIssueToProject(t, env, repo, issueNum)
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
+	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n%s", issueNum, prBodySuffix)
+	prNum = createMemberPRBody(t, env, repo, baseBranch, branch, path, content, title, body, issueNum, false)
+	if baseBranch == "" || baseBranch == "main" {
+		AwaitClosingLinkage(t, env, repo, issueNum, prNum, awaitSeedTimeout)
+	}
+	AwaitPRForBranchVisible(t, env, repo, issueNum, awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issueNum, awaitSeedTimeout)
+	t.Logf("prepared member %s: issue #%d, PR #%d, path %s (not yet Queued)", marker, issueNum, prNum, path)
+	return issueNum, prNum, itemID
+}
+
+// slowCIEveryHeadMarker makes the bed's slow-gate sleep its 10-minute window on
+// every head of the PR, merge commits included. The plain slow-ci-required
+// markers skip a merge-commit head (the window is served once per PR); a
+// scenario that needs the merge-train singleton catch-up itself to hold the
+// partition's worker uses this one.
+const slowCIEveryHeadMarker = "\nslow-ci-every-head\n"
+
+// queuedMember is one member for queueInObservedOrder.
+type queuedMember struct {
+	issue int
+	item  string
+}
+
+// queueInObservedOrder places each item in Queued, in the given order, and
+// waits for the engine to have read the move before placing the next. The train
+// orders a partition by StatusEnteredAt, the time the engine OBSERVED the move;
+// moves observed in one reconcile are stamped in arbitrary order (0.0.84 gate:
+// [A,P,B,C] for a back-to-back [A,B,C,P]), so back-to-back placement does not
+// fix the order. Callers keep the members paused so nothing batches meanwhile.
+func queueInObservedOrder(t *testing.T, env *Env, repo string, members []queuedMember) {
+	t.Helper()
+	for _, m := range members {
+		offset := LogOffset(t, env)
+		SetIssueStatus(t, env, m.item, "Queued")
+		AwaitBoardItemVisible(t, env, repo, m.issue, awaitSeedTimeout)
+		probe := fmt.Sprintf("[#%d cache] probe: ", m.issue)
+		staleProbe, newProbe := probe+"stale", probe+"new item discovered"
+		fetched := fmt.Sprintf("[cache] stale for #%d (", m.issue)
+		missed := fmt.Sprintf("[cache] miss for #%d ", m.issue)
+		waitForLogMatch(t, env, offset, 10*time.Minute, fmt.Sprintf("the engine reading #%d's move to Queued", m.issue),
+			func(l string) bool {
+				return strings.Contains(l, staleProbe) || strings.Contains(l, newProbe) ||
+					strings.Contains(l, fetched) || strings.Contains(l, missed)
+			})
+		// The lines above are logged just before the fetch that applies the move;
+		// leave it time to land so the next member is stamped strictly later.
+		time.Sleep(5 * time.Second)
+	}
 }

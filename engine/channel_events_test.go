@@ -82,23 +82,28 @@ func channelEngine(t *testing.T, ahead time.Duration, sub *channelevents.Subscri
 // time-driven events.
 func channelEngineTick(t *testing.T, ahead time.Duration, sub *channelevents.Subscription, tick time.Duration) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, tick
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-
-	return channelEngineOn(t, apiEngine(t, ahead), ahead, sub)
+	e := apiEngine(t, ahead)
+	e.SetChannelTimingForTest(20*time.Millisecond, tick)
+	return channelEngineOn(t, e, ahead, sub)
 }
 
 // channelEngineOn starts the channel hub on an already-built engine (one wired
 // with a mock GitHub client, say) and attaches subscriber "T" as channelEngine
-// does. The caller has set channelDebounce/channelTick.
+// does. A debounce or tick the caller has not set on e (SetChannelTimingForTest)
+// defaults to 20ms and an hour.
 func channelEngineOn(t *testing.T, e *Engine, ahead time.Duration, sub *channelevents.Subscription) (*Engine, *chanSink) {
 	t.Helper()
 	// An adjustable clock installed before any goroutine starts, so a test can
 	// move time (a deadline passing) without racing the deriver.
 	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
+	if e.chanTest.debounce.Load() == 0 {
+		e.chanTest.debounce.Store(int64(20 * time.Millisecond))
+	}
+	if e.chanTest.tick.Load() == 0 {
+		e.chanTest.tick.Store(int64(time.Hour))
+	}
 	e.fabrikDir = t.TempDir()
-	e.startChannelEvents()
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir), false)
 	t.Cleanup(e.closeChannelEvents)
 	ce := e.channelEvents()
 	if ce == nil {
@@ -339,15 +344,13 @@ func (c *adjClock) set(t time.Time) { c.mu.Lock(); c.t = t; c.mu.Unlock() }
 // events, delivers the held ones in order on re-attach, and does not replay a
 // settle episode it already announced.
 func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	dir := t.TempDir()
 
 	start := func() *Engine {
 		e := apiEngine(t, 0)
+		e.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 		e.fabrikDir = t.TempDir()
-		e.startChannelEventsIn(dir)
+		e.startChannelEventsIn(dir, false)
 		t.Cleanup(e.closeChannelEvents)
 		return e
 	}
@@ -553,6 +556,10 @@ func TestSelfUpgradeConfigsFlushChannelStateBeforeExec(t *testing.T) {
 // A subscriber that arrives after items already settled or paused still learns
 // about them: a new subscription and a fresh session each get one catch-up
 // snapshot of current state, tagged catch_up=true, while a reconnect does not.
+//
+// The subscriber names its events, so it is not on the semantic default and
+// keeps the per-item snapshot; a default subscription is caught up with the
+// situation digest instead (channel_situation_test.go, #2171).
 func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e, live := channelEngine(t, 0, settledOnly())
 	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
@@ -563,11 +570,12 @@ func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e.seedAPIItem(t, 3, "Implement") // nothing waiting on anyone
 
 	st := e.channelStreamer()
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	perItem := localapi.SubscribeParams{Subscriber: "late", Events: []string{"validate-settled", "awaiting-input"}}
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 	// The same subscription again is not a new subscription: no second catch-up.
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 
@@ -632,9 +640,6 @@ func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
 // #2112: on a multi-repo daemon (owner, no repo) a bare issue number in a
 // subscription resolves when the cached issues are all in one repo.
 func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	m := multiRepoAPIEngine()
 	seedRepoItem(m, "owner/repo", 7)
 	e, _ := channelEngineOn(t, m, 0, nil)
@@ -648,48 +653,29 @@ func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
 }
 
 // A catch-up snapshot is current state, never history: it must not replay
-// arrivals, column moves or closes (#2123, ADR 2123). The same items produce
-// column-changed and closed live, so a catch-up that stayed silent only because
-// the items had no lifecycle history would not show it.
+// arrivals, column moves or closes (#2123, ADR 2123). The assertion is made on
+// catchUpEvents itself over a state that holds a fresh arrival, a recent column
+// move and a recent close, so a catch-up that emitted any of those types fails
+// here — a subscriber-side scan would pass whether or not it did (#2187).
 func TestCatchUpNeverReplaysLifecycleEvents(t *testing.T) {
 	e, live := channelEngine(t, 0, nil)
 	e.MarkBoardPopulatedForTest()
-	e.seedAPIItem(t, 1, "Specify", "fabrik:cruise")
-	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	e.seedAPIItem(t, 1, "Specify", "fabrik:cruise")                            // closed below
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input") // paused, stays open
+	e.seedAPIItem(t, 3, "Specify", "fabrik:cruise")                            // fresh arrival
+	e.seedAPIItem(t, 4, "Specify", "fabrik:cruise")                            // moved below
 	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Research"})
 	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1})
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 4, NewStatus: "Implement"})
 
-	// The lifecycle events do exist live for these very items, and have all been
-	// published before the late subscriber exists.
+	// The lifecycle events do exist live for these very items.
 	seen := map[channelevents.EventType]bool{}
 	for !(seen[channelevents.ItemAdded] && seen[channelevents.ColumnChanged] && seen[channelevents.Closed]) {
 		seen[live.next(t).Type] = true
 	}
 
-	st := e.channelStreamer()
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
-		t.Fatal(err)
-	}
-	sink := newChanSink()
-	detach, err := st.Attach(localapi.AttachParams{Subscriber: "late", CatchUp: true}, sink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer detach()
-
-	var caughtUp []channelevents.Event
-	timeout := time.After(400 * time.Millisecond)
-collect:
-	for {
-		select {
-		case ev := <-sink.ch:
-			caughtUp = append(caughtUp, ev)
-		case <-timeout:
-			break collect
-		}
-	}
 	sawPaused := false
-	for _, ev := range caughtUp {
+	for _, ev := range e.catchUpEvents() {
 		switch ev.Type {
 		case channelevents.ItemAdded, channelevents.ColumnChanged, channelevents.Closed:
 			t.Fatalf("catch-up replayed a lifecycle event: %+v", ev)
@@ -698,7 +684,52 @@ collect:
 		}
 	}
 	if !sawPaused {
-		t.Fatalf("the paused item should still be in the snapshot; the scan above would be vacuous: %+v", caughtUp)
+		t.Fatalf("the paused item should still be in the snapshot; the scan above would be vacuous: %+v", e.catchUpEvents())
+	}
+}
+
+// An arrival is announced only once its labels are known (#2123 FR-005, #2187):
+// a probe-seeded card has none, and an item-added with an empty label set would
+// make a label-scoped subscriber miss it. Removing the LabelsKnown condition in
+// announceArrival makes this fail.
+func TestChannelItemAddedWaitsForLabels(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_X", Number: 5, Repo: "owner/repo", Title: "labelless", Status: "Specify", LabelsAbsent: true,
+	}})
+	sink.quiet(t, 300*time.Millisecond)
+
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 5, FreshState: gh.ProjectItem{
+		ID: "I_X", Number: 5, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:cruise"},
+	}})
+	ev := sink.nextOfType(t, channelevents.ItemAdded)
+	if ev.Issue != 5 || len(ev.Labels) == 0 || !hasLabelStr(ev.Labels, "fabrik:cruise") {
+		t.Fatalf("item-added must carry the known labels: %+v", ev)
+	}
+}
+
+// An item whose column has no configured stage is outside Fabrik's known column
+// set: it is never announced, and a later move into a configured column is a
+// column-changed, not a late arrival (#2187, ADR 2123).
+func TestChannelItemAddedSkipsUnconfiguredColumn(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 6, "Mystery column", "enhancement")
+	sink.quiet(t, 300*time.Millisecond)
+
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 6, NewStatus: "Specify"})
+	ev := sink.nextOfType(t, channelevents.ColumnChanged)
+	if ev.Issue != 6 || ev.Meta["from"] != "Mystery column" || ev.Meta["to"] != "Specify" {
+		t.Fatalf("unexpected column-changed: %+v", ev)
+	}
+	sink.quiet(t, 300*time.Millisecond)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, got := range sink.got {
+		if got.Type == channelevents.ItemAdded {
+			t.Fatalf("item-added published for an item first seen in an unconfigured column: %+v", got)
+		}
 	}
 }
 

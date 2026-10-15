@@ -43,6 +43,9 @@ func (realClock) Now() time.Time { return time.Now() }
 // are unaffected.
 func (e *Engine) SetClock(c Clock) {
 	e.clock = c
+	// The store's eligibility and column-move stamps (#2120) are read by the
+	// classifier against e.now(); stamp them on the same clock.
+	e.store.SetClock(e.now)
 	// The pipeline-liveness verdict (#2124) measures "no poll started" from the
 	// daemon's start; keep that stamp on the same clock as the verdict.
 	e.health.markStarted(e.now())

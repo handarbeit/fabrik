@@ -2,6 +2,8 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,11 +44,9 @@ func TestFetchTextField_Success(t *testing.T) {
 	}
 }
 
-func TestFetchTextField_MissingOrNotText(t *testing.T) {
+func TestFetchTextField_Missing(t *testing.T) {
 	for name, resp := range map[string]string{
 		"missing field": `{"data":{"node":{"field":null}}}`,
-		"no id (union)": `{"data":{"node":{"field":{}}}}`,
-		"number field":  `{"data":{"node":{"field":{"id":"F","name":"Fabrik","dataType":"NUMBER"}}}}`,
 		"non-project":   `{"data":{"node":{}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -62,6 +62,80 @@ func TestFetchTextField_MissingOrNotText(t *testing.T) {
 				t.Fatalf("want nil field, got %+v", f)
 			}
 		})
+	}
+}
+
+func TestFetchTextField_TypeMismatch(t *testing.T) {
+	for name, tc := range map[string]struct{ resp, found string }{
+		"no id (union)": {`{"data":{"node":{"field":{}}}}`, ""},
+		"number field":  {`{"data":{"node":{"field":{"id":"F","name":"Fabrik","dataType":"NUMBER"}}}}`, "NUMBER"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tc.resp))
+			}))
+			defer srv.Close()
+			f, err := NewClientWithBaseURL("token", srv.URL).FetchTextField("PVT_1", "Fabrik")
+			var mm *FieldTypeMismatchError
+			if !errors.As(err, &mm) {
+				t.Fatalf("want *FieldTypeMismatchError, got %v", err)
+			}
+			if f != nil || mm.Name != "Fabrik" || mm.Want != "TEXT" || mm.Found != tc.found {
+				t.Fatalf("field = %+v, mismatch = %+v", f, mm)
+			}
+		})
+	}
+}
+
+// SC-001 (#2218): GitHub reports a missing field name as a GraphQL error, not
+// a null field. The recording is that response; it must resolve to absent.
+// Non-vacuity: removing the isFieldNotFoundError branch in fetchProjectFieldID
+// makes this (and the date twin) fail with the wrapped GraphQL error.
+func TestFetchTextField_AbsentFieldGraphQLError(t *testing.T) {
+	srv := textFieldServer(t, "fetch_text_field_absent", func(q string, vars map[string]interface{}) {})
+	defer srv.Close()
+	f, err := NewClientWithBaseURL("token", srv.URL).FetchTextField("PVT_1", "Fabrik")
+	if err != nil || f != nil {
+		t.Fatalf("an absent field must resolve to (nil, nil), got %+v, %v", f, err)
+	}
+}
+
+func TestIsFieldNotFoundError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		resp string
+		want bool
+	}{
+		"real shape with field path": {`{"data":{"node":{"field":null}},"errors":[{"type":"NOT_FOUND","path":["node","field"],"message":"Could not resolve to a Unions::ProjectV2FieldConfiguration with the name 'Fabrik'."}]}`, true},
+		"real shape without a path":  {`{"errors":[{"message":"Could not resolve to a Unions::ProjectV2FieldConfiguration with the name 'Fabrik'."}]}`, true},
+		"same message, other path":   {`{"errors":[{"path":["node","items"],"message":"Could not resolve to a Unions::ProjectV2FieldConfiguration with the name 'Fabrik'."}]}`, false},
+		"bad project id":             {`{"errors":[{"type":"NOT_FOUND","path":["node"],"message":"Could not resolve to a node with the global id of 'PVT_1'."}]}`, false},
+		"unrelated":                  {`{"errors":[{"message":"boom"}]}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tc.resp))
+			}))
+			defer srv.Close()
+			f, err := NewClientWithBaseURL("token", srv.URL).FetchTextField("PVT_1", "Fabrik")
+			if tc.want && (err != nil || f != nil) {
+				t.Fatalf("want absent (nil, nil), got %+v, %v", f, err)
+			}
+			if !tc.want && err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}
+
+func TestGraphQLError_KeepsLegacyText(t *testing.T) {
+	err := error(&GraphQLError{Message: "boom", Path: []interface{}{"node", "field"}})
+	if err.Error() != "GraphQL error: boom" {
+		t.Fatalf("Error() = %q", err.Error())
+	}
+	wrapped := fmt.Errorf("fetching: %w", err)
+	var ge *GraphQLError
+	if !errors.As(wrapped, &ge) || len(ge.Path) != 2 {
+		t.Fatalf("errors.As lost the typed error: %v", wrapped)
 	}
 }
 

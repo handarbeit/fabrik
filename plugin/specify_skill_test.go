@@ -51,12 +51,12 @@ var specTemplateLines = []string{
 // spec — managed repos may have neither), in order, and tells the worker the
 // engine, not the worker, persists the spec.
 func TestSpecifySkillCarriesSpecTemplate(t *testing.T) {
-	content := readSkill(t, "fabrik-specify")
+	content := readSkill(t, "specify")
 	pos := 0
 	for _, line := range specTemplateLines {
 		i := strings.Index(content[pos:], line)
 		if i < 0 {
-			t.Fatalf("fabrik-specify/SKILL.md: template line %q missing or out of order", line)
+			t.Fatalf("specify/SKILL.md: template line %q missing or out of order", line)
 		}
 		pos += i + len(line)
 	}
@@ -66,30 +66,30 @@ func TestSpecifySkillCarriesSpecTemplate(t *testing.T) {
 		"exactly `## Open Questions`",
 	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("fabrik-specify/SKILL.md missing %q", want)
+			t.Errorf("specify/SKILL.md missing %q", want)
 		}
 	}
 	for _, banned := range []string{".specify/templates", "spec-template.md"} {
 		if strings.Contains(content, banned) {
-			t.Errorf("fabrik-specify/SKILL.md must not point at %q: the template is inlined", banned)
+			t.Errorf("specify/SKILL.md must not point at %q: the template is inlined", banned)
 		}
 	}
 }
 
 // TestSpecifyCommentSkillReferencesTemplate pins that the comment skill uses
 // the same template by reference and does not carry a second copy that could
-// drift from fabrik-specify's.
+// drift from specify's.
 func TestSpecifyCommentSkillReferencesTemplate(t *testing.T) {
-	content := readSkill(t, "fabrik-specify-comment")
+	content := readSkill(t, "specify-comment")
 	for _, want := range []string{
-		"`fabrik-specify` skill",
+		"`fabrik-stages:specify` skill",
 		"Spec template",
 		"specs/<issue number>-<slug>/spec.md",
 		"`Draft` while any open question remains, `Specified` once none do",
 		"exactly that",
 	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("fabrik-specify-comment/SKILL.md missing %q", want)
+			t.Errorf("specify-comment/SKILL.md missing %q", want)
 		}
 	}
 	for _, copied := range []string{
@@ -98,7 +98,7 @@ func TestSpecifyCommentSkillReferencesTemplate(t *testing.T) {
 		"## Source References *(optional)*",
 	} {
 		if strings.Contains(content, copied) {
-			t.Errorf("fabrik-specify-comment/SKILL.md restates template text %q; reference fabrik-specify instead", copied)
+			t.Errorf("specify-comment/SKILL.md restates template text %q; reference specify instead", copied)
 		}
 	}
 }
@@ -110,10 +110,10 @@ func TestSpecifyCommentSkillReferencesTemplate(t *testing.T) {
 // instruction itself is what these assertions guard.
 func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 	const sharedPhrase = "carry non-template sections forward verbatim"
-	specify := readSkill(t, "fabrik-specify")
-	comment := readSkill(t, "fabrik-specify-comment")
+	specify := readSkill(t, "specify")
+	comment := readSkill(t, "specify-comment")
 
-	for name, body := range map[string]string{"fabrik-specify": specify, "fabrik-specify-comment": comment} {
+	for name, body := range map[string]string{"specify": specify, "specify-comment": comment} {
 		if !strings.Contains(strings.ToLower(body), sharedPhrase) {
 			t.Errorf("%s: missing shared phrase %q", name, sharedPhrase)
 		}
@@ -126,14 +126,14 @@ func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 	}
 
 	if !strings.Contains(specify, "- [ ] If the current body already started with `# Feature Specification:`, any non-template section was carried forward verbatim") {
-		t.Error("fabrik-specify: Quality Checklist is missing the gated carry-forward item")
+		t.Error("specify: Quality Checklist is missing the gated carry-forward item")
 	}
 
 	// The rule is gated on template shape: a rough first-run body is input to
 	// restructure, never preserved and appended after the template.
 	const gate = "when the current body already starts with `# Feature Specification:`"
 	const restructure = "input to restructure, not sections to preserve"
-	for name, body := range map[string]string{"fabrik-specify": specify, "fabrik-specify-comment": comment} {
+	for name, body := range map[string]string{"specify": specify, "specify-comment": comment} {
 		if !strings.Contains(body, gate) {
 			t.Errorf("%s: carry-forward rule is missing the template-shape gate %q", name, gate)
 		}
@@ -146,17 +146,17 @@ func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 		"never append the rough body after the template",
 	} {
 		if !strings.Contains(specify, p) {
-			t.Errorf("fabrik-specify: first-run restructure wording missing %q", p)
+			t.Errorf("specify: first-run restructure wording missing %q", p)
 		}
 	}
 
 	// The over-broad wordings that covered the whole body must be gone.
 	banned := map[string][]string{
-		"fabrik-specify":         {"**Every other heading stays exactly as in the template**", "The body follows the Spec template exactly"},
-		"fabrik-specify-comment": {"keep every heading, header field and the order exactly as they are"},
+		"specify":         {"**Every other heading stays exactly as in the template**", "The body follows the Spec template exactly"},
+		"specify-comment": {"keep every heading, header field and the order exactly as they are"},
 	}
 	for name, phrases := range banned {
-		body := map[string]string{"fabrik-specify": specify, "fabrik-specify-comment": comment}[name]
+		body := map[string]string{"specify": specify, "specify-comment": comment}[name]
 		for _, p := range phrases {
 			if strings.Contains(body, p) {
 				t.Errorf("%s: still contains over-broad wording %q", name, p)
@@ -171,7 +171,7 @@ func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 		"never renumber an existing requirement",
 	} {
 		if !strings.Contains(specify, p) {
-			t.Errorf("fabrik-specify: template rule weakened, missing %q", p)
+			t.Errorf("specify: template rule weakened, missing %q", p)
 		}
 	}
 	for _, p := range []string{
@@ -179,7 +179,7 @@ func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 		"never renumber existing FR/SC identifiers",
 	} {
 		if !strings.Contains(comment, p) {
-			t.Errorf("fabrik-specify-comment: template rule weakened, missing %q", p)
+			t.Errorf("specify-comment: template rule weakened, missing %q", p)
 		}
 	}
 }

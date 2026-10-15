@@ -757,3 +757,26 @@ func TestReexecStartReason(t *testing.T) {
 		})
 	}
 }
+
+func TestMinutesOrDefault(t *testing.T) {
+	for _, tc := range []struct {
+		minutes, def int
+		want         time.Duration
+	}{
+		{0, 5, 5 * time.Minute},
+		{-3, 10, 10 * time.Minute},
+		{7, 5, 7 * time.Minute},
+	} {
+		if got := minutesOrDefault(tc.minutes, tc.def); got != tc.want {
+			t.Errorf("minutesOrDefault(%d, %d) = %v, want %v", tc.minutes, tc.def, got, tc.want)
+		}
+	}
+}
+
+func TestAnomalyThresholdFlagsAreDefined(t *testing.T) {
+	for _, name := range []string{"retry-starved-threshold", "item-wedged-threshold", "cache-divergence-window"} {
+		if flag.Lookup(name) == nil {
+			t.Errorf("flag --%s is not registered", name)
+		}
+	}
+}

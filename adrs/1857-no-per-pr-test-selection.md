@@ -1,8 +1,10 @@
 # ADR 1857: CI Runs the Whole Module on Every PR — No Per-PR Test Selection, No `simgh` Sharding
 
 **Date**: 2026-09-25
-**Status**: Accepted
+**Status**: Accepted (carve-out added by ADR 2254)
 **Issue**: #1857 — ci: select tests from the dependency graph instead of running the whole module on every PR
+
+> **Amended by [ADR 2228](2228-sim-race-linux-parallelism-and-sharding.md):** the revisit trigger "`tests/sim` grows toward its timeout" was acted on. Raising Linux `-race` parallelism took the sim from ~405 s to ~182 s; sharding the sim across CI jobs was measured and rejected. Per-PR selection is still not built.
 
 ## Context
 
@@ -110,7 +112,8 @@ meant to avoid.
 2. **Do not shard or parallelise `simgh`.** At most ~19s of saving, against real
    `t.Setenv`/timing constraints and the requirement to preserve coverage exactly.
 3. **Keep `ci.yml`'s job structure and `go test` step unchanged**, so the `Test and vet`
-   check reports on every PR exactly as before (R7/AC8).
+   check reports on every PR exactly as before (R7/AC8). (ADR 2254 later gated the steps
+   on a diff classifier; the job names and the check's `success` conclusion are unchanged.)
 4. **Ship no guard test.** The release gate (`scripts/cut-release.sh`, `scripts/e2e/run.sh`'s
    `run_pregate`) is untouched and nothing narrows it, so R3/AC5 holds by construction. A
    static check that greps the gate scripts' `go test` command text would guard a selector
@@ -163,6 +166,11 @@ listed out of scope). **If CI latency becomes a problem, file it as its own issu
   included), and PR #2061 timed out at 300.02 s with no failing test. The cap was raised
   to 10m in `ci.yml` and `scripts/ci/worker-shaped-test.sh` as a stopgap. The decision
   here (no per-PR test selection) stands; speeding up the sim package is the follow-up.
+  **Triggered again 2026-10-12:** `tests/sim` grew from 362 s to 579 s on CI in eight
+  hours as the MCP flight added 34 sim tests (266 s), and PR #2209 timed out at 600 s with
+  no failing test. The cap was raised to 20m (PR #2211) as a second stopgap. The real fix
+  is #2210: engine-scoped test seams so the channel tests can run in parallel, and a
+  drain-driven wait in place of fixed sleeps, with a 420 s target.
 - #1439 moves Pruefer-only code out of `github/`, shrinking its blast radius so more PRs
   narrow meaningfully.
 - The shape of PR traffic changes so that a large share of PRs touch only leaf packages.
@@ -174,9 +182,30 @@ as the diff basis; fail closed for `tests/e2e` and every unowned path; an explic
 of cross-package `_test.go` readers, backed by a guard test that fails when a test reads a
 `../` path not in the registry.
 
+## Amendment (#2254, 2026-10-14): skip the Go suites when no Go build input changed
+
+The decision above rejects **selecting a subset of Go tests**. It does not forbid
+**skipping the Go suites entirely** when a change cannot alter `go build` or `go test`
+output. ADR 2254 adds exactly that carve-out: the first step of each Go test job classifies
+the PR's diff (`git diff HEAD^1 HEAD` of the synthetic merge commit, `fetch-depth: 2`), and
+if every changed path is on an explicit skippable list the Go steps are skipped by step-level
+`if:` conditions. The job still ends `success` under the same name, so required checks and
+the merge train are unaffected. A `paths:` workflow filter is not used.
+
+**The fail-safe rule:** the skippable list is narrow and explicit, a never-skip list
+(`*.go`, `go.mod`, `go.sum`, `testdata/`, `plugin/**`, `stages/**`, the workflow, the
+classifier, and every non-Go file a Go test reads) wins over it, and anything else — an
+unreadable diff, a non-merge `HEAD`, an empty diff, an unparseable path, a path on neither
+list — runs the full suite. The "explicit registry of cross-package `_test.go` readers,
+backed by a guard test" that this ADR said any selector would need is built there
+(`tests/ciskip/readers_test.go`). When any Go build input changes, what runs is exactly what
+ran before: nothing here selects tests, and Decisions 1 and 2 stand.
+
 ## Consequences
 
-- CI stays whole-module; every PR pays the ~145–200s `go test` step (a cold run can be
+- CI runs the whole module on every PR whose diff touches a Go build input or any path the
+  classifier does not recognise (amended by ADR 2254; a PR whose whole diff is skippable
+  skips the Go suites); every other PR pays the ~145–200s `go test` step (a cold run can be
   slower than cached reruns).
 - ADR 1454's R7 ("CI placement") stays accurate: layers 1–3 share one `go test -race ./...`
   on every PR.

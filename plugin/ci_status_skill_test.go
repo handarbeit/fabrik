@@ -8,8 +8,8 @@ import (
 // ciStatusSkills are the six test-running skills that carry the "Skipping a
 // redundant full-suite run" rules, now the "Which tests to run locally" table (#1997, amended by #2116, ADR-2116).
 var ciStatusSkills = []string{
-	"fabrik-implement", "fabrik-review", "fabrik-validate",
-	"fabrik-implement-comment", "fabrik-review-comment", "fabrik-validate-comment",
+	"implement", "review", "validate",
+	"implement-comment", "review-comment", "validate-comment",
 }
 
 // ciStatusSkillPins are phrases every one of the six skills must carry. One

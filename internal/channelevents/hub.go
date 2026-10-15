@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,8 +49,11 @@ type Options struct {
 	SubscriberTTL time.Duration
 	// MinDigest is the lower digest bound (default MinDigest); tests shorten it.
 	MinDigest time.Duration
-	Now       func() time.Time
-	Logf      func(format string, args ...any)
+	// MinSituation is the lower situation-cadence bound (default MinSituation);
+	// tests shorten it.
+	MinSituation time.Duration
+	Now          func() time.Time
+	Logf         func(format string, args ...any)
 
 	// beforeDeliver, when set (tests only), runs in the drain loop after a batch
 	// has been taken and before the epoch recheck that precedes Deliver.
@@ -63,6 +68,19 @@ type registryFile struct {
 type stateFile struct {
 	Seen     map[string]time.Time `json:"seen,omitempty"`
 	Counters map[string]int       `json:"counters,omitempty"`
+	// Reminders holds, per "<subscriber>|<episode key>", when a decision was
+	// last announced to that subscriber as a reminder (#2120 R6a).
+	Reminders map[string]Reminder `json:"reminders,omitempty"`
+	// Situation holds, per subscriber, the fingerprint of the situation digest
+	// last sent to it (#2171), so an unchanged view is not re-sent — across a
+	// restart too, since the restart catch-up already delivered one.
+	Situation map[string]string `json:"situation,omitempty"`
+}
+
+// Reminder is the persisted reminder memory for one (subscriber, episode).
+type Reminder struct {
+	At time.Time `json:"at"`
+	N  int       `json:"n"`
 }
 
 type attachment struct {
@@ -95,6 +113,8 @@ type Hub struct {
 	subscribers map[string]*subscriber
 	seen        map[string]time.Time
 	counters    map[string]int
+	reminders   map[string]Reminder
+	situation   map[string]string
 	closed      bool
 
 	// Dedup keys and counters are persisted lazily: stateDirty marks unwritten
@@ -126,6 +146,9 @@ func Open(o Options) (*Hub, error) {
 	if o.MinDigest <= 0 {
 		o.MinDigest = MinDigest
 	}
+	if o.MinSituation <= 0 {
+		o.MinSituation = MinSituation
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -141,6 +164,8 @@ func Open(o Options) (*Hub, error) {
 		subscribers: map[string]*subscriber{},
 		seen:        map[string]time.Time{},
 		counters:    map[string]int{},
+		reminders:   map[string]Reminder{},
+		situation:   map[string]string{},
 	}
 	now := o.Now()
 
@@ -172,6 +197,12 @@ func Open(o Options) (*Hub, error) {
 		}
 		for k, v := range st.Counters {
 			h.counters[k] = v
+		}
+		for k, v := range st.Reminders {
+			h.reminders[k] = v
+		}
+		for k, v := range st.Situation {
+			h.situation[k] = v
 		}
 	}
 
@@ -254,6 +285,18 @@ func (h *Hub) flushState() {
 	for k, v := range h.counters {
 		st.Counters[k] = v
 	}
+	if len(h.reminders) > 0 {
+		st.Reminders = make(map[string]Reminder, len(h.reminders))
+		for k, v := range h.reminders {
+			st.Reminders[k] = v
+		}
+	}
+	if len(h.situation) > 0 {
+		st.Situation = make(map[string]string, len(h.situation))
+		for k, v := range h.situation {
+			st.Situation[k] = v
+		}
+	}
 	h.mu.Unlock()
 	h.stateWrites.Add(1)
 	if err := saveJSON(h.statePath(), st); err != nil {
@@ -301,7 +344,7 @@ func (h *Hub) Subscribe(sub Subscription) (Subscription, error) {
 // SubscribeNew is Subscribe that also reports whether the subscription was newly
 // created (false: an identical one already existed).
 func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
-	if err := sub.Validate(h.opt.MinDigest); err != nil {
+	if err := sub.ValidateMin(h.opt.MinDigest, h.opt.MinSituation); err != nil {
 		return Subscription{}, false, err
 	}
 	h.mu.Lock()
@@ -328,7 +371,20 @@ func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
 // dedup of live events, and an event the queue already holds for the same
 // (type, repo, issue) is skipped so a held announcement is not doubled. It
 // returns how many events were queued.
+//
+// A DecisionPending event handed in with the open episode's DedupKey also
+// restarts that subscriber's reminder clock (#2120 R6a): the catch-up is a fresh
+// announcement of the same decision, so a reminder due "since the original
+// announcement" must not fire right behind it. The key is read here and cleared
+// before the event is queued, as for every catch-up event.
 func (h *Hub) CatchUp(name, subID string, evs []Event) int {
+	return h.CatchUpWhere(name, subID, evs, nil)
+}
+
+// CatchUpWhere is CatchUp restricted to the subscriptions take accepts (nil
+// accepts all). The situation catch-up uses it to give the per-item snapshot only
+// to subscriptions that do not take the digest (#2171).
+func (h *Hub) CatchUpWhere(name, subID string, evs []Event, take func(Subscription) bool) int {
 	now := h.opt.Now()
 	h.mu.Lock()
 	if h.closed {
@@ -337,7 +393,7 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 	}
 	var subs []Subscription
 	for _, sub := range h.subs {
-		if sub.Subscriber == name && (subID == "" || sub.ID == subID) {
+		if sub.Subscriber == name && (subID == "" || sub.ID == subID) && (take == nil || take(sub)) {
 			subs = append(subs, sub)
 		}
 	}
@@ -367,6 +423,9 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 		if ev.At.IsZero() {
 			ev.At = now
 		}
+		if ev.Type == DecisionPending && ev.DedupKey != "" {
+			h.restartReminderClock(name, ev, ev.DedupKey, now)
+		}
 		ev.DedupKey = ""
 		s.mu.Lock()
 		held := false
@@ -384,6 +443,64 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 		queued++
 	}
 	return queued
+}
+
+// RestartReminders restarts name's reminder clock for every DecisionPending event
+// in evs that carries its episode's DedupKey, as CatchUp does for the events it
+// queues. The situation catch-up announces those decisions inside the digest
+// instead of as events, and a reminder due "since the original announcement"
+// must not fire right behind it (#2171).
+func (h *Hub) RestartReminders(name string, evs []Event) {
+	now := h.opt.Now()
+	for _, ev := range evs {
+		if ev.Type == DecisionPending && ev.DedupKey != "" {
+			h.restartReminderClock(name, ev, ev.DedupKey, now)
+		}
+	}
+}
+
+// SubscriberNames lists, sorted, every subscriber that holds at least one
+// subscription — attached or not. The restart readiness pass queues its catch-up
+// to each of them (#2169).
+func (h *Hub) SubscriberNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, sub := range h.subs {
+		if !seen[sub.Subscriber] {
+			seen[sub.Subscriber] = true
+			out = append(out, sub.Subscriber)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// restartReminderClock sets the reminder anchor of (name, episode key) to now,
+// keeping its count, when one of the subscriber's subscriptions matching ev asks
+// for reminders. Nothing is recorded for a subscriber that does not.
+func (h *Hub) restartReminderClock(name string, ev Event, dedupKey string, now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	wants := false
+	for _, sub := range h.subs {
+		if sub.Subscriber == name && sub.RemindAfterSeconds > 0 && sub.Matches(ev) {
+			wants = true
+			break
+		}
+	}
+	if !wants {
+		return
+	}
+	key := name + "|" + dedupKey
+	rem := h.reminders[key]
+	rem.At = now
+	h.reminders[key] = rem
+	h.saveStateLocked()
 }
 
 // Unsubscribe removes one subscription by id, or every subscription of the
@@ -414,6 +531,14 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 		sub = h.subscribers[subscriberName]
 		remaining = h.subscriptionsLocked(subscriberName)
 		h.saveRegistryLocked()
+		if !h.takesSituationLocked(subscriberName) {
+			// Nothing left to send it to: forget what was last sent, so a later
+			// subscription starts from a clean slate.
+			if _, ok := h.situation[subscriberName]; ok {
+				delete(h.situation, subscriberName)
+				h.saveStateLocked()
+			}
+		}
 	}
 	h.mu.Unlock()
 	if sub == nil {
@@ -436,6 +561,90 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 	sub.sendMu.Lock()
 	sub.sendMu.Unlock() //nolint:staticcheck // SA2001: the empty critical section is the fence
 	return removed
+}
+
+// takesSituationLocked reports whether any of name's subscriptions takes the
+// situation digest. h.mu held.
+func (h *Hub) takesSituationLocked(name string) bool {
+	for _, s := range h.subs {
+		if s.Subscriber == name && s.TakesSituation() {
+			return true
+		}
+	}
+	return false
+}
+
+// PublishSituation delivers a situation digest to one subscriber (#2171). It is
+// a separate path from Publish because its dedup is not Publish's: Publish drops
+// an event whose DedupKey it has ever seen, which cannot say "A, then B, then A
+// again must be sent again". Here the memory is the fingerprint of the digest
+// last sent to name.
+//
+// It does nothing, and reports false, when none of name's subscriptions takes
+// situation, or when force is false and fingerprint equals the one last sent.
+// Otherwise it replaces any situation digest still held in the queue (so a
+// subscriber that is away holds at most one, however many ticks pass), queues ev
+// and records the fingerprint. Like every publish it never blocks on a session.
+func (h *Hub) PublishSituation(name string, ev Event, fingerprint string, force bool) bool {
+	now := h.opt.Now()
+	if ev.At.IsZero() {
+		ev.At = now
+	}
+	ev.Type = Situation
+	ev.DedupKey = ""
+	h.mu.Lock()
+	if h.closed || !h.takesSituationLocked(name) {
+		h.mu.Unlock()
+		return false
+	}
+	if !force && fingerprint != "" && h.situation[name] == fingerprint {
+		h.mu.Unlock()
+		return false
+	}
+	if fingerprint != "" {
+		h.situation[name] = fingerprint
+		h.saveStateLocked()
+	}
+	s := h.subscribers[name]
+	if s == nil {
+		s = newSubscriber(name, h.heldPath(name), queueFile{})
+		h.subscribers[name] = s
+	}
+	h.mu.Unlock()
+
+	s.mu.Lock()
+	dropped := s.q.dropType(Situation)
+	changed := s.q.push(ev, false, time.Time{}, false, h.opt.HeldMax)
+	if changed || dropped {
+		h.saveQueue(s)
+	}
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// SituationFingerprint returns the fingerprint of the digest last sent to name,
+// "" when none was.
+func (h *Hub) SituationFingerprint(name string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.situation[name]
+}
+
+// Attached reports whether a session is bound to name right now.
+func (h *Hub) Attached(name string) bool {
+	h.mu.Lock()
+	s := h.subscribers[name]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.att != nil
 }
 
 // subscriptionsLocked lists a subscriber's subscriptions. h.mu held.
@@ -493,6 +702,128 @@ func (h *Hub) BumpCounter(key string) int {
 	h.counters[key]++
 	h.saveStateLocked()
 	return h.counters[key]
+}
+
+// PublishReminders re-announces a still-pending decision as a reminder to every
+// attached subscriber with a matching subscription that asks for them
+// (RemindAfterSeconds > 0) and is due (#2120 R6a). ev is the current form of the
+// original event; dedupKey is that event's DedupKey, the episode identity.
+//
+// A subscriber is due once its interval has passed since the later of the
+// original announcement (the hub's persisted dedup time for dedupKey) and its
+// previous reminder (persisted per subscriber). Both anchors are persisted
+// times, so a restart neither fires nor postpones a reminder: it never runs off
+// daemon uptime. With no announcement time on record the first look only plants
+// the anchor. Only attached subscribers are reminded — a detached one is
+// caught up on attach — and a reminder is never held. It returns how many
+// subscribers were reminded.
+func (h *Hub) PublishReminders(ev Event, dedupKey string) int {
+	now := h.opt.Now()
+	h.mu.Lock()
+	if h.closed || dedupKey == "" {
+		h.mu.Unlock()
+		return 0
+	}
+	announced, haveAnnounced := h.seen[dedupKey]
+	type due struct {
+		s *subscriber
+		k string
+		r Reminder
+	}
+	var dues []due
+	var order []string
+	interval := map[string]time.Duration{}
+	for _, sub := range h.subs {
+		if sub.RemindAfterSeconds <= 0 || !sub.Matches(ev) {
+			continue
+		}
+		d := sub.Remind()
+		if cur, ok := interval[sub.Subscriber]; !ok {
+			order = append(order, sub.Subscriber)
+			interval[sub.Subscriber] = d
+		} else if d < cur {
+			interval[sub.Subscriber] = d
+		}
+	}
+	for _, name := range order {
+		s := h.subscribers[name]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		attached := s.att != nil
+		s.mu.Unlock()
+		key := name + "|" + dedupKey
+		rem, have := h.reminders[key]
+		anchor := rem.At
+		if !have {
+			if !haveAnnounced {
+				// Nothing on record to measure from: plant the anchor and wait.
+				h.reminders[key] = Reminder{At: now}
+				h.saveStateLocked()
+				continue
+			}
+			anchor = announced
+		}
+		if now.Sub(anchor) < interval[name] || !attached {
+			continue
+		}
+		rem.At, rem.N = now, rem.N+1
+		h.reminders[key] = rem
+		dues = append(dues, due{s: s, k: key, r: rem})
+	}
+	if len(dues) > 0 {
+		h.saveStateLocked()
+	}
+	h.mu.Unlock()
+
+	for _, d := range dues {
+		out := ev
+		out.DedupKey = ""
+		out.At = now
+		out.Meta = make(map[string]string, len(ev.Meta)+2)
+		for k, v := range ev.Meta {
+			out.Meta[k] = v
+		}
+		out.Meta["reminder"] = "true"
+		out.Meta["reminder_count"] = strconv.Itoa(d.r.N)
+		out.Content = "(reminder) " + ev.Content
+		h.enqueue(d.s, out, 0, now)
+	}
+	return len(dues)
+}
+
+// RemindersEnabled reports whether any subscription asks for reminders, so the
+// caller can skip building them.
+func (h *Hub) RemindersEnabled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range h.subs {
+		if s.RemindAfterSeconds > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearReminders forgets the reminder memory of an episode that ended.
+func (h *Hub) ClearReminders(dedupKey string) {
+	if dedupKey == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	suffix := "|" + dedupKey
+	changed := false
+	for k := range h.reminders {
+		if strings.HasSuffix(k, suffix) {
+			delete(h.reminders, k)
+			changed = true
+		}
+	}
+	if changed {
+		h.saveStateLocked()
+	}
 }
 
 type target struct {
@@ -787,6 +1118,7 @@ func (h *Hub) Prune(now time.Time) {
 		}
 		h.subs = kept
 		delete(h.lastAttach, name)
+		delete(h.situation, name)
 		if s := h.subscribers[name]; s != nil {
 			_ = os.Remove(s.path)
 			delete(h.subscribers, name)
@@ -804,6 +1136,11 @@ func (h *Hub) Prune(now time.Time) {
 	for k, t := range h.seen {
 		if now.Sub(t) > seenTTL {
 			delete(h.seen, k)
+		}
+	}
+	for k, r := range h.reminders {
+		if now.Sub(r.At) > MaxRemind+seenTTL {
+			delete(h.reminders, k)
 		}
 	}
 	h.saveRegistryLocked()
@@ -883,4 +1220,40 @@ func (h *Hub) Queued(name string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.q.Entries)
+}
+
+// Deliverable reports whether the hub would hand name's attached session a
+// batch right now: a non-digest entry, the dropped notice, or a digest already
+// due. A subscriber with no attached session is never deliverable (nothing
+// will take the entry), and digests the queue is deliberately holding until
+// their due time are not deliverable either. An entry leaves the queue only
+// after the sink's Deliver has returned, so false means the sink has seen
+// everything it was owed. A true result also wakes the attachment's pump, so a
+// digest that became due only because the clock was advanced is delivered
+// without waiting out the pump's real-time timer. Test seam for the drain wait
+// (#2210): unlike Queued it cannot block forever on a held digest.
+func (h *Hub) Deliverable(name string) bool {
+	h.mu.Lock()
+	s := h.subscribers[name]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.att == nil {
+		return false
+	}
+	_, _, ok := s.q.next(h.opt.Now())
+	if ok {
+		// The pump sleeps on a real-time timer sized from the (possibly test-
+		// controlled) clock delta, so a digest that has just become due on an
+		// advanced clock is not seen until that timer fires. Wake it so the
+		// drain wait observes the delivery instead of spinning to its cap.
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
+	return ok
 }

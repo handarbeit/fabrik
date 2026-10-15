@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -83,12 +84,17 @@ func ComputeDiskVersion(pluginDir string) (string, error) {
 	return computePluginFingerprint(entries), nil
 }
 
-// WriteVersionHash writes hash to pluginDir/.installed-version.
+// WriteVersionHash writes hash to pluginDir/.installed-version. A file that
+// already holds exactly hash is not rewritten.
 func WriteVersionHash(pluginDir, hash string) error {
 	if err := os.MkdirAll(pluginDir, 0755); err != nil {
 		return fmt.Errorf("creating plugin dir: %w", err)
 	}
 	dest := filepath.Join(pluginDir, installedVersionFile)
+	// Leave a matching file alone so its mtime is not bumped for no reason.
+	if cur, err := os.ReadFile(dest); err == nil && string(cur) == hash+"\n" {
+		return nil
+	}
 	return os.WriteFile(dest, []byte(hash+"\n"), 0644)
 }
 
@@ -254,11 +260,22 @@ func isKnownEmbedded(hash string, knownVersions []string) bool {
 	return false
 }
 
-// RefreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
-// Returns the number of files written.
+// RefreshPlugin brings .fabrik/plugin/ in line with the embedded plugin files.
+// Returns the number of files created, changed or pruned.
 func RefreshPlugin() (int, error) {
-	pluginDir := ".fabrik/plugin"
-	wrote := 0
+	return RefreshPluginTo(".fabrik/plugin")
+}
+
+// RefreshPluginTo writes the embedded plugin files into pluginDir and returns
+// the number of files created, changed or pruned. A file whose content already
+// matches the embed is not rewritten (mode and mtime are not compared) and does
+// not count. It then prunes the files an earlier release shipped that the
+// embed no longer carries (see prunePluginDir), so a rename such as #2140's
+// skills/fabrik-review -> skills/review does not leave both sets side by side;
+// each pruned file counts.
+func RefreshPluginTo(pluginDir string) (int, error) {
+	changed := 0
+	embedded := map[string]bool{}
 	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -277,11 +294,81 @@ func RefreshPlugin() (int, error) {
 		if mkErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkErr != nil {
 			return fmt.Errorf("creating directory for %s: %w", destPath, mkErr)
 		}
+		embedded[filepath.ToSlash(rel)] = true
+		cur, curErr := os.ReadFile(destPath)
+		if curErr != nil && !os.IsNotExist(curErr) {
+			return fmt.Errorf("reading %s: %w", destPath, curErr)
+		}
+		if curErr == nil && bytes.Equal(cur, data) {
+			return nil
+		}
 		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
-		wrote++
+		changed++
 		return nil
 	})
-	return wrote, err
+	if err != nil {
+		return changed, err
+	}
+	pruned, pruneErr := prunePluginDir(pluginDir, embedded)
+	changed += pruned
+	if pruneErr != nil {
+		return changed, pruneErr
+	}
+	return changed, nil
+}
+
+// prunePluginDir removes from pluginDir every file that is not in the embedded
+// set (embedded: slash-separated paths relative to the plugin root) but is
+// byte-identical to a version some release shipped, then removes the
+// directories that emptied. A file the operator edited, or added, is never
+// shipped and is therefore never touched: it stays, and the tree stays
+// classified as customised. The rule is general, so it also covers future
+// renames. .installed-version is metadata and is left alone. Idempotent.
+// Returns the number of files removed (not the directories).
+func prunePluginDir(pluginDir string, embedded map[string]bool) (int, error) {
+	var dirs []string
+	pruned := 0
+	err := filepath.WalkDir(pluginDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if p != pluginDir {
+				dirs = append(dirs, p)
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(pluginDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if embedded[rel] || rel == installedVersionFile || strings.HasSuffix(rel, "/"+installedVersionFile) {
+			return nil
+		}
+		data, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return fmt.Errorf("reading %s: %w", p, readErr)
+		}
+		sum := sha256.Sum256(data)
+		if !IsShippedFile(rel, hex.EncodeToString(sum[:])) {
+			return nil
+		}
+		if rmErr := os.Remove(p); rmErr != nil {
+			return fmt.Errorf("pruning %s: %w", p, rmErr)
+		}
+		pruned++
+		return nil
+	})
+	if err != nil {
+		return pruned, err
+	}
+	// Deepest first; os.Remove refuses a non-empty directory, which is exactly
+	// the "keep what the operator left there" behaviour wanted.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i]) // intentional: a non-empty directory is kept
+	}
+	return pruned, nil
 }

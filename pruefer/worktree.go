@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -56,6 +57,10 @@ func cloneRef(ctx context.Context, remoteURL, token, ref string, prNumber int) (
 		cleanup()
 		return "", func() {}, fmt.Errorf("checking out FETCH_HEAD: %w", err)
 	}
+	// FETCH_HEAD records the fetched URL, and the clone is readable by the
+	// reviewer (#2192): drop it so a credentialed remote URL can never be read
+	// from inside the review scope. Best effort; checkout no longer needs it.
+	_ = os.Remove(filepath.Join(dir, ".git", "FETCH_HEAD"))
 	return dir, cleanup, nil
 }
 
@@ -93,32 +98,4 @@ func redactArgs(args []string, token string) []string {
 		}
 	}
 	return out
-}
-
-// writeDiffFile writes the PR's unified diff to a single-use temp file
-// outside the review clone, returning its absolute path and a cleanup func
-// (safe to call more than once, including on the error path).
-//
-// Deliberately outside the clone directory: a file inside the reviewed tree
-// would show up in `git status`, in a Grep/Glob sweep, and — if the repo
-// happens to use the same name — could collide with the repo's own content.
-// The reviewer reads it by absolute path, which its Read tool grant allows.
-func writeDiffFile(diff string, prNumber int) (path string, cleanup func(), err error) {
-	f, err := os.CreateTemp("", fmt.Sprintf("pruefer-pr-%d-*.diff", prNumber))
-	if err != nil {
-		return "", func() {}, fmt.Errorf("creating diff file: %w", err)
-	}
-	name := f.Name()
-	cleanup = func() { os.Remove(name) }
-
-	if _, err := f.WriteString(diff); err != nil {
-		f.Close()
-		cleanup()
-		return "", func() {}, fmt.Errorf("writing diff file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("closing diff file: %w", err)
-	}
-	return name, cleanup, nil
 }

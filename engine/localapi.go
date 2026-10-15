@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
@@ -203,7 +202,7 @@ func counterStages(ss itemstate.StageState, kind string) []string {
 // attentionInput extracts the classifier input from one item's state. st may
 // point at live Store memory (inside Scan): everything is copied out, nothing
 // retained, nothing blocking.
-func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time) attention.Input {
+func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time, look blockerLookup) attention.Input {
 	in := attention.Input{
 		Now: now,
 		Cfg: attention.Config{
@@ -220,7 +219,20 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		PausedByEngine:          st.StageState.PausedByEngine[st.Status],
 		StatusEnteredAt:         st.StatusEnteredAt,
 		ClaudeUsageLimitedUntil: usageLimitedUntil,
+		EligibilityChangedAt:    st.EligibilityChangedAt,
+		NextStage:               e.decisionNextStage(st.Status),
+		StageCommentAt:          stageCommentCreatedAt(st),
+		Resume:                  resumeMethodOf(st),
 	}
+	if stage := e.stageByName(st.Status); stage != nil {
+		in.AutoAdvances = stageAutoAdvances(e.cfg.Yolo, st.Labels, stage)
+	}
+	if hasLabelStr(st.Labels, "stage:"+st.Status+":complete") {
+		// Only a completed stage can be a pending decision; the feedback scan is
+		// not free, so it is skipped for everything else.
+		in.FeedbackPending = e.cachedPendingFeedbackOf(st).any()
+	}
+	in.ParkedBlockers, in.BlockedOnlyByParked, in.ParkedBlockersUnknown = e.resolveParkedBlockersState(st, look)
 	for _, kind := range counterKinds {
 		in.Counters = append(in.Counters, attention.Counter{
 			Name: kind,
@@ -246,6 +258,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		}
 	}
 	in.PollStall, in.PollRecoveredAt = e.attentionPollStall(now)
+	e.fillWorkerInputs(&in, st, now, usageLimitedUntil)
 	for _, t := range st.StageState.LastAttemptAt {
 		if t.After(in.LastAttemptAt) {
 			in.LastAttemptAt = t
@@ -254,6 +267,8 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 	if lpr := st.LinkedPR; lpr != nil {
 		in.LastCIProgressAt = lpr.LastCIProgressAt
 		in.HasOpenUnmergedPR = lpr.Number != 0 && !lpr.Merged && lpr.State != "closed"
+		in.PRNumber = lpr.Number
+		in.CI = e.attentionCIFact(lpr, now)
 	}
 	return in
 }
@@ -282,7 +297,9 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 			Deadlines: []localapi.DeadlineInfo{},
 		},
 		Progress: localapi.ProgressInfo{At: localapi.KnownTime(res.ProgressAt)},
+		Cause:    res.Cause,
 	}
+	info.CIFailing = res.CIFailing
 	if !res.ProgressAt.IsZero() {
 		info.Progress.AgeSeconds = localapi.Some(secs(res.ProgressAge))
 	}
@@ -294,7 +311,43 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 			Kind: d.Kind, At: localapi.KnownTime(d.At), Basis: d.Basis,
 		})
 	}
+	info.Pending = pendingInfo(res.Pending, now)
+	info.Options = optionInfos(res.Options)
 	return info
+}
+
+func optionInfos(opts []attention.Option) []localapi.OptionInfo {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]localapi.OptionInfo, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, localapi.OptionInfo{Action: o.Action, Tool: o.Tool})
+	}
+	return out
+}
+
+// pendingInfo maps a suspended item's decision onto the wire. A daemon-observed
+// first-seen is only ever a lower bound: it is reported as AtLeastAgeSeconds and
+// never as the age.
+func pendingInfo(p *attention.Pending, now time.Time) *localapi.PendingInfo {
+	if p == nil {
+		return nil
+	}
+	out := &localapi.PendingInfo{
+		Kind: p.Kind, CompletedStage: p.CompletedStage, NextStage: p.NextStage,
+		Since: localapi.KnownTime(p.Since), SinceBasis: p.SinceBasis,
+		AgeSeconds: localapi.Unknown[int64](), AtLeastAgeSeconds: localapi.Unknown[int64](),
+	}
+	if p.SinceExact() {
+		out.AgeSeconds = ageSince(now, p.Since)
+	} else {
+		out.AtLeastAgeSeconds = ageSince(now, p.Since)
+	}
+	for _, b := range p.Blockers {
+		out.Blockers = append(out.Blockers, localapi.PendingBlocker{Issue: b.Ref, Column: b.Column})
+	}
+	return out
 }
 
 func milestoneField(st *itemstate.ItemState) localapi.MilestoneField {
@@ -400,13 +453,13 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 	st := snap.State()
 	now := b.e.now()
 	threshold := b.stallThreshold(0)
-	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now)))
+	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now), b.e.peekBlockerLookup()))
 
 	out := &localapi.StatusResult{
 		Envelope:  b.envelope(now),
 		Issue:     issueRef(st.Repo, st.Number),
 		Title:     st.Title,
-		URL:       knownString(st.URL),
+		URL:       b.issueURL(&st),
 		Milestone: milestoneField(&st),
 		Cache: localapi.CacheInfo{
 			LastDeepFetchAt: localapi.KnownTime(st.LastDeepFetchAt),
@@ -416,7 +469,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 		Limits:     b.limits(&st),
 		Worker:     b.worker(&st),
 		LastInvoke: lastInvocation(&st),
-		PR:         b.prInfo(&st),
+		PR:         b.prInfo(&st, now),
 		Blockers:   blockers(&st),
 		Attention:  attentionInfo(res, now, threshold, latestFabrikComment(&st)),
 	}
@@ -426,6 +479,16 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 		}
 	}
 	return out, nil
+}
+
+// issueURL is the cached issue URL, or (#2127 R2) the one derivable from the
+// repo and number when the cache never carried it (the probe bootstrap and a
+// minimal opened item do not).
+func (b localAPIBackend) issueURL(st *itemstate.ItemState) localapi.Known[string] {
+	if st.URL != "" || readPolishDisabled(2) {
+		return knownString(st.URL)
+	}
+	return knownString(b.e.webURL(st.Repo, "issues", st.Number))
 }
 
 func knownString(s string) localapi.Known[string] {
@@ -442,6 +505,7 @@ func (b localAPIBackend) place(st *itemstate.ItemState) localapi.Place {
 		StatusEnteredBasis: statusEnteredBasis,
 		StageLabels:        []string{},
 		FabrikLabels:       []string{},
+		OtherLabels:        []string{},
 		Autonomy:           "none",
 	}
 	labels := append([]string(nil), st.Labels...)
@@ -452,6 +516,8 @@ func (b localAPIBackend) place(st *itemstate.ItemState) localapi.Place {
 			pl.StageLabels = append(pl.StageLabels, l)
 		case strings.HasPrefix(l, "fabrik:"):
 			pl.FabrikLabels = append(pl.FabrikLabels, l)
+		case !readPolishDisabled(2):
+			pl.OtherLabels = append(pl.OtherLabels, l)
 		}
 	}
 	switch {
@@ -473,8 +539,10 @@ func (b localAPIBackend) limits(st *itemstate.ItemState) []localapi.Limit {
 				stageSet[s] = true
 			}
 		}
-		// The current stage always reports a configured limit, even at zero.
-		if st.Status != "" && max.Kind != "unknown" {
+		// The current stage always reports a configured limit, even at zero —
+		// except a parking or holding column, where the cycle limits mean nothing
+		// (#2127 R2).
+		if st.Status != "" && max.Kind != "unknown" && !b.noCycleLimits(st.Status) {
 			stageSet[st.Status] = true
 		}
 		names := make([]string, 0, len(stageSet))
@@ -489,24 +557,63 @@ func (b localAPIBackend) limits(st *itemstate.ItemState) []localapi.Limit {
 	return out
 }
 
+// noCycleLimits reports whether status names an unmanaged (parking) or holding
+// column, where no stage runs and so no cycle limit applies.
+func (b localAPIBackend) noCycleLimits(status string) bool {
+	if readPolishDisabled(2) {
+		return false
+	}
+	k := b.e.attentionStageKind(status)
+	return k == attention.KindUnmanaged || k == attention.KindHolding
+}
+
 func (b localAPIBackend) worker(st *itemstate.ItemState) localapi.WorkerInfo {
 	w := localapi.WorkerInfo{
 		StartedAt:     localapi.Unknown[time.Time](),
 		LastSignAt:    localapi.Unknown[time.Time](),
-		TurnsUsed:     localapi.Unknown[int](), // never tracked live for an in-flight worker
+		TurnsUsed:     localapi.Unknown[int](), // unknown unless the engine has the live count
 		MaxTurns:      localapi.Unknown[int](),
 		LastTurnsUsed: localapi.Unknown[int](),
 	}
 	stage := st.Status
-	if st.Worker != nil {
-		w.InFlight = true
-		w.Stage = st.Worker.StageName
-		w.StartedAt = localapi.KnownTime(st.Worker.StartedAt)
-		w.LastSignAt = localapi.KnownTime(st.Worker.LastSignAt)
-		stage = st.Worker.StageName
+	switch {
+	case st.Worker != nil:
+		h := st.Worker
+		w.Stage = h.StageName
+		w.Kind, w.Trigger = h.Kind, h.Trigger
+		stage = h.StageName
+		if h.Queued {
+			// Dispatched but holding no worker slot (#2121): not in flight, and it
+			// has no start time yet — started_at is the slot-acquired time.
+			w.Queued = true
+			since := localapi.KnownTime(h.QueuedSince)
+			w.QueuedSince = &since
+		} else {
+			w.InFlight = true
+			w.StartedAt = localapi.KnownTime(h.StartedAt)
+			w.LastSignAt = localapi.KnownTime(h.LastSignAt)
+			if h.TurnsKnown {
+				w.TurnsUsed = localapi.Some(h.TurnsUsed)
+			}
+		}
+	case st.ConflictResolution != nil:
+		// A merge-train conflict resolution is a worker kind of its own, recorded
+		// on the member rather than as a Worker handle (#2121).
+		c := st.ConflictResolution
+		w.Kind = itemstate.WorkerKindTrainConflict
+		if c.Queued {
+			w.Queued = true
+			since := localapi.KnownTime(c.Since)
+			w.QueuedSince = &since
+		} else {
+			w.InFlight = true
+			w.StartedAt = localapi.KnownTime(c.Since)
+		}
 	}
-	if s := b.e.stageByName(stage); s != nil && s.MaxTurns > 0 && w.InFlight {
-		w.MaxTurns = localapi.Some(s.MaxTurns)
+	if w.InFlight && st.Worker != nil && st.Worker.TurnsMax > 0 {
+		// The running invocation's effective budget (it differs from the stage's
+		// max_turns for a comment review or an extended budget).
+		w.MaxTurns = localapi.Some(st.Worker.TurnsMax)
 	}
 	if n, ok := st.StageState.LastTurnsUsed[stage]; ok {
 		w.LastTurnsUsed = localapi.Some(n)
@@ -520,6 +627,15 @@ func lastInvocation(st *itemstate.ItemState) localapi.InvocationInfo {
 		IsComment:       st.LastInvocationIsComment,
 		DurationSeconds: localapi.Unknown[float64](),
 		Tokens:          localapi.Unknown[localapi.Tokens](),
+	}
+	if !readPolishDisabled(4) {
+		info.FigureBasis = localapi.FigureBasis{
+			DurationSeconds: localapi.BasisPerInvocation,
+			Tokens:          localapi.BasisSessionCumulative,
+			CostUSD:         localapi.BasisSessionCumulative,
+			TurnsUsed:       localapi.BasisPerInvocation,
+			Note:            "bases are as reported by the Claude CLI; on a first, non-resumed invocation per-invocation and session figures coincide",
+		}
 	}
 	tu := st.LastTokenUsage
 	recorded := st.LastInvocationDuration > 0 || tu != (itemstate.TokenUsage{}) || len(st.StageState.LastTurnsUsed) > 0
@@ -547,31 +663,12 @@ func lastInvocation(st *itemstate.ItemState) localapi.InvocationInfo {
 	return info
 }
 
-// ciVerdict summarises the cached check runs only. No cached runs is unknown,
-// not "none": the cache cannot tell "no CI" from "never fetched".
-func ciVerdict(runs []gh.CheckRun) localapi.Known[string] {
-	if len(runs) == 0 {
-		return localapi.Unknown[string]()
-	}
-	pending := false
-	for _, r := range runs {
-		if r.Status != "completed" {
-			pending = true
-			continue
-		}
-		switch r.Conclusion {
-		case "success", "neutral", "skipped":
-		default:
-			return localapi.Some("red")
-		}
-	}
-	if pending {
-		return localapi.Some("pending")
-	}
-	return localapi.Some("green")
-}
-
-func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
+// prInfo renders the linked PR from the Store alone (#2122). The facts and the
+// CI verdict are poll-side records (PRFacts, CIVerdictRecord); they are shown
+// with when they were observed and whether that is older than one poll
+// interval. A fact never observed is unknown, never a healthy default, and a
+// verdict is shown only for the head it was computed for.
+func (b localAPIBackend) prInfo(st *itemstate.ItemState, now time.Time) localapi.PRInfo {
 	pr := localapi.PRInfo{
 		Number:         localapi.Unknown[int](),
 		PRState:        localapi.Unknown[string](),
@@ -581,6 +678,14 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
 		MergeableState: localapi.Unknown[string](),
 		CI:             localapi.Unknown[string](),
 		HeadSHA:        localapi.Unknown[string](),
+		FactsAsOf:      localapi.Unknown[time.Time](),
+		FactsStale:     localapi.Unknown[bool](),
+		CIAsOf:         localapi.Unknown[time.Time](),
+		CIStale:        localapi.Unknown[bool](),
+		CIHeadSHA:      localapi.Unknown[string](),
+		CIFailing:      []string{},
+		URL:            localapi.Unknown[string](),
+		Reviewers:      []localapi.ReviewerVerdict{},
 	}
 	lpr := st.LinkedPR
 	if lpr == nil || lpr.Number == 0 {
@@ -593,22 +698,67 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
 	}
 	pr.State = "linked"
 	pr.Number = localapi.Some(lpr.Number)
-	if lpr.State != "" { // PR details were applied at least once
+	pr.URL = knownString(b.e.webURL(st.Repo, "pull", lpr.Number))
+	pr.Reviewers = b.e.reviewerVerdicts(st)
+	pr.HeadSHA = knownString(lpr.ObservedHead())
+
+	staleAfter := b.prFactsStaleAfter()
+	if f := lpr.Facts; !f.ObservedAt.IsZero() && f.State != "" {
+		pr.PRState = localapi.Some(f.State)
+		pr.Draft = localapi.Some(f.Draft)
+		pr.Merged = localapi.Some(f.Merged)
+		if f.Mergeable != nil {
+			if *f.Mergeable {
+				pr.Mergeable = localapi.Some("mergeable")
+			} else {
+				pr.Mergeable = localapi.Some("conflicting")
+			}
+		}
+		pr.MergeableState = knownString(f.MergeableState)
+		pr.FactsAsOf = localapi.KnownTime(f.ObservedAt)
+		pr.FactsStale = staleKnown(now, f.ObservedAt, staleAfter)
+	} else if lpr.State != "" { // PR details applied by a webhook or a gate read: no as-of
 		pr.PRState = localapi.Some(lpr.State)
 		pr.Draft = localapi.Some(lpr.Draft)
 		pr.Merged = localapi.Some(lpr.Merged)
 	}
-	if lpr.Mergeable != nil {
-		if *lpr.Mergeable {
-			pr.Mergeable = localapi.Some("mergeable")
-		} else {
-			pr.Mergeable = localapi.Some("conflicting")
+
+	// The verdict is for one head. A record for any other head is not shown
+	// (the Store clears it on a head change; this is the belt to that braces).
+	if v := lpr.CIVerdict; v.Verdict != "" && v.HeadSHA != "" && v.HeadSHA == lpr.AgreedHead() {
+		pr.CI = localapi.Some(v.Verdict)
+		pr.CIHeadSHA = localapi.Some(v.HeadSHA)
+		pr.CIAsOf = localapi.KnownTime(v.ObservedAt)
+		pr.CIStale = staleKnown(now, v.ObservedAt, staleAfter)
+		if v.Verdict == "red" {
+			pr.CIFailing = append(pr.CIFailing, v.Failing...)
 		}
 	}
-	pr.MergeableState = knownString(lpr.MergeableState)
-	pr.HeadSHA = knownString(lpr.HeadSHA)
-	pr.CI = ciVerdict(lpr.CheckRuns)
 	return pr
+}
+
+// prFactsStaleAfter is the age beyond which a PR fact is stale: one poll
+// interval, the engine's effective one, which stretches under back-off so a
+// deliberate back-off does not read as stale. Zero means not known.
+func (b localAPIBackend) prFactsStaleAfter() time.Duration {
+	return b.e.prFactsStaleAfter()
+}
+
+func (e *Engine) prFactsStaleAfter() time.Duration {
+	d := e.health.pollPeriodSnapshot()
+	if iv := e.pollInterval(); iv > d {
+		d = iv
+	}
+	return d
+}
+
+// staleKnown reports whether observedAt is older than staleAfter; unknown when
+// the fact was never observed or the interval is not known.
+func staleKnown(now, observedAt time.Time, staleAfter time.Duration) localapi.Known[bool] {
+	if observedAt.IsZero() || staleAfter <= 0 {
+		return localapi.Unknown[bool]()
+	}
+	return localapi.Some(now.Sub(observedAt) > staleAfter)
 }
 
 func blockers(st *itemstate.ItemState) localapi.BlockersInfo {
@@ -675,7 +825,7 @@ func (b localAPIBackend) trainRows() []trainRow {
 		if it.IsPR || it.Status != hs.Name || it.IsClosed || hasLabelStr(it.Labels, "fabrik:paused") || it.LastDeepFetchAt.IsZero() {
 			return
 		}
-		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: it.StatusEnteredAt})
+		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: queueOrderTime(it.StatusAtGitHub, it.StatusEnteredAt)})
 	})
 	sort.Slice(rows, func(i, j int) bool {
 		if !rows[i].entered.Equal(rows[j].entered) {
@@ -697,12 +847,31 @@ func (b localAPIBackend) trainWorkerActive(repo, base string) bool {
 }
 
 func (b localAPIBackend) trainPosition(st *itemstate.ItemState) *localapi.TrainPosition {
-	if st.IsClosed || hasLabelStr(st.Labels, "fabrik:paused") || st.LastDeepFetchAt.IsZero() {
-		return nil // not a batchable member as far as the cache can tell
+	pos, total, ok := trainSlot(b.trainRows(), st)
+	if !ok {
+		return nil
 	}
 	base := trainBase(st.Labels)
-	pos, total := 0, 0
-	for _, r := range b.trainRows() {
+	return &localapi.TrainPosition{
+		Partition:      mergeTrainKey(st.Repo, base),
+		Position:       pos,
+		Of:             total,
+		WorkerInFlight: b.trainWorkerActive(st.Repo, base),
+		Basis:          "cached base: label; ordered by daemon-observed time in the holding stage, then issue number",
+	}
+}
+
+// trainSlot is the pure core of trainPosition (#2238): the 1-based position and
+// partition size of st among rows (already ordered by trainRows). ok is false
+// when the cache cannot place st as a batchable member. It takes the rows rather
+// than scanning, so a caller already inside a Store.Scan can pass rows built
+// beforehand.
+func trainSlot(rows []trainRow, st *itemstate.ItemState) (pos, total int, ok bool) {
+	if st.IsClosed || hasLabelStr(st.Labels, "fabrik:paused") || st.LastDeepFetchAt.IsZero() {
+		return 0, 0, false // not a batchable member as far as the cache can tell
+	}
+	base := trainBase(st.Labels)
+	for _, r := range rows {
 		if r.repo != st.Repo || r.base != base {
 			continue
 		}
@@ -712,15 +881,9 @@ func (b localAPIBackend) trainPosition(st *itemstate.ItemState) *localapi.TrainP
 		}
 	}
 	if pos == 0 {
-		return nil
+		return 0, 0, false
 	}
-	return &localapi.TrainPosition{
-		Partition:      mergeTrainKey(st.Repo, base),
-		Position:       pos,
-		Of:             total,
-		WorkerInFlight: b.trainWorkerActive(st.Repo, base),
-		Basis:          "cached base: label; ordered by daemon-observed time in the holding stage, then issue number",
-	}
+	return pos, total, true
 }
 
 // ---- board ----
@@ -751,6 +914,9 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 		filter = *p.Filter
 	}
 
+	// Blockers are resolved from an index built by its own Scan: resolving them
+	// with Peek inside the visitor below would nest the store's read lock.
+	look := b.e.scanBlockerIndex()
 	var rows []boardRow
 	b.e.store.Scan(func(it *itemstate.ItemState) {
 		if it.IsPR {
@@ -764,7 +930,7 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 			lastDeep:  it.LastDeepFetchAt,
 			entered:   it.StatusEnteredAt,
 			hasWorker: it.Worker != nil,
-			input:     b.e.attentionInput(it, now, threshold, usageLimited),
+			input:     b.e.attentionInput(it, now, threshold, usageLimited, look),
 		}
 		for _, d := range it.BlockedBy {
 			if strings.EqualFold(d.State, "OPEN") {
@@ -791,9 +957,21 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 		kept = append(kept, r)
 	}
 
+	if !readPolishDisabled(3) {
+		res.Matched = len(kept)
+	}
 	switch p.View {
 	case localapi.ViewFlow:
 		res.Flow = b.flow(kept)
+		// The flow lists open items only; say how many matched items it left out
+		// so the columns reconcile with Matched (#2127 R1).
+		if !readPolishDisabled(1) {
+			for _, r := range kept {
+				if r.input.Closed {
+					res.Excluded.Closed++
+				}
+			}
+		}
 	default:
 		res.Attention = b.attentionView(kept, now, threshold)
 	}
@@ -858,6 +1036,11 @@ func (b localAPIBackend) attentionView(rows []boardRow, now time.Time, threshold
 		if a.res.Rank != c.res.Rank {
 			return a.res.Rank < c.res.Rank
 		}
+		// Suspended shares needs-human's rank (#2120): within it a pause that
+		// needs an answer sorts ahead of a decision that merely waits.
+		if as, cs := a.res.State == attention.Suspended, c.res.State == attention.Suspended; as != cs {
+			return !as
+		}
 		if a.row.repo != c.row.repo {
 			return a.row.repo < c.row.repo
 		}
@@ -880,6 +1063,8 @@ func (b localAPIBackend) attentionView(rows []boardRow, now time.Time, threshold
 				LastDeepFetchAt: localapi.KnownTime(p.row.lastDeep),
 				AgeSeconds:      ageSince(now, p.row.lastDeep),
 			},
+			Pending: pendingInfo(p.res.Pending, now),
+			Options: optionInfos(p.res.Options),
 		})
 	}
 	return out
@@ -1012,13 +1197,30 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		res.Backoff.Ratio = localapi.Some(bo.Ratio)
 	}
 
-	inUse := 0
+	// in_use counts item workers that HOLD a slot; a dispatched worker still
+	// waiting for one is counted in queued instead (#2121). The two are read from
+	// one Scan so they describe the same instant, and in_use is clamped to the
+	// maximum: a worker that has just exited and one that has just entered can
+	// both be visible to a reader that does not hold the pool still.
+	inUse, queued := 0, 0
 	e.store.Scan(func(it *itemstate.ItemState) {
-		if it.Worker != nil {
+		switch {
+		case it.Worker != nil && it.Worker.Queued:
+			queued++
+		case it.Worker != nil:
+			inUse++
+		case it.ConflictResolution != nil && it.ConflictResolution.Queued:
+			queued++
+		case it.ConflictResolution != nil && it.ConflictResolution.GeneralSlot:
+			// A merge-train conflict resolution on a general-pool slot holds one
+			// like any worker; one on the reserved train slot is train_in_use.
 			inUse++
 		}
 	})
-	res.Workers = localapi.WorkerSlots{InUse: inUse, MaxConcurrent: localapi.Unknown[int]()}
+	if e.cfg.MaxConcurrent > 0 && inUse > e.cfg.MaxConcurrent {
+		inUse = e.cfg.MaxConcurrent
+	}
+	res.Workers = localapi.WorkerSlots{InUse: inUse, Queued: queued, MaxConcurrent: localapi.Unknown[int]()}
 	if e.cfg.MaxConcurrent > 0 {
 		res.Workers.MaxConcurrent = localapi.Some(e.cfg.MaxConcurrent)
 	}
@@ -1028,6 +1230,11 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions(now, h)
+	if h.Draining {
+		// The count is read live from the Store: the mirror's value is only refreshed
+		// by awaitDrain, which starts once the poll in progress at the SIGHUP returns.
+		res.Draining = &localapi.DrainHealth{Since: localapi.KnownTime(h.DrainSince), WorkersRemaining: len(b.e.drainWorkers())}
+	}
 	return res, nil
 }
 

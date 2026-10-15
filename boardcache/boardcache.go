@@ -223,18 +223,25 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 		Body:            s.Body,
 		Status:          s.Status,
 		StatusEnteredAt: s.StatusEnteredAt,
+		StatusAtGitHub:  s.StatusAtGitHub,
 		URL:             s.URL,
 		Repo:            s.Repo,
 		IsPR:            s.IsPR,
 		IsClosed:        s.IsClosed,
 		UpdatedAt:       s.UpdatedAt,
-		Labels:          s.Labels,
-		Assignees:       s.Assignees,
-		Comments:        s.Comments,
-		Author:          s.Author,
-		BlockedBy:       s.BlockedBy,
-		Milestone:       s.Milestone,
-		MilestoneKnown:  s.MilestoneKnown,
+
+		IssueLayerUpdatedAt:    s.IssueLayerUpdatedAt,
+		LinkedPRUpdatedAt:      s.LinkedPRUpdatedAt,
+		IssueCommentTotal:      s.IssueCommentTotal,
+		IssueCommentTotalKnown: s.IssueCommentTotalKnown,
+
+		Labels:         s.Labels,
+		Assignees:      s.Assignees,
+		Comments:       s.Comments,
+		Author:         s.Author,
+		BlockedBy:      s.BlockedBy,
+		Milestone:      s.Milestone,
+		MilestoneKnown: s.MilestoneKnown,
 	}
 	if s.LinkedPR != nil {
 		pi.LinkedPRNumber = s.LinkedPR.Number
@@ -310,6 +317,10 @@ type CacheImpl struct {
 	// FetchProjectBoard uses max(ItemState.UpdatedAt, localDeltaAt[key]) so that
 	// webhook-driven changes are visible to itemMayNeedWork before the next Reconcile.
 	localDeltaAt map[string]time.Time
+
+	// checkRunsConfirmedAt records when FetchCheckRuns last confirmed a head's
+	// check runs live (#2180); guarded by mu.
+	checkRunsConfirmedAt map[string]time.Time
 
 	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey, pendingCheckRuns).
 	store *itemstate.Store
@@ -389,12 +400,18 @@ func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID stri
 			IsPR:           pi.IsPR,
 			IsClosed:       pi.IsClosed,
 			Status:         pi.Status,
+			StatusAtGitHub: pi.StatusAtGitHub,
 			Repo:           pi.Repo,
 			UpdatedAt:      pi.EffectiveUpdatedAt,
 			LinkedPRNumber: pi.LinkedPRNumber,
 			// The probe carries no labels: the first label-bearing population
 			// (deep fetch or reconcile) is then a silent baseline (#2123).
 			LabelsAbsent: true,
+
+			IssueLayerUpdatedAt:    pi.IssueLayerUpdatedAt,
+			LinkedPRUpdatedAt:      pi.LinkedPRUpdatedAt,
+			IssueCommentTotal:      pi.IssueCommentTotal,
+			IssueCommentTotalKnown: pi.IssueCommentTotalKnown,
 		})
 	}
 
@@ -670,12 +687,52 @@ func (c *CacheImpl) IsItemDeepFetched(repo string, number int) bool {
 	return !snap.State().LastDeepFetchAt.IsZero()
 }
 
+// Evidence is what a board read says about one item's current state, in the
+// layers the cache judges separately (#2180). The zero value of a field means
+// "this producer did not capture it"; cacheIsStale then falls back to the
+// coarser signals it does have.
+type Evidence struct {
+	// Overall is the item's single updatedAt: the later of the issue, the
+	// project item and the linked PR. Zero means the board read carried no
+	// signal at all, which reads as fresh (no hot-loop refetch).
+	Overall time.Time
+	// IssueLayer is Overall without the linked PR: the issue and project item.
+	IssueLayer time.Time
+	// PRLayer is the first linked PR's own updatedAt.
+	PRLayer time.Time
+	// CommentTotal is GitHub's comment count for the issue (not the PR);
+	// meaningful only when CommentTotalKnown.
+	CommentTotal      int
+	CommentTotalKnown bool
+}
+
+// EvidenceFromItem reads the evidence off a board-listing ProjectItem.
+func EvidenceFromItem(item *gh.ProjectItem) Evidence {
+	return Evidence{
+		Overall:           item.UpdatedAt,
+		IssueLayer:        item.IssueLayerUpdatedAt,
+		PRLayer:           item.LinkedPRUpdatedAt,
+		CommentTotal:      item.IssueCommentTotal,
+		CommentTotalKnown: item.IssueCommentTotalKnown,
+	}
+}
+
+// EvidenceFromProbe reads the evidence off a probe-loop item.
+func EvidenceFromProbe(pi gh.BoardProbeItem) Evidence {
+	return Evidence{
+		Overall:           pi.EffectiveUpdatedAt,
+		IssueLayer:        pi.IssueLayerUpdatedAt,
+		PRLayer:           pi.LinkedPRUpdatedAt,
+		CommentTotal:      pi.IssueCommentTotal,
+		CommentTotalKnown: pi.IssueCommentTotalKnown,
+	}
+}
+
 // IsItemCacheFresh returns true when the cache has deep-fetched details for the
-// given item AND those details are not stale relative to the supplied
-// sourceUpdatedAt (typically pi.UpdatedAt from a fresh board read). When the
-// cache is stale, FetchItemDetails will fall through to a GraphQL deep-fetch.
-// Called outside c.mu.
-func (c *CacheImpl) IsItemCacheFresh(repo string, number int, sourceUpdatedAt time.Time) bool {
+// given item AND those details are not stale relative to the supplied board
+// evidence (see cacheIsStale). When the cache is stale, FetchItemDetails will
+// fall through to a GraphQL deep-fetch. Called outside c.mu.
+func (c *CacheImpl) IsItemCacheFresh(repo string, number int, ev Evidence) bool {
 	snap, err := c.store.Get(repo, number)
 	if err != nil {
 		return false
@@ -684,28 +741,85 @@ func (c *CacheImpl) IsItemCacheFresh(repo string, number int, sourceUpdatedAt ti
 	if s.LastDeepFetchAt.IsZero() {
 		return false
 	}
-	return !cacheIsStale(sourceUpdatedAt, s.LastSeenSourceUpdatedAt)
+	return !cacheIsStale(ev, s)
+}
+
+// issueCommentCap is the deep fetch's first page of issue comments. At or past
+// it the comment-total check is skipped (fail-open to the updatedAt rule).
+const issueCommentCap = 100
+
+// cachedIssueComments counts the issue's own comments in the cached copy,
+// excluding the linked PR's comments and review-thread comments.
+func cachedIssueComments(s itemstate.ItemState) int {
+	n := 0
+	for _, cm := range s.Comments {
+		if cm.FromPR == 0 && cm.Path == "" {
+			n++
+		}
+	}
+	return n
 }
 
 // cacheIsStale reports whether the cached deep state is stale relative to the
-// fresh board's source updatedAt. Returns true when sourceUpdatedAt is strictly
-// after lastSeen — i.e., something on GitHub has bumped updatedAt since we last
-// captured a deep fetch.
+// board's current evidence (#2180). The cached copy is fresh only if all of:
+//
+//  1. Issue layer: the issue/project-item updatedAt is not after
+//     LastSeenSourceUpdatedAt. This is the baseline SelfWriteObserved advances,
+//     and the only layer the engine writes.
+//  2. PR layer: the linked PR's updatedAt is not after LastSeenPRUpdatedAt,
+//     which is set from GitHub values only. An engine write on the issue can
+//     therefore never hide a review, thread comment or PR comment.
+//  3. Comment evidence: GitHub's issue comment total equals the cached issue
+//     comment count (skipped at or past the first-page cap). A self-write keeps
+//     the two equal because the engine's own comments are written through the
+//     cache; a human comment hidden by the issue-layer baseline makes them
+//     differ, which no timestamp compare can see.
 //
 // Edge cases:
-//   - lastSeen is zero (legacy cache entries written before this field existed):
-//     treat as stale so the next FetchItemDetails refreshes once and populates
-//     LastSeenSourceUpdatedAt going forward.
-//   - sourceUpdatedAt is zero (board read did not populate it): treat as fresh
-//     to avoid a hot-loop refetch when no signal is available.
-func cacheIsStale(sourceUpdatedAt, lastSeen time.Time) bool {
-	if sourceUpdatedAt.IsZero() {
+//   - LastSeenSourceUpdatedAt is zero (never fetched, or invalidated): stale,
+//     so the next FetchItemDetails refreshes once and re-anchors every
+//     baseline.
+//   - ev.Overall is zero (the board read carried no signal): fresh, to avoid a
+//     hot-loop refetch.
+//   - A linked PR on the board that the cache has no record of (no PR baseline
+//     and no cached PR): stale, since a PR appeared after the fetch.
+//   - Layers not captured (zero IssueLayer, or no PR baseline for a cached
+//     PR): fall back to comparing Overall against LastSeenSourceUpdatedAt, as
+//     before #2180.
+//
+// Every refetch re-anchors all baselines to GitHub's values and rebuilds the
+// cached comment list, so no mismatch can persist across polls.
+func cacheIsStale(ev Evidence, s itemstate.ItemState) bool {
+	if ev.Overall.IsZero() {
 		return false
 	}
+	lastSeen := s.LastSeenSourceUpdatedAt
 	if lastSeen.IsZero() {
 		return true
 	}
-	return sourceUpdatedAt.After(lastSeen)
+	// A linked PR the cached copy knows nothing about (no PR baseline and no
+	// cached PR) appeared after the fetch. Its changes are unseen, and the
+	// overall compare below would let an issue-side self-write mask them. The
+	// refetch caches the PR, so this cannot repeat.
+	if !ev.PRLayer.IsZero() && s.LastSeenPRUpdatedAt.IsZero() && (s.LinkedPR == nil || s.LinkedPR.Number == 0) {
+		return true
+	}
+	if !ev.IssueLayer.IsZero() && !s.LastSeenPRUpdatedAt.IsZero() {
+		if ev.IssueLayer.After(lastSeen) {
+			return true
+		}
+		if !ev.PRLayer.IsZero() && ev.PRLayer.After(s.LastSeenPRUpdatedAt) {
+			return true
+		}
+	} else if ev.Overall.After(lastSeen) {
+		return true
+	}
+	if ev.CommentTotalKnown {
+		if cached := cachedIssueComments(s); cached < issueCommentCap && ev.CommentTotal != cached {
+			return true
+		}
+	}
+	return false
 }
 
 // Subscribe registers an observer on the underlying Store. The returned func
@@ -749,6 +863,11 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 		key := itemKey(snap.Repo(), snap.Number())
 		if t, ok := localDeltaAtCopy[key]; ok && t.After(pi.UpdatedAt) {
 			pi.UpdatedAt = t
+		}
+		// A webhook stamp counts as an issue-layer change too (#2180): the cache
+		// compares layers, not the overall value.
+		if t, ok := localDeltaAtCopy[key]; ok && t.After(pi.IssueLayerUpdatedAt) && !pi.IssueLayerUpdatedAt.IsZero() {
+			pi.IssueLayerUpdatedAt = t
 		}
 		items = append(items, pi)
 	}
@@ -810,7 +929,7 @@ func (c *CacheImpl) fetchItemDetails(item *gh.ProjectItem, fromProbe bool) error
 	if err == nil {
 		s := snap.State()
 		if !s.LastDeepFetchAt.IsZero() {
-			if !cacheIsStale(item.UpdatedAt, s.LastSeenSourceUpdatedAt) {
+			if !cacheIsStale(EvidenceFromItem(item), s) {
 				// Cache hit — copy deep fields into item.
 				copyDeepFieldsFromState(item, s)
 				return nil
@@ -865,25 +984,22 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	}
 
 	if runs := c.store.CheckRunsBySHA(sha); len(runs) > 0 {
-		// Never trust a cached read that would classify as FAILED without
-		// confirming it live first: on a webhook-less deployment there is no
-		// check_run event to refresh a stale cached failure, and blindly
-		// trusting it would let a superseded/rerun check keep shadowing its
-		// own fresh rerun forever (#958 leg 3). A cached WAIT or READY
-		// classification is still served from cache.
-		//
-		// #1303: a cached PENDING classification has the identical staleness
-		// hazard (nothing supersedes it without a webhook either) and is not
-		// inverted to an allowlist here deliberately — see RefreshCheckRunsLive
-		// below, which closes that specific gap for the one caller
-		// (settleAwaitingCIScan) where an open-ended stale-Pending stall is
-		// possible, without changing this general cache-trust contract (and
-		// the ~35 existing settlePRMergeState/ReadClient call sites) for
-		// every other caller of FetchCheckRuns.
-		if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
+		// Only a cached READY set is served on trust (#2180). Check completion
+		// does not move any updatedAt, so no freshness baseline can reveal a
+		// stale cached PENDING set; on a webhook-less deployment nothing else
+		// supersedes it either (#1303). A cached FAILED set has the identical
+		// hazard — a superseded/rerun check would keep shadowing its own fresh
+		// rerun (#958 leg 3). Both are confirmed live. A PENDING set that was
+		// confirmed live moments ago is served, so one poll's repeated reads of
+		// the same head cost one REST call, not one per reader.
+		status, _, _ := gh.ClassifyCheckRuns(runs)
+		switch {
+		case status == gh.CheckRunsReady:
+			return runs, nil
+		case status == gh.CheckRunsPending && c.checkRunsConfirmedRecently(sha):
 			return runs, nil
 		}
-		c.logFn("[cache] cached check runs for sha=%s classify as FAILED — refetching from GitHub before trusting it\n", sha)
+		c.logFn("[cache] cached check runs for sha=%s are not READY — confirming live before trusting them\n", sha)
 	}
 
 	c.logFn("[cache] miss: FetchCheckRuns sha=%s — fetching from GitHub\n", sha)
@@ -895,45 +1011,37 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	for _, run := range runs {
 		c.store.Apply(itemstate.CheckRunCompleted{Repo: fullRepo, SHA: sha, Run: run})
 	}
+	c.noteCheckRunsConfirmed(sha)
 	return runs, nil
 }
 
-// RefreshCheckRunsLive unconditionally fetches check runs for sha from GitHub,
-// bypassing FetchCheckRuns's cache-trust check entirely, and applies the
-// result into the Store exactly as FetchCheckRuns's own miss path does — so a
-// subsequent FetchCheckRuns call for the same sha is served from this fresh
-// data.
-//
-// #1303: this exists to close a narrow but real gap in FetchCheckRuns's
-// general cache-trust contract (deliberately left unchanged — see its doc
-// comment): a cached PENDING classification is served from cache
-// indefinitely, since only a would-be-FAILED classification forces a live
-// refetch (#958 leg 3). On a webhook-less deployment nothing else ever
-// supersedes a stale cached PENDING snapshot with a check_run event, so
-// settleAwaitingCIScan (the one caller for which an open-ended stale-Pending
-// read is consequential — it can silently claim the item forever via
-// checkMergeabilityGate's PRMergeUnsettled branch) calls this once per
-// fabrik:awaiting-ci item per poll to prime the store with genuinely fresh
-// data before the Phase 1 handler chain runs, rather than trusting whatever
-// FetchCheckRuns' own cache-trust check would otherwise decide.
-func (c *CacheImpl) RefreshCheckRunsLive(owner, repo, sha string) error {
+// checkRunsConfirmTTL bounds how long a live-confirmed PENDING check-run set is
+// served from cache: long enough to cover the repeated reads within one poll,
+// far shorter than the poll interval.
+const checkRunsConfirmTTL = 15 * time.Second
+
+func (c *CacheImpl) checkRunsConfirmedRecently(sha string) bool {
 	c.mu.RLock()
-	paused := c.paused
-	c.mu.RUnlock()
+	defer c.mu.RUnlock()
+	at, ok := c.checkRunsConfirmedAt[sha]
+	return ok && time.Since(at) < checkRunsConfirmTTL
+}
 
-	if paused {
-		return nil
+func (c *CacheImpl) noteCheckRunsConfirmed(sha string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.checkRunsConfirmedAt == nil {
+		c.checkRunsConfirmedAt = make(map[string]time.Time)
 	}
-
-	fullRepo := owner + "/" + repo
-	runs, err := c.fallback.FetchCheckRuns(owner, repo, sha)
-	if err != nil {
-		return err
+	// Bound the map: drop expired entries once it grows past a small size.
+	if len(c.checkRunsConfirmedAt) > 256 {
+		for k, t := range c.checkRunsConfirmedAt {
+			if time.Since(t) >= checkRunsConfirmTTL {
+				delete(c.checkRunsConfirmedAt, k)
+			}
+		}
 	}
-	for _, run := range runs {
-		c.store.Apply(itemstate.CheckRunCompleted{Repo: fullRepo, SHA: sha, Run: run})
-	}
-	return nil
+	c.checkRunsConfirmedAt[sha] = time.Now()
 }
 
 // FetchLinkedPR returns cached PR details for an issue; falls back to GitHub

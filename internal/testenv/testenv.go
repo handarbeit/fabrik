@@ -70,6 +70,15 @@ func Isolate(t testing.TB) {
 // is a test-local file holding globalContents (e.g. a url insteadOf rewrite)
 // and the system config is disabled. Command-scope GIT_CONFIG_* entries — which
 // outrank the global file — are removed by Isolate.
+//
+// It also cuts off the repository layer (#2262): git resolves local config from
+// the working directory, and in a linked worktree that is the main repository's
+// shared .git/config, so a checkout's own credential.helper or url insteadOf
+// would otherwise leak into a `git config` run without an explicit directory.
+// The test's working directory is therefore changed to a fresh temp directory
+// outside any repository (restored on cleanup). Like t.Chdir, this forbids
+// t.Parallel and a caller that needs its original directory must use an
+// absolute path.
 func IsolateGit(t testing.TB, globalContents string) {
 	t.Helper()
 	Isolate(t)
@@ -79,6 +88,7 @@ func IsolateGit(t testing.TB, globalContents string) {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", cfgPath)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Chdir(t.TempDir())
 }
 
 // ScrubProcess unsets the same variables once, for a package's TestMain, where

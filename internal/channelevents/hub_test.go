@@ -774,3 +774,63 @@ func TestHubUnsubscribeUnknownIsHarmless(t *testing.T) {
 		t.Fatal("subscription must survive a no-op unsubscribe")
 	}
 }
+
+// Deliverable (#2210) is true while an attached subscriber is owed a batch, false
+// once the sink has seen everything, and stays false for a digest the queue is
+// deliberately holding — the case where Queued would never reach zero.
+func TestHubDeliverable(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	h.Subscribe(Subscription{Subscriber: "X"})
+	h.Publish(ev(1, Merged))
+	if h.Deliverable("X") {
+		t.Fatal("an unattached subscriber is never deliverable")
+	}
+	if h.Deliverable("nobody") {
+		t.Fatal("an unknown subscriber is never deliverable")
+	}
+	s := newSink()
+	h.Attach("X", s)
+	s.wait(t)
+	waitFor(t, func() bool { return !h.Deliverable("X") && h.Queued("X") == 0 })
+
+	h.Subscribe(Subscription{Subscriber: "D", DigestSeconds: 3600})
+	d := newSink()
+	h.Attach("D", d)
+	h.Publish(ev(2, Merged)) // collected into an hour-long digest
+	if h.Queued("D") != 1 {
+		t.Fatalf("Queued=%d want 1 held digest entry", h.Queued("D"))
+	}
+	if h.Deliverable("D") {
+		t.Fatal("a held digest must not count as deliverable")
+	}
+	h.Publish(ev(3, ValidateSettled)) // immediate types bypass the digest
+	d.wait(t)
+	waitFor(t, func() bool { return !h.Deliverable("D") })
+}
+
+// A digest that becomes due only because the injected clock moved must be
+// delivered once the drain polls Deliverable, even though the pump's real-time
+// timer (sized from the old clock delta) has not fired (#2210).
+func TestHubDeliverableWakesPumpAfterClockAdvance(t *testing.T) {
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	var cmu sync.Mutex
+	clock := now
+	h := openHub(t, t.TempDir(), func(o *Options) {
+		o.Now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return clock }
+	})
+	h.Subscribe(Subscription{Subscriber: "D", DigestSeconds: 3600})
+	d := newSink()
+	h.Attach("D", d)
+	h.Publish(ev(1, Merged)) // held in an hour-long digest
+	if h.Deliverable("D") {
+		t.Fatal("a held digest must not be deliverable before its due time")
+	}
+	// Let the pump evaluate the held digest and arm its real-time timer on the
+	// old clock; the bug only exists once that timer is sleeping.
+	time.Sleep(100 * time.Millisecond)
+	cmu.Lock()
+	clock = now.Add(2 * time.Hour)
+	cmu.Unlock()
+	waitFor(t, func() bool { return !h.Deliverable("D") && h.Queued("D") == 0 })
+	d.wait(t)
+}

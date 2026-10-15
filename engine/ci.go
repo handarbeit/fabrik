@@ -643,7 +643,8 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 	var headBefore string
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
-		tag: "ci-fix-reinvoke",
+		tag:  "ci-fix-reinvoke",
+		kind: itemstate.WorkerKindCIFixReinvoke,
 		// #1812: refunded by dispatchReinvoke when the invocation provably never
 		// ran; the after hook (and its no-op-SHA debounce) is skipped then.
 		cycle: cycleCharge{

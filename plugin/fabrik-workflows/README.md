@@ -8,12 +8,12 @@ Six skills, one per pipeline stage:
 
 | Skill | Stage | Purpose |
 |-------|-------|---------|
-| `fabrik:fabrik-specify` | Specify | Refine rough issues into clear specs |
-| `fabrik:fabrik-research` | Research | Explore codebase and surface technical findings |
-| `fabrik:fabrik-plan` | Plan | Design implementation approach with task checklist |
-| `fabrik:fabrik-implement` | Implement | Execute the plan: code, test, commit, push |
-| `fabrik:fabrik-review` | Review | Review implementation, fix issues, prepare PR |
-| `fabrik:fabrik-validate` | Validate | Final quality gate: verify requirements met |
+| `fabrik-stages:specify` | Specify | Refine rough issues into clear specs |
+| `fabrik-stages:research` | Research | Explore codebase and surface technical findings |
+| `fabrik-stages:plan` | Plan | Design implementation approach with task checklist |
+| `fabrik-stages:implement` | Implement | Execute the plan: code, test, commit, push |
+| `fabrik-stages:review` | Review | Review implementation, fix issues, prepare PR |
+| `fabrik-stages:validate` | Validate | Final quality gate: verify requirements met |
 
 ## Installation
 

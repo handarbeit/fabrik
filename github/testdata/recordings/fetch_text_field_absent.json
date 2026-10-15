@@ -1,0 +1,10 @@
+{
+  "provenance": {
+    "operation": "fetch_text_field_absent",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-10-13T03:00:00Z",
+    "source_repo": "hand-authored from the log line quoted in #2218 (shadoworg board #5) and the vendored schema; re-record with scripts/wire-contract/record-fixtures.sh against the \"Fabrik Test\" sandbox board (a deliberately absent field name)",
+    "scrubbed": true
+  },
+  "response": {"data":{"node":{"field":null}},"errors":[{"type":"NOT_FOUND","path":["node","field"],"locations":[{"line":5,"column":7}],"message":"Could not resolve to a Unions::ProjectV2FieldConfiguration with the name 'Fabrik'."}]}
+}

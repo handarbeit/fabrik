@@ -77,6 +77,10 @@ type pluginStateReport struct {
 	// CustomizedMsg is the operator-facing customization text (already built by
 	// pluginCustomizationWarning); empty when not Customized.
 	CustomizedMsg string
+	// MigrationPending means `fabrik upgrade` has a workflow migration to apply
+	// (#2139); MigrationDetail says what.
+	MigrationPending bool
+	MigrationDetail  string
 }
 
 // reportPluginState records the plugin conditions that block or degrade work —
@@ -108,8 +112,15 @@ func reportPluginState(w io.Writer, r pluginStateReport) {
 		conds = append(conds, warnings.Condition{
 			Subject: "customized",
 			Title:   "Plugin skills have local customizations — auto-refresh skipped",
-			Detail:  msg + "\n\nLocal edits block the next upgrade until reconciled; they are not discarded.",
+			Detail:  msg + "\n\nLocal edits are not discarded. They block plugin updates until `fabrik upgrade` moves them into .fabrik/plugins/local-workflows.",
 			LogLine: msg,
+		})
+	}
+	if r.MigrationPending {
+		conds = append(conds, warnings.Condition{
+			Subject: "migration_pending",
+			Title:   "Workflow migration pending — run 'fabrik upgrade'",
+			Detail:  r.MigrationDetail + "\n\nFix: run 'fabrik upgrade', then review and commit the result. The daemon keeps working on the current layout until you do.",
 		})
 	}
 	var err error

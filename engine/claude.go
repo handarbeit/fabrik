@@ -23,6 +23,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -83,6 +84,7 @@ type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 type claudeSkillLoadError = claudeerr.SkillLoadError
+type claudeKilledError = claudeerr.KilledError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for an
 // Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight
@@ -106,6 +108,9 @@ const apiErrorTerminalReason = "api_error"
 // classified as a did-not-run exit, regardless of what TerminalReason says
 // (#1458 R5 could not empirically verify CostUSD on a real api_error sample,
 // so this guard is reused unchanged rather than dropped — see ADR-1458).
+//
+// usage must be this invocation's own (see invocationGuardUsage, #1949): on a
+// resumed session the result's figures are cumulative.
 //
 // This function does not itself inspect api_error_status: the caller
 // (interpretClaudeResult) tries classifyUsageLimitExit first, which claims the
@@ -138,7 +143,9 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // over from the original prose-based guard (#1184): a genuine usage-limit
 // exit terminates the invocation immediately (0 turns, $0.00), so an
 // invocation that consumed turns and incurred cost is never classified as
-// one, regardless of what TerminalReason says.
+// one, regardless of what TerminalReason says. usage must be this
+// invocation's own, not a resumed session's cumulative totals (see
+// invocationGuardUsage, #1949).
 //
 // A second structural trigger is terminal_reason "api_error" together with
 // api_error_status 429 (ADR-1811): the CLI reports a session limit that way
@@ -439,7 +446,7 @@ var claudeGHToken string
 // AppID/AppPrivateKeyPath/AppInstallationID mint a ~1h installation token
 // that a background refresh loop keeps current for the engine's own API
 // calls. Reading it live here (typically Client.Token(), riding that same
-// refresh loop) means a worker's `gh` invocations (e.g. fabrik-validate's
+// refresh loop) means a worker's `gh` invocations (e.g. the validate skill's
 // Pre-Completion Gate) authenticate as the same installation the engine
 // itself uses, without a second minting path. nil (the default, and always
 // true in PAT mode) leaves buildClaudeEnv's claudeGHToken injection exactly
@@ -465,7 +472,7 @@ var claudeGHTokenOverrideFn func() string
 // pattern. Injected into every Claude worker's environment as GH_HOST so the
 // worker's gh invocations target the same GitHub instance as the engine
 // itself (FR-6, ADR-1391) — without this, a stage worker's `gh` calls (e.g.
-// fabrik-validate's Pre-Completion Gate) would silently hit github.com even
+// the validate skill's Pre-Completion Gate) would silently hit github.com even
 // when the engine is talking to a GHES instance. Empty (the default) skips
 // injection entirely, preserving today's behavior byte-for-byte.
 var claudeGHHost string
@@ -537,6 +544,7 @@ type turnCountingWriter struct {
 	inner       io.Writer
 	issueNumber int
 	maxTurns    int
+	onTurn      func(turns, budget int) // optional per-invocation hook (#2121)
 	buf         []byte
 	count       int
 }
@@ -554,6 +562,9 @@ func (w *turnCountingWriter) Write(p []byte) (int, error) {
 			w.count++
 			if claudeTurnProgress != nil {
 				claudeTurnProgress(w.issueNumber, w.count, w.maxTurns)
+			}
+			if w.onTurn != nil {
+				w.onTurn(w.count, w.maxTurns)
 			}
 		}
 	}
@@ -815,7 +826,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -861,7 +872,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1310,6 +1321,31 @@ func sessionNameSentinel(repo string, issueNumber int, stageName string) string 
 	return fmt.Sprintf("fabrik:%s#%d:%s", sanitizeSentinelComponent(repo), issueNumber, sanitizeSentinelComponent(stageName))
 }
 
+// workerSettingsJSON is the inline per-invocation --settings value (#2140,
+// ADR 2140, FR-005): it disables the PM plugin's marketplace identity and
+// nothing else, so a user who has fabrik@fabrik installed does not get it in a
+// worker now that the stage plugin no longer shadows its name. The stage
+// plugins are --plugin-dir entries (<name>@inline), a separate identity that a
+// disabled marketplace plugin does not touch.
+//
+// Verification status: UNVERIFIED for the PM plugin. The live check
+// (worker_settings_live_test.go) has shown only that the stage plugins still
+// load with this setting; it has not yet shown the PM plugin absent on a host
+// where it is installed (see ADR 2140, "Verification of the live assumption").
+//
+// It carries only enabledPlugins, so the apiKeyHelper refusal (ADR 1346) —
+// which scans settings files, never this inline value — is unaffected.
+func workerSettingsJSON() string {
+	b, err := json.Marshal(map[string]any{
+		"enabledPlugins": map[string]bool{plugin.PMPluginID: false},
+	})
+	if err != nil {
+		// Marshalling a map of strings and bools cannot fail.
+		panic(fmt.Sprintf("marshalling worker settings: %v", err))
+	}
+	return string(b)
+}
+
 func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string, sessionName string) []string {
 	args := []string{
 		"--output-format", "stream-json",
@@ -1332,6 +1368,10 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 	for _, dir := range claudePluginDirs {
 		args = append(args, "--plugin-dir", dir)
 	}
+
+	// The human-facing PM plugin (fabrik@fabrik) must never load in a worker —
+	// not its skills, not any MCP server it bundles. Applies on every path.
+	args = append(args, "--settings", workerSettingsJSON())
 
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)
@@ -1405,7 +1445,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), onTurn func(turns, budget int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
@@ -1451,7 +1491,13 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	lastActivity.Store(time.Now().UnixNano())
 	// Wrap stdoutWriter with a turn-counting writer that fires claudeTurnProgress on
 	// each user event (logical turn start), then with the activity writer for inactivity tracking.
-	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns}
+	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns, onTurn: onTurn}
+	if onTurn != nil {
+		onTurn(0, maxTurns) // invocation start: forget the previous invocation's count, publish this budget
+		// Invocation end: the worker handle outlives Claude (result handling, pushes,
+		// later work), so forget the count and budget rather than leave them stale.
+		defer onTurn(0, 0)
+	}
 	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
@@ -1665,7 +1711,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
 		return text, false, usage, sle
 	}
-	return text, completed, usage, err
+	return text, completed, usage, wrapKilledError(err, completed, wasTimedOut, inactivityFired.Load())
 }
 
 // skillLoadOverride decides whether interpretClaudeResult's outcome must be
@@ -1682,6 +1728,23 @@ func skillLoadOverride(ctx context.Context, rawOutput []byte, expectedSkill stri
 		return nil
 	}
 	return detectSkillLoadFailure(rawOutput, expectedSkill)
+}
+
+// wrapKilledError records why the engine killed an invocation (#2170): a
+// timed-out run that did not complete returns its error wrapped in a
+// claudeerr.KilledError naming the wall-time deadline or the inactivity
+// watchdog. The wrapper is transparent (Unwrap), so every errors.As
+// classification and the retry accounting built on it see the original error.
+// A run that completed (the marker was emitted before the kill) is left alone.
+func wrapKilledError(err error, completed, wasTimedOut, inactivity bool) error {
+	if err == nil || completed || !wasTimedOut {
+		return err
+	}
+	cause := claudeerr.KillWallTime
+	if inactivity {
+		cause = claudeerr.KillInactivity
+	}
+	return &claudeerr.KilledError{Cause: cause, Err: err}
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -1904,14 +1967,18 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// payload to trust, so it falls through to the generic error below
 		// rather than being classified by any means.
 		if ok {
-			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
+			// On --resume the result's turns/cost are the session's cumulative
+			// figures; the classifiers' real-work guard must judge this
+			// invocation's own usage (#1949). Display and accounting keep usage.
+			guardUsage := invocationGuardUsage(usage, rawOutput, resumeSessionID != "")
+			if msg, detected := classifyUsageLimitExit(resp, guardUsage); detected {
 				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
 				// The reset instant lives on a separate rate_limit_event stream line,
 				// not on the result object (ADR-1815); a best-effort raw-stream scan
 				// that can never affect the classification above.
 				resetAt, resetReason := extractUsageLimitReset(rawOutput)
 				return text, false, usage, &claudeUsageLimitError{Message: msg, ResetAt: resetAt, ResetFallbackReason: resetReason}
-			} else if _, detected := classifyAPIErrorExit(resp, usage); detected {
+			} else if _, detected := classifyAPIErrorExit(resp, guardUsage); detected {
 				claudeLog(issueNumber, "claude", "api_error exit detected (turns=%d, cost=$%.4f) — stage did not run, not charged against max_retries\n", usage.TurnsUsed, usage.CostUSD)
 				return text, false, usage, &claudeAPIErrorExit{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 			} else if resp.TerminalReason != "" && resp.TerminalReason != usageLimitTerminalReason {

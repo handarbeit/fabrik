@@ -7,6 +7,7 @@
 //	gate [run] --resume [--clean] ...         # run only what the coverage ledger lacks (#1972)
 //	gate coverage [--sha S] [--format notes]  # is live coverage complete for S? (exit 0 / 8)
 //	gate report [--sha S] [--baseline B]      # measured per-test runtime from the archive (#1992)
+//	gate sim [go test flags...]               # just the sim suite, with the pre-gate's diagnostics (#2247); what scripts/cut-release.sh runs
 //
 // It is not part of the fabrik binary.
 package main
@@ -56,10 +57,10 @@ func realMain(argv []string) int {
 	return code
 }
 
-// splitSubcommand peels an explicit "run", "reset", "coverage" or "report" off the front; anything
+// splitSubcommand peels an explicit "run", "reset", "coverage", "report" or "sim" off the front; anything
 // else is the gate's own arguments (--clean, go test flags).
 func splitSubcommand(argv []string) (string, []string) {
-	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset" || argv[0] == "coverage" || argv[0] == "report") {
+	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset" || argv[0] == "coverage" || argv[0] == "report" || argv[0] == "sim") {
 		return argv[0], argv[1:]
 	}
 	return "run", argv
@@ -84,6 +85,17 @@ func run(ctx context.Context, sub string, argv []string) int {
 	}
 	if sub == "report" {
 		return g.ReportCmd(ctx, argv)
+	}
+	if sub == "sim" {
+		if err := g.RunSim(ctx, argv); err != nil {
+			if ee, ok := err.(*gate.ExitError); ok {
+				fmt.Fprintln(os.Stderr, ee.Msg)
+				return ee.Code
+			}
+			fmt.Fprintf(os.Stderr, "gate: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	if sub == "reset" {
 		opts, bed, err := parseResetArgs(argv)

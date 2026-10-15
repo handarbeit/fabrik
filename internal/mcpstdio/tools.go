@@ -20,6 +20,8 @@ const (
 	ToolStatus = "fabrik_status"
 	ToolBoard  = "fabrik_board"
 	ToolHealth = "fabrik_health"
+	// ToolSituation (#2171, ADR 2171) is the rolled-up "what needs you" view.
+	ToolSituation = "fabrik_situation"
 
 	ToolSubscribe   = "fabrik_subscribe"
 	ToolUnsubscribe = "fabrik_unsubscribe"
@@ -33,11 +35,12 @@ const (
 	ToolRevalidate       = "fabrik_revalidate"
 	ToolClearClaudeLimit = "fabrik_clear_claude_limit"
 	ToolAdvance          = "fabrik_advance"
+	ToolMoveParked       = "fabrik_move_parked"
 )
 
 // ActionTools lists the tools that make the daemon write to GitHub.
 func ActionTools() []string {
-	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance}
+	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked}
 }
 
 // IsActionTool reports whether name is one of ActionTools.
@@ -105,9 +108,10 @@ func toolDefs() []map[string]any {
 	return []map[string]any{
 		{
 			"name": ToolStatus,
-			"description": "Everything the Fabrik daemon knows about one issue, from its in-memory cache (no GitHub call): place on the board and time in column, labels, milestone, " +
-				"cycle counters as 'n of max', worker, last invocation, linked PR / CI / merge-train position, blockers, and an `attention` block that answers " +
-				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when). " +
+			"description": "Everything the Fabrik daemon knows about one issue, from its in-memory cache (no GitHub call): place on the board and time in column, every label (stage and fabrik groupings plus other_labels), milestone, " +
+				"cycle counters as 'n of max' (none for a parking or holding column), worker, last invocation (figure_basis says which figures are per-invocation and which are session-cumulative, as the Claude CLI reports them), " +
+				"linked PR / CI / merge-train position with a per-reviewer verdict at the PR head (at_head, inline_at_head, outstanding, clean_pass, unaddressed), blockers, and an `attention` block that answers " +
+				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when; a suspended item names the decision and its options instead, and no next time). " +
 				"Anything the daemon cannot vouch for is the string \"unknown\".",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
@@ -117,8 +121,9 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolBoard,
 			"description": "Overseer view of the whole board from the daemon's cache (no GitHub call). view=attention lists only items that need looking at, ranked " +
-				"needs-human, escalated, stalled, then settled-at-Validate awaiting a human merge decision (cruise), each with a one-line reason. " +
-				"view=flow gives per column the count, the oldest time-in-column and the in-flight workers. Time-in-column is daemon-observed (resets on restart). " +
+				"needs-human and suspended (a completed stage or parked blocker waiting on a human decision, with the options to act and a GitHub-anchored age), escalated, stalled, then settled-at-Validate awaiting a human merge decision (cruise), each with a one-line reason. " +
+				"view=flow gives per column the count, the oldest time-in-column and the in-flight workers; closed (Done) items are not listed but counted in excluded.closed, so the columns plus excluded.closed equal matched. " +
+				"Every result carries matched, the number of items that passed the filter; an attention view always carries `attention` (an empty list when none of the matched items needs looking at). Time-in-column is daemon-observed (resets on restart). " +
 				"Items the cache cannot evaluate for a filter (e.g. milestone not yet captured) are excluded and counted, never guessed.",
 			"inputSchema": obj(map[string]any{
 				"view": map[string]any{"type": "string", "enum": []string{localapi.ViewAttention, localapi.ViewFlow}, "description": "attention (default) or flow"},
@@ -138,8 +143,24 @@ func toolDefs() []map[string]any {
 			"description": "Pipeline health from the daemon's own state (no GitHub call): version and uptime, time since the last poll attempt and success, webhook and reconcile freshness, " +
 				"poll liveness (poll.in_progress and current_started_at, last_completed_at, the step an in-progress poll is in, next_due_at with backing_off, and the overdue verdict: true when a poll has run longer than 2 x interval_seconds or none started within 2 x interval of next_due_at, so a stalled engine is distinguishable from a stalled item), " +
 				"the account-wide Claude usage-limit hold, GraphQL backoff (as_of says when a poll last refreshed it; it does not age on its own), worker slots in use (plus the reserved merge-train slot, train_in_use/train_max, when merge_train is on), " +
-				"and per (repo, base) merge-train partition members with oldest_queued_since, the run phase, and an idle_reason when members are queued and no run is active.",
+				"and per (repo, base) merge-train partition members with oldest_queued_since, the run phase, and an idle_reason when members are queued and no run is active. " +
+				"While the daemon drains for a SIGHUP restart a draining object (since, workers_remaining) is present and the poll overdue verdict is unknown, not overdue.",
 			"inputSchema": obj(map[string]any{}),
+			"annotations": readOnly,
+		},
+		{
+			"name": ToolSituation,
+			"description": "The one answer to 'what needs me?', from the daemon's in-memory state (no GitHub call): PRs settled at Validate under cruise awaiting a merge decision (with the review and CI verdicts as cached), " +
+				"items held at the feedback / review / CI / merge gate (the gate and how long it has held), items waiting for human input (with how to resume them), pending decisions, stalled items, " +
+				"merge-train state per (repo, base) partition, poll and worker health (in progress or overdue, slots in use, train members queued), and active anomalies (pipeline-stalled, retry-starved, item-wedged, cache-divergence). " +
+				"Every item entry carries its title, link and the options to act, each with the MCP tool that performs it when one exists. Each section is ordered by attention rank and bounded: `omitted` counts the entries cut, and an item appears in one section only (an item already reported as item-wedged is under anomalies, not gates). " +
+				"A fact the daemon cannot vouch for (a hold that began before the daemon started, labels it has not read yet) is \"unknown\", never a default; `nothing_needs_you` is true only when there is nothing to report and every open item could be classified. " +
+				"The same view is what a `situation` event carries and what the catch-up on attach delivers. With push: true the view is also queued to this session's channel as a `situation` event, " +
+				"unless it equals the last one sent to this subscriber (force: true sends it anyway); that writes nothing to GitHub or the board and needs this server to have been launched with --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"push":  map[string]any{"type": "boolean", "description": "also queue this view to this session as a situation event (deduplicated unless force)"},
+				"force": map[string]any{"type": "boolean", "description": "with push, send even when the view equals the last digest sent to this subscriber"},
+			}),
 			"annotations": readOnly,
 		},
 		{
@@ -148,9 +169,15 @@ func toolDefs() []map[string]any {
 				"Scopes combine with AND (entries inside one list with OR): issues, repos, a milestone, and label patterns (* matches any run of characters, e.g. fabrik:* or stage:*:complete; " +
 				"patterns only affect label-applied/label-removed events). By default label events skip high-churn labels (fabrik:locked:*, stage:*:in_progress, fabrik:spawned-child:*, fabrik:credited-pr:*, fabrik:editing); " +
 				"pass exclude_labels: [] to receive every label change. item-added (a new item arrived), column-changed (a board column move) and closed are lifecycle events; progress_via_column replaces the stage-label stream with column moves. events filters by type: " + eventList() + ". " +
-				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, escalated, paused and daemon-unreachable always arrive at once. " +
+				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, settlement-withdrawn, escalated, paused and daemon-unreachable always arrive at once. " +
+				"situation_seconds (60 to 86400; default off) pushes the situation digest - the same rolled-up view fabrik_situation returns - at most that often, and only when it changed since the last one sent to this session; it needs situation in events (or no events list). " +
+				"remind_after (seconds, 600 to 2592000; default off) re-sends a still-pending decision-pending event to this session once per interval, marked reminder=true and carrying the original's attributes; it is never sent from daemon uptime and never as `stalled`. " +
+				"Without an events list you receive the semantic event family: every type below except the raw label-applied / label-removed events. Label events are opt-in - name label-applied and/or label-removed in events to receive them (labels, exclude_labels and progress_via_column only shape label events, so they do nothing unless you do; the response notes it). " +
+				"On subscribing, on a fresh attach and after a daemon restart you receive one catch_up snapshot of what needs you: the situation digest if this subscription takes situation (the default family does), otherwise the per-item events it matches. After a restart you also receive daemon-reachable first and then the changes made while it was down (origin=downtime-delta) - never a replay of unchanged state. " +
+				"Label events are not a readiness signal: a label such as stage:Validate:complete can appear and be removed again while the PR still needs a rebase, CI or a fix. " +
+				"Only validate-settled (the item is ready for your decision) and settlement-withdrawn (it stopped being ready before you acted) say whether an item is ready; act on decision-pending/validate-settled events using their `options` and do not act on a settled event that a settlement-withdrawn event has since withdrawn. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
-				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
+				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
 				"Re-subscribing with the same filters is harmless. " +
 				"The daemon tolerates version skew: an event type it renamed since this server was built is mapped to its new name, and one it does not know is dropped; the response lists both under mapped and rejected, " +
 				"and a request that names only unknown types is refused without touching the existing subscription.",
@@ -160,10 +187,12 @@ func toolDefs() []map[string]any {
 				"milestone":           map[string]any{"type": "string", "description": "milestone title, or #N for a milestone number; items whose milestone the daemon has not captured never match"},
 				"labels":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "include patterns for label events (default: every label)"},
 				"exclude_labels":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exclude patterns for label events; omit for the default churn exclusions, [] for none"},
-				"events":              map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: all)"},
+				"events":              map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: the semantic family - every type except label-applied and label-removed; name those to opt in)"},
 				"digest_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
 				"progress_via_column": map[string]any{"type": "boolean", "description": "drop label-applied/label-removed for stage:*:complete and stage:*:in_progress when column-changed is also taken, so progress arrives as column moves instead of the stage-label stream; overrides labels and exclude_labels for those two patterns; requires column-changed in events when events is set"},
 				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
+				"remind_after":        map[string]any{"type": "integer", "minimum": 600, "maximum": 2592000, "description": "seconds between reminders for a still-pending decision-pending episode; omit for none"},
+				"situation_seconds":   map[string]any{"type": "integer", "minimum": 60, "maximum": 86400, "description": "push the situation digest at most this often, only when it changed since the last one sent; omit for none (the catch-up and fabrik_situation push still deliver one)"},
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
 		},
@@ -216,6 +245,18 @@ func toolDefs() []map[string]any {
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 			}, "issue"),
+			"annotations": action(false),
+		},
+		{
+			"name": ToolMoveParked,
+			"description": "Move an item from one unmanaged parking column (e.g. Triage) to another (e.g. Backlog). This starts no work: the engine never dispatches for a parking column, so it is the \"accepted, not yet\" decision, not a promotion; use fabrik_promote to move an item into the pipeline. " +
+				"It only moves BETWEEN parking columns and never pulls work out of the pipeline. The daemon confirms the item's current column live and fails closed. " +
+				"Refused, with the current state and writing nothing, when the item is not in a parking column, `to` is not another parking column that exists on the board (holding, cleanup and pipeline columns are refused; the refusal lists the valid parking destinations), or `to` is the item's current column. " +
+				"A legacy Backlog column with no configured stage counts as a parking column. Changes no labels and lifts no pause. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue": issueSchema(),
+				"to":    map[string]any{"type": "string", "description": "the parking column to move the item into, e.g. Backlog"},
+			}, "issue", "to"),
 			"annotations": action(false),
 		},
 		{
@@ -277,6 +318,24 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodBoard, localapi.BoardParams{View: a.View, Filter: a.Filter, StallThresholdSeconds: a.StallMi * 60}, nil
 	case ToolHealth:
 		return localapi.MethodHealth, nil, nil
+	case ToolSituation:
+		var a struct {
+			Push  bool `json:"push"`
+			Force bool `json:"force"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		p := localapi.SituationParams{Push: a.Push, Force: a.Force}
+		if a.Push {
+			// A push goes to this session's own channel only: the launched
+			// --subscriber name, with no per-call override (as for the action
+			// tools), so a call cannot queue a digest into, or overwrite the dedup
+			// memory of, another subscriber. Without a name the daemon still
+			// answers and says nothing was pushed.
+			p.Subscriber = defaultSubscriber
+		}
+		return localapi.MethodSituation, p, nil
 	case ToolSubscribe:
 		var a struct {
 			Issues        []issueArg `json:"issues"`
@@ -286,6 +345,8 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			ExcludeLabels *[]string  `json:"exclude_labels"`
 			Events        []string   `json:"events"`
 			DigestSeconds int        `json:"digest_seconds"`
+			RemindAfter   int        `json:"remind_after"`
+			Situation     int        `json:"situation_seconds"`
 			Subscriber    string     `json:"subscriber"`
 
 			ProgressViaColumn bool `json:"progress_via_column"`
@@ -300,6 +361,12 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.DigestSeconds < 0 {
 			return "", nil, fmt.Errorf("digest_seconds must be positive")
 		}
+		if a.RemindAfter < 0 {
+			return "", nil, fmt.Errorf("remind_after must be positive")
+		}
+		if a.Situation < 0 {
+			return "", nil, fmt.Errorf("situation_seconds must be positive")
+		}
 		var issues []string
 		for _, i := range a.Issues {
 			issues = append(issues, string(i))
@@ -307,7 +374,9 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodSubscribe, localapi.SubscribeParams{
 			Subscriber: who, Repos: a.Repos, Issues: issues, Milestone: a.Milestone,
 			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
-			ProgressViaColumn: a.ProgressViaColumn,
+			ProgressViaColumn:  a.ProgressViaColumn,
+			RemindAfterSeconds: a.RemindAfter,
+			SituationSeconds:   a.Situation,
 		}, nil
 	case ToolUnsubscribe:
 		var a struct {
@@ -374,6 +443,22 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			return "", nil, fmt.Errorf("issue is required")
 		}
 		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: string(a.Issue)}, nil
+	case ToolMoveParked:
+		var a struct {
+			Issue issueArg `json:"issue"`
+			To    string   `json:"to"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" || a.To == "" {
+			return "", nil, fmt.Errorf("issue and to are required")
+		}
+		return localapi.MethodMoveParked, localapi.MoveParkedParams{Subscriber: who, Issue: string(a.Issue), To: a.To}, nil
 	case ToolAdvance:
 		var a struct {
 			Issue issueArg `json:"issue"`

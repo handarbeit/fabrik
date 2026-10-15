@@ -374,7 +374,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// yet on a same-dispatch edge, so it cannot catch this on its own.
 	// Without this guard, a Validate agent that (against its own skill
 	// instructions — see "If You Discover a Blocking Issue" in
-	// fabrik-validate/SKILL.md) emits a spawn block together with
+	// the validate skill/SKILL.md) emits a spawn block together with
 	// FABRIK_STAGE_COMPLETE on a yolo issue could reach MergePR/auto-merge
 	// before fabrik:blocked is ever applied — reproducing, one dispatch
 	// earlier, the exact silent-merge-past-an-undeclared-blocker danger
@@ -627,6 +627,28 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	e.logf(item.Number, "done", "stage %q signaled no work needed — skipping remaining stages and moving to Done\n", stage.Name)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// Feedback gate (#2220 FR-004): the no-work decision ends in a Done move, an
+	// advance that must not outrun an unprocessed comment. Held before the
+	// awaiting-done marker is written, so there is nothing to retract; the stage
+	// keeps stage:<X>:complete, the comment path handles the comment next poll
+	// (stage has run), and its own completion advances the item normally.
+	if !hasLabel(item.Labels, "fabrik:awaiting-done") && e.feedbackGateBlocks(item, false, "no-work-needed") {
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		if !hasLabel(item.Labels, completeLabel) {
+			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+				e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+			} else {
+				if c := e.cache(); c != nil {
+					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
+				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+				}
+			}
+		}
+		return
+	}
 
 	if !hasLabel(item.Labels, "fabrik:awaiting-done") {
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {

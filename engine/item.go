@@ -408,7 +408,12 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	if !item.IsClosed {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 && !item.IsClosed {
-			return true, 0
+			// A stage that has not run on this entry runs first (#2220); mirror
+			// processItem's routing so admission and dispatch agree. Falls through
+			// to the ordinary complete-label / cooldown checks below otherwise.
+			if e.pendingCommentRoutesToCommentPath(item, stage) {
+				return true, 0
+			}
 		}
 	}
 
@@ -445,7 +450,9 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	repo := itemOwnerRepoString(item, e.defaultRepo())
 	if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
 		lastAttempt := snap.LastAttemptAt(stage.Name)
-		if !lastAttempt.IsZero() {
+		// A time slice (turn-cap / max_wall_time stop) is not a fast failure: the
+		// retry backoff does not apply (#2232).
+		if !lastAttempt.IsZero() && !snap.BackoffExempt(stage.Name) {
 			cooldown := e.stageRetryBackoff()
 			if elapsed := time.Since(lastAttempt); elapsed < cooldown {
 				return false, cooldown - elapsed
@@ -454,6 +461,19 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	}
 
 	return true, 0
+}
+
+// pendingCommentRoutesToCommentPath is itemNeedsWork's mirror of the routing
+// condition in processItem for a pending comment on an item that is neither
+// paused nor awaiting input (both returned earlier). It reads only what
+// processItem reads before its own decision.
+func (e *Engine) pendingCommentRoutesToCommentPath(item gh.ProjectItem, stage *stages.Stage) bool {
+	enginePaused := false
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
+		enginePaused = snap.PausedByEngine(stage.Name)
+	}
+	return e.stageRanOnEntry(item, stage, enginePaused, false)
 }
 
 func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {
@@ -537,7 +557,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
 		if ok, raw, refused := e.resumeAuthorised(item); ok {
-			e.unblockAwaitingInput(item, stage)
+			if !e.unblockAwaitingInput(item, stage) {
+				// The pause could not be lifted: leave the comment unprocessed so
+				// the next poll resumes it, rather than marking it done and
+				// leaving the item paused with nothing to resume it (#1970).
+				return nil
+			}
 			return e.processComments(ctx, board, item, stage, raw)
 		} else if refused > 0 {
 			e.logf(item.Number, "skip", "awaiting user input: %d human comment(s) predate the pause — resume refused (ADR-1813)\n", refused)
@@ -551,12 +576,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// comment processing. Otherwise skip. A human comment on a paused issue
 	// is an implicit "resume and handle this." Bot-only chatter does not
 	// unpause (#1083 — pause must remain an effective operator kill-switch).
+	resumedFromPause := false
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
 			ok, _, refused := e.resumeAuthorised(item)
 			if ok {
+				resumedFromPause = true
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
-				e.removeLabel(item, "fabrik:paused")
+				if err := e.removeLabelChecked(item, "fabrik:paused"); err != nil {
+					e.logf(item.Number, "warn", "could not remove paused label, retrying next poll: %v\n", err)
+					return nil
+				}
 				// Also clear any failed label so the stage retries cleanly
 				e.clearFailedStage(item, stage)
 				break // fall through to comment processing below
@@ -568,6 +598,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}
 			return nil
 		}
+	}
+
+	// Both pause gates have passed: a bare fabrik:awaiting-input (the operator
+	// removed only fabrik:paused) is an orphan, not a pause (#1970).
+	if hasLabel(item.Labels, "fabrik:awaiting-input") && !hasLabel(item.Labels, "fabrik:paused") {
+		e.clearOrphanAwaitingInput(item)
 	}
 
 	// Dependency gate: block stage start if open blockers exist. This check runs
@@ -626,8 +662,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// so this is a redundant-but-explicit ownership boundary, not a
 	// load-bearing filter — matching the same idiom used elsewhere in
 	// ADR-1387 (e.g. runValidatePRTerminalAdvance's own IsClosed skip).
+	//
+	// A stage that has not yet run on this entry runs first (#2220, ADR 2220): the
+	// comment skills assume the stage already produced its output, and would
+	// otherwise complete it alone. The comments stay unprocessed through the
+	// stage run (markCommentsSeenByStage skips them); feedbackGateBlocks holds
+	// the advance, and the comment pass follows.
 	if len(newComments) > 0 && !item.IsClosed {
-		return e.processComments(ctx, board, item, stage, newComments)
+		if e.stageRanOnEntry(item, stage, wasPaused, resumedFromPause) {
+			return e.processComments(ctx, board, item, stage, newComments)
+		}
+		e.logf(item.Number, "stage-first", "%d pending comment(s) but stage %q has not run — running the stage first (#2220)\n", len(newComments), stage.Name)
 	}
 
 	// PRs only support comment processing — skip stage invocation
@@ -649,6 +694,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	var lastAttempt time.Time
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		lastAttempt = snap.LastAttemptAt(stage.Name)
+		if snap.BackoffExempt(stage.Name) {
+			// The last run ended as a time slice: no retry backoff (#2232).
+			lastAttempt = time.Time{}
+		}
 	}
 	if !lastAttempt.IsZero() {
 		// If stage completed, the completion label above would have caught it.
@@ -726,7 +775,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// GraphQL-populated ProjectItem fields; both are false-by-default (FR-3 no-op on
 	// non-queue repos). EnsureWorktree's existing skipUpdate arg bypasses the rebase.
 	skipUpdate := !lastAttempt.IsZero() || prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
 	if err != nil {
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
@@ -973,7 +1022,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 			Number:     item.Number,
 			User:       e.lockIdentity(),
 			AcquiredAt: workerStartedAt,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt, Kind: itemstate.WorkerKindStageRun},
 		})
 		e.syncLabelAdd(item, lockLabel, true)
 		workerDone = make(chan struct{})
@@ -1143,6 +1192,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigIntGrace:       sigIntGrace,
 		SigTermGrace:      sigTermGrace,
 		OnPIDReady:        func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		OnTurn:            e.liveTurnRecorder(repoStr, item.Number),
 		CorrectiveHint:    e.consumeStallHint(repoStr, item.Number, stage.Name),
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,
@@ -1674,6 +1724,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			Number:    item.Number,
 			StageName: stage.Name,
 			At:        time.Now(),
+			Slice:     isTimeSlice(err, turnLimited),
 		})
 	}
 
@@ -1712,9 +1763,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// trigger the awaiting-input unblock logic on subsequent polls.
 	if claudeRan {
 		e.markCommentsSeenByStage(item, item.Comments)
-		// The InvocationObserver fires on InvocationChanged (from InvocationRecorded
-		// below) and adds this item to e.mayNeedWork, ensuring it is re-evaluated in
-		// the next poll cycle. No explicit eviction is needed.
+		// InvocationChanged is in neither the poll wake set nor cycleSet, so nothing
+		// here re-admits the item: a stage that ends incomplete records its own
+		// retry-backoff cooldown below (#2232), and feedback already cached is
+		// admitted by postRunFeedbackAdmission.
 	}
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
@@ -1783,6 +1835,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 					// Below MaxRetries threshold — record flag so next poll retries PR creation
 					// before re-invoking Claude, then release lock and let cooldown expire.
 					e.store.Apply(itemstate.PRCreationFailedRecorded{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					// StageAttempted was stamped above, so the retry waits out the
+					// backoff; own its admission (#2232).
+					e.recordPostRunRetryCooldown(item, e.stageRetryBackoff())
 					releaseLock()
 					return
 				}
@@ -1810,7 +1865,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		e.blockOnInput(item, stage, output)
 	} else {
 		cooldown := e.stageRetryBackoff()
-		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		slice := claudeRan && isTimeSlice(err, turnLimited)
+		if slice {
+			// A full slice just ran (turn cap or max_wall_time), so the backoff that
+			// stops a fast failure from looping does not apply; SliceRetries and
+			// max_retries still bound it (#2232).
+			cooldown = 0
+			e.logf(item.Number, "wait", "stage %q did not complete — will retry on the next poll (time slice)\n", stage.Name)
+		} else if claudeRan {
+			e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		} else {
+			// No StageAttempted was recorded, so no backoff applies.
+			e.logf(item.Number, "wait", "stage %q did not start — will retry on the next poll\n", stage.Name)
+		}
 		// Escalation is decided before stall-hint arming (see below) so arming can be
 		// skipped on the attempt that triggers it.
 		//
@@ -1940,8 +2007,38 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		} else if willEscalateToolsDenied {
 			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			releaseLock() // permanently giving up — release the lock
+		} else {
+			// The retry will happen: tell the channel deriver why and when it is due
+			// (#2170), so a retry that then waits for a slot can be reported.
+			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied), e.now().Add(cooldown))
+			// The same value as the log line above (FR-004): record the instant the
+			// retry falls due, so its expiry admits the item rather than leaving it
+			// to the periodic re-evaluation (FR-001, #2232). Only when the backoff
+			// actually applies, i.e. StageAttempted was stamped (claudeRan).
+			if claudeRan {
+				e.recordPostRunRetryCooldown(item, cooldown)
+			}
 		}
 	}
+}
+
+// retryCause names why a stage run ended without completing, for the
+// retry-starved event (#2170). It only labels the outcome; no decision reads it.
+func retryCause(err error, turnLimited, resumeFailed, toolsDenied bool) string {
+	var killed *claudeKilledError
+	switch {
+	case errors.As(err, &killed):
+		return killed.Cause
+	case turnLimited:
+		return "max-turns"
+	case resumeFailed:
+		return "resume-failure"
+	case toolsDenied:
+		return "tools-denied"
+	case err != nil:
+		return "error"
+	}
+	return "incomplete"
 }
 
 // detectAndArmStallHint compares this incomplete invocation's turn usage against
@@ -2422,12 +2519,21 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 
 // unblockAwaitingInput is called when a user comment arrives on an issue that
 // was paused via blockOnInput. It removes both labels and clears LastAttemptAt
-// so the stage re-runs promptly after comment processing.
-func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) {
+// so the stage re-runs promptly after comment processing. It returns false,
+// touching no counters, when fabrik:paused could not be removed (#1970): the
+// caller must not process the comment then, or it would be marked processed
+// with the pause still in force. A failed awaiting-input removal alone is
+// tolerated; clearOrphanAwaitingInput strips the bare label later.
+func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) bool {
 	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
 
-	e.removeLabel(item, "fabrik:paused")
-	e.removeLabel(item, "fabrik:awaiting-input")
+	if err := e.removeLabelChecked(item, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not remove paused label, retrying next poll: %v\n", err)
+		return false
+	}
+	if err := e.removeLabelChecked(item, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not remove awaiting-input label (orphan rule will clear it): %v\n", err)
+	}
 
 	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
 	// and reset retry/pause state that may have accumulated before the block.
@@ -2448,6 +2554,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	// forward progress the pause was waiting for (#1555 review finding).
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.resetCommentBreaker(item)
+	return true
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
@@ -3089,6 +3196,19 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	// The retry waits out the dispatch cooldown and, on top of it, the account-wide
+	// usage-limit hold; the deriver measures starvation from the hold's lift (#2170).
+	retryAt := e.now().Add(e.stageRetryBackoff())
+	e.emitRetryScheduled(item, stage, "claude-usage-limit", retryAt)
+	// Admit the item when both the dispatch cooldown and the account-wide hold
+	// have passed, so an expiry during the hold is not admitted only to be
+	// refused (#2232).
+	if hold, held := e.claudeUsageLimitedUntilTime(e.now()); held && hold.After(retryAt) {
+		retryAt = hold
+	}
+	if !postRunRetryRecordDisabled.Load() {
+		e.recordStageRetryCooldownUntil(item, retryAt)
+	}
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
@@ -3177,6 +3297,8 @@ func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIError
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	e.emitRetryScheduled(item, stage, "api-error", e.now().Add(e.stageRetryBackoff()))
+	e.recordPostRunRetryCooldown(item, e.stageRetryBackoff())
 
 	p.release()
 }

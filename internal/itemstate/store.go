@@ -39,6 +39,10 @@ type Store struct {
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
+	// clock stamps EligibilityChangedAt and StatusMovedAt (SetClock); nil means
+	// time.Now(). Guarded by mu.
+	clock func() time.Time
+
 	// Reverse-lookup indexes maintained on every Apply that touches the relevant fields.
 	shaToKey    map[string]string // LinkedPR.HeadSHA → itemKey
 	itemIDToKey map[string]string // ItemState.ItemID → itemKey
@@ -293,6 +297,10 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 		m = fp.Inner
 	}
 	flags := s.applyToItem(item, m)
+	if existed {
+		s.stampEligibility(item, before)
+		flags |= clearStatusFacts(item, before)
+	}
 
 	// No-op detection: if nothing changed, skip observers. EngineWriteAt is
 	// bookkeeping for the reconcile protection (#2159): a redundant engine write
@@ -315,13 +323,34 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	change := Change{Repo: repo, Number: number, Fields: flags}
 	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()))
 	annotateLifecycleChange(&change, m, before, snap.state, existed)
+	annotateStatusChange(&change, m, before.Status, snap.state.Status, existed)
+	switch m.(type) {
+	case ShallowBoardItemUpdated:
+		change.Path = PathReconcile
+	case ItemDeepFetched:
+		change.Path = PathDeepFetch
+	case ProbeBoardItemUpdated:
+		change.Path = PathProbe
+	}
 	if fromProbe {
 		change.Origin = OriginProbe
+		change.Path = PathProbe
 	}
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 
 	return snap, []Change{change}, nil
+}
+
+// annotateStatusChange records the column before and after for an item that
+// already existed, and marks an engine-made move (#2170).
+func annotateStatusChange(change *Change, m Mutation, before, after string, existed bool) {
+	if _, ok := m.(LocalStatusUpdated); ok {
+		change.EngineStatusWrite = true
+	}
+	if existed && before != after {
+		change.StatusFrom, change.StatusTo = before, after
+	}
 }
 
 // annotateLabelChange fills the label-delta fields of change from a before/after
@@ -476,6 +505,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			item.Status = v.NewStatus
 			item.Terminal = false
 			item.StatusEnteredAt = time.Now()
+			item.StatusAtGitHub = time.Time{} // the engine is the writer: daemon time is the move time
 			return StatusChanged | EngineWriteRecordedChanged
 		}
 		return EngineWriteRecordedChanged
@@ -527,6 +557,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		var flags ChangeFlags = LockChanged
 		if v.Worker != nil {
 			w := *v.Worker
+			if item.Worker != nil {
+				// The placeholder may already carry kind/trigger/turns (#2121).
+				if w.Kind == "" {
+					w.Kind = item.Worker.Kind
+				}
+				if w.Trigger == "" {
+					w.Trigger = item.Worker.Trigger
+				}
+			}
 			item.Worker = &w
 			flags |= WorkerChanged
 		}
@@ -545,6 +584,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		flags := applyProjectItem(item, fresh)
 		item.LastDeepFetchAt = time.Now()
 		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
+		item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
@@ -560,6 +600,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LastAttemptAt[v.StageName] = v.At
+		if v.Slice {
+			item.StageState.BackoffExempt[v.StageName] = true
+		} else {
+			delete(item.StageState.BackoffExempt, v.StageName)
+		}
 		return StageStateChanged
 
 	case StageRetryIncremented:
@@ -765,10 +810,6 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		return 0
 
-	case PausedBackstopServed:
-		item.PausedBackstopBaseline = v.Baseline
-		return 0
-
 	case LabelAppliedAtRecorded:
 		if item.LabelAppliedAt == nil {
 			item.LabelAppliedAt = make(map[string]time.Time)
@@ -777,12 +818,108 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LabelAppliedAtChanged
 
 	case WorkerEntered:
-		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
-		return WorkerChanged | WorkerLifecycleChanged
+		w := &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt,
+			Kind: v.Kind, Trigger: v.Trigger}
+		if v.Queued {
+			w.Queued = true
+			w.QueuedSince = v.QueuedSince
+			if w.QueuedSince.IsZero() {
+				w.QueuedSince = v.StartedAt
+			}
+		}
+		item.Worker = w
+		var flags ChangeFlags = WorkerChanged | WorkerLifecycleChanged
+		// A stage-run dispatch supersedes any retry it was waiting on.
+		if (v.Kind == "" || v.Kind == WorkerKindStageRun) && item.PendingRetry != nil {
+			item.PendingRetry = nil
+			flags |= StatusFactsChanged
+		}
+		return flags
 
-	case WorkerRefreshed:
-		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
+	case WorkerSlotAcquired:
+		if item.Worker == nil {
+			return 0 // no-op: the worker already exited
+		}
+		item.Worker.Queued = false
+		item.Worker.QueuedSince = time.Time{}
+		item.Worker.StartedAt = v.At
+		item.Worker.LastSignAt = v.At
 		return WorkerChanged
+
+	case WorkerKindSet:
+		if item.Worker == nil {
+			return 0
+		}
+		switch item.Worker.Kind {
+		case "", WorkerKindStageRun, WorkerKindCommentReview:
+		default:
+			return 0 // a reinvoke kind is never overridden
+		}
+		if item.Worker.Kind == v.Kind && item.Worker.Trigger == v.Trigger {
+			return 0
+		}
+		item.Worker.Kind = v.Kind
+		item.Worker.Trigger = v.Trigger
+		return WorkerChanged
+
+	case WorkerTriggerSet:
+		if item.Worker == nil || item.Worker.Trigger == v.Trigger {
+			return 0
+		}
+		item.Worker.Trigger = v.Trigger
+		return WorkerChanged
+
+	case WorkerTurnsRecorded:
+		if item.Worker == nil {
+			return 0
+		}
+		known := v.Turns > 0
+		if item.Worker.TurnsKnown == known && item.Worker.TurnsUsed == v.Turns && item.Worker.TurnsMax == v.Max {
+			return 0
+		}
+		item.Worker.TurnsUsed = v.Turns
+		item.Worker.TurnsKnown = known
+		item.Worker.TurnsMax = v.Max
+		return WorkerChanged
+
+	case RetryScheduled:
+		r := v.Retry
+		item.PendingRetry = &r
+		return StatusFactsChanged
+
+	case GateHoldRecorded:
+		h := v.Hold
+		h.IDs = copyStrings(v.Hold.IDs)
+		if item.GateHold != nil && item.GateHold.Gate == h.Gate && !item.GateHold.Since.IsZero() {
+			h.Since = item.GateHold.Since
+		}
+		item.GateHold = &h
+		return StatusFactsChanged
+
+	case GateHoldCleared:
+		if item.GateHold == nil || (v.Gate != "" && item.GateHold.Gate != v.Gate) {
+			return 0
+		}
+		item.GateHold = nil
+		return StatusFactsChanged
+
+	case ConflictResolutionSet:
+		if !v.Active {
+			if item.ConflictResolution == nil {
+				return 0
+			}
+			item.ConflictResolution = nil
+			return StatusFactsChanged
+		}
+		item.ConflictResolution = &ConflictResolution{Queued: v.Queued, Since: v.Since, GeneralSlot: v.GeneralSlot}
+		return StatusFactsChanged
+
+	case RebaseCauseSet:
+		if item.RebaseCause == v.Cause {
+			return 0
+		}
+		item.RebaseCause = v.Cause
+		return StatusFactsChanged
 
 	case WorkerHeartbeat:
 		if item.Worker == nil {
@@ -892,6 +1029,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case DeepFetchInvalidated:
 		item.LastDeepFetchAt = time.Time{}
 		item.LastSeenSourceUpdatedAt = time.Time{}
+		item.LastSeenPRUpdatedAt = time.Time{}
 		return DeepFetchChanged
 
 	case SelfWriteObserved:
@@ -922,7 +1060,20 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 				flags |= CheckRunChanged
 			}
 		}
+		// The overseer CI verdict is valid for one head only (#2122, FR-007):
+		// drop it when the head moves, including the first head the engine
+		// records after a verdict was computed for the facts' head.
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.CIVerdict.HeadSHA != v.SHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
+		}
 		item.LinkedPR.HeadSHA = v.SHA
+		// A head that disagrees with the one the facts were read for has no
+		// agreed head: no verdict applies to either (#2122).
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.AgreedHead() != item.LinkedPR.CIVerdict.HeadSHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
+		}
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
 			drainedChanged := false
@@ -948,6 +1099,44 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.Merged = v.Merged
 		item.LinkedPR.Draft = v.Draft
 		return LinkedPRChanged | PRStateChanged
+
+	case PRFactsObserved:
+		if item.LinkedPR == nil || (v.PRNumber != 0 && item.LinkedPR.Number != v.PRNumber) {
+			return 0
+		}
+		lpr := item.LinkedPR
+		facts := v.Facts
+		if facts.State != "open" || facts.Merged {
+			// No open-PR verdict applies to a merged or closed PR.
+			lpr.CIVerdict = CIVerdictRecord{}
+		}
+		changed := !prFactsEqual(lpr.Facts, facts)
+		lpr.Facts = facts
+		// Facts read for a head the engine has not recorded (or the reverse) leave
+		// no agreed head: drop any verdict that is not for the agreed one.
+		if lpr.CIVerdict.HeadSHA != "" && lpr.AgreedHead() != lpr.CIVerdict.HeadSHA {
+			lpr.CIVerdict = CIVerdictRecord{}
+			changed = true
+		}
+		if !changed {
+			return 0
+		}
+		return PRFactsChanged
+
+	case CIVerdictObserved:
+		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.AgreedHead() != v.Verdict.HeadSHA {
+			return 0
+		}
+		cur := item.LinkedPR.CIVerdict
+		if cur.Verdict == v.Verdict.Verdict && cur.HeadSHA == v.Verdict.HeadSHA &&
+			cur.RunsFingerprint == v.Verdict.RunsFingerprint && cur.ObservedAt.Equal(v.Verdict.ObservedAt) &&
+			stringsEqual(cur.Failing, v.Verdict.Failing) {
+			return 0
+		}
+		nv := v.Verdict
+		nv.Failing = copyStrings(v.Verdict.Failing)
+		item.LinkedPR.CIVerdict = nv
+		return PRFactsChanged
 
 	case ReviewThreadCommentAdded:
 		ensureLinkedPR(item, 0)
@@ -1008,6 +1197,9 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		item := s.getOrCreate(key)
 		before := newSnapshot(*item).state
 		flags := applyProjectItem(item, pi)
+		if existed {
+			s.stampEligibility(item, before)
+		}
 
 		if reflect.DeepEqual(before, *item) {
 			s.mu.Unlock()
@@ -1019,11 +1211,12 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		repo, number := item.Repo, item.Number
 		s.mu.Unlock()
 
-		change := Change{Repo: repo, Number: number, Fields: flags}
+		change := Change{Repo: repo, Number: number, Fields: flags, Path: PathReconcile}
 		if before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()) {
 			change.LabelDeltas = diffLabels(before.Labels, snap.state.Labels)
 		}
 		annotateLifecycleChange(&change, nil, before, snap.state, existed)
+		annotateStatusChange(&change, nil, before.Status, snap.state.Status, existed)
 		s.notify(obs, change, snap)
 		changes = append(changes, change)
 	}
@@ -1046,6 +1239,8 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		item.Status = v.NewStatus
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = v.At // zero when the payload carried no updated_at
+		s.stampEligibility(item, before)
 	}
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)
@@ -1067,6 +1262,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		}
 	}
 	change.StatusAt = v.At
+	annotateStatusChange(&change, nil, before.Status, snap.state.Status, true)
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 	return snap, []Change{change}, nil
@@ -1477,6 +1673,9 @@ func ensureStageStateMaps(item *ItemState) {
 	if ss.LastAttemptAt == nil {
 		ss.LastAttemptAt = make(map[string]time.Time)
 	}
+	if ss.BackoffExempt == nil {
+		ss.BackoffExempt = make(map[string]bool)
+	}
 	if ss.PausedByEngine == nil {
 		ss.PausedByEngine = make(map[string]bool)
 	}
@@ -1540,4 +1739,27 @@ func ensureStageStateMaps(item *ItemState) {
 // calls this.
 func (s *Store) SetLegacyLabelBaselineForTest(on bool) {
 	s.legacyLabelBaseline.Store(on)
+}
+
+func prFactsEqual(a, b PRFacts) bool {
+	if a.State != b.State || a.Draft != b.Draft || a.Merged != b.Merged ||
+		a.MergeableState != b.MergeableState || a.HeadSHA != b.HeadSHA || !a.ObservedAt.Equal(b.ObservedAt) {
+		return false
+	}
+	if (a.Mergeable == nil) != (b.Mergeable == nil) {
+		return false
+	}
+	return a.Mergeable == nil || *a.Mergeable == *b.Mergeable
+}
+
+func stringsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
