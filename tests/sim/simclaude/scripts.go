@@ -178,3 +178,31 @@ func SkillLoadFailedComment(skill string) CommentScript {
 		return "", false, usage, &claudeerr.SkillLoadError{Skill: skill, ToolUseID: "toolu_sim", Detail: "Unknown skill: " + skill}
 	}
 }
+
+// ToolsDeniedEditComment returns a CommentScript mirroring a comment-review run
+// whose Edit on relPath (inside the worktree) was denied by the CLI (#2301): no
+// commit, completed=false and a *claudeerr.ToolsDeniedError. runClaude never
+// runs in the sim, so the script stamps the verdict runClaude would have —
+// the allow list covers Edit on the whole worktree — directly on the denial.
+func ToolsDeniedEditComment(relPath string) CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		return "", false, engine.TokenUsage{TurnsUsed: 3, CostUSD: 0.02}, &claudeerr.ToolsDeniedError{
+			ToolNames: []string{"Edit"},
+			Denials: []claudeerr.ToolDenial{{
+				ToolName: "Edit", Path: workDir + "/" + relPath,
+				Ungrantable: true, RelPath: relPath, CoveredBy: "Edit(" + workDir + "/**)",
+			}},
+		}
+	}
+}
+
+// ToolsDeniedBashComment is ToolsDeniedEditComment for a denied Bash command,
+// which is never ungrantable and so follows the bounded #1704 retries.
+func ToolsDeniedBashComment(command string) CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		return "", false, engine.TokenUsage{TurnsUsed: 3, CostUSD: 0.02}, &claudeerr.ToolsDeniedError{
+			ToolNames: []string{"Bash"},
+			Denials:   []claudeerr.ToolDenial{{ToolName: "Bash", Command: command}},
+		}
+	}
+}

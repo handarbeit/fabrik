@@ -209,6 +209,33 @@ func decodeToolCommand(raw json.RawMessage) string {
 	return v.Command
 }
 
+// decodeToolPath best-effort extracts the target path of a denied file-tool
+// call: tool_input.file_path for Edit/Write/MultiEdit and
+// tool_input.notebook_path for NotebookEdit (#2301; field names confirmed
+// against a real CLI 2.1.299 capture, engine/testdata/
+// protected_path_edit_denied_stream.jsonl). Returns "" for any other tool,
+// absent input, a decode failure or a missing/non-string field — never panics,
+// never fabricates a value.
+func decodeToolPath(toolName string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		FilePath     string `json:"file_path"`
+		NotebookPath string `json:"notebook_path"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	switch toolName {
+	case "Edit", "Write", "MultiEdit":
+		return v.FilePath
+	case "NotebookEdit":
+		return v.NotebookPath
+	}
+	return ""
+}
+
 // toolDenial is engine's working alias for claudeerr.ToolDenial — one denied
 // tool call, with command detail when decodable. See claudeerr.ToolDenial's
 // doc comment.
@@ -240,7 +267,8 @@ type toolDenial = claudeerr.ToolDenial
 // repeatedly across multiple attempts within the same invocation is named
 // once in the R4 explanatory comment, not once per denial. denials carries
 // one entry per raw PermissionDenials entry (not deduplicated) with command
-// detail decoded only for ToolName == "Bash" — see #1775.
+// detail decoded only for ToolName == "Bash" — see #1775 — and the target path
+// decoded for the file tools (#2301).
 func classifyToolsDenied(resp claudeResponse) (toolNames []string, denials []toolDenial, detected bool) {
 	if len(resp.PermissionDenials) == 0 {
 		return nil, nil, false
@@ -254,7 +282,7 @@ func classifyToolsDenied(resp claudeResponse) (toolNames []string, denials []too
 		if d.ToolName == "Bash" {
 			command = decodeToolCommand(d.ToolInput)
 		}
-		denials = append(denials, toolDenial{ToolName: d.ToolName, Command: command})
+		denials = append(denials, toolDenial{ToolName: d.ToolName, Command: command, Path: decodeToolPath(d.ToolName, d.ToolInput)})
 		if seen[d.ToolName] {
 			continue
 		}
@@ -321,12 +349,29 @@ func firstToolsDeniedCommand(denials []toolDenial) (toolName, command string, ok
 	return "", "", false
 }
 
-// toolsDeniedLogSummary renders the "tools=X" or "tools=X; first: `cmd`"
-// fragment shared by both classifyToolsDenied log lines (R2/R9).
+// firstToolsDeniedPath returns the tool name and sanitized path of the first
+// denial that carries a decodable file path (#2301), with ok=false when none
+// does — callers degrade to tool-name-only wording, never an empty path.
+func firstToolsDeniedPath(denials []toolDenial) (toolName, path string, ok bool) {
+	for _, d := range denials {
+		sanitized := sanitizeToolsDeniedCommand(d.Path)
+		if sanitized == "" {
+			continue
+		}
+		return d.ToolName, sanitized, true
+	}
+	return "", "", false
+}
+
+// toolsDeniedLogSummary renders the "tools=X", "tools=X; first: `cmd`" or
+// "tools=X; first: `path`" fragment shared by both classifyToolsDenied log
+// lines (R2/R9, #2301 R5).
 func toolsDeniedLogSummary(toolNames []string, denials []toolDenial) string {
 	summary := fmt.Sprintf("tools=%s", strings.Join(toolNames, ", "))
 	if _, command, ok := firstToolsDeniedCommand(denials); ok {
 		summary += fmt.Sprintf("; first: `%s`", command)
+	} else if _, path, ok := firstToolsDeniedPath(denials); ok {
+		summary += fmt.Sprintf("; first: `%s`", path)
 	}
 	return summary
 }
@@ -1727,6 +1772,12 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	text, completed, usage, err := interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
 	recordSessionContextSize(issueNumber, sessFilePath, rawOutput)
+	// Stamp the ungrantable verdict (#2301) from the structured denials and the
+	// args this very invocation was started with.
+	var toolsDeniedErr *claudeToolsDeniedError
+	if errors.As(err, &toolsDeniedErr) {
+		markUngrantableDenials(toolsDeniedErr, args, workDir)
+	}
 	if sle := skillLoadOverride(ctx, rawOutput, expectedSkill, wasTimedOut, completed, err); sle != nil {
 		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
 		return text, false, usage, sle

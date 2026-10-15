@@ -429,7 +429,7 @@ var labelTable = map[string]labelInfo{
 	"fabrik:bot-reprompted":                {"a bot reviewer was re-prompted; the engine pauses if it still has not responded", true},
 	"fabrik:children-spawned":              {"child issues were spawned and block this one", false},
 	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the usage-limit hold lifts", true},
-	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine retries, bounded by its own counter", true},
+	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine usually retries, bounded by its own counter (a denial no rule can grant pauses at once instead)", true},
 	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", false},
 	"fabrik:skill-unresolved":              {"a stage skill reference matches no loaded plugin; fix the stage YAML or load the plugin", false},
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},

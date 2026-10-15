@@ -2032,7 +2032,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.pauseForSliceLimit(item, stage, sliceCount, e.cfg.MaxSliceRetries)
 			releaseLock() // permanently giving up — release the lock
 		} else if willEscalateToolsDenied {
-			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
+			e.pauseForToolsDenied(item, stage, toolsDeniedCount, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			releaseLock() // permanently giving up — release the lock
 		} else {
 			// The retry will happen: tell the channel deriver why and when it is due
@@ -2289,12 +2289,27 @@ func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.S
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		count = snap.ToolsDeniedRetries(stage.Name)
 	}
+	// An ungrantable denial (#2301) pauses on its first occurrence with its own
+	// comment, so the explanatory comment and the fabrik:tools-denied label
+	// ("the engine retries") are skipped for it.
+	if ungrantable := e.ungrantableDenials(denials); len(ungrantable) > 0 {
+		e.logUngrantableDenials(item, ungrantable)
+		// A label left by an earlier bounded-retry denial of the same episode
+		// would keep claiming the engine retries while the issue is paused.
+		if hasLabel(item.Labels, "fabrik:tools-denied") {
+			e.removeLabel(item, "fabrik:tools-denied")
+		}
+		return count, true
+	}
 	if !hasLabel(item.Labels, "fabrik:tools-denied") {
 		toolsJoined := strings.Join(toolNames, ", ")
 		commandDetail := ""
 		scopeTool := toolsJoined
 		if toolName, command, ok := firstToolsDeniedCommand(denials); ok {
 			commandDetail = fmt.Sprintf(" (command: `%s`)", command)
+			scopeTool = toolName
+		} else if toolName, path, ok := firstToolsDeniedPath(denials); ok {
+			commandDetail = fmt.Sprintf(" (path: `%s`)", path)
 			scopeTool = toolName
 		}
 		comment := fmt.Sprintf(
@@ -2335,6 +2350,8 @@ func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Sta
 	commandDetail := ""
 	if _, command, ok := firstToolsDeniedCommand(denials); ok {
 		commandDetail = fmt.Sprintf(" (command: `%s`)", command)
+	} else if _, path, ok := firstToolsDeniedPath(denials); ok {
+		commandDetail = fmt.Sprintf(" (path: `%s`)", path)
 	}
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — tool permission denial limit reached**\n\nStage **%s** has had a tool call denied by the CLI's permission configuration (%s)%s %d consecutive time(s), which has reached the configured limit of %d "+

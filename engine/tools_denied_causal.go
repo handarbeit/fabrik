@@ -24,9 +24,9 @@ import (
 //  2. Joinable evidence: at least one permission_denials entry carries a
 //     tool_use_id that matches a main-thread tool_use in the stream.
 //  3. Relevance: at least one joined denial names a write-capable tool
-//     (Edit, Write, NotebookEdit, Bash).
+//     (Edit, Write, MultiEdit, NotebookEdit, Bash).
 //  4. No recovery: after the LAST relevant denial the main thread made no
-//     Edit/Write/NotebookEdit call (other than the denied calls) whose result
+//     Edit/Write/MultiEdit/NotebookEdit call (other than the denied calls) whose result
 //     is missing or not an error. Anchoring on the last denial, not the
 //     first, keeps an early incidental denial from masking a final blocking
 //     one (e.g. a denied git commit after successful edits). Bash is deliberately not a recovery signal:
@@ -65,10 +65,10 @@ const (
 )
 
 // writeCapableTools are the tools whose denial can plausibly block a stage.
-var writeCapableTools = map[string]bool{"Edit": true, "Write": true, "NotebookEdit": true, "Bash": true}
+var writeCapableTools = map[string]bool{"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "Bash": true}
 
 // fileMutatingTools are the tools whose later success counts as recovery.
-var fileMutatingTools = map[string]bool{"Edit": true, "Write": true, "NotebookEdit": true}
+var fileMutatingTools = map[string]bool{"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true}
 
 // streamToolCall is one main-thread tool_use in stream order.
 type streamToolCall struct {

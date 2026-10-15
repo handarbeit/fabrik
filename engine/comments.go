@@ -593,7 +593,9 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 			toolsDeniedCount, willEscalate := e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			e.logf(item.Number, "tools-denied", "comment review's tool call(s) denied by permission configuration: %s\n", toolsDeniedLogSummary(toolsDeniedErr.ToolNames, toolsDeniedErr.Denials))
 			if willEscalate {
-				e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
+				// Pauses on the first occurrence for an ungrantable denial (#2301),
+				// at the MaxToolsDeniedRetries bound otherwise.
+				e.pauseForToolsDenied(item, stage, toolsDeniedCount, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			}
 			return "", err
 		}
