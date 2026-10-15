@@ -82,6 +82,6 @@ func reportClaudeProfile(res claudeprofile.Resolution, w io.Writer) {
 	// The check always completes, so Reconcile also clears an earlier run's entry
 	// once the sources agree (#2135).
 	if err := warnings.Reconcile(w, claudeProfileWarningType, conds); err != nil {
-		fmt.Fprintf(w, "[startup] warning: recording %s warning: %v\n", claudeProfileWarningType, err)
+		fmt.Fprintf(w, "[startup] recording the %s warnings-panel entry failed: %v\n", claudeProfileWarningType, err)
 	}
 }
