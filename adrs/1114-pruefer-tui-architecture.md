@@ -59,7 +59,7 @@ Confirms the spec's default assumption: the existing `/pruefer review` GitHub-co
 
 **Negative / Trade-offs:**
 - `pruefer/tui` duplicates a non-trivial amount of structure from Fabrik's `tui/` (styles, `Component` interface, header/detail/footer shapes). Two copies to keep conceptually in sync if either evolves, accepted per Decision 1's rationale and the issue's explicit "extraction is a follow-up" scoping.
-- Completed-review history and the session-total cost/turn count are both lost on every daemon restart (Decisions 5 and 6) — a deliberate trade against unbounded growth and new disk I/O, but it means a long-running daemon's "session total" resets more often than an operator might expect from the name.
+- Completed-review history is lost on every daemon restart (Decision 5) — a deliberate trade against unbounded growth and new disk I/O. (The session-total cost/turn count this bullet originally also covered was removed from the footer when Decision 6 was superseded.)
 - `ClaudeInvoker.Review`'s signature change is a breaking change to the interface, requiring every caller and test mock in `pruefer/` to update in the same change set (compile-time enforced, not a runtime risk, but a wider diff than a purely additive change would have been).
 
 ## Related Work
