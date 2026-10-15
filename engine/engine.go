@@ -306,6 +306,7 @@ type Engine struct {
 	mergeTrainTrials                      map[string][]time.Time        // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
+	trainNotPassedAsRed                   atomic.Bool                   // test seam: SetTrainNotPassedAsRedForTest (#2296)
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
 	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
