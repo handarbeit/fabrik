@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/handarbeit/fabrik/internal/skillref"
 )
 
 func writePluginFile(t *testing.T, path, content string) {
@@ -44,8 +46,8 @@ func TestDescribePlugin_MatchesDiscovery(t *testing.T) {
 		{filepath.Join(root, "missing"), "missing", []string{}},
 	} {
 		got := DescribePlugin(tc.dir)
-		want := discoverPlugin(tc.dir)
-		if got.Name != tc.name || got.Name != want.Name || !reflect.DeepEqual(got.Skills, tc.skills) || !reflect.DeepEqual(got.Skills, want.skillNames()) {
+		want := skillref.Discover(tc.dir)
+		if got.Name != tc.name || got.Name != want.Name || !reflect.DeepEqual(got.Skills, tc.skills) || !reflect.DeepEqual(got.Skills, want.SkillNames()) {
 			t.Errorf("%s: got %+v, want name %q skills %v", tc.dir, got, tc.name, tc.skills)
 		}
 	}

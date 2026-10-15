@@ -78,7 +78,7 @@ func unresolvedCondition(ue *skillUnresolvedError) warnings.Condition {
 		Title:   fmt.Sprintf("%s: %s %q does not resolve", ue.Stage, ue.Key, ue.Ref),
 		Detail: fmt.Sprintf("Stage %q cannot run: %s %q is unresolved (%s).\n\nPlugins searched: %s.\n\n"+
 			"Fix: name a skill a loaded plugin provides as <plugin>:<skill>, or add the plugin to plugin_dirs (see docs/USER_GUIDE.md).",
-			ue.Stage, ue.Key, ue.Ref, ue.Why, ue.Cat.describe()),
+			ue.Stage, ue.Key, ue.Ref, ue.Why, ue.Cat.Describe()),
 		Fingerprint: ue.Ref + "|" + ue.Why,
 	}
 }

@@ -6,11 +6,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/handarbeit/fabrik/internal/skillref"
 	"github.com/handarbeit/fabrik/plugin"
 )
 
 // pluginManifestRel is the manifest path inside a Claude Code plugin directory.
-const pluginManifestRel = ".claude-plugin/plugin.json"
+const pluginManifestRel = skillref.ManifestRel
 
 // resolvePluginDirs builds the ordered list of plugin directories handed to
 // every worker (ADR 2136). Index 0 is the base plugin when one exists: the

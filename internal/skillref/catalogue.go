@@ -1,51 +1,72 @@
-package engine
+package skillref
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// loadedPlugin is one plugin directory handed to workers via --plugin-dir,
-// with the skills Claude Code would register for it (ADR 2137).
-type loadedPlugin struct {
+// ManifestRel is the manifest path inside a Claude Code plugin directory.
+const ManifestRel = ".claude-plugin/plugin.json"
+
+// Plugin is one plugin directory handed to workers via --plugin-dir, with the
+// skills Claude Code would register for it (ADR 2137).
+type Plugin struct {
 	Name   string            // manifest name, else the directory basename
 	Dir    string            // absolute plugin directory
 	Skills map[string]string // skill name -> SKILL.md path
 }
 
-// skillCatalogue is an immutable snapshot of the loaded plugins, in load order
-// (base first, then plugin_dirs extras). Never mutated after construction, so
-// it is safe to share between worker goroutines.
-type skillCatalogue struct {
-	plugins []loadedPlugin
+// Catalogue is an immutable snapshot of the loaded plugins, in load order
+// (base first, then extras). Never mutated after construction, so it is safe to
+// share between goroutines.
+type Catalogue struct {
+	plugins []Plugin
 }
 
-// buildSkillCatalogue reads each plugin directory from disk. A directory that
-// cannot be read yields a plugin with no skills rather than an error: the
-// resolver then reports the reference as unresolved, naming the path.
-func buildSkillCatalogue(dirs []string) *skillCatalogue {
-	c := &skillCatalogue{}
+// Build reads each plugin directory from disk. A directory that cannot be read
+// yields a plugin with no skills rather than an error: the resolver then
+// reports the reference as unresolved, naming the path.
+func Build(dirs []string) *Catalogue {
+	c := &Catalogue{}
 	for _, dir := range dirs {
-		c.plugins = append(c.plugins, discoverPlugin(dir))
+		c.plugins = append(c.plugins, Discover(dir))
 	}
 	return c
 }
 
-func (c *skillCatalogue) empty() bool { return c == nil || len(c.plugins) == 0 }
+// Empty reports whether the catalogue holds no plugin directories. Nil-safe.
+func (c *Catalogue) Empty() bool { return c == nil || len(c.plugins) == 0 }
 
-func (c *skillCatalogue) plugin(name string) (loadedPlugin, bool) {
+// Plugin returns the loaded plugin with the given name.
+func (c *Catalogue) Plugin(name string) (Plugin, bool) {
+	if c == nil {
+		return Plugin{}, false
+	}
 	for _, p := range c.plugins {
 		if p.Name == name {
 			return p, true
 		}
 	}
-	return loadedPlugin{}, false
+	return Plugin{}, false
 }
 
-// discoverPlugin mirrors Claude Code's skill discovery:
+// Describe lists the searched plugins and their paths. Nil-safe.
+func (c *Catalogue) Describe() string {
+	if c.Empty() {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(c.plugins))
+	for _, p := range c.plugins {
+		parts = append(parts, fmt.Sprintf("%s (%s)", p.Name, p.Dir))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Discover mirrors Claude Code's skill discovery:
 //   - skills/<name>/SKILL.md is always scanned;
 //   - the manifest "skills" key (string or array) adds directories, each either
 //     a directory of <name>/SKILL.md folders or a single folder holding
@@ -54,14 +75,14 @@ func (c *skillCatalogue) plugin(name string) (loadedPlugin, bool) {
 //
 // The skill identity is the directory name; the commands key and commands/ are
 // not skills. A plugin with no manifest is named after its directory.
-func discoverPlugin(dir string) loadedPlugin {
-	p := loadedPlugin{Name: filepath.Base(dir), Dir: dir, Skills: map[string]string{}}
+func Discover(dir string) Plugin {
+	p := Plugin{Name: filepath.Base(dir), Dir: dir, Skills: map[string]string{}}
 	var manifest struct {
 		Name   string          `json:"name"`
 		Skills json.RawMessage `json:"skills"`
 	}
 	hasSkillsKey := false
-	if data, err := os.ReadFile(filepath.Join(dir, pluginManifestRel)); err == nil {
+	if data, err := os.ReadFile(filepath.Join(dir, ManifestRel)); err == nil {
 		if json.Unmarshal(data, &manifest) == nil {
 			if manifest.Name != "" {
 				p.Name = manifest.Name
@@ -105,7 +126,7 @@ func discoverPlugin(dir string) loadedPlugin {
 	return p
 }
 
-func scanSkillsDir(p loadedPlugin, dir string) {
+func scanSkillsDir(p Plugin, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -118,8 +139,8 @@ func scanSkillsDir(p loadedPlugin, dir string) {
 	}
 }
 
-// skillNames returns the plugin's skill names, sorted.
-func (p loadedPlugin) skillNames() []string {
+// SkillNames returns the plugin's skill names, sorted.
+func (p Plugin) SkillNames() []string {
 	names := make([]string, 0, len(p.Skills))
 	for n := range p.Skills {
 		names = append(names, n)

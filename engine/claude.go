@@ -23,6 +23,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/skillref"
 	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
@@ -1798,7 +1799,7 @@ func skillLoadOverride(ctx context.Context, rawOutput []byte, expectedSkill stri
 	if expectedSkill == "" || (err != nil && !completed) || (ctx.Err() != nil && !wasTimedOut) {
 		return nil
 	}
-	return detectSkillLoadFailure(rawOutput, expectedSkill)
+	return skillref.DetectLoadFailure(rawOutput, expectedSkill)
 }
 
 // wrapKilledError records why the engine killed an invocation (#2170): a

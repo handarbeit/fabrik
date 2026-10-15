@@ -39,7 +39,7 @@ func (e *Engine) handleSkillUnresolved(item gh.ProjectItem, stage *stages.Stage,
 	}
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — skill reference unresolved**\n\nStage **%s** did not run because its `%s` reference `%s` does not resolve: %s.\n\nPlugins searched: %s.\n\nThis is not a stage failure — it does not count against `max_retries`. Name a skill a loaded plugin provides as `<plugin>:<skill>` in the stage YAML, or load the plugin (`plugin_dirs`); the next dispatch re-resolves and the `%s` label clears automatically once it does. See docs/USER_GUIDE.md.",
-		stage.Name, ue.Key, ue.Ref, ue.Why, ue.Cat.describe(), skillUnresolvedLabel,
+		stage.Name, ue.Key, ue.Ref, ue.Why, ue.Cat.Describe(), skillUnresolvedLabel,
 	)
 	e.postItemComment(item, comment, false)
 	e.addLabel(item, skillUnresolvedLabel)

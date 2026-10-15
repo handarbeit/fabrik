@@ -79,7 +79,7 @@ type streamToolCall struct {
 // scanMainThreadToolCalls returns the main-thread tool_use blocks in stream
 // order and each tool_result's is_error by tool_use_id. Sub-agent traffic (a
 // non-null parent_tool_use_id) and unparseable lines are ignored, as in
-// detectSkillLoadFailure.
+// skillref.DetectLoadFailure.
 func scanMainThreadToolCalls(rawOutput []byte) (calls []streamToolCall, isError map[string]bool) {
 	isError = map[string]bool{}
 	if len(rawOutput) == 0 {

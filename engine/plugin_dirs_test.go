@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/internal/skillref"
 	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -358,7 +359,7 @@ func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cat := buildSkillCatalogue(dirs)
+	cat := skillref.Build(dirs)
 	for ref, want := range map[string]string{
 		"local-workflows:fabrik-plan": "local-workflows:fabrik-plan",
 		"fabrik-stages:plan":          "fabrik-stages:plan",
@@ -369,7 +370,7 @@ func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
 		"fabrik:fabrik-research": "fabrik-stages:research",
 		"fabrik:fabrik-plan":     "fabrik-stages:plan",
 	} {
-		res, why, ok := cat.resolve(ref)
+		res, why, ok := cat.Resolve(ref, fabrikSkillOptions)
 		if !ok {
 			t.Errorf("%s did not resolve: %s", ref, why)
 			continue
