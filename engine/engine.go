@@ -309,6 +309,9 @@ type Engine struct {
 	trainNotPassedAsRed                   atomic.Bool                   // test seam: SetTrainNotPassedAsRedForTest (#2296)
 	trainStaleAsRed                       atomic.Bool                   // test seam: SetTrainStaleAsRedForTest (#2298)
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	completionMergedCheckOff              atomic.Bool                   // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
+	mergeInFlightGuardOff                 atomic.Bool                   // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
+	mergedPushGuardOff                    atomic.Bool                   // test seam: SetMergedPushGuardDisabledForTest (#2299)
 	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                   // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                   // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry

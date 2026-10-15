@@ -2120,6 +2120,18 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 			return
 		}
+		// #2299: a PR that already merged is a terminal advance, not a merge
+		// attempt (a doomed MergePR would only log a warning). Checked before the
+		// in-flight guard — advancing a merged item merges nothing.
+		if e.completionTerminalCheck(board, item, stage) {
+			advancedItems[issueKey(item, e.defaultRepo())] = true
+			return
+		}
+		// #2299 R4: a worker for this item is running — its completion may still
+		// change the item, so the merge decision waits for a later poll.
+		if e.mergeDeferredForWorker(item) {
+			return
+		}
 		_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
 		if mergeErr != nil {
 			e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)

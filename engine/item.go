@@ -1778,7 +1778,11 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	pushRefused := false
 	if claudeRan {
 		wm := e.worktreesFor(item.Repo)
-		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
+		if pushErr := e.pushBranchUnlessQueued(item, wm); errors.Is(pushErr, ErrPushSkippedPRMerged) {
+			// #2299 R5: the linked PR already merged — nothing to push and nothing to
+			// warn about. handleStageComplete's live check takes the terminal path.
+			e.logf(item.Number, "push", "post-stage push skipped: %v\n", pushErr)
+		} else if pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 			// The zero-ahead guard (#2089) has already paused the item.
 			pushRefused = errors.Is(pushErr, ErrPushRefusedZeroAhead)
