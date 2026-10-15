@@ -15,7 +15,7 @@
         "source": "git-subdir",
         "url": "https://github.com/handarbeit/fabrik.git",
         "path": "plugin/fabrik",
-        "ref": "v0.0.86"
+        "ref": "v0.0.87"
       },
       "homepage": "https://fabrik.handarbeit.io",
       "author": {
