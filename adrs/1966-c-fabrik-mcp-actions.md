@@ -64,3 +64,7 @@ The suspension it clears is account-wide, but the engine's settle scan reads the
 - `promote` and `revalidate` cost one extra GitHub read each (an ID-keyed single query); everything else costs only the write and the comment.
 - ~~An action's own label write appears on the requester's own subscription as a `label-applied` event with actor `fabrik`.~~ **Superseded by ADR 2125:** the requester rides the write, and the event reads `actor=overseer`, `via=<subscriber>`. The engine's autonomous writes keep `actor=fabrik`; the change stays observation-only.
 - Because the daemon acts on its cache (plus one live read for two actions), a stale cache can still refuse a valid action; it cannot make a wrong one succeed for the two expensive transitions.
+
+## Amendment (ADR 2322)
+
+The shim no longer requires `--subscriber` for actions: it resolves a name from `--subscriber`, `FABRIK_SUBSCRIBER`, `CLAUDE_TOPIC`, then the OS username, and refuses an action only when none of these yields a name. The name is still self-asserted and advisory, so an OS username adds no new trust claim. See [ADR 2322](2322-fabrik-mcp-subscriber-resolution.md).

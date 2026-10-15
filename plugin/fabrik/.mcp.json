@@ -4,7 +4,6 @@
       "command": "fabrik",
       "args": ["mcp"],
       "env": {
-        "FABRIK_SUBSCRIBER": "${user_config.subscriber}",
         "FABRIK_MCP_DIR": "${user_config.fabrik_dir}",
         "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
       }

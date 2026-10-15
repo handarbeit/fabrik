@@ -152,7 +152,7 @@ This plugin is what lets Claude answer "what's the status of #N?" from the runni
 /plugin install fabrik@fabrik
 ```
 
-The plugin starts `fabrik mcp` for the session, so `fabrik` must be on `PATH`. It asks for two optional settings: a **subscriber name** (needed only for the overseer actions and pushed events; pick a stable name such as the topic you are working on, never a PID) and a **Fabrik directory** (leave empty to use the session's own directory). Marketplace auto-update is off by default for third-party marketplaces; the user can turn it on from the marketplace's entry in `/plugin`. A session-start notice tells them if the plugin and the binary versions differ. If they previously registered the server by hand with `claude mcp add fabrik -- fabrik mcp`, have them remove that (`claude mcp remove fabrik`) so there is only one.
+The plugin starts `fabrik mcp` for the session, so `fabrik` must be on `PATH`. It asks for one optional setting, a **Fabrik directory** (leave empty to use the session's own directory). The subscriber name is not a plugin setting: it comes from `FABRIK_SUBSCRIBER`, else `CLAUDE_TOPIC`, else the OS username. The overseer actions work under the username; to receive pushed events the user exports `FABRIK_SUBSCRIBER=<a stable name such as the topic they are working on, never a PID>` before starting Claude Code. Marketplace auto-update is off by default for third-party marketplaces; the user can turn it on from the marketplace's entry in `/plugin`. A session-start notice tells them if the plugin and the binary versions differ. If they previously registered the server by hand with `claude mcp add fabrik -- fabrik mcp`, have them remove that (`claude mcp remove fabrik`) so there is only one.
 
 ## Compatibility gotcha
 

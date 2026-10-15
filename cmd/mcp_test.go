@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/internal/mcpstdio"
 )
 
 type mcpStubBackend struct{}
@@ -137,17 +138,58 @@ func TestRunMCPRejectsStrayArguments(t *testing.T) {
 	}
 }
 
-func TestSubscriberNameFlagBeatsEnvAndThereIsNoGeneratedDefault(t *testing.T) {
-	t.Setenv("FABRIK_SUBSCRIBER", "from-env")
-	if got := subscriberName("from-flag"); got != "from-flag" {
-		t.Errorf("flag must win: %q", got)
+// isolateSubscriberEnv pins every input of resolveSubscriber, so a test never
+// reads the host's $USER, $CLAUDE_TOPIC or $FABRIK_SUBSCRIBER.
+func isolateSubscriberEnv(t *testing.T, subscriber, topic, usr string) {
+	t.Helper()
+	t.Setenv("FABRIK_SUBSCRIBER", subscriber)
+	t.Setenv("CLAUDE_TOPIC", topic)
+	t.Setenv("USER", usr)
+}
+
+// The subscriber is the first set of --subscriber, FABRIK_SUBSCRIBER,
+// CLAUDE_TOPIC and the OS username; an unexpanded placeholder or a blank value
+// counts as unset at every level (#2322).
+func TestResolveSubscriberOrderAndSources(t *testing.T) {
+	const ph = "${user_config.subscriber}"
+	for _, tc := range []struct {
+		name                       string
+		flag, env, topic, usr, osu string
+		want                       string
+		src                        mcpstdio.NameSource
+	}{
+		{"flag beats everything", "Z", "Y", "X", "alice", "bob", "Z", mcpstdio.SourceFlag},
+		{"env beats topic and user", "", "Y", "X", "alice", "bob", "Y", mcpstdio.SourceEnv},
+		{"topic beats user", "", "", "X", "alice", "bob", "X", mcpstdio.SourceTopic},
+		{"USER is the default", "", "", "", "alice", "bob", "alice", mcpstdio.SourceDefault},
+		{"os/user when USER is empty", "", "", "", "", "bob", "bob", mcpstdio.SourceDefault},
+		{"nothing resolvable", "", "", "", "", "", "", mcpstdio.SourceNone},
+		{"placeholder flag falls to env", ph, "Y", "X", "alice", "", "Y", mcpstdio.SourceEnv},
+		{"placeholder env falls to topic", "", ph, "X", "alice", "", "X", mcpstdio.SourceTopic},
+		{"placeholder topic falls to user", "", "", ph, "alice", "", "alice", mcpstdio.SourceDefault},
+		{"all placeholders", ph, ph, ph, "", "", "", mcpstdio.SourceNone},
+		{"whitespace-only is unset", "  ", "\t", " \n", "", "bob", "bob", mcpstdio.SourceDefault},
+		{"value is trimmed", " Z ", "", "", "", "", "Z", mcpstdio.SourceFlag},
+		{"placeholder USER falls to os/user", "", "", "", ph, "bob", "bob", mcpstdio.SourceDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateSubscriberEnv(t, tc.env, tc.topic, tc.usr)
+			got, src := resolveSubscriber(tc.flag, func() string { return tc.osu })
+			if got != tc.want || src != tc.src {
+				t.Errorf("resolveSubscriber = (%q, %v), want (%q, %v)", got, src, tc.want, tc.src)
+			}
+		})
 	}
-	if got := subscriberName(""); got != "from-env" {
-		t.Errorf("env fallback: %q", got)
+}
+
+// $USER set means the os/user lookup is never paid for.
+func TestResolveSubscriberSkipsLookupWhenUserIsSet(t *testing.T) {
+	isolateSubscriberEnv(t, "", "", "alice")
+	if got, _ := resolveSubscriber("", func() string { t.Error("lookup must not run"); return "" }); got != "alice" {
+		t.Errorf("got %q", got)
 	}
-	t.Setenv("FABRIK_SUBSCRIBER", "")
-	if got := subscriberName(""); got != "" {
-		t.Errorf("no name must stay empty (push off), got %q", got)
+	if got, src := resolveSubscriber("", nil); got != "alice" || src != mcpstdio.SourceDefault {
+		t.Errorf("nil lookup with USER set: (%q, %v)", got, src)
 	}
 }
 
@@ -208,9 +250,9 @@ func TestUnexpandedPluginPlaceholdersCountAsUnset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FABRIK_SUBSCRIBER", "${user_config.subscriber}")
-	if got := subscriberName(""); got != "" {
-		t.Errorf("placeholder subscriber must read as unset, got %q", got)
+	isolateSubscriberEnv(t, "${user_config.subscriber}", "${CLAUDE_TOPIC}", "")
+	if got, src := resolveSubscriber("", func() string { return "" }); got != "" || src != mcpstdio.SourceNone {
+		t.Errorf("placeholder subscriber must read as unset, got (%q, %v)", got, src)
 	}
 	t.Setenv("FABRIK_MCP_DIR", "${user_config.fabrik_dir}")
 	t.Setenv("CLAUDE_PROJECT_DIR", "/from/project")
@@ -424,7 +466,7 @@ func TestNewMCPServerStreamsOnlyInsideAFabrikProject(t *testing.T) {
 	mkdirs(t, filepath.Join(project, ".fabrik"), plain)
 	t.Setenv("FABRIK_MCP_DIR", "")
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
-	t.Setenv("FABRIK_SUBSCRIBER", "")
+	isolateSubscriberEnv(t, "", "", "")
 
 	for _, tc := range []struct {
 		name  string
@@ -486,4 +528,64 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// Inside a project, a name from CLAUDE_TOPIC or FABRIK_SUBSCRIBER starts the
+// stream; the OS-username default names the audit comments but starts none
+// (#2322 FR-008), and the launched name survives for the action tools.
+func TestNewMCPServerDefaultNameStartsNoStream(t *testing.T) {
+	project := filepath.Join(mcpFixture(t), "project")
+	mkdirs(t, filepath.Join(project, ".fabrik"))
+	t.Setenv("FABRIK_MCP_DIR", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+
+	for _, tc := range []struct {
+		name            string
+		env, topic, usr string
+		wantName        string
+		wantSource      mcpstdio.NameSource
+		wantStream      bool
+	}{
+		{"default", "", "", "alice", "alice", mcpstdio.SourceDefault, false},
+		{"topic", "", "my-topic", "alice", "my-topic", mcpstdio.SourceTopic, true},
+		{"env beats topic", "my-env", "my-topic", "alice", "my-env", mcpstdio.SourceEnv, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateSubscriberEnv(t, tc.env, tc.topic, tc.usr)
+			srv, err := newMCPServer(project, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if srv.Subscriber != tc.wantName || srv.SubscriberSource != tc.wantSource {
+				t.Fatalf("server name = (%q, %v), want (%q, %v)", srv.Subscriber, srv.SubscriberSource, tc.wantName, tc.wantSource)
+			}
+			var gotName atomic.Value
+			started := make(chan struct{}, 1)
+			srv.Stream = func(ctx context.Context, o localapi.StreamOptions) error {
+				gotName.Store(o.Subscriber)
+				started <- struct{}{}
+				<-ctx.Done()
+				return nil
+			}
+			srv.In = strings.NewReader(mcpHandshake)
+			srv.Out = &lockedWriter{w: io.Discard}
+			srv.Err = io.Discard
+			if err := srv.Serve(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-started:
+				if !tc.wantStream {
+					t.Fatalf("stream started under %q; the default must not stream", gotName.Load())
+				}
+				if gotName.Load() != tc.wantName {
+					t.Errorf("stream attached as %v, want %q", gotName.Load(), tc.wantName)
+				}
+			case <-time.After(300 * time.Millisecond):
+				if tc.wantStream {
+					t.Fatal("stream never started")
+				}
+			}
+		})
+	}
 }

@@ -109,9 +109,14 @@ func (s *Server) notifyChannel(ev channelevents.Event) {
 
 // startStream launches the held connection once, after the client has said it is
 // initialized (a notification before that could be dropped). A shim launched
-// without a subscriber name has no push: the read tools work unchanged.
+// without a subscriber name has no push: the read tools work unchanged. The
+// OS-username default never streams either (StreamName, #2322): the handshake
+// carries no reliable signal that this session can receive pushes, and a stream
+// under a name every session shares would let a `claude -p` process supersede
+// the human's interactive session.
 func (s *Server) startStream(ctx context.Context) {
-	if s.Subscriber == "" || s.DisableStream {
+	name := s.StreamName()
+	if name == "" || s.DisableStream {
 		return
 	}
 	s.streamOnce.Do(func() {
@@ -130,7 +135,7 @@ func (s *Server) startStream(ctx context.Context) {
 			defer watch.stop()
 			err := stream(ctx, localapi.StreamOptions{
 				Path:       s.SocketPath,
-				Subscriber: s.Subscriber,
+				Subscriber: name,
 				OnEvent:    s.notifyChannel,
 				OnState:    watch.onState,
 				Logf:       func(f string, a ...any) { s.logf(f, a...) },
@@ -159,6 +164,16 @@ type reachability struct {
 	warned   bool
 }
 
+// supersededContent is the stream-superseded notice text. A session whose name
+// came from the shared default also learns how to stop colliding (#2322).
+func supersededContent(name string, source NameSource) string {
+	msg := fmt.Sprintf("Another session attached as subscriber %q and took over this stream; this session will receive no more Fabrik events. Use a distinct --subscriber name per session to keep both.", name)
+	if source == SourceDefault {
+		msg += " This session's name came from the default (the OS username), which every session on this machine shares: set FABRIK_SUBSCRIBER to a name of its own in each session's environment, or run the sessions under `topic`."
+	}
+	return msg
+}
+
 func (r *reachability) onState(st localapi.StreamState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -171,7 +186,7 @@ func (r *reachability) onState(st localapi.StreamState) {
 		}
 		r.srv.notifyChannel(channelevents.Event{
 			Type:    channelevents.StreamSuperseded,
-			Content: fmt.Sprintf("Another session attached as subscriber %q and took over this stream; this session will receive no more Fabrik events. Use a distinct --subscriber name per session to keep both.", r.srv.Subscriber),
+			Content: supersededContent(r.srv.Subscriber, r.srv.SubscriberSource),
 			Meta:    map[string]string{"event": string(channelevents.StreamSuperseded), "subscriber": r.srv.Subscriber},
 		})
 		return

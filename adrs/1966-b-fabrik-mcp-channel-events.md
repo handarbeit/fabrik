@@ -97,3 +97,7 @@ Before these surfaces first shipped (0.0.84), the account-wide Claude usage-limi
 | attention deadline kind `claude-suspension-end` | `claude-usage-limit-end` |
 
 `fabrik:claude-limit`, `fabrik:clear-claude-limit` and the `fabrik_clear_claude_limit` tool keep their names. ~~No alias is accepted by `subscribe`: a subscriber that names an old event type must re-subscribe with the new one.~~ *Amended by ADR 2168: `subscribe` now maps the two old names to the new ones and reports the mapping, so a shim built before the rename keeps a working subscription.* As a courtesy to development machines, `channelevents.Open` rewrites the two old type strings in persisted subscriptions and held queues to the new names on load (`internal/channelevents/legacy.go`), so existing state does not go silently unmatched.
+
+## Amendment (ADR 2322)
+
+The "no generated default" rule is superseded: the name now resolves `--subscriber`, `FABRIK_SUBSCRIBER`, `CLAUDE_TOPIC`, then the OS username. A fixed default is stable (the rule's concern was PIDs and session ids), but it is shared by every session, so it names the action audit comments and never starts the push stream. A superseded default-named session's `stream-superseded` notice carries the per-session remedy. See [ADR 2322](2322-fabrik-mcp-subscriber-resolution.md).
