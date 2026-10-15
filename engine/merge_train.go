@@ -4298,6 +4298,13 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 // check runs falls back to mergeable_state + required-context — the one case
 // where mergeable_state is genuinely load-bearing for green, exactly as in
 // pollTrainCI and settlePRMergeState's ADR-933 zero-check-runs branch.
+//
+// Since #1822 both green returns are additionally gated on ciSuiteHold: an
+// all-green (or zero-run) check-run set is a complete pass only when no check
+// suite still has outstanding work, since a job queued for a runner has no
+// check run yet. A hold or a suite-read error is TrainCIPending — never green.
+// singletonFastPathEligible inherits this through its own call here, so the
+// fast path, the landing wait and the advance gate agree on one SHA.
 func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, checkRuns []gh.CheckRun) (result TrainCIResult, detail string) {
 	if len(checkRuns) > 0 {
 		status, _, failed := gh.ClassifyCheckRuns(checkRuns)
