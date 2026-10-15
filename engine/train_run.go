@@ -127,6 +127,19 @@ type trainRunRecord struct {
 	// Poisoner is the write-ahead mark of an ejection about to happen: set (and
 	// persisted) BEFORE ejectMember so a restart finishes the ejection exactly once.
 	Poisoner int `json:"poisoner,omitempty"`
+
+	// RebaseCycles is the run's spent rebuild budget (#2298 R2): one per stale trial
+	// rebuilt on a moved base (handleStaleTrial) and one per main-moved landing rebase
+	// (landGreenBatchRun), bounded together by effectiveMaxTrainRebaseCycles(). It is
+	// persisted write-ahead so neither a restart nor a second actor can spend it twice.
+	RebaseCycles int `json:"rebase_cycles,omitempty"`
+	// StaleTrial is the name of the trial whose stale verdict has already been counted
+	// and acted on (re-pin, re-form set); replaying the verdict for the same trial after
+	// a restart skips the count and finishes the rebuild exactly once.
+	StaleTrial string `json:"stale_trial,omitempty"`
+	// Rebuild asks the next stepForm to open a trial rather than take a singleton
+	// shortcut (fast path / catch-up), for one formation.
+	Rebuild bool `json:"rebuild,omitempty"`
 }
 
 // ─── JSON-safe mirrors of the per-trial CI state (#2052 / #2072 bookkeeping) ───

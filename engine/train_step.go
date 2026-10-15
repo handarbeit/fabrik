@@ -411,7 +411,7 @@ func appendEjected(ejected []int, input, survivors []trainMember) []int {
 // trial: every trial except a green one, a CI-infrastructure abandon, or a cancelled
 // one counts as "no progress" (#1528, #2052, #2046).
 func (e *Engine) recordTrialIfCounts(ctx context.Context, p trialParams, result TrainCIResult, err error) {
-	if result != TrainCIGreen && result != TrainCIInfra && !trainCancelled(ctx, err) {
+	if result != TrainCIGreen && result != TrainCIInfra && result != TrainCIStale && !trainCancelled(ctx, err) {
 		e.recordTrial(p.trainKey)
 	}
 }
@@ -424,6 +424,10 @@ func (e *Engine) stepForm(ctx context.Context, r *trainRun) stepOut {
 	repoKey := p.repoKey()
 	trainKey := p.trainKey
 	current := r.current()
+	r.mu.Lock()
+	rebuild := r.rec.Rebuild
+	r.rec.Rebuild = false
+	r.mu.Unlock()
 
 	if len(current) == 0 {
 		e.logfRepo(repoKey, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", trainKey)
@@ -445,19 +449,24 @@ func (e *Engine) stepForm(ctx context.Context, r *trainRun) stepOut {
 			r.persist()
 			return outContinue
 		}
-		if e.trySingletonFastPath(ctx, state, p, current[0]) {
-			r.finish()
-			return outDone
+		// #2298: a rebuild after a stale trial asks for a new trial on the new base. The
+		// fast path would skip it, and the catch-up would rewrite the member's own PR
+		// (review churn), so neither runs for this formation.
+		if !rebuild {
+			if e.trySingletonFastPath(ctx, state, p, current[0]) {
+				r.finish()
+				return outDone
+			}
+			// #2044: a singleton that is merely BEHIND the pinned base is caught up on its own
+			// branch and landed through the fast path rather than via a trial.
+			caughtUp, decided := e.trySingletonCatchUp(ctx, state, p, current[0])
+			if decided {
+				r.finish()
+				return outDone
+			}
+			current[0] = caughtUp
+			r.setCurrent(current)
 		}
-		// #2044: a singleton that is merely BEHIND the pinned base is caught up on its own
-		// branch and landed through the fast path rather than via a trial.
-		caughtUp, decided := e.trySingletonCatchUp(ctx, state, p, current[0])
-		if decided {
-			r.finish()
-			return outDone
-		}
-		current[0] = caughtUp
-		r.setCurrent(current)
 	}
 
 	trialName := p.nextTrialName()
@@ -487,6 +496,9 @@ func (e *Engine) stepMainVerdict(ctx context.Context, r *trainRun, v trialVerdic
 	r.state.trialName = t.Name
 	r.state.prNum = t.PRNum
 	r.state.mu.Unlock()
+	if v.result == TrainCIStale {
+		return e.handleStaleTrial(ctx, r, t, v.diag)
+	}
 	return e.mainOutcome(ctx, r, t.Name, r.memberList(t.Members), v.result, v.diag, nil)
 }
 
@@ -555,7 +567,7 @@ func (e *Engine) mainOutcome(ctx context.Context, r *trainRun, trialName string,
 		e.logfRepo(repoKey, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", trainKey, len(survivors))
 		r.setStep(stepLanding)
 		r.persist()
-		e.landGreenBatch(ctx, state, p, survivors)
+		e.landGreenBatchRun(ctx, r, state, p, survivors)
 		r.finish()
 		return outDone
 	case TrainCIPending:
@@ -676,6 +688,9 @@ func (e *Engine) stepHalfVerdict(ctx context.Context, r *trainRun, v trialVerdic
 	if t == nil {
 		r.setStep(stepBisect)
 		return outContinue
+	}
+	if v.result == TrainCIStale {
+		return e.handleStaleTrial(ctx, r, t, v.diag)
 	}
 	return e.halfOutcome(ctx, r, t.Name, r.memberList(t.Members), v.result, v.diag, nil)
 }
@@ -972,6 +987,9 @@ func (e *Engine) stepSingleVerdict(ctx context.Context, r *trainRun, v trialVerd
 		r.setStep(stepOAT)
 		return outContinue
 	}
+	if v.result == TrainCIStale {
+		return e.handleStaleTrial(ctx, r, t, v.diag)
+	}
 	return e.singleOutcome(ctx, r, m, t.Name, r.memberList(t.Members), v.result, v.diag, nil)
 }
 
@@ -1056,9 +1074,10 @@ func (e *Engine) awaitTrialVerdict(ctx context.Context, r *trainRun) trialVerdic
 	}
 	if e.trainValidateFn != nil {
 		res, diag := e.trainValidateFn(ctx, r.memberList(t.Members))
+		res = e.staleSeamVerdict(res)
 		return trialVerdict{result: res, diag: diag}
 	}
-	res, diag := e.pollTrainCI(ctx, r.p.owner, r.p.repo, t.PRNum, t.HeadSHA)
+	res, diag := e.pollTrainCIFor(ctx, r.p.owner, r.p.repo, t.PRNum, t.HeadSHA, r.baseProbe(t))
 	return trialVerdict{result: res, diag: diag}
 }
 

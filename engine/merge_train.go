@@ -46,6 +46,16 @@ const (
 	// through to the trial. Never charged, ejected or paused. Appended last so
 	// existing iota values do not shift.
 	TrainCINotPassed
+	// TrainCIStale means the trial PR reads mergeable_state "dirty" because the base
+	// branch advanced past the trial's pinned base SHA mid-CI, or because the base
+	// could not be read to rule that out (#2298, ADR 2298). The trial is stale, not
+	// red: nothing the members did produced it, so it is never charged to the
+	// runaway guard, never bisected, ejected, paused or auto-repaired. It is
+	// returned only by evalTrialCI and consumed only by handleStaleTrial, which
+	// rebuilds the same member set on the live base within the shared
+	// max_train_rebase_cycles budget. Appended last so existing iota values do not
+	// shift.
+	TrainCIStale
 )
 
 // trainMember pairs a batch member's ProjectItem with its linked PR number and head SHA.
@@ -87,6 +97,10 @@ type trainCIDiagnostic struct {
 	Note           string
 	PRNum          int
 	TrialSHA       string
+	// BaseMoveObserved is set on a TrainCIStale verdict when a live read confirmed the
+	// base had advanced past the trial; false means the read failed and the verdict
+	// fails toward stale (#2298 R1).
+	BaseMoveObserved bool
 }
 
 // Truncation policy for rendering a trainCIDiagnostic into a comment body (R3): inline a
@@ -1417,7 +1431,7 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 	// either; that is what "leave the members uncharged" means for R2/R4.
 	// #2046: a cancellation (e.g. while waiting for a conflict-resolution slot) is
 	// likewise not a trial.
-	if result != TrainCIGreen && result != TrainCIInfra && !trainCancelled(ctx, err) {
+	if result != TrainCIGreen && result != TrainCIInfra && result != TrainCIStale && !trainCancelled(ctx, err) {
 		e.recordTrial(p.trainKey)
 	}
 	return survivors, result, prNum, diag, err
@@ -4811,8 +4825,35 @@ func membersToItems(members []trainMember) []gh.ProjectItem {
 // re-validation here dissolves rather than bisecting, so the rebase-cycle budget
 // and the bisection cost cap never interact (compose-not-duplicate).
 func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, survivors []trainMember) {
+	e.landGreenBatchRun(ctx, nil, state, p, survivors)
+}
+
+// landGreenBatchRun is landGreenBatch drawing on a run's persisted rebuild budget (#2298
+// R2): r.rec.RebaseCycles is shared with handleStaleTrial, so a run that already spent
+// cycles rebuilding stale trials has only the remainder left at landing, and one run can
+// never spend max_train_rebase_cycles twice. A nil run (reconstruct, tests) counts from
+// zero in a local, as before.
+func (e *Engine) landGreenBatchRun(ctx context.Context, r *trainRun, state *mergeTrainWorkerState, p trialParams, survivors []trainMember) {
 	maxCycles := e.effectiveMaxTrainRebaseCycles()
-	cycles := 0
+	local := 0
+	cyclesUsed := func() int {
+		if r == nil {
+			return local
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.rec.RebaseCycles
+	}
+	spendCycle := func() int {
+		if r == nil {
+			local++
+			return local
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.rec.RebaseCycles++
+		return r.rec.RebaseCycles
+	}
 
 	for {
 		state.mu.RLock()
@@ -4828,12 +4869,12 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		}
 
 		// Main moved under the batch.
-		if cycles >= maxCycles {
+		if cyclesUsed() >= maxCycles {
 			e.dissolveBatch(state, p, prNum, trialName, membersToItems(survivors),
 				fmt.Sprintf("the base branch advanced under the batch and it still could not catch up after %d rebase attempt(s) (main-moved rebase limit)", maxCycles))
 			return
 		}
-		cycles++
+		cycles := spendCycle()
 		e.logfRepo(p.repoKey(), "merge-train", "trial %s is behind %s (main moved) — rebasing off the new base (cycle %d/%d)\n", trialName, p.baseBranch, cycles, maxCycles)
 
 		// Re-pin the base to the current origin/<base> so the re-assembly forks off
@@ -5225,7 +5266,8 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // the full test suite, if left unmarked-required) is still queued or
 // in_progress on the trial SHA — accepting it as green in that state is
 // exactly the #1150 defect this fixes (see adrs/1153-*.md). "dirty" is
-// unambiguous and still returns TrainCIRed immediately. Otherwise, an
+// unambiguous red — except (#2298) when the base branch has moved past the trial (or
+// cannot be read), where it is the uncharged TrainCIStale. Otherwise, an
 // accepted mergeable_state is recorded as necessary-but-not-sufficient: the
 // check-run pass below is what actually confirms completeness (no run left
 // queued/in_progress) before TrainCIGreen is returned. mergeable_state
@@ -5234,12 +5276,20 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // branch below), since in that case there is no per-check signal to fall
 // back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
+	return e.pollTrainCIFor(ctx, owner, repo, prNum, trialSHA, trialBaseProbe{})
+}
+
+// pollTrainCIFor is pollTrainCI with the trial's base identity, so a "dirty" reading on a
+// moved base is the uncharged TrainCIStale rather than red (#2298). A zero probe keeps
+// "dirty" red.
+func (e *Engine) pollTrainCIFor(ctx context.Context, owner, repo string, prNum int, trialSHA string, probe trialBaseProbe) (TrainCIResult, *trainCIDiagnostic) {
 	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	// #2052: per-trial CI-infrastructure state. Local to this call — one call is
 	// one trial — so it is single-goroutine by construction and every bisection
 	// sub-trial gets its own retrigger budget and its own single failed-job re-run.
 	var st trialCIState
+	st.probe = probe
 
 	for {
 		select {

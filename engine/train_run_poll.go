@@ -79,6 +79,7 @@ func (e *Engine) pollTrainRun(ctx context.Context, board *gh.ProjectBoard, r *tr
 	case e.trainValidateFn != nil:
 		if e.trainValidateHoldForTest == nil || !e.trainValidateHoldForTest() {
 			v.result, v.diag = e.trainValidateFn(ctx, r.memberList(t.Members))
+			v.result = e.staleSeamVerdict(v.result)
 			decided = true
 		}
 	default:
@@ -294,6 +295,19 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 			return
 		}
 		switch {
+		case (pr == nil || strings.EqualFold(pr.State, "closed") && !pr.Merged) && rec.StaleTrial != "" && rec.StaleTrial == rec.Trial.Name:
+			// #2298 R7: a restart landed between handleStaleTrial closing the stale trial and
+			// its second persist. The cycle was counted and the base re-pinned write-ahead, so
+			// finish the cleanup and carry on at the re-form step instead of dropping the
+			// record (which would forget the cycle count).
+			e.logfRepo(repoKey, "merge-train", "train run for %s: stale trial %s (PR #%d) was already closed — resuming at the rebuild\n", rec.TrainKey, rec.Trial.Name, rec.Trial.PRNum)
+			e.cleanupTrialArtifacts(repoKey, wm, rec.Trial.Name)
+			rec.Trial = nil
+			if rec.OAT != nil {
+				rec.Step = stepOAT
+			} else {
+				rec.Step = stepForm
+			}
 		case pr == nil || strings.EqualFold(pr.State, "closed") && !pr.Merged:
 			e.discardTrainRunMode(rec, wm, fmt.Sprintf("trial PR #%d is closed", rec.Trial.PRNum), discardCleanOnly)
 			return
