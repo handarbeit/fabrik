@@ -252,8 +252,8 @@ SHA would silently read the wrong CI results.
 `dirty`, and `draft` from the whole model, in this order:
 
 1. `unknown` — the PR is merged or closed, or a recompute window is pending
-2. `draft` — the PR is a draft
-3. `dirty` — the trial merge genuinely conflicts
+2. `dirty` — the trial merge genuinely conflicts
+3. `draft` — the PR is a draft
 4. `behind` — the base requires up-to-date heads *and* has advanced
 5. `blocked` — a required context is missing, pending, or failing
 6. `unstable` — a non-required context is pending or failing
@@ -268,14 +268,18 @@ incident unreproducible here.
 
 **Simplified:** this precedence is the sim's own deliberate choice, **not** a
 reverse-engineering of GitHub's internal algorithm for every combination of
-conditions. A draft PR that also conflicts resolves to `draft`, not `dirty`. If
-a scenario depends on a specific combination, verify the real behaviour against
-a recorded GitHub response rather than trusting the sim's ordering.
+conditions. A draft PR that also conflicts resolves to `dirty`, not `draft`
+(changed in #2298: the merge-train's trial CI PRs are drafts, and the reported
+incident was real GitHub returning `dirty` for a draft trial PR whose base moved
+conflictingly mid-CI; with the earlier `draft > dirty` order the sim could never
+reach the engine's stale-trial branch). If a scenario depends on a specific
+combination, verify the real behaviour against a recorded GitHub response
+rather than trusting the sim's ordering.
 
 **Risk:** medium, and concentrated in *which* state an untested combination
 resolves to rather than in the ordering itself. Each single-condition case has
 its own test, and `mergeable_precedence_test.go` additionally pins every
-adjacent link in the chain — draft > dirty > behind > blocked > unstable >
+adjacent link in the chain — dirty > draft, dirty > behind > blocked > unstable >
 clean — with two conditions arranged at once, so the order is constrained
 transitively rather than assumed. What those tests cannot tell you is whether
 this order is the order *GitHub* would use for the same combination; that

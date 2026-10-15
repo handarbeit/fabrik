@@ -18,16 +18,17 @@ import (
 //
 // Each test below arranges two conditions that resolve to different states and
 // asserts the higher-precedence one wins. Together they pin every *adjacent*
-// link in the chain — draft > dirty > behind > blocked > unstable — which
+// link in the chain — dirty > draft, dirty > behind > blocked > unstable — which
 // constrains the whole ordering transitively rather than spot-checking pairs.
 
-// TestPrecedenceDraftOverDirty pins draft > dirty.
+// TestPrecedenceDirtyOverDraft pins dirty > draft (#2298).
 //
 // The existing draft test arranges a draft PR with everything else green, so it
 // would pass under any ordering. This one makes the PR genuinely conflict as
-// well: FIDELITY.md promises "a draft PR that also conflicts resolves to draft,
-// not dirty", and this is what holds that promise to account.
-func TestPrecedenceDraftOverDirty(t *testing.T) {
+// well: FIDELITY.md promises "a draft PR that also conflicts resolves to dirty,
+// not draft" — the merge-train's trial CI PRs are drafts, and the stale-trial
+// rebuild depends on one reading dirty when its base moves conflictingly.
+func TestPrecedenceDirtyOverDraft(t *testing.T) {
 	s, _ := seedBasicBoard(t)
 	seedConflict(t, s)
 	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Draft: true})
@@ -44,7 +45,7 @@ func TestPrecedenceDraftOverDirty(t *testing.T) {
 		t.Fatal("precondition: the seeded head must genuinely conflict with main")
 	}
 
-	assertState(t, s, stateDraft)
+	assertState(t, s, stateDirty)
 }
 
 // TestPrecedenceDirtyOverBehind pins dirty > behind.

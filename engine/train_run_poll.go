@@ -83,6 +83,7 @@ func (e *Engine) pollTrainRun(ctx context.Context, board *gh.ProjectBoard, r *tr
 			decided = true
 		}
 	default:
+		r.ci.probe = r.baseProbe(t)
 		before := r.ci.record()
 		res, diag, dec := e.evalTrialCI(ctx, r.p.owner, r.p.repo, t.PRNum, t.HeadSHA, &r.ci)
 		v, decided = trialVerdict{result: res, diag: diag}, dec

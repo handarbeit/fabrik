@@ -331,8 +331,8 @@ func (s *Sim) FetchPRMergeableState(owner, repo string, prNumber int) (string, e
 // Precedence, applied in this order:
 //
 //  1. unknown  — the PR is merged or closed, or a recompute window is pending
-//  2. draft    — the PR is a draft
-//  3. dirty    — the trial merge genuinely conflicts
+//  2. dirty    — the trial merge genuinely conflicts
+//  3. draft    — the PR is a draft
 //  4. behind   — the base branch requires up-to-date heads and has advanced
 //  5. blocked  — a required context is missing, pending, or failing
 //  6. unstable — a non-required context is pending or failing
@@ -340,8 +340,10 @@ func (s *Sim) FetchPRMergeableState(owner, repo string, prNumber int) (string, e
 //
 // This order is the model's own deliberate choice, not a reverse-engineering
 // of GitHub's internal algorithm for every combination. A draft PR that also
-// conflicts resolves to "draft", not "dirty". FIDELITY.md states this so a
-// scenario author reasons about edge cases rather than discovering them.
+// conflicts resolves to "dirty", not "draft" (#2298): the merge-train's trial CI
+// PRs are drafts, and real GitHub reported "dirty" for one whose base moved
+// conflictingly mid-CI. FIDELITY.md states this so a scenario author reasons
+// about edge cases rather than discovering them.
 func (s *Sim) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
 	s.mu.Lock()
 	r, pr, err := s.prLocked(owner, repo, prNumber)
@@ -385,11 +387,9 @@ type gitFactsResult struct {
 // called while holding mu.
 //
 // It runs unconditionally, including for a draft PR, and that is not an
-// oversight to optimise away. deriveMergeableState short-circuits a draft to
-// "draft" without reading `behind` or `headSHA`, but `conflict` is *not*
-// discarded — FetchPRMergeableFields turns it into the returned `mergeable`
-// flag, and GitHub reports mergeability for draft PRs too (a draft is
-// mergeable: true/false with mergeable_state: "draft"). Skipping the trial
+// oversight to optimise away. deriveMergeableState reads `conflict` before
+// `draft` (a conflicting draft is "dirty", #2298), and FetchPRMergeableFields
+// also turns it into the returned `mergeable` flag. Skipping the trial
 // merge for drafts would therefore change an answer, not just save work. The
 // only genuinely dead call for a draft is commitsBehind, a single rev-list
 // against the bare repo — cheap next to the worktree the trial merge needs,
@@ -419,11 +419,11 @@ func (s *Sim) gitFacts(r *repoState, base, head string) (gitFactsResult, error) 
 // deriveMergeableState applies the precedence order documented on
 // FetchPRMergeableFields. Takes mu; must not be called while holding it.
 func (s *Sim) deriveMergeableState(r *repoState, base string, facts gitFactsResult, draft bool) string {
-	if draft {
-		return stateDraft
-	}
 	if facts.conflict {
 		return stateDirty
+	}
+	if draft {
+		return stateDraft
 	}
 
 	s.mu.Lock()

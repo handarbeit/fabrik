@@ -274,11 +274,9 @@ func (e *Engine) dirtyTrialVerdict(logRepo, owner, repo string, prNum int, trial
 		note := fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" and %s has %d commit(s) the trial lacks — the base moved under the trial.", probe.baseBranch, behind)
 		return TrainCIStale, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA, BaseMoveObserved: true}, true
 	}
-	return TrainCIRed, &trainCIDiagnostic{
-		Note:     fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" although %s has not moved since the trial was assembled.", probe.baseBranch),
-		PRNum:    prNum,
-		TrialSHA: trialSHA,
-	}, true
+	note := fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" although %s has not moved since the trial was assembled.", probe.baseBranch)
+	e.logfRepo(logRepo, "merge-train", "trial %s (PR #%d) red: %s\n", trialSHA, prNum, note)
+	return TrainCIRed, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}, true
 }
 
 // logTrialCITimeout logs the CI-wait timeout line for a trial PR, naming the last
