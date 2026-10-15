@@ -2294,6 +2294,11 @@ func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.S
 	// ("the engine retries") are skipped for it.
 	if ungrantable := e.ungrantableDenials(denials); len(ungrantable) > 0 {
 		e.logUngrantableDenials(item, ungrantable)
+		// A label left by an earlier bounded-retry denial of the same episode
+		// would keep claiming the engine retries while the issue is paused.
+		if hasLabel(item.Labels, "fabrik:tools-denied") {
+			e.removeLabel(item, "fabrik:tools-denied")
+		}
 		return count, true
 	}
 	if !hasLabel(item.Labels, "fabrik:tools-denied") {

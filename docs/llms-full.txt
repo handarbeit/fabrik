@@ -9305,7 +9305,8 @@ documentation link to the comment.
 **Handling.** `recordToolsDeniedDetection` still increments `ToolsDeniedRetries`, but for a run with any
 ungrantable denial it logs `[#N tools-denied] ungrantable denial: <Tool> <relpath> (covered by <rule>) —
 pausing on first occurrence`, skips the explanatory comment and the `fabrik:tools-denied` label (the label
-reads "the engine retries"), and forces `willEscalate`. Both call sites (`finalizeStageOutcome`,
+reads "the engine retries") and removes it if an earlier bounded-retry denial of the same episode left
+it, and forces `willEscalate`. Both call sites (`finalizeStageOutcome`,
 `processComments`) then call `pauseForToolsDenied`, which runs `pauseForUngrantableDenial`: `fabrik:paused` +
 `fabrik:awaiting-input`, `EnginePaused` applied (so removing `fabrik:paused` resets the counters through
 `clearFailedStage` exactly as after `pauseForToolsDeniedLimit`), and a comment that names the tool and each

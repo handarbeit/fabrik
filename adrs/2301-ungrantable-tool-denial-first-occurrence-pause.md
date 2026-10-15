@@ -34,7 +34,8 @@ could not help.
 4. **Handling.** Both consumers pause on first occurrence via `pauseForToolsDenied`; all other bookkeeping of
    ADR 1523 is unchanged (no `failed` label, no `max_retries` charge, WIP commit and push, breakers bypassed,
    `EnginePaused`). The explanatory comment and `fabrik:tools-denied` label are skipped for such a run: the
-   label reads "the engine retries" and the pause comment replaces the comment.
+   label reads "the engine retries" and the pause comment replaces the comment. A label already left by an
+   earlier bounded-retry denial of the same episode is removed, so it cannot contradict the pause.
 5. **`MultiEdit`** joins the causal gate's write-capable and recovery tool sets.
 
 ## Consequences and known gaps

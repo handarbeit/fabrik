@@ -325,6 +325,44 @@ func TestUngrantableDenial_StagePath_PausesOnFirstOccurrence(t *testing.T) {
 	}
 }
 
+// A fabrik:tools-denied label left by an earlier bounded-retry denial would keep
+// claiming the engine retries while the issue is paused, so the first-occurrence
+// pause removes it.
+func TestUngrantableDenial_PauseClearsStaleToolsDeniedLabel(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		name := "enabled"
+		if disabled {
+			name = "classification disabled (non-vacuity)"
+		}
+		t.Run(name, func(t *testing.T) {
+			skipIfNoGit(t)
+			repoDir := initBareRepo(t)
+			client := &mockGitHubClient{}
+			claude := &mockClaudeInvoker{
+				invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+					return "", false, TokenUsage{TurnsUsed: 3}, ungrantableEditDenial()
+				},
+			}
+			eng := NewWithDeps(
+				Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+					MaxRetries: 2, MaxToolsDeniedRetries: 3, Stages: testStages()},
+				client, claude, NewWorktreeManager(repoDir),
+			)
+			eng.SetUngrantableDenialDisabledForTest(disabled)
+
+			board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+			item := gh.ProjectItem{Number: 402, Title: "stale label", Status: "Research", ItemID: "PVTI_402", Labels: []string{"fabrik:tools-denied"}}
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Fatalf("processItem: %v", err)
+			}
+
+			if got := removedLabel(client, "fabrik:tools-denied"); got == disabled {
+				t.Errorf("tools-denied label removed = %v with classification disabled = %v", got, disabled)
+			}
+		})
+	}
+}
+
 func TestUngrantableDenial_CommentPath_PausesOnFirstOccurrence(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
 		name := "enabled"
