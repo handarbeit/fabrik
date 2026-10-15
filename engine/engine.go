@@ -452,7 +452,7 @@ type Engine struct {
 	// pre-seam behavior. Tests substitute it via SetClock to control
 	// itemstate.CooldownAt timing deterministically (ADR-1449).
 	clock Clock
-	// trainCIPollInterval overrides pollTrainCI/pollForMergeable's hardcoded
+	// trainCIPollInterval overrides pollTrainCI/settleAndMerge's hardcoded
 	// 30s retry interval when non-zero. Both functions poll real GitHub state
 	// (check runs, mergeable fields) on a real-wall-clock ticker unrelated to
 	// the Clock seam above — trial-branch CI genuinely takes real time to run
@@ -865,7 +865,7 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	e.worktreeManagers[nameWithOwner] = wm
 }
 
-// SetTrainCIPollIntervalForTest overrides pollTrainCI/pollForMergeable's
+// SetTrainCIPollIntervalForTest overrides pollTrainCI/settleAndMerge's
 // hardcoded 30s retry interval — see the trainCIPollInterval field's doc
 // comment for why this exists and why it's a duration override rather than a
 // Clock-seam concern. Test seam only (ADR-1449, #1452, tests/sim); production

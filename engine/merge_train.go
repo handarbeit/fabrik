@@ -2021,7 +2021,7 @@ func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.
 	}
 	// classifyLandingCI's zero-check-runs branch falls back to mergeable_state
 	// alone (ADR-933's "Actions disabled" case) — correct for its usual caller
-	// (pollForMergeable, judging a landing PR whose tree was already validated
+	// (settleAndMerge, judging a landing PR whose tree was already validated
 	// by a just-polled trial CI run) but wrong here: R1.2 requires positive
 	// evidence that the member's OWN CI already ran and passed, and this fast
 	// path never builds a trial, so zero check runs on the member's own PR
@@ -4275,7 +4275,7 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 	return behind > 0
 }
 
-// classifyLandingCI classifies a landing PR's CI state for pollForMergeable
+// classifyLandingCI classifies a landing PR's CI state for settleAndMerge
 // (R6, ADR-1441) — the merge-train *landing* counterpart to
 // settlePRMergeState/checkCIGate's (engine/pr_settle.go, engine/ci.go)
 // per-check classification, and structurally mirroring pollTrainCI's own
@@ -5134,7 +5134,7 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // pollTrainCI polls the integration PR's CI signals, returning the typed result and,
 // for a red result, the diagnostic that observed it (R1/#1420) — nil for green/pending.
 // Blocks until the result is known or the CIBackstopTimeout elapses (ADR-1410, R6 —
-// see pollForMergeable's doc comment for why this synchronous blocking loop keeps an
+// same bound as settleAndMerge (engine/merge_train_landing_settle.go), which explains why this synchronous blocking loop keeps an
 // elapsed-time bound, pointed at the backstop rather than the liveness-dwell
 // CIWaitTimeout, instead of adopting liveness semantics itself). A confirmed CI
 // failure (check-run or required-context) already returns TrainCIRed immediately
