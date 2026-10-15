@@ -234,3 +234,11 @@ func withholdCovered(blocks []diffFileBlock, covered []string) (keep []diffFileB
 	}
 	return keep, withheld
 }
+
+// IsTrialBranch reports whether headRef has the engine's merge-train trial
+// naming. Exported only so engine's contract test can pin it against the
+// engine's own branch construction (pruefer does not import engine).
+func IsTrialBranch(headRef string) bool { return trialBranchRE.MatchString(headRef) }
+
+// TrialMemberIssues is trialMemberIssues for the same contract test.
+func TrialMemberIssues(body string) []int { return trialMemberIssues(body) }
