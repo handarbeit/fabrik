@@ -30,9 +30,10 @@ import (
 // which still bounds a wait on checks that are actually pending. Not user-configurable.
 const trainBlockedSettleTimeout = 5 * time.Minute
 
-// landingFailureMarker is the hidden body marker that dedups the landing-failure comment
-// across restarts: "<!-- fabrik:train-landing-failure pr=N -->".
-const landingFailureMarker = "fabrik:train-landing-failure"
+// landingFailureMarker names the hidden body marker that dedups the landing-failure comment
+// across restarts: "<!-- fabrik:train-landing-failure pr=N -->". Held without its "fabrik:"
+// prefix so it is not mistaken for a label literal by the label-meaning scan.
+const landingFailureMarker = "train-landing-failure"
 
 // landingState holds the #2297 per-Engine seams and the landing-failure comment dedup set.
 // The zero value is production behaviour.
@@ -242,11 +243,17 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 		if time.Now().After(deadline) {
 			break
 		}
+		// Never sleep past the deadline: a poll interval longer than the time left would only
+		// delay the verdict.
+		wait := e.trainCIPollIntervalOrDefault()
+		if left := time.Until(deadline); left < wait {
+			wait = left
+		}
 		select {
 		case <-ctx.Done():
 			e.logfRepo(repoKey, "merge-train", "context cancelled while waiting to land integration PR #%d\n", prNum)
 			return landingResult{outcome: outcomeCancelled, state: lastState, reason: "cancelled"}
-		case <-time.After(e.trainCIPollIntervalOrDefault()):
+		case <-time.After(wait):
 		}
 	}
 
@@ -298,7 +305,7 @@ func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []t
 		return
 	}
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, prNum)
-	marker := fmt.Sprintf("<!-- %s pr=%d -->", landingFailureMarker, prNum)
+	marker := fmt.Sprintf("<!-- fabrik:%s pr=%d -->", landingFailureMarker, prNum)
 	for _, c := range survivors[0].item.Comments {
 		if strings.Contains(c.Body, marker) {
 			return

@@ -108,7 +108,7 @@ func (r *landingRig) failureComments() int {
 	defer r.mu.Unlock()
 	n := 0
 	for _, c := range r.comments {
-		if strings.Contains(c, landingFailureMarker) {
+		if strings.Contains(c, "fabrik:"+landingFailureMarker) {
 			n++
 		}
 	}
@@ -299,7 +299,7 @@ func TestLanding_BlockedBoundExpires_KeepsTrialAndCommentsOnce(t *testing.T) {
 func TestLanding_FailureCommentMarkerSurvivesRestart(t *testing.T) {
 	r := newLandingRig(t, []string{"blocked"}, nil, landingRigOpts{})
 	survivors := landingSurvivors()
-	survivors[0].item.Comments = []gh.Comment{{Body: fmt.Sprintf("<!-- %s pr=%d -->", landingFailureMarker, 100)}}
+	survivors[0].item.Comments = []gh.Comment{{Body: fmt.Sprintf("<!-- fabrik:%s pr=%d -->", landingFailureMarker, 100)}}
 	landingPaths[0].run(context.Background(), r, survivors)
 	if n := r.failureComments(); n != 0 {
 		t.Errorf("failure comments = %d, want 0 when the marker is already on the member", n)
