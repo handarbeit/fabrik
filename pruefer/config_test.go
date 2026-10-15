@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1338,12 +1339,13 @@ func TestLoadConfig_KeepTranscripts(t *testing.T) {
 		t.Errorf("defaults = %q / %q, want %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir, KeepTranscriptsPartial, DefaultTranscriptDir)
 	}
 
-	path := writeYAMLConfig(t, dir, "keep_transcripts: all\ntranscript_dir: /tmp/x\n")
+	tdir := filepath.Join(dir, "transcripts-x")
+	path := writeYAMLConfig(t, dir, "keep_transcripts: all\ntranscript_dir: "+strconv.Quote(tdir)+"\n")
 	cfg, err = LoadConfig([]string{"-config", path})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != "/tmp/x" {
+	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != tdir {
 		t.Errorf("YAML = %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir)
 	}
 
