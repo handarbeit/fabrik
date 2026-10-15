@@ -190,7 +190,7 @@ func TestCheckHTTPSCredentials_IgnoresRepoLocalHelper(t *testing.T) {
 func TestCheckAPIKeyHelper_UnparseableSettingsRecordsAndClears(t *testing.T) {
 	isolateWarnings(t)
 	cfgDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+	setResolvedClaudeProfile(t, cfgDir)
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.fabrikDir = t.TempDir()
 

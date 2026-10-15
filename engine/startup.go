@@ -15,6 +15,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -677,11 +678,11 @@ func managedPolicySettingsPath() string {
 }
 
 // claudeUserConfigDir returns the directory Claude Code resolves user-level
-// settings from: $CLAUDE_CONFIG_DIR if set (the same "Alternate Claude
-// Profile" variable Fabrik already documents and pins subprocess invocations
-// to), else ~/.claude. Empty if the home directory cannot be resolved.
+// settings from: the resolved Claude profile directory (#2293 — the same value
+// every worker is pinned to, see internal/claudeprofile) if there is one, else
+// ~/.claude. Empty if the home directory cannot be resolved.
 func claudeUserConfigDir() string {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+	if dir := claudeprofile.Current().Dir; dir != "" {
 		return dir
 	}
 	home, err := os.UserHomeDir()
