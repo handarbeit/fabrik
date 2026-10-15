@@ -261,7 +261,8 @@ also requires `denialCausal` (`engine/tools_denied_causal.go`). A run is denial-
 `tool_use` in the stream-json (verified against a stream captured from CLI 2.1.299: the id matches, and
 the denied call's own `tool_result` carries `is_error: true`); (3) a joined denial names a write-capable
 tool (`Edit`, `Write`, `NotebookEdit`, `Bash`); (4) no main-thread `Edit`/`Write`/`NotebookEdit` call other
-than the denied ones succeeded (or lacks a result) after the first relevant denial. `Bash` is not a
+than the denied ones succeeded (or lacks a result) after the last relevant denial, so an early incidental denial cannot
+mask a final blocking one (a denied `git commit` after successful edits stays denial-caused). `Bash` is not a
 recovery signal, because #1523's incident had read-only `Bash` succeeding beside denied writes. A
 non-causal run returns no sentinel, so it flows down the ordinary failure path (`StageRetryIncremented`,
 `max_retries`), posts no tools-denied comment and applies no label; one engine-log line records the

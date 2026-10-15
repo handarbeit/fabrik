@@ -97,6 +97,12 @@ func TestDenialCausal(t *testing.T) {
 			// the earlier Edit precedes the denial, so it is not recovery
 		},
 		{
+			name:      "early incidental denial, successful edits, then a final denied commit stays exempt",
+			steps:     []streamStep{denied("b1", "Bash"), ok("e1", "Edit"), ok("e2", "Write"), denied("b2", "Bash")},
+			commits:   0,
+			wantCause: true,
+		},
+		{
 			name:       "single early denial then successful Edit/Write is incidental (FR-001)",
 			steps:      []streamStep{denied("w1", "Write"), ok("e1", "Edit"), ok("e2", "Edit")},
 			commits:    -1,

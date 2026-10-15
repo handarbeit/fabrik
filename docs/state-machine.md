@@ -3883,8 +3883,10 @@ data only (the `permission_denials[].tool_use_id`, the stream-json `tool_use`/`t
    stream (sub-agent traffic, an empty or unmatched id, a bare result line or a truncated stream do not join).
 3. **Relevance** — at least one joined denial names a write-capable tool (`Edit`, `Write`, `NotebookEdit`,
    `Bash`).
-4. **No recovery** — after the first relevant denial the main thread made no `Edit`/`Write`/`NotebookEdit`
-   call (other than the denied ones) whose result is missing or not an error. `Bash` is deliberately not a
+4. **No recovery** — after the last relevant denial the main thread made no `Edit`/`Write`/`NotebookEdit`
+   call (other than the denied ones) whose result is missing or not an error. Anchoring on the last denial
+   keeps an early incidental denial from masking a final blocking one (e.g. a denied `git commit` after
+   successful edits). `Bash` is deliberately not a
    recovery signal: #1523's incident had read-only `Bash` succeeding beside denied writes.
 
 Anything else is an **ordinary failure**: `StageRetryIncremented` is recorded and it counts against

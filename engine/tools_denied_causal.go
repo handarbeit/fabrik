@@ -25,9 +25,11 @@ import (
 //     tool_use_id that matches a main-thread tool_use in the stream.
 //  3. Relevance: at least one joined denial names a write-capable tool
 //     (Edit, Write, NotebookEdit, Bash).
-//  4. No recovery: after the first relevant denial the main thread made no
+//  4. No recovery: after the LAST relevant denial the main thread made no
 //     Edit/Write/NotebookEdit call (other than the denied calls) whose result
-//     is missing or not an error. Bash is deliberately not a recovery signal:
+//     is missing or not an error. Anchoring on the last denial, not the
+//     first, keeps an early incidental denial from masking a final blocking
+//     one (e.g. a denied git commit after successful edits). Bash is deliberately not a recovery signal:
 //     #1523's incident had read-only Bash succeeding beside denied mutating
 //     calls. Committed work is covered by rule 1 instead.
 //
@@ -146,7 +148,7 @@ func denialCausal(resp claudeResponse, rawOutput []byte, commitsPushed int) (cau
 		name[c.ID] = c.Name
 	}
 	denied := map[string]bool{}
-	firstRelevant := -1
+	lastRelevant := -1
 	joined := false
 	for _, d := range resp.PermissionDenials {
 		pos, ok := position[d.ToolUseID]
@@ -155,17 +157,17 @@ func denialCausal(resp claudeResponse, rawOutput []byte, commitsPushed int) (cau
 		}
 		joined = true
 		denied[d.ToolUseID] = true
-		if writeCapableTools[name[d.ToolUseID]] && (firstRelevant < 0 || pos < firstRelevant) {
-			firstRelevant = pos
+		if writeCapableTools[name[d.ToolUseID]] && pos > lastRelevant {
+			lastRelevant = pos
 		}
 	}
 	if !joined {
 		return false, denialReasonNoJoin
 	}
-	if firstRelevant < 0 {
+	if lastRelevant < 0 {
 		return false, denialReasonNoWrite
 	}
-	for _, c := range calls[firstRelevant+1:] {
+	for _, c := range calls[lastRelevant+1:] {
 		if !fileMutatingTools[c.Name] || denied[c.ID] {
 			continue
 		}
