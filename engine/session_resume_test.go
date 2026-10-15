@@ -213,8 +213,44 @@ func TestDecideSessionResume_ResetIsOneShot(t *testing.T) {
 	if got := *lines; len(got) != 1 || got[0] != "session|fresh session (stage state was reset)" {
 		t.Fatalf("log lines = %v", got)
 	}
-	if d3 := e.decideSessionResume(sessionTestItem, sessionTestStage("resume", 0), sessionStageDispatch, false); !d3.Resume {
-		t.Fatalf("reset not consumed by applySessionDecision: %+v", d3)
+	// The discarded pointer is dropped, and the flag is consumed: a later session
+	// created over the same meta must not start fresh again.
+	sessFile := e.SessionFileForTest(sessionTestItem, "Implement")
+	if _, err := os.Stat(sessFile); !os.IsNotExist(err) {
+		t.Fatalf("discarded session pointer still present: %v", err)
+	}
+	if m, found := readSessionMeta(sessFile); !found || m.Reset {
+		t.Fatalf("reset not consumed by applySessionDecision: %+v (found=%v)", m, found)
+	}
+}
+
+// A fresh decision over a saved session drops the old pointer, so a fresh run
+// that dies before the CLI reports a session id cannot leave the next dispatch
+// "continuing" the discarded session (closed=false + pointer to S1).
+func TestApplySessionDecision_FreshOverSavedDropsPointer(t *testing.T) {
+	for _, kind := range []sessionInvocation{sessionStageDispatch, sessionCommentReview} {
+		e, _ := sessionTestEngine(t)
+		e.RecordSessionForTest(sessionTestItem, "Implement", "S1", 450000, true)
+		st := sessionTestStage("fresh", 0)
+		d := e.decideSessionResume(sessionTestItem, st, kind, true)
+		if d.Resume {
+			t.Fatalf("kind %d: expected fresh: %+v", kind, d)
+		}
+		e.applySessionDecision(sessionTestItem, d)
+		// The fresh run died early: the early-return path marks the session open.
+		e.markSessionClosed(sessionTestItem, "Implement", false)
+		next := e.decideSessionResume(sessionTestItem, st, sessionStageDispatch, false)
+		if next.Resume && strings.Contains(next.Reason, "S1") {
+			t.Fatalf("kind %d: next dispatch resumes the discarded session: %+v", kind, next)
+		}
+	}
+
+	// A resume decision leaves the pointer alone.
+	e, _ := sessionTestEngine(t)
+	e.RecordSessionForTest(sessionTestItem, "Implement", "S1", 100, true)
+	e.applySessionDecision(sessionTestItem, e.decideSessionResume(sessionTestItem, sessionTestStage("auto", 0), sessionCommentReview, false))
+	if _, err := os.Stat(e.SessionFileForTest(sessionTestItem, "Implement")); err != nil {
+		t.Fatalf("resume decision removed the pointer: %v", err)
 	}
 }
 

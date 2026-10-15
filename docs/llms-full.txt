@@ -11699,6 +11699,8 @@ The meta is removed wherever the pointer is (resume-failure abandonment, dead-se
 | `fresh session (stage state was reset)` | a stage reset flag was consumed |
 | `fresh session (no prior run recorded)` | a pre-ADR-2300 session, first dispatch of this uptime |
 
+When a decision is fresh over a saved session, the engine removes the old `.session` pointer before the invocation (the meta stays; its size is bound to the old session id). A fresh run that dies before the CLI reports a session id therefore cannot leave the next dispatch "continuing" the session the operator asked to discard.
+
 A fresh comment-review session overwrites the stage's `.session` pointer (and the meta's size is rewritten for it); `closed` is preserved, so a later stage dispatch still treats the stage correctly, but a stage continuation after such a pass resumes the comment session.
 
 ### Model Override

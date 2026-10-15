@@ -197,6 +197,17 @@ func (e *Engine) applySessionDecision(item gh.ProjectItem, d sessionDecision) {
 	if d.consumeReset {
 		updateSessionMeta(item.Number, d.sessFile, func(m *sessionMeta) { m.Reset = false })
 	}
+	if d.freshOverSaved() {
+		// The saved session is discarded on purpose. Drop its pointer now: a fresh
+		// run that dies before the CLI reports a session id (timeout kill, cancel,
+		// unparsable output) never overwrites it, and the next dispatch would then
+		// read "last run not closed" as a continuation and resume the very session
+		// the operator asked to leave behind. The meta stays; it is bound to the
+		// old session id, so its size never applies to the next session.
+		if err := os.Remove(d.sessFile); err != nil && !os.IsNotExist(err) {
+			e.logf(item.Number, "session", "warning: removing discarded session pointer %s: %v\n", d.sessFile, err)
+		}
+	}
 }
 
 // freshOverSaved reports whether a stage dispatch decided to start a fresh
