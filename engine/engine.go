@@ -1063,6 +1063,10 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 	claudeLogf = e.logf
 	claudeTUI = ch != nil
 	if ch != nil {
+		f := func(format string, args ...any) { e.logf(0, "github-app", format+"\n", args...) }
+		appAuthLogf.Store(&f)
+	}
+	if ch != nil {
 		claudeTurnProgress = func(issueNumber, turnsUsed, maxTurns int) {
 			e.emit(tui.TurnProgressEvent{
 				IssueNumber: issueNumber,
