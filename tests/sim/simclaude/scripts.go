@@ -146,6 +146,17 @@ func CommentReviewNoMarker() CommentScript {
 	}
 }
 
+// CommentReviewBlocked returns a CommentScript for a comment-review run that
+// needs a human answer (#2280): no commit, completed=false, and
+// FABRIK_BLOCKED_ON_INPUT with a FABRIK_SUMMARY block carrying question. The
+// engine pauses the item with the label pair and posts the question.
+func CommentReviewBlocked(question string) CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		output := fmt.Sprintf("I need a decision before changing %s.\n\nFABRIK_SUMMARY_BEGIN\n%s\nFABRIK_SUMMARY_END\n\nFABRIK_BLOCKED_ON_INPUT\n", stage.Name, question)
+		return output, false, engine.TokenUsage{TurnsUsed: 2, MaxTurns: 50, CostUSD: 0.03}, nil
+	}
+}
+
 // SkillLoadFailed returns a Script mirroring a worker whose own configured
 // skill failed to load at runtime (#2138): the engine's runClaude replaces the
 // outcome with a *claudeerr.SkillLoadError whatever marker the worker printed,

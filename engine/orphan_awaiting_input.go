@@ -18,7 +18,9 @@ func (e *Engine) SetOrphanAwaitingInputClearDisabledForTest(disabled bool) {
 // and isAwaitingInput (both labels) plus the paused-only guards then treat the
 // item as running normally while the stale label lingers, surfacing as
 // needs-human. handleStageComplete clears it only when a run emits
-// FABRIK_STAGE_COMPLETE, which the comment skills never do.
+// FABRIK_STAGE_COMPLETE, which the comment skills never do. A comment-path run
+// that emits FABRIK_BLOCKED_ON_INPUT pauses the item properly (#2280); that pair
+// carries fabrik:paused and is left alone here.
 //
 // The decision reads live labels (item.Labels is a snapshot that predates the
 // resume gate's own removals) and strips only when fabrik:paused is absent: a

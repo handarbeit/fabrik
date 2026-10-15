@@ -169,7 +169,7 @@ CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen a
 
 ### Markers in Claude Output
 - `FABRIK_STAGE_COMPLETE` — Claude signals stage completion (must be on its own line)
-- `FABRIK_BLOCKED_ON_INPUT` — Claude signals it needs user input before the stage can continue; mutually exclusive with `FABRIK_STAGE_COMPLETE`
+- `FABRIK_BLOCKED_ON_INPUT` — Claude signals it needs user input before the stage can continue; mutually exclusive with `FABRIK_STAGE_COMPLETE`; honoured on the stage path and, since #2280, by comment-review and reinvoke runs (same pause, comment marked processed, breakers bypassed)
 - `FABRIK_ISSUE_UPDATE_BEGIN` / `FABRIK_ISSUE_UPDATE_END` — Updated issue body from comment processing
 - `FABRIK_SUMMARY_BEGIN` / `FABRIK_SUMMARY_END` — Brief summary for issue when detailed output goes to PR
 
