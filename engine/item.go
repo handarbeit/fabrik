@@ -1371,6 +1371,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	}
 
 	if err != nil {
+		// Several outcomes below return before the end-of-run bookkeeping that
+		// records the durable continuation signal (ADR 2300). A run that really
+		// executed Claude and ended without the stage-complete marker leaves the
+		// session open, so record that here too: otherwise a stage re-entered
+		// under resume_session: fresh/auto whose new session dies on a usage
+		// limit, an api_error, a skill load failure or a cancellation would still
+		// read as closed and discard the new session again. A pre-spawn refusal
+		// (apiKeyHelper, unresolved skill) touched no session and is left alone.
+		var preSpawnAPIKey *apiKeyHelperDetectedError
+		var preSpawnSkill *skillUnresolvedError
+		if claudeRan && !errors.As(err, &preSpawnAPIKey) && !errors.As(err, &preSpawnSkill) {
+			e.markSessionClosed(item, stage.Name, false)
+		}
 		if p.ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
 			// R8 (#1393): commit and push any uncommitted work before releasing

@@ -200,3 +200,35 @@ func TestProcessItem_ContinuationExemptionRemovedBreaksContinuation(t *testing.T
 		t.Fatalf("resume flags = %v, want the continuation fresh once the exemption is gone", got)
 	}
 }
+
+// A re-entry whose run ends in an early-return outcome (api_error exit here)
+// still leaves the session open: the next run is a continuation and resumes
+// the new session whatever resume_session says, rather than treating the stale
+// closed flag as a fresh re-entry and discarding it again (ADR 2300).
+func TestProcessItem_EarlyReturnOutcomeLeavesSessionOpen(t *testing.T) {
+	h := newStageResumeHarness(t, "fresh", 900000)
+	h.script = func(call int) (bool, error) {
+		switch call {
+		case 1:
+			return true, nil // stage completes: session closed
+		case 2:
+			return false, &claudeAPIErrorExit{TerminalReason: "api_error", NumTurns: 1} // re-entry dies
+		}
+		return true, nil
+	}
+
+	h.run(t)
+	h.restart()
+	h.run(t) // re-entry under fresh, ends in an api_error exit
+	if m := h.meta(t); m.Closed {
+		t.Fatalf("api_error exit must leave the session open: %+v", m)
+	}
+	h.restart()
+	h.run(t) // continuation: resumes
+
+	got := h.calls()
+	want := []bool{false, false, true}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("resume flags = %v, want %v", got, want)
+	}
+}
