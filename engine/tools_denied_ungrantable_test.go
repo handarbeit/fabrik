@@ -12,7 +12,25 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-const ungrantableTestWorkDir = "/tmp/fabrik-capture/wt"
+// ungrantableTestWorkDir is the worktree the captured stream was recorded in,
+// read from the stream's own init event so the fixture and the tests cannot
+// disagree about it.
+var ungrantableTestWorkDir = capturedWorkDir()
+
+func capturedWorkDir() string {
+	raw, err := os.ReadFile("testdata/protected_path_edit_denied_stream.jsonl")
+	if err != nil {
+		panic(err)
+	}
+	line, _, _ := strings.Cut(string(raw), "\n")
+	var ev struct {
+		Cwd string `json:"cwd"`
+	}
+	if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Cwd == "" {
+		panic("protected_path_edit_denied_stream.jsonl: first line is not an init event with a cwd")
+	}
+	return ev.Cwd
+}
 
 func TestDecodeToolPath(t *testing.T) {
 	cases := []struct {
@@ -71,7 +89,7 @@ func TestToolsDeniedLogSummary_ShowsFirstPath(t *testing.T) {
 }
 
 func TestUngrantableDenial_Predicate(t *testing.T) {
-	const w = ungrantableTestWorkDir
+	w := ungrantableTestWorkDir
 	edit := func(p string) toolDenial { return toolDenial{ToolName: "Edit", Path: p} }
 	cases := []struct {
 		name     string
