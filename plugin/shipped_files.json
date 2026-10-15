@@ -5,6 +5,7 @@
     "ccf9b167ecb7f9fd114d67336a1e3c0e48aea1929c4de8e9f7f77c73edaa3aaf"
   ],
   "LABELS.md": [
+    "1cd43b9d994695b97a934402e77dea4af8da259dbce626619909e8ceafe51d85",
     "2593938e5086ccdcdb3bdd305bf22c4f9cf4058237e862d420914cc40dd7b85b",
     "4168bbdb03580f008f7b8bef5f0ea4b8f40b211226685957d6c4a1753a263242",
     "5722d5751191577cc3ca5cf3975f29aa17024c1fa81cde569c937ff1dd610d53",
@@ -170,6 +171,7 @@
     "38b6b7d6689f26c24a561c619ef67f09cd9d9681c8ac4ae2f4d869ad6adbda73"
   ],
   "skills/plan/SKILL.md": [
+    "48dedb59b9b5ff01a185e7a459f153cf784bf00d319a533bcca7b45101491fa7",
     "f2d35aec6533f18128025ee9d159a7bf000954d761b78ddd667ca8c73c555dfb"
   ],
   "skills/research-comment/SKILL.md": [
@@ -182,7 +184,8 @@
     "0deaefa2a9fcbdbd16daeae89a8832f543c3358939f57c8a2ec5d459f7699837"
   ],
   "skills/review/SKILL.md": [
-    "303026da38092ef5f6ca0cba7953d6ad9df00029241d8785396efe4ebf4b786f"
+    "303026da38092ef5f6ca0cba7953d6ad9df00029241d8785396efe4ebf4b786f",
+    "753d472c8d2ebec03bdd40dcb6fc068e46087b81d35bd22f719065ebfa9bf744"
   ],
   "skills/specify-comment/SKILL.md": [
     "4e8f158f675d008eeda5a0927602637532e96c93bd004abe0265119ab0a91e62"
@@ -194,6 +197,7 @@
     "e8bb4c188cf497befd180c70ec1c852e9b1d1934dff10ed533480b78f9a018ad"
   ],
   "skills/validate/SKILL.md": [
+    "7d1cf98fe964064e9ab03b1008b1714791e0c2ec6d65461002036d1ac14c5a8f",
     "d334e0b3d334e8b56171f1f7b3ed269b900ba6151f21c483dd53ae8283219e8c"
   ]
 }
