@@ -1065,6 +1065,12 @@ user: your-github-username
 # minimum supported version (3.19).
 # ghes_host: ""
 
+# Claude Code profile directory every stage worker runs under (which Claude
+# account the instance bills to). Ranks above a bare CLAUDE_CONFIG_DIR from the
+# environment and below the flag, FABRIK_CLAUDE_CONFIG_DIR and .env. See
+# "Alternate Claude Profile" below.
+# claude_config_dir: /home/user/.claude-alt-profile
+
 # GitHub App authentication — a second, co-equal auth path alongside a PAT
 # (FABRIK_TOKEN/GITHUB_TOKEN), not a replacement. All three must be set
 # together or none at all (absent, the default, means PAT mode — byte-
@@ -1350,6 +1356,7 @@ FABRIK_USER=my-personal-username
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
 | `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
+| `--claude-config-dir` | Claude Code profile directory every stage worker runs under; highest precedence of the six sources. Also `FABRIK_CLAUDE_CONFIG_DIR`, `claude_config_dir`. See [Alternate Claude Profile](#alternate-claude-profile-claude_config_dir). | `""` (Claude Code's own default) |
 | `--github-app-id` | GitHub App ID for App-installation auth — co-equal with `--token`, not a replacement. Must be set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all. Also `FABRIK_GITHUB_APP_ID`. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
@@ -1435,6 +1442,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_WORKER_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact names of Fabrik-scrubbed variables (see "Fabrik Daemon Secrets Workers Never See" below) to let through to every Claude worker unchanged. Names not on the scrub list, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, `GIT_CONFIG_*` and this variable itself are ignored with a `[startup]` warning. Can admit credentials, so a `[startup]` notice names each admitted variable. Never forwarded to the worker itself. | -- |
 | `FABRIK_INSTANCE_ID` | *(no config.yaml key)* | GitHub App auth only. Stable per-instance string that replaces the hostname in the hash behind the `fabrik:locked:<slug>-<hash>` lock label, so it survives hostname changes (container/pod restarts). Ignored in PAT mode. Absent (default) means the hostname is used. See [GitHub App Authentication](#github-app-authentication). | `""` (hostname) |
 | `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
+| `FABRIK_CLAUDE_CONFIG_DIR` | `claude_config_dir` | Claude Code profile directory every stage worker runs under. As an environment variable it outranks `.env` and `config.yaml`; a bare `CLAUDE_CONFIG_DIR` ranks *below* `config.yaml`. Never forwarded to workers (they get `CLAUDE_CONFIG_DIR`). See [Alternate Claude Profile](#alternate-claude-profile-claude_config_dir). | `""` (Claude Code's own default) |
 | `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
 | `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
@@ -4334,7 +4342,7 @@ supplying an API key. Fabrik refuses to start if `apiKeyHelper` is set anywhere
 in the resolved Claude Code settings chain: the managed-policy layer
 (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
 `/etc/claude-code/managed-settings.json` on Linux), the user layer
-(`$CLAUDE_CONFIG_DIR` or `~/.claude`, `settings.json`/`settings.local.json`), and
+(the resolved Claude profile directory — see [Alternate Claude Profile](#alternate-claude-profile-claude_config_dir) — or `~/.claude`, `settings.json`/`settings.local.json`), and
 the project layer (`.claude/settings.json`/`.claude/settings.local.json` in the
 directory Fabrik itself runs from). The startup error names the specific file
 and layer; remove `apiKeyHelper` from it and restart. A missing or unreadable
@@ -4415,41 +4423,82 @@ same `go test -race ./...`.
 
 ### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
 
-`CLAUDE_CONFIG_DIR` is not special-cased by Fabrik — it is simply one instance of
-the general passthrough rule above (it is not `ANTHROPIC_`/`CLAUDE_CODE_*`-namespaced,
-so the auth scrub above never touches it), which is what makes this pattern work
-at all. Setting it in the engine's environment points every Claude Code
-invocation at an alternate credentials/config directory — a different account,
-subscription, and billing quota than the engine's own default profile. Fabrik
-does not set or otherwise manage this variable; it only reads it once, at
-startup, to emit the notice below.
+`CLAUDE_CONFIG_DIR` decides which Claude account every stage worker bills to.
+Pointing an instance at an alternate credentials/config directory — a different
+account, subscription and usage quota than the daemon's own default profile — is
+how you run several instances across several accounts to spread usage-limit
+exposure. Because the variable also belongs to Claude Code and is exported by
+unrelated tools, Fabrik resolves it through one layered resolver instead of
+trusting whatever the daemon's process environment happens to hold. (An
+inherited value used to silently beat the project's `.env`, so a project could
+bill to the wrong subscription for days with no signal.)
 
-This is the pattern to use when you want one Fabrik instance's stage invocations
-to bill against a different Claude account than the one the engine itself runs
-as — for example, running several instances across several accounts to spread
-usage-limit exposure.
+**Precedence, highest first:**
 
-Set it in `.env` (already `.gitignore`-enforced, per the note above):
+1. `--claude-config-dir`
+2. `FABRIK_CLAUDE_CONFIG_DIR` in the shell environment
+3. `.env` — `FABRIK_CLAUDE_CONFIG_DIR` beats `CLAUDE_CONFIG_DIR` there
+4. `claude_config_dir:` in `.fabrik/config.yaml`
+5. a bare `CLAUDE_CONFIG_DIR` inherited from the environment
+6. unset — Claude Code's own default
+
+This is the same order as every other Fabrik setting. A bare `CLAUDE_CONFIG_DIR`
+sits below `config.yaml` because its presence says nothing about intent toward
+Fabrik; `FABRIK_CLAUDE_CONFIG_DIR` keeps the environment layer, so an operator can
+still override a committed `config.yaml` from the shell. An empty value at any layer
+means "not set". A leading `~` is expanded and paths are cleaned before sources are
+compared.
+
+Record a project's profile in `.fabrik/config.yaml` (commit it) or `.env`:
+
+```yaml
+claude_config_dir: /home/user/.claude-alt-profile
+```
 
 ```
 CLAUDE_CONFIG_DIR=/home/user/.claude-alt-profile
 ```
 
-It survives `--auto-upgrade` re-execs: a re-exec restarts the same binary from
-scratch, which re-runs `.env` loading at startup, so the value is picked up again
-exactly as on a fresh start.
+**Behaviour change:** a one-shot `CLAUDE_CONFIG_DIR=x fabrik` no longer beats `.env`
+or `config.yaml`. Use `--claude-config-dir x` or `FABRIK_CLAUDE_CONFIG_DIR=x` for a
+per-invocation override.
 
-To confirm it took effect, check the startup output (stderr and `.fabrik/fabrik.log`)
-for a line naming the resolved directory:
+**Workers always get the resolved value.** Every `claude` process the engine starts
+runs with `CLAUDE_CONFIG_DIR=<resolved>`, even if the daemon's own environment holds
+a different (overridden) value; when nothing resolved the variable is removed from
+the worker. `FABRIK_CLAUDE_CONFIG_DIR` never reaches a worker. The interactive
+`claude` launches (TUI resume, the warnings-panel fix session, `fabrik watch`) and
+the `apiKeyHelper` check use the same resolved directory, as does the account shown
+in the TUI footer. (`fabrik resume`, which does not read `.env`, still follows the
+shell environment only.)
+
+**Startup line.** To see what was resolved, check the startup output (stderr and
+`.fabrik/fabrik.log`):
 
 ```
-[startup] notice: CLAUDE_CONFIG_DIR is set to "/home/user/.claude-alt-profile" — Claude invocations will use this profile directory instead of the default account. See docs/USER_GUIDE.md.
+[startup] notice: Claude profile "/home/user/.claude-alt-profile" (a@b.com) from .fabrik/config.yaml
 ```
 
-No line means `CLAUDE_CONFIG_DIR` was unset — every invocation runs against the
-default profile. Fabrik does not validate the directory's contents or credential
-state; a misconfigured or unauthenticated profile fails wherever Claude Code
-itself would fail, not at Fabrik startup.
+The account email is read from the profile directory (a directory name does not
+determine its account) and is omitted when unreadable. No line means nothing
+resolved, so every invocation runs against Claude Code's default profile.
+
+**Disagreement warning.** When two or more sources name different directories,
+Fabrik logs `[startup] warning: Claude profile sources disagree …` and records a
+`claude_config_dir` entry in the Warnings panel. It lists every source with its
+directory and account, and says which one won. It clears itself once the sources
+agree. Two sources naming the same directory are not a disagreement.
+
+**Restarts.** The `.env` values for `CLAUDE_CONFIG_DIR` and `FABRIK_CLAUDE_CONFIG_DIR`
+are read as data and never exported into the daemon's process environment, so a
+SIGHUP restart or `--auto-upgrade` re-exec — which pass the environment on — resolve
+the same directory from the same source as the first start, and a `.env` value is
+never mistaken for an inherited one. The configuration is read once at start;
+changing it requires a restart.
+
+Fabrik does not validate the directory's contents or credential state; a
+misconfigured or unauthenticated profile fails wherever Claude Code itself would
+fail, not at Fabrik startup.
 
 ### Worker Session Naming (`--name`)
 

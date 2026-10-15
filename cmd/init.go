@@ -29,6 +29,9 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # Keep secrets (FABRIK_TOKEN, GITHUB_TOKEN) in .env (gitignored).
 #
 # Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
+# A bare CLAUDE_CONFIG_DIR inherited from the environment ranks below this file
+# (claude_config_dir): it belongs to Claude Code and unrelated tools set it. Use
+# FABRIK_CLAUDE_CONFIG_DIR to override from the environment.
 
 # Required: GitHub repository owner (org or username)
 # owner: your-org
@@ -48,6 +51,10 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # owner_type: organization         # Owner type parsed from project URL: "user" or "organization".
 # ghes_host: ""                 # GitHub Enterprise Server hostname (no scheme, no trailing slash).
 #                               # Absent means github.com. Also: --ghes-host flag or FABRIK_GHES_HOST env var.
+# claude_config_dir: ""         # Claude Code profile directory every stage worker runs under (which account it bills to).
+#                               # Also: --claude-config-dir flag or FABRIK_CLAUDE_CONFIG_DIR env var. A bare CLAUDE_CONFIG_DIR
+#                               # inherited from the environment ranks BELOW this key (it belongs to Claude Code and is set by
+#                               # unrelated tools); one in .env ranks above it.
 # stages: ./.fabrik/stages      # Path to stage YAML configs directory.
 # poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
 # retry_backoff: 60             # Seconds before retrying a stage that did not complete. Independent of poll (#1831).
