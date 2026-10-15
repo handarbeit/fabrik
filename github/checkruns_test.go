@@ -228,3 +228,23 @@ func TestClassifyCheckRuns_NewerCancelledSupersedesOlderSuccess(t *testing.T) {
 		t.Errorf("newer cancelled over older success: status = %v, want NonPassing", status)
 	}
 }
+
+func TestSummarizeCheckRuns(t *testing.T) {
+	runs := []CheckRun{
+		{ID: 1, Name: "a", Status: "completed", Conclusion: "failure"}, // superseded rerun
+		{ID: 2, Name: "a", Status: "completed", Conclusion: "success"},
+		{Name: "b", Status: "completed", Conclusion: "skipped"},
+		{Name: "c", Status: "completed", Conclusion: "neutral"},
+		{Name: "d", Status: "completed", Conclusion: "failure"},
+		{Name: "e", Status: "in_progress"},
+		{Name: "f", Status: "completed", Conclusion: "cancelled"},
+	}
+	got := SummarizeCheckRuns(runs)
+	want := CheckRunCounts{Total: 6, Passed: 3, Failed: 1, Pending: 1, NonPassing: 1}
+	if got != want {
+		t.Errorf("SummarizeCheckRuns = %+v, want %+v", got, want)
+	}
+	if z := SummarizeCheckRuns(nil); z != (CheckRunCounts{}) {
+		t.Errorf("empty = %+v", z)
+	}
+}
