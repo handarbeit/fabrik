@@ -126,9 +126,7 @@ func (r RepoPaneComponent) View(width int) string {
 		if st.LastErr != "" {
 			line += "  " + failStyle.Render("error: "+st.LastErr)
 		}
-		if runes := []rune(line); len(runes) > maxWidth {
-			line = string(runes[:maxWidth-1]) + "…"
-		}
+		line = truncateLine(line, maxWidth)
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
