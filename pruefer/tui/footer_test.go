@@ -314,3 +314,17 @@ func TestModel_SkipEventRoutesToFooter(t *testing.T) {
 		t.Errorf("footer.SkipCount(catch_up) = %d, want 4", got)
 	}
 }
+
+// #2294: a SIGHUP reload that changes the Claude profile updates the footer's
+// account rather than leaving the startup one on screen.
+func TestFooter_ClaudeAccountEventReplacesAccount(t *testing.T) {
+	m := New([]string{"handarbeit/fabrik"}, time.Now()).WithInfo(Info{ClaudeAccount: "old@example.com"})
+	if !strings.Contains(m.footer.View(120), "old@example.com") {
+		t.Fatalf("footer does not show the startup account:\n%s", m.footer.View(120))
+	}
+	next, _ := m.Update(ClaudeAccountEvent{Account: "new@example.com"})
+	view := next.(Model).footer.View(120)
+	if !strings.Contains(view, "new@example.com") || strings.Contains(view, "old@example.com") {
+		t.Errorf("footer after ClaudeAccountEvent:\n%s", view)
+	}
+}

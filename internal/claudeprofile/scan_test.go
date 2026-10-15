@@ -50,9 +50,7 @@ func goSources(t *testing.T, root string) []string {
 
 // getenvExceptions lists audited raw reads of the bare variable outside this
 // package, each with its reason (SC-008).
-var getenvExceptions = map[string]string{
-	"pruefer/tui_run.go": "Pruefer adopts the resolver in #2294; until then it reads the inherited value for its footer",
-}
+var getenvExceptions = map[string]string{}
 
 var rawRead = regexp.MustCompile(`(?:Getenv|LookupEnv)\(\s*"CLAUDE_CONFIG_DIR"\s*\)`)
 

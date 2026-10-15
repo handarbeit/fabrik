@@ -13,6 +13,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/internal/githubauth"
+	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,
@@ -25,17 +26,9 @@ import (
 // Pruefer's existing logf-based structured logging with identical review
 // behavior.
 func Execute() error {
-	// Snapshot the ambient CLAUDE_CONFIG_DIR BEFORE .env is read, and load .env
-	// without exporting either Claude profile name (#2294): .env is read as data
-	// and resolved by claudeprofile, so a value in it can outrank an inherited
-	// one. Anything exported here would come back from a self-upgrade re-exec
-	// (which passes os.Environ()) looking inherited, losing its provenance.
-	ambientConfigDir := os.Getenv(claudeprofile.BareEnv)
-	dotenv, err := config.LoadDotenvWithholding(PrueferClaudeConfigDirEnv, claudeprofile.BareEnv)
-	if err != nil {
-		return fmt.Errorf("loading .env: %w", err)
+	if err := loadDotenvAndCaptureProfile(); err != nil {
+		return err
 	}
-	captureProfileSnapshot(ambientConfigDir, dotenv)
 
 	// Captured once so a later SIGHUP-triggered reload (handleReload) can
 	// re-run LoadConfig against the same argument list, rather than
@@ -238,6 +231,22 @@ func Execute() error {
 	return daemon.Run(ctx)
 }
 
+// loadDotenvAndCaptureProfile snapshots the ambient CLAUDE_CONFIG_DIR BEFORE
+// .env is read, then loads .env without exporting either Claude profile name
+// (#2294). .env is read as data and resolved by claudeprofile, so a value in it
+// can outrank an inherited one. Anything exported here would come back from a
+// self-upgrade re-exec (which passes os.Environ()) looking inherited, losing its
+// provenance; for the same reason the resolved winner is never os.Setenv'd.
+func loadDotenvAndCaptureProfile() error {
+	ambientConfigDir := os.Getenv(claudeprofile.BareEnv)
+	dotenv, err := config.LoadDotenvWithholding(PrueferClaudeConfigDirEnv, claudeprofile.BareEnv)
+	if err != nil {
+		return fmt.Errorf("loading .env: %w", err)
+	}
+	captureProfileSnapshot(ambientConfigDir, dotenv)
+	return nil
+}
+
 // handleReload processes one SIGHUP (ADR-1640): re-reads config via
 // LoadConfig(args), merges it against daemon's currently running config
 // (applyConfigReload), and applies the merged config to daemon.
@@ -286,7 +295,11 @@ func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	merged, diff := applyConfigReload(old, cand)
 	daemon.ApplyReload(merged, nil, nil)
 	logReloadSummary(diff)
-	reportClaudeProfile("reload", profile, fieldChanged(diff.FieldsChanged, "ClaudeConfigDir"))
+	profileChanged := fieldChanged(diff.FieldsChanged, "ClaudeConfigDir")
+	reportClaudeProfile("reload", profile, profileChanged)
+	if profileChanged {
+		daemon.emit(ptui.ClaudeAccountEvent{Account: profile.WinnerEmail()})
+	}
 
 	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 ||
 		fieldChanged(diff.FieldsChanged, "MaxDerivedRepos") || fieldChanged(diff.FieldsChanged, "ServedAccounts") {

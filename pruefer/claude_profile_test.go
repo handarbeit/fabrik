@@ -220,3 +220,45 @@ func TestProfileSnapshot_UncapturedReadsAmbientLive(t *testing.T) {
 		t.Errorf("ClaudeConfigDir = %q, want %q", cfg.ClaudeConfigDir, d)
 	}
 }
+
+// Provenance (#2294): after startup loading, neither .env name is in the
+// process environment, so a self-upgrade re-exec (which passes os.Environ())
+// cannot turn a .env value into an apparent inherited one. Every other .env
+// name is still exported, as LoadDotenv always did.
+func TestLoadDotenvAndCaptureProfile_ExportsNeitherProfileName(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ambient := t.TempDir()
+	t.Setenv(claudeprofile.BareEnv, ambient)
+	t.Setenv(PrueferClaudeConfigDirEnv, "")
+	os.Unsetenv(PrueferClaudeConfigDirEnv)
+	os.Unsetenv("PRUEFER_PROFILE_TEST_OTHER")
+	t.Cleanup(func() { os.Unsetenv("PRUEFER_PROFILE_TEST_OTHER") })
+	t.Cleanup(resetProfileSnapshot)
+	body := PrueferClaudeConfigDirEnv + "=/from/dotenv\nCLAUDE_CONFIG_DIR=/bare/dotenv\nPRUEFER_PROFILE_TEST_OTHER=1\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loadDotenvAndCaptureProfile(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv(claudeprofile.BareEnv); got != ambient {
+		t.Errorf("CLAUDE_CONFIG_DIR = %q, want the untouched ambient %q", got, ambient)
+	}
+	if v, set := os.LookupEnv(PrueferClaudeConfigDirEnv); set {
+		t.Errorf("%s was exported from .env: %q", PrueferClaudeConfigDirEnv, v)
+	}
+	if os.Getenv("PRUEFER_PROFILE_TEST_OTHER") != "1" {
+		t.Error("an unrelated .env name was not exported")
+	}
+	gotAmbient, dotenv := profileSnapshotInputs()
+	if gotAmbient != ambient || dotenv[PrueferClaudeConfigDirEnv] != "/from/dotenv" {
+		t.Errorf("snapshot = (%q, %v)", gotAmbient, dotenv)
+	}
+	// The .env PRUEFER_ name beats the bare one, and both beat the ambient value.
+	cfg, _ := loadProfileConfig(t, "model: sonnet\n")
+	if cfg.ClaudeConfigDir != "/from/dotenv" {
+		t.Errorf("ClaudeConfigDir = %q, want /from/dotenv", cfg.ClaudeConfigDir)
+	}
+}
