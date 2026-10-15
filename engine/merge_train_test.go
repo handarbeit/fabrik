@@ -25,7 +25,7 @@ import (
 
 // trainTestEngine builds an Engine wired with the given mock client and invoker.
 // It configures a Queued holding stage and a Done stage for merge-train use, and sets
-// a short CIBackstopTimeout so CI-polling tests terminate quickly — pollForMergeable/
+// a short CIBackstopTimeout so CI-polling tests terminate quickly — settleAndMerge/
 // pollTrainCI's blocking-loop deadline is CIBackstopTimeout (ADR-1410, R6), not
 // CIWaitTimeout (now a liveness-stall dwell consumed only by the async CI gate).
 // statusField is pre-set so advanceToNextStage can advance members from Queued to
@@ -314,7 +314,7 @@ func TestPollTrainCI_Timeout_ReturnsPending(t *testing.T) {
 // TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades is the R6
 // acceptance test (ADR-1410): a batch member whose integration PR never
 // reaches a mergeable_state GitHub will accept is not wedged indefinitely —
-// pollForMergeable's blocking loop is bounded by CIBackstopTimeout, posts a
+// settleAndMerge's blocking loop is bounded by CIBackstopTimeout, posts a
 // "landing timeout" comment on the first survivor, and returns false so the
 // batch simply retries on the next merge-train cycle (no fabrik:paused, no
 // escalation — it degrades, matching pollTrainCI's TrainCIPending shape
@@ -351,19 +351,18 @@ func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false when CIBackstopTimeout elapses with mergeability never resolved")
+		t.Error("expected settleAndMerge to return false when CIBackstopTimeout elapses with mergeability never resolved")
 	}
-	if !commentPosted {
-		t.Error("expected a landing-timeout comment to be posted on the first survivor")
+	if commentPosted {
+		t.Error("the wait itself must post no comment (#2297 R6) — the landing path posts the one deduped failure comment")
 	}
 }
 
-// ── R6 (ADR-1441): pollForMergeable check-run classification ────────────────
+// ── R6 (ADR-1441): settleAndMerge check-run classification ────────────────
 //
-// pollForMergeable previously read only mergeable_state and treated
+// settleAndMerge previously read only mergeable_state and treated
 // gh.MergeableStateAccepted (clean/unstable) as an unconditional green light
 // — the same defect ADR-1153 fixed for pollTrainCI, left unfixed here and
 // explicitly flagged as a "candidate fast-follow" that never got its own
@@ -375,7 +374,7 @@ func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) 
 // TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse is the direct
 // AC7 regression test: an integration PR reporting mergeable_state=unstable
 // with a concluded failure check run on its head SHA must not be judged
-// landable. Must fail against pre-ADR-1441 pollForMergeable, which never
+// landable. Must fail against pre-ADR-1441 settleAndMerge, which never
 // called FetchCheckRuns at all.
 func TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{
@@ -393,10 +392,9 @@ func TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false for mergeable_state=unstable with a failed check run")
+		t.Error("expected settleAndMerge to return false for mergeable_state=unstable with a failed check run")
 	}
 }
 
@@ -442,13 +440,12 @@ func TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades(t
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false — a pending non-required check must not be judged landable")
+		t.Error("expected settleAndMerge to return false — a pending non-required check must not be judged landable")
 	}
-	if !commentPosted {
-		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses with the check still pending")
+	if commentPosted {
+		t.Error("the wait itself posts no comment (#2297 R6)")
 	}
 }
 
@@ -477,10 +474,9 @@ func TestPollForMergeable_Dirty_ReturnsFalseImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false immediately for mergeable_state=dirty")
+		t.Error("expected settleAndMerge to return false immediately for mergeable_state=dirty")
 	}
 	if checkRunsFetched {
 		t.Error("FetchCheckRuns must NOT be called when mergeable_state=dirty — the conflict is dispositive on its own")
@@ -508,10 +504,9 @@ func TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if !result {
-		t.Error("expected pollForMergeable to return true for mergeable_state=clean with zero check runs")
+		t.Error("expected settleAndMerge to return true for mergeable_state=clean with zero check runs")
 	}
 }
 
@@ -539,10 +534,9 @@ func TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false for a required context confirmed-failed via classic commit status with zero check runs")
+		t.Error("expected settleAndMerge to return false for a required context confirmed-failed via classic commit status with zero check runs")
 	}
 }
 
@@ -590,13 +584,12 @@ func TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	result := eng.pollForMergeable(ctx, "owner", "repo", 42, survivors)
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
 	if result {
-		t.Error("expected pollForMergeable to return false when FetchCheckRuns errors — a fetch failure must not be treated as confirmed zero check runs")
+		t.Error("expected settleAndMerge to return false when FetchCheckRuns errors — a fetch failure must not be treated as confirmed zero check runs")
 	}
-	if !commentPosted {
-		t.Error("expected a landing-timeout comment once CIBackstopTimeout elapses while FetchCheckRuns keeps erroring")
+	if commentPosted {
+		t.Error("the wait itself posts no comment (#2297 R6)")
 	}
 }
 
@@ -4179,13 +4172,13 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 }
 
 // TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation is the issue #1094
-// regression test for the landSingleton call site: pollForMergeable already judged the
+// regression test for the landSingleton call site: settleAndMerge already judged the
 // singleton landing PR acceptable (mergeable_state=clean), but MergePR's own new
 // precondition check observes a flipped state and refuses with gh.ErrNotMergeableCI.
 // landSingleton must handle this exactly like any other MergePR failure — log and
 // return, leaving the member in Queued with no Done advancement, no PR/issue closure,
 // and no fabrik:paused or fabrik:rebase-needed escalation label — confirming the new
-// precondition does not strand a PR pollForMergeable already judged acceptable.
+// precondition does not strand a PR settleAndMerge already judged acceptable.
 func TestLandSingleton_MergeAPIFailure_CINotGreen_NoEscalation(t *testing.T) {
 	m := makeQueuedMember(9, 90, "Issue Nine")
 	client := &mockGitHubClient{
@@ -4421,7 +4414,7 @@ func TestSingletonFastPathEligible_CheckRunInProgress_FallsThrough(t *testing.T)
 // TestSingletonFastPathEligible_ZeroCheckRuns_FallsThrough guards against a
 // false positive found during review: classifyLandingCI's zero-check-runs
 // branch falls back to mergeable_state alone (ADR-933's "Actions disabled"
-// case) — correct for its usual caller (pollForMergeable, judging a landing
+// case) — correct for its usual caller (settleAndMerge, judging a landing
 // PR whose tree a just-polled trial CI run already validated) but wrong for
 // this fast path, which never builds a trial. A member whose own PR head has
 // zero check runs has had nothing actually validated — R1.2 requires
@@ -5078,7 +5071,7 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 }
 
 // TestLandMergeTrainBatch_MergeAPIFailure_CINotGreen_NoEscalation is the issue #1094
-// regression test for this call site: pollForMergeable already judged the integration
+// regression test for this call site: settleAndMerge already judged the integration
 // PR acceptable (mergeable_state=clean), but MergePR's own new precondition check
 // observes a flipped state (a TOCTOU window between the two GETs) and refuses with
 // gh.ErrNotMergeableCI. This must be handled exactly like any other MergePR failure

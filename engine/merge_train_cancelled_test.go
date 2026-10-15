@@ -87,11 +87,10 @@ func TestPollForMergeable_CancelledRun_ReturnsFalseImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	survivors := []trainMember{{item: gh.ProjectItem{Number: 7}, prNum: 7}}
-	if eng.pollForMergeable(ctx, "owner", "repo", 42, survivors) {
+	if res := eng.settleAndMerge(ctx, "owner", "repo", 42, ""); res.outcome != outcomeNotPassed {
 		t.Fatal("a cancelled run on the landing PR must not be landable")
 	}
 	if time.Since(start) > 3*time.Second {
-		t.Errorf("pollForMergeable waited %v; a cancelled run must return immediately", time.Since(start))
+		t.Errorf("settleAndMerge waited %v; a cancelled run must return immediately", time.Since(start))
 	}
 }
