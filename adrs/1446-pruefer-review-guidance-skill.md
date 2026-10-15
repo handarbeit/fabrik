@@ -1,6 +1,6 @@
 # ADR 1446: Pruefer review guidance is configurable via a repo-resident skill, layered over an operator override and the embedded default
 
-**Status:** Accepted
+**Status:** Accepted. Decision C2 (the embedded default is *text*) and the `resolveGuidance` signature described under C3/C4 are partially superseded by [ADR 2306](2306-pruefer-review-embedded-plugin-skill.md): the default layer is now the embedded `pruefer-review:review` skill, and `resolveGuidance` returns only the operator and repo layers (`(guidance string, replacesDefault bool)`). The rest of this ADR stands.
 **Date:** 2026-09-13
 **Issue:** [#1446](https://github.com/handarbeit/fabrik/issues/1446)
 
