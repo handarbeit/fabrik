@@ -887,6 +887,8 @@ small file reads and, at most once per tool per daemon lifetime, a version-check
 
 Always pushed after Claude runs (success or failure): `git push --force-with-lease -u origin fabrik/issue-<N>`
 
+The one exception is a linked PR that is already merged (#2299): the push wrappers (`pushBranchUnlessQueued`, `pushBranchOnCancel`) read the PR live first and return `ErrPushSkippedPRMerged` without running `git push`, because GitHub deleted the branch on merge and the push would either fail the lease or re-create it. The stage still completes; for a `wait_for_ci` Validate stage `handleStageComplete` then takes the terminal path instead of arming `fabrik:awaiting-ci`. A failed PR read pushes as before. See `docs/state-machine.md` §6.14.7.
+
 ---
 
 ## Phase 5: Comment Processing
