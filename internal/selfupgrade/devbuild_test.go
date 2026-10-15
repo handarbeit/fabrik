@@ -697,8 +697,8 @@ func TestMatchGitHubRemote(t *testing.T) {
 		"http://github.com/handarbeit/fabrik",
 		"git://github.com/handarbeit/fabrik",
 		"git+ssh://git@github.com/handarbeit/fabrik",
-		"file:///tmp/handarbeit/fabrik",
-		"/tmp/handarbeit/fabrik",
+		"file:///srv/handarbeit/fabrik",
+		"/srv/handarbeit/fabrik",
 		"handarbeit/fabrik",
 		"github.com/handarbeit/fabrik",
 		// whitespace / control characters inside
