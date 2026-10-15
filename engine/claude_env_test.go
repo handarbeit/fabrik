@@ -107,7 +107,7 @@ func containsPrefix(env []string, prefix string) bool {
 
 // TestBuildClaudeEnv_GHHost_EmittedWhenConfigured covers FR-6: when a GHES
 // host is configured, buildClaudeEnv must emit GH_HOST so a stage worker's
-// `gh` invocations (e.g. fabrik-validate's Pre-Completion Gate) target the
+// `gh` invocations (e.g. the validate skill's Pre-Completion Gate) target the
 // same instance as the engine rather than silently hitting github.com.
 func TestBuildClaudeEnv_GHHost_EmittedWhenConfigured(t *testing.T) {
 	old := claudeGHHost

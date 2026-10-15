@@ -46,6 +46,8 @@ type Snapshot struct {
 //   - LinkedPRState.ReviewRequests
 //   - LinkedPRState.ThreadComments
 //   - LinkedPRState.CheckRuns
+//   - LinkedPRState.Facts.Mergeable
+//   - LinkedPRState.CIVerdict.Failing
 func newSnapshot(s ItemState) Snapshot {
 	c := s
 
@@ -70,6 +72,7 @@ func newSnapshot(s ItemState) Snapshot {
 		lpr.ReviewRequests = copyReviewRequests(s.LinkedPR.ReviewRequests)
 		lpr.ThreadComments = copyComments(s.LinkedPR.ThreadComments)
 		lpr.CheckRuns = copyCheckRuns(s.LinkedPR.CheckRuns)
+		lpr.Facts, lpr.CIVerdict = copyPRFacts(s.LinkedPR.Facts, s.LinkedPR.CIVerdict)
 		c.LinkedPR = &lpr
 	}
 
@@ -81,6 +84,19 @@ func newSnapshot(s ItemState) Snapshot {
 	if s.Worker != nil {
 		w := *s.Worker
 		c.Worker = &w
+	}
+	if s.PendingRetry != nil {
+		pr := *s.PendingRetry
+		c.PendingRetry = &pr
+	}
+	if s.GateHold != nil {
+		gh := *s.GateHold
+		gh.IDs = copyStrings(s.GateHold.IDs)
+		c.GateHold = &gh
+	}
+	if s.ConflictResolution != nil {
+		cr := *s.ConflictResolution
+		c.ConflictResolution = &cr
 	}
 
 	return Snapshot{state: c}
@@ -140,6 +156,7 @@ func (s Snapshot) LinkedPR() *LinkedPRState {
 	lpr.ReviewRequests = copyReviewRequests(s.state.LinkedPR.ReviewRequests)
 	lpr.ThreadComments = copyComments(s.state.LinkedPR.ThreadComments)
 	lpr.CheckRuns = copyCheckRuns(s.state.LinkedPR.CheckRuns)
+	lpr.Facts, lpr.CIVerdict = copyPRFacts(s.state.LinkedPR.Facts, s.state.LinkedPR.CIVerdict)
 	return &lpr
 }
 
@@ -188,12 +205,6 @@ func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 	return false
 }
 
-// PausedBackstopBaseline returns the baseline at which the paused-item
-// backstop last completed a live fetch, or zero if it never has.
-func (s Snapshot) PausedBackstopBaseline() time.Time {
-	return s.state.PausedBackstopBaseline
-}
-
 // LabelAppliedAt returns the time the engine itself most recently applied the
 // given label to this issue, or zero if no record-at-write has been made for
 // it (cold cache — the caller should fall back to a live fetch). See
@@ -201,6 +212,12 @@ func (s Snapshot) PausedBackstopBaseline() time.Time {
 // CooldownAt.
 func (s Snapshot) LabelAppliedAt(label string) time.Time {
 	return s.state.LabelAppliedAt[label]
+}
+
+// BackoffExempt reports whether the stage's last invocation ended as a time
+// slice, so the dispatch retry backoff does not apply (#2232).
+func (s Snapshot) BackoffExempt(stageName string) bool {
+	return s.state.StageState.BackoffExempt[stageName]
 }
 
 // LastAttemptAt returns the last invocation timestamp for a given stage, or zero.
@@ -445,6 +462,7 @@ func copyStageState(s StageState) StageState {
 	return StageState{
 		Attempts:             copyMap(s.Attempts),
 		LastAttemptAt:        copyMap(s.LastAttemptAt),
+		BackoffExempt:        copyMap(s.BackoffExempt),
 		PausedByEngine:       copyMap(s.PausedByEngine),
 		PRCreationFailed:     copyMap(s.PRCreationFailed),
 		ReviewCycles:         copyMap(s.ReviewCycles),
@@ -464,4 +482,15 @@ func copyStageState(s StageState) StageState {
 		StallHintPending:     copyMap(s.StallHintPending),
 		StallEpisodeArmed:    copyMap(s.StallEpisodeArmed),
 	}
+}
+
+// copyPRFacts deep-copies the pointer and slice members of the overseer PR
+// facts (#2122).
+func copyPRFacts(f PRFacts, v CIVerdictRecord) (PRFacts, CIVerdictRecord) {
+	if f.Mergeable != nil {
+		m := *f.Mergeable
+		f.Mergeable = &m
+	}
+	v.Failing = copyStrings(v.Failing)
+	return f, v
 }

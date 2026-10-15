@@ -128,7 +128,8 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 // lives in reinvoke.go.
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
-		tag: "rebase-reinvoke",
+		tag:  "rebase-reinvoke",
+		kind: itemstate.WorkerKindRebaseReinvoke,
 		// #1812: refunded by dispatchReinvoke when the invocation provably never
 		// ran; the after hook (auto-merge re-enable) is skipped then.
 		cycle: cycleCharge{

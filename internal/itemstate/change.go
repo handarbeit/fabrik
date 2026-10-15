@@ -1,6 +1,9 @@
 package itemstate
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ChangeFlags is a bitmask describing which logical field groups of an ItemState
 // were altered by a mutation. Observers use this to cheaply filter whether a
@@ -90,6 +93,15 @@ const (
 	// protection, intentionally excluded from wakeChFlags/cycleSetFlags so it
 	// never wakes the poll loop.
 	EngineWriteRecordedChanged
+	// StatusFactsChanged indicates PendingRetry, GateHold, ConflictResolution or
+	// RebaseCause changed (#2121). Facts the attention classifier reads; like
+	// EngineWriteRecordedChanged they are intentionally excluded from
+	// wakeChFlags/cycleSetFlags so recording one never wakes the poll loop.
+	StatusFactsChanged
+	// PRFactsChanged indicates LinkedPR.Facts or LinkedPR.CIVerdict changed
+	// (#2122). Display facts for the overseer API; intentionally excluded from
+	// wakeChFlags/cycleSetFlags so a poll-side write never wakes the poll.
+	PRFactsChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
@@ -137,6 +149,45 @@ type Change struct {
 	// Closed is true when the mutation moved an already-held item from open to
 	// closed (#2123).
 	Closed bool
+	// Path names the cache-refresh path that produced the change when it came
+	// from a reconcile, a deep fetch or the probe loop (#2170); PathNone for every
+	// other mutation. Origin cannot tell these apart (all are OriginOther, or
+	// OriginProbe for the probe), and the cache-divergence detector needs the name.
+	Path ChangePath
+	// StatusFrom/StatusTo are the board column before and after, set whenever
+	// StatusChanged is in Fields and the item existed before (#2170).
+	StatusFrom, StatusTo string
+	// EngineStatusWrite is true for a LocalStatusUpdated write-through: Fabrik
+	// moved the item itself.
+	EngineStatusWrite bool
+}
+
+// ChangePath names the refresh path behind a Change (#2170).
+type ChangePath uint8
+
+const (
+	// PathNone is every mutation that is not a refresh from GitHub.
+	PathNone ChangePath = iota
+	// PathReconcile is a board reconcile: ShallowBoardItemUpdated or a
+	// BoardReconciled item.
+	PathReconcile
+	// PathDeepFetch is ItemDeepFetched.
+	PathDeepFetch
+	// PathProbe is a mutation applied by the probe loop (FromProbe).
+	PathProbe
+)
+
+// String is the wire name used in cache-divergence events.
+func (p ChangePath) String() string {
+	switch p {
+	case PathReconcile:
+		return "reconcile"
+	case PathDeepFetch:
+		return "deep-fetch"
+	case PathProbe:
+		return "probe"
+	}
+	return ""
 }
 
 // LabelDelta is one label added to or removed from an item.
@@ -179,4 +230,94 @@ func diffLabels(before, after []string) []LabelDelta {
 		}
 	}
 	return out
+}
+
+// eligibilityLabel reports whether adding or removing label changes whether the
+// engine will move the item on by itself or is blocked on a human (#2120 R3).
+func eligibilityLabel(label string) bool {
+	switch label {
+	case "fabrik:cruise", "fabrik:yolo", "fabrik:blocked", "fabrik:paused":
+		return true
+	}
+	return strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":complete")
+}
+
+// stampEligibility records the store clock's "now" in item.EligibilityChangedAt
+// when the label change from before to item.Labels touched an eligibility label,
+// and in item.StatusMovedAt when the item moved between two known columns (#2120
+// R3). Called only for an item the store already held, with s.mu held. The time
+// comes from the store clock (SetClock) so a test or sim clock that drives the
+// classifier drives the stamps too: with time.Now() a sim clock set before real
+// time would put the stamp in the classifier's future.
+func (s *Store) stampEligibility(item *ItemState, before ItemState) {
+	now := s.nowLocked()
+	for _, d := range diffLabels(before.Labels, item.Labels) {
+		if eligibilityLabel(d.Label) {
+			item.EligibilityChangedAt = now
+			break
+		}
+	}
+	if before.Status != "" && item.Status != "" && before.Status != item.Status {
+		item.StatusMovedAt = now
+	}
+}
+
+// SetClock makes the store stamp EligibilityChangedAt and StatusMovedAt from now
+// instead of time.Now(). The engine passes its own clock so the stamps and the
+// classifier that reads them agree. nil restores time.Now().
+func (s *Store) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	s.clock = now
+	s.mu.Unlock()
+}
+
+// nowLocked returns the store clock's time; s.mu must be held.
+func (s *Store) nowLocked() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// clearStatusFacts drops the in-memory attention facts a mutation has made stale
+// (#2121): a pending retry and a gate hold end when the item is paused, closed,
+// moves column or completes a stage; a conflict resolution ends when the item
+// closes; the rebase cause ends with its fabrik:rebase-needed label. Returns
+// StatusFactsChanged when anything was cleared. Called with the store lock held,
+// for an item the store already held.
+func clearStatusFacts(item *ItemState, before ItemState) ChangeFlags {
+	var ended bool
+	for _, d := range diffLabels(before.Labels, item.Labels) {
+		if d.Added && (d.Label == "fabrik:paused" || (strings.HasPrefix(d.Label, "stage:") && strings.HasSuffix(d.Label, ":complete"))) {
+			ended = true
+		}
+	}
+	if item.IsClosed && !before.IsClosed {
+		ended = true
+		if item.ConflictResolution != nil {
+			item.ConflictResolution = nil
+		}
+	}
+	if before.Status != "" && item.Status != before.Status {
+		ended = true
+	}
+	var changed bool
+	if ended {
+		if item.PendingRetry != nil {
+			item.PendingRetry = nil
+			changed = true
+		}
+		if item.GateHold != nil {
+			item.GateHold = nil
+			changed = true
+		}
+	}
+	if item.RebaseCause != "" && !containsString(item.Labels, "fabrik:rebase-needed") {
+		item.RebaseCause = ""
+		changed = true
+	}
+	if changed || (item.IsClosed && !before.IsClosed && before.ConflictResolution != nil) {
+		return StatusFactsChanged
+	}
+	return 0
 }

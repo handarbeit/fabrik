@@ -175,6 +175,12 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		// (PR cards stay unknown), and a null milestone is still "known".
 		Milestone:      cloneMilestone(iss.milestone),
 		MilestoneKnown: !isPR,
+		// Layered board evidence (#2180), as production's listing reports it:
+		// the issue and project-item layer without the linked PR, plus the
+		// issue's own comment count (Issue content nodes only).
+		IssueLayerUpdatedAt:    laterOf(iss.updatedAt, cardUpdatedAt),
+		IssueCommentTotal:      len(iss.comments),
+		IssueCommentTotalKnown: !isPR,
 	}
 	for _, c := range iss.comments {
 		item.Comments = append(item.Comments, c.toGH())
@@ -212,6 +218,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 			}
 		}
 		item.UpdatedAt = laterOf(item.UpdatedAt, linked.updatedAt)
+		item.LinkedPRUpdatedAt = linked.updatedAt
 	}
 	s.mu.Unlock()
 
@@ -357,6 +364,9 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 	}
 	// effectiveUpdatedAt is max(content, project item, linked PR).
 	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, s.cardActivityAt(p, live))
+	probe.IssueLayerUpdatedAt = probe.EffectiveUpdatedAt
+	probe.IssueCommentTotal = len(iss.comments)
+	probe.IssueCommentTotalKnown = !live.isPR
 	linked := s.boardLinkedPRLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
@@ -369,6 +379,13 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 		linkedHead = linked.head
 		probe.LinkedPRNumber = linked.number
 		probe.LinkedPRUpdatedAt = linked.updatedAt
+		// The probe's linked-PR scalars (#2122). Mergeability is reported the
+		// way GitHub lazily computes it, as UNKNOWN: the sim does not run a
+		// merge simulation per probed PR per poll (see FIDELITY.md).
+		probe.LinkedPRFacts = gh.ProbePRFacts{Known: true, State: linked.state, Draft: linked.draft, Merged: linked.merged}
+		if linked.merged {
+			probe.LinkedPRFacts.State = "closed"
+		}
 		probe.EffectiveUpdatedAt = laterOf(probe.EffectiveUpdatedAt, linked.updatedAt)
 	}
 	s.mu.Unlock()

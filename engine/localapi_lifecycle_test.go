@@ -123,6 +123,7 @@ func TestRun_LocalAPILifecycleAcrossSighupRestart(t *testing.T) {
 // Clean shutdown (context cancel, no re-exec) also removes the socket, and a
 // failure to bind never stops the daemon.
 func TestRun_LocalAPIRemovedOnCleanShutdownAndBindFailureIsNonFatal(t *testing.T) {
+	isolateWarningsFile(t)
 	eng := lifecycleEngine(t)
 	path := localapi.SocketPath(eng.fabrikDir)
 	readyCh := make(chan struct{})

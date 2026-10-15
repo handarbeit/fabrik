@@ -330,27 +330,47 @@ func TestSelectDeepFetchCandidates_PausedWithNewActivityStillFetched(t *testing.
 	}
 }
 
-// #1944 — the periodic re-evaluation is a backstop for a resume comment that
-// cycleSet missed. The self-write staleness baseline (SelfWriteObserved, #1090)
-// is the local clock at the engine's own write, so a human reply landing within
-// about a second of the pause comment reads as already seen (0.0.83 gate,
-// alpha#6773). A paused item with a RECENT baseline, admitted by an expired
-// periodic cooldown and absent from cycleSet, must be fetched.
-func TestSelectDeepFetchCandidates_PausedRecentBaselinePeriodicReevalFetched(t *testing.T) {
+// pausedCachedItem seeds a deep-fetched paused item whose cached copy holds one
+// issue comment (the engine's pause comment), then applies the engine's own
+// pause write, which advances the issue-layer baseline (SelfWriteObserved, #1090).
+func pausedCachedItem(t *testing.T, eng *Engine, number int, updatedAt time.Time) {
+	t.Helper()
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: number, FreshState: gh.ProjectItem{
+		Number: number, Repo: "owner/repo", Status: "Research",
+		Labels:    []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments:  []gh.Comment{{DatabaseID: 1, Author: "fabrik-bot", Body: "🏭 **Fabrik** paused"}},
+		UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
+		IssueCommentTotal: 1, IssueCommentTotalKnown: true,
+	}})
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: number})
+	eng.store.Apply(itemstate.CooldownRecorded{
+		Repo: "owner/repo", Number: number, Reason: "periodic-re-eval", Until: time.Now().Add(-time.Minute),
+	})
+}
+
+// #1944 / #2180 — a human reply landing within about a second of the pause
+// comment reads as already seen under the self-write baseline (0.0.83 gate,
+// alpha#6773). The cache's freshness rule sees it through the issue comment
+// total, so a paused item admitted by an expired periodic cooldown (and absent
+// from cycleSet) reads through the cache and refetches exactly once. This
+// replaces the hand-rolled #1944 backstop.
+func TestSelectDeepFetchCandidates_PausedMaskedReplyPeriodicReevalFetched(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60 // a real recheck interval (10 × poll); testEngine leaves it 0
 
-	eng.store.Apply(itemstate.CooldownRecorded{
-		Repo: "owner/repo", Number: 56, Reason: "periodic-re-eval", Until: time.Now().Add(-time.Minute),
-	})
-	// The engine's own pause write just advanced the baseline.
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 56})
+	updatedAt := time.Now().Add(-2 * time.Minute)
+	pausedCachedItem(t, eng, 1, updatedAt)
 
+	// GitHub now has the pause comment plus the human reply, whose updatedAt
+	// sits just before the engine's pause write.
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
-			{Number: 56, Title: "Just paused, reply masked by the self-write baseline", Status: "Research", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}},
+			{Number: 1, Repo: "owner/repo", Title: "Paused, reply masked", Status: "Research",
+				Labels:    []string{"fabrik:paused", "fabrik:awaiting-input"},
+				UpdatedAt: updatedAt.Add(time.Second), IssueLayerUpdatedAt: updatedAt.Add(time.Second),
+				IssueCommentTotal: 2, IssueCommentTotalKnown: true},
 		},
 	}
 
@@ -360,73 +380,41 @@ func TestSelectDeepFetchCandidates_PausedRecentBaselinePeriodicReevalFetched(t *
 	fetchCalls := len(client.fetchItemDetailsCalls)
 	client.mu.Unlock()
 	if fetchCalls != 1 || deepFetched != 1 {
-		t.Errorf("a freshly paused item due for periodic re-evaluation must be deep-fetched so a masked resume comment is seen; "+
-			"got %d FetchItemDetails call(s), deepFetched=%d, want 1/1", fetchCalls, deepFetched)
+		t.Errorf("a paused item due for periodic re-evaluation whose reply was masked must reach GitHub once; "+
+			"got %d FetchItemDetails call(s) on the client, deepFetched=%d, want 1/1", fetchCalls, deepFetched)
 	}
 }
 
-// #1944 keeps #1379's cost bound: a long-parked paused item (old baseline) is
-// still not fetched at its periodic re-evaluation.
-func TestSelectDeepFetchCandidates_PausedOldBaselinePeriodicReevalSkipped(t *testing.T) {
-	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60 // a real recheck interval (10 × poll); testEngine leaves it 0
-
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 57})
-	eng.SetClock(stubClock{t: time.Now().Add(3 * eng.githubRecheckInterval())})
-	eng.store.Apply(itemstate.CooldownRecorded{
-		Repo: "owner/repo", Number: 57, Reason: "periodic-re-eval", Until: eng.now().Add(-time.Minute),
-	})
-
-	board := &gh.ProjectBoard{
-		ProjectID: "PVT_1",
-		Items: []gh.ProjectItem{
-			{Number: 57, Title: "Long-parked item", Status: "Research", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}},
-		},
-	}
-
-	eng.selectDeepFetchCandidates(board, "", map[string]bool{}, map[string]bool{})
-
-	client.mu.Lock()
-	fetchCalls := len(client.fetchItemDetailsCalls)
-	client.mu.Unlock()
-	if fetchCalls != 0 {
-		t.Errorf("a long-parked paused item must not be fetched at its periodic re-evaluation (#1379), got %d call(s)", fetchCalls)
-	}
-}
-
-// #1944 — in production readClient is the board cache, which judges freshness by
-// the same (masked) baseline. The backstop must invalidate the entry so the fetch
-// reaches GitHub; a cache hit would return the cached comments without the reply.
-func TestSelectDeepFetchCandidates_PausedBackstopBypassesFreshCache(t *testing.T) {
+// #1944 keeps #1379's cost bound under the #2180 rule: a paused item whose
+// cache is genuinely fresh costs nothing at its periodic re-evaluation, however
+// recent or old its self-write baseline is.
+func TestSelectDeepFetchCandidates_PausedFreshCachePeriodicReevalNotFetched(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 
 	updatedAt := time.Now().Add(-2 * time.Minute)
-	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
-		Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, UpdatedAt: updatedAt,
-	}})
-	// The engine's own pause write advanced the baseline past the reply's updatedAt.
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 1})
-	eng.store.Apply(itemstate.CooldownRecorded{
-		Repo: "owner/repo", Number: 1, Reason: "periodic-re-eval", Until: time.Now().Add(-time.Minute),
-	})
+	pausedCachedItem(t, eng, 1, updatedAt)
 
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
-			{Number: 1, Repo: "owner/repo", Title: "Paused, reply masked", Status: "Research",
-				Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, UpdatedAt: updatedAt},
+			{Number: 1, Repo: "owner/repo", Title: "Long-parked item", Status: "Research",
+				Labels:    []string{"fabrik:paused", "fabrik:awaiting-input"},
+				UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
+				IssueCommentTotal: 1, IssueCommentTotalKnown: true},
 		},
 	}
 
-	eng.selectDeepFetchCandidates(board, "", map[string]bool{}, map[string]bool{})
+	candidates, _ := eng.selectDeepFetchCandidates(board, "", map[string]bool{}, map[string]bool{})
 
 	client.mu.Lock()
 	fetchCalls := len(client.fetchItemDetailsCalls)
 	client.mu.Unlock()
-	if fetchCalls != 1 {
-		t.Errorf("backstop fetch must bypass the fresh cache entry and reach GitHub, got %d FetchItemDetails call(s) on the client, want 1", fetchCalls)
+	if fetchCalls != 0 {
+		t.Errorf("a paused item with a fresh cache must not reach GitHub at its periodic re-evaluation (#1379), got %d call(s)", fetchCalls)
+	}
+	if len(candidates) != 1 {
+		t.Errorf("the paused item must stay a candidate (read through the cache), got %d", len(candidates))
 	}
 }

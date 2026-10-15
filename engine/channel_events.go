@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/attention"
@@ -37,15 +38,6 @@ import (
 // goroutine drains the queue, owns every piece of per-item memory and is the
 // only caller of Hub.Publish, which is what serialises ordering and dedup.
 
-// These are vars so tests can shorten them. The debounce and the ticker are
-// real-time mechanisms (wall clock, not the e.now() seam): a debounce that
-// followed a frozen test clock would never elapse.
-var (
-	channelDebounce = 750 * time.Millisecond
-	channelTick     = 30 * time.Second
-	channelPrune    = time.Hour
-)
-
 // itemMemo is the consumer-owned memory for one item.
 type itemMemo struct {
 	// pauseKey is the last pause-family classification key ("" = none).
@@ -57,6 +49,13 @@ type itemMemo struct {
 	near map[string]bool
 	// lastComment is the comment link the previous event for this item carried.
 	lastComment string
+	// dp is the open decision-pending episode, if any (channel_decision.go);
+	// dpSeen is when the item was first seen suspended without an exact GitHub
+	// time (real time), for decisionAnchorGrace.
+	dp     *decisionEpisode
+	dpSeen time.Time
+	// rebaseSeen mirrors dirtyItem.rebaseSeen for the evaluation in progress.
+	rebaseSeen bool
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -66,6 +65,11 @@ type dirtyItem struct {
 	// staleCandidate is set when an invocation was recorded while
 	// fabrik:awaiting-input was present at that moment.
 	staleCandidate bool
+	// rebaseSeen is set when fabrik:rebase-needed was applied to the item since
+	// the last evaluation, even if it was removed again before this one ran (the
+	// engine applies it and dispatches the rebase within one pass), so a
+	// withdrawal is attributed to the rebase rather than to the worker it caused.
+	rebaseSeen bool
 }
 
 type channelEvents struct {
@@ -81,6 +85,9 @@ type channelEvents struct {
 	// nudge asks the consumer to re-check account-wide state (the Claude
 	// usage-limit hold) without waiting for the next tick.
 	nudge bool
+	// busy is true while drain() holds events it has taken off the queue but not
+	// yet published or evaluated; idle() (channel_settings.go) reads it.
+	busy bool
 	// arrivals are items created after the board was populated that have not been
 	// announced yet (key → when noted); each is held until the item's labels are
 	// known and it carries a board Status, so item-added never reports an empty
@@ -99,6 +106,35 @@ type channelEvents struct {
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 
+	// sitEval is when each subscriber's situation cadence last evaluated
+	// (#2171); consumer-owned.
+	sitEval map[string]time.Time
+
+	// anom is the retry/wedge episode memory and the divergence ledger
+	// (#2170); it has its own mutex because hooks and the observer write it.
+	anom anomalyState
+
+	// ledger is the persisted last-observed per-item state a restart diffs its
+	// first observation against (#2169); nil when it could not be opened.
+	ledger *channelevents.Ledger
+	// ready is false from start until the readiness pass has queued the restart
+	// catch-up (see channel_downtime.go); readyBy is the real-time deadline.
+	ready   atomic.Bool
+	readyBy time.Time
+	// dmu guards the downtime-diff bookkeeping: looked/pend (first-observation
+	// state per item) and warmBuf (deltas held back until the catch-up is queued).
+	dmu     sync.Mutex
+	looked  map[string]bool
+	pend    map[string]*priorEntry
+	warmBuf []channelevents.Event
+	// unpub holds the items with a downtime delta still in warmBuf: the ledger
+	// does not follow them until the delta is published, so a hard kill while
+	// warming leaves the old record to be diffed again by the next start.
+	unpub map[string]bool
+	// autonomy is who last wrote each item's fabrik:cruise / fabrik:yolo label,
+	// for the cause of a re-settle (also under dmu).
+	autonomy map[string]autonomyActor
+
 	wake  chan struct{}
 	stop  chan struct{}
 	wg    sync.WaitGroup
@@ -116,14 +152,21 @@ func channelStateDir(fabrikDir string) string {
 // the observer and starts the consumer. Failure is non-fatal: without a hub the
 // read API keeps working and push is simply off.
 func (e *Engine) startChannelEvents() {
-	e.startChannelEventsIn(channelStateDir(e.fabrikDir))
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir), true)
 }
 
-func (e *Engine) startChannelEventsIn(dir string) {
+// startChannelEventsIn starts the hub under dir. warming is true in production:
+// every daemon start is a restart, so the first catch-up waits for the readiness
+// pass (channel_downtime.go) and downtime deltas are held until it has run. The
+// test seam StartChannelEventsForTest passes false (ready at once, no restart
+// catch-up); StartChannelEventsWarmingForTest passes true.
+func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 	hub, err := channelevents.Open(channelevents.Options{
 		Dir:     dir,
 		HeldMax: e.cfg.ChannelHeldMax,
-		Now:     e.now,
+		// Zero keeps the production floor; the test seam shortens it.
+		MinSituation: time.Duration(e.chanTest.situationMin.Load()),
+		Now:          e.now,
 		Logf: func(format string, args ...any) {
 			e.logf(0, "channel", format, args...)
 		},
@@ -139,9 +182,17 @@ func (e *Engine) startChannelEventsIn(dir string) {
 		landings: map[string]time.Time{},
 		dirty:    map[string]*dirtyItem{},
 		memo:     map[string]*itemMemo{},
+		looked:   map[string]bool{},
+		pend:     map[string]*priorEntry{},
+		unpub:    map[string]bool{},
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
+		readyBy:  time.Now().Add(e.chanReadyTimeout()),
 	}
+	ce.ledger = channelevents.OpenLedger(dir, e.now, func(format string, args ...any) {
+		e.logf(0, "channel", format, args...)
+	})
+	ce.ready.Store(!warming)
 	ce.seed()
 	ce.unsub = e.store.Subscribe(itemstate.ObserverFunc(ce.onChange))
 	e.channelMu.Lock()
@@ -159,6 +210,8 @@ func (e *Engine) startChannelEventsIn(dir string) {
 // leaves this process running. Safe with no hub, and idempotent.
 func (e *Engine) flushChannelEvents() {
 	if ce := e.channelEvents(); ce != nil {
+		ce.spillWarm()
+		ce.ledger.Flush()
 		ce.hub.Flush()
 	}
 }
@@ -178,6 +231,8 @@ func (e *Engine) closeChannelEvents() {
 	}
 	close(ce.stop)
 	ce.wg.Wait()
+	ce.spillWarm()
+	ce.ledger.Close()
 	ce.hub.Close()
 }
 
@@ -236,19 +291,50 @@ func (ce *channelEvents) seed() {
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
 	ce.claudeLimited = !usageLimited.IsZero()
+	look := e.scanBlockerIndex()
+	var pending []string
 	e.store.Scan(func(st *itemstate.ItemState) {
-		// An item whose labels are not known yet (probe-seeded) has no meaningful
-		// classification; its first label-bearing evaluation is the baseline (#2123).
-		if st.IsPR || !st.LabelsKnown {
+		if st.IsPR {
 			return
 		}
-		key := issueRef(st.Repo, st.Number)
+		// The previous run's persisted state is diffed against this first
+		// observation (column and closed state now, labels once they are known)
+		// and the ledger starts following the item (#2169).
+		ref := issueRef(st.Repo, st.Number)
+		if evs, _, _ := ce.downtimeCheck(ref, st); len(evs) > 0 {
+			ce.enqueue(evs...)
+		}
+		ce.observeLedger(ref, st)
+		// An item whose labels are not known yet (probe-seeded) has no meaningful
+		// classification; its first label-bearing evaluation is the baseline (#2123).
+		if !st.LabelsKnown {
+			return
+		}
+		key := ref
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
+		if res.State == attention.Suspended {
+			pending = append(pending, st.Repo+"#"+strconv.Itoa(st.Number))
+		}
 	})
+	// A suspended item with no open persisted episode is announced once; the
+	// scan's read lock is released first, because the step reads the store again.
+	for _, key := range pending {
+		repo, n, ok := parseIssueRef(key)
+		if !ok {
+			continue
+		}
+		snap, ok := e.store.Peek(repo, n)
+		if !ok {
+			continue
+		}
+		st := snap.State()
+		res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, e.peekBlockerLookup()))
+		ce.enqueueDerived(ce.decisionStep(key, ce.memoFor(key), &st, res))
+	}
 }
 
 func (ce *channelEvents) memoFor(key string) *itemMemo {
@@ -277,17 +363,40 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		return
 	}
 	key := issueRef(c.Repo, c.Number)
+	if c.Fields&itemstate.WorkerLifecycleChanged != 0 && st.Worker != nil {
+		ce.noteWorkerEntered(key)
+	}
 	// A reopened issue or a failed landing verification ends the announced
 	// landing, so a later close is attributed from its own change, not from a
 	// stale mark.
 	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
 		ce.clearLanding(key)
 	}
-	var evs []channelevents.Event
+	// A reconcile, deep fetch or probe that reverts a recent engine write is
+	// reported once, ahead of the label events it caused, and those are marked
+	// unverified (#2170): the cache and GitHub disagree, so the change may be a
+	// phantom.
+	// The first observation after a restart is diffed against the previous run's
+	// persisted state; what differs is a change made while the daemon was down
+	// (#2169). Its column and closed deltas replace the live column-changed and
+	// closed for this change, which would otherwise report the same move again.
+	dtEvs, dtColumn, dtClosed := ce.downtimeCheck(key, &st)
+	ce.observeLedger(key, &st)
+	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
+	diverged := len(evs) // events from here on are built from the suspect change
+	rebaseApplied := false
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
 		}
+		if d.Added && d.Label == "fabrik:rebase-needed" {
+			rebaseApplied = true
+		}
+		if d.Added && d.Label == "fabrik:revalidate" && ce.ledger != nil {
+			// Sent back through Validate on purpose: the next settle says so.
+			ce.ledger.MarkRevalidated(key)
+		}
+		ce.noteAutonomyWrite(key, d, ce.e.labelAttribute(c))
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"
@@ -295,11 +404,28 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		evs = append(evs, le)
 		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
 	}
-	if c.Fields&itemstate.StatusChanged != 0 && !c.Created && c.PrevStatus != "" && st.Status != "" && st.Status != c.PrevStatus {
+	if c.Fields&itemstate.StatusChanged != 0 && !c.Created && c.PrevStatus != "" && st.Status != "" && st.Status != c.PrevStatus && !dtColumn {
 		evs = append(evs, ce.e.columnEvent(&st, c))
 	}
-	if c.Closed {
+	if c.Closed && !dtClosed {
 		evs = append(evs, ce.closedEvent(key, &st, c))
+	}
+	if diverged > len(dtEvs) || unattributed(c.Origin) {
+		// Every event built from a change a cache-divergence was raised for (label
+		// events, the label-derived merged / blocker-cleared / landing-verification-
+		// failed, column-changed, closed) may be a phantom (#2170 R3). So is one
+		// built from a change only a reconcile, deep fetch or probe saw: no known
+		// write or webhook backs it (#2169 R3a).
+		start := diverged
+		if start < len(dtEvs) {
+			start = len(dtEvs)
+		}
+		for i := start; i < len(evs); i++ {
+			if evs[i].Meta == nil {
+				evs[i].Meta = map[string]string{}
+			}
+			evs[i].Meta[channelevents.MetaUnverified] = "true"
+		}
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |
@@ -317,11 +443,12 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if c.Fields&interesting != 0 || arrivalPending {
 		d := ce.dirty[key]
 		if d == nil {
-			d = &dirtyItem{due: time.Now().Add(channelDebounce)}
+			d = &dirtyItem{due: time.Now().Add(ce.e.chanDebounce())}
 			ce.dirty[key] = d
 		}
 		d.flags |= c.Fields
 		d.staleCandidate = d.staleCandidate || staleCand
+		d.rebaseSeen = d.rebaseSeen || rebaseApplied
 	}
 	ce.mu.Unlock()
 	ce.signal()
@@ -330,7 +457,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 // run is the single consumer goroutine.
 func (ce *channelEvents) run() {
 	defer ce.wg.Done()
-	tick := time.NewTicker(channelTick)
+	tick := time.NewTicker(ce.e.chanTick())
 	defer tick.Stop()
 	prune := time.NewTicker(channelPrune)
 	defer prune.Stop()
@@ -392,6 +519,12 @@ func (ce *channelEvents) nextDue() time.Duration {
 // debounce has elapsed.
 func (ce *channelEvents) drain() {
 	ce.mu.Lock()
+	ce.busy = true
+	defer func() {
+		ce.mu.Lock()
+		ce.busy = false
+		ce.mu.Unlock()
+	}()
 	q := ce.queue
 	ce.queue = nil
 	nudged := ce.nudge
@@ -410,8 +543,12 @@ func (ce *channelEvents) drain() {
 	}
 	ce.mu.Unlock()
 	for _, ev := range q {
+		if ce.holdWarm(ev) {
+			continue
+		}
 		ce.hub.Publish(finishEvent(ev))
 	}
+	ce.checkReady()
 	for _, k := range due {
 		ce.evaluateItem(k, flags[k])
 	}
@@ -421,6 +558,7 @@ func (ce *channelEvents) drain() {
 	if nudged {
 		ce.checkClaudeLimit()
 	}
+	ce.checkAnomalies()
 }
 
 // labelAttribution is who caused a label change, as pushed on a label event.
@@ -469,6 +607,25 @@ func (e *Engine) labelAttribute(c itemstate.Change) labelAttribution {
 	return labelAttribution{Actor: "unknown"}
 }
 
+// maxPushTitleRunes caps the title a push carries.
+const maxPushTitleRunes = 200
+
+// pushTitle renders an issue title for a push: line breaks and backticks become
+// spaces (the value is shown inline), runs of whitespace collapse, and a long
+// title is cut at maxPushTitleRunes with an ellipsis.
+func pushTitle(title string) string {
+	t := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r == '`' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, title)), " ")
+	if r := []rune(t); len(r) > maxPushTitleRunes {
+		t = string(r[:maxPushTitleRunes-1]) + "…"
+	}
+	return t
+}
+
 // baseEvent fills the routing and identity fields shared by every event.
 func (e *Engine) baseEvent(st *itemstate.ItemState, typ channelevents.EventType) channelevents.Event {
 	ev := channelevents.Event{
@@ -481,6 +638,11 @@ func (e *Engine) baseEvent(st *itemstate.ItemState, typ channelevents.EventType)
 	}
 	if lpr := st.LinkedPR; lpr != nil && lpr.Number != 0 {
 		ev.PR = lpr.Number
+	}
+	// Every item-scoped push says what the item is, so a reacting session does
+	// not need a fabrik_status round trip (#2127 R8).
+	if t := pushTitle(st.Title); t != "" && !readPolishDisabled(8) {
+		ev.Meta["title"] = t
 	}
 	if st.MilestoneKnown {
 		ev.MilestoneKnown = true
@@ -528,6 +690,13 @@ func finishEvent(ev channelevents.Event) channelevents.Event {
 		ev.Meta["issue"] = strconv.Itoa(ev.Issue)
 	}
 	ev.Meta["event"] = string(ev.Type)
+	if ev.Meta[channelevents.MetaSource] == "" {
+		if ev.Meta["catch_up"] == "true" {
+			ev.Meta[channelevents.MetaSource] = channelevents.SourceCatchUp
+		} else {
+			ev.Meta[channelevents.MetaSource] = channelevents.SourceLive
+		}
+	}
 	if ev.Stage != "" {
 		ev.Meta["stage"] = ev.Stage
 	}

@@ -98,12 +98,16 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where string) bool {
 	pf := e.unprocessedFeedback(item, alreadyLive)
 	if pf.empty() && pf.Live {
+		e.noteGateClear(item, gateFeedback)
 		return false
 	}
 	if pf.empty() {
 		e.logf(item.Number, "feedback-gate", "holding %s — live feedback read failed, feedback state unknown\n", where)
+		e.noteGateHold(item, gateFeedback, "live feedback read failed, feedback state unknown", nil)
 	} else {
-		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, describePendingFeedback(pf))
+		reason := describePendingFeedback(pf)
+		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, reason)
+		e.noteGateHold(item, gateFeedback, reason, pendingFeedbackIDs(pf))
 	}
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
@@ -135,6 +139,19 @@ func describePendingFeedback(pf pendingFeedback) string {
 		parts = append(parts, fmt.Sprintf("%d unprocessed %s (%s)", n, noun, feedbackIDs(pf.Bodies)))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// pendingFeedbackIDs lists every pending feedback identifier, in the order
+// describePendingFeedback names them, for the item-wedged event (#2170).
+func pendingFeedbackIDs(pf pendingFeedback) []string {
+	var ids []string
+	for _, group := range [][]gh.Comment{pf.Comments, pf.Threads, pf.Bodies} {
+		if len(group) == 0 {
+			continue
+		}
+		ids = append(ids, strings.Split(feedbackIDs(group), ", ")...)
+	}
+	return ids
 }
 
 // feedbackIDs lists comment identifiers for logging: the numeric database ID

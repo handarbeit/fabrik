@@ -121,23 +121,26 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 	// "alpha line"/"bravo line" hunk, a later run's conflict was "Staged …
 	// using previous resolution" and never reached Claude, failing A2/A5
 	// (0.0.83 gate run 3). The engine was right to replay it (#1834).
-	aIssue, aPR, aItem := PrepareMemberExactPath(t, env, repo, base, "conflictA", sharedPath, fmt.Sprintf("alpha line %s\n", stamp))
-	bIssue, bPR, bItem := PrepareMemberExactPath(t, env, repo, base, "conflictB", sharedPath, fmt.Sprintf("bravo line %s\n", stamp))
-	cIssue, cPR, cItem := PrepareMemberExactPath(t, env, repo, base, "conflictC", cleanPath, "clean entry\n")
-	pIssue, _, pItem := PrepareMemberExactPath(t, env, repo, base, "conflictP", poisonPath, "POISON — this member fails the combined check\n")
+	//
+	// Each member is prepared PAUSED and queued one at a time, in merge order,
+	// waiting for the engine to read each move (queueInObservedOrder): the batch is
+	// ordered by when the engine observed each move, and four back-to-back moves
+	// read in one reconcile came out [A,P,B,C] (0.0.84 gate). Paused members never
+	// batch, so they are then released together.
+	ensurePausedLabelExists(t, env, repo)
+	aIssue, aPR, aItem := prepareMemberExactPath(t, env, repo, base, "conflictA", sharedPath, fmt.Sprintf("alpha line %s\n", stamp), pausedLabel)
+	repauseOnFailure(t, env, repo, aIssue)
+	bIssue, bPR, bItem := prepareMemberExactPath(t, env, repo, base, "conflictB", sharedPath, fmt.Sprintf("bravo line %s\n", stamp), pausedLabel)
+	repauseOnFailure(t, env, repo, bIssue)
+	cIssue, cPR, cItem := prepareMemberExactPath(t, env, repo, base, "conflictC", cleanPath, "clean entry\n", pausedLabel)
+	repauseOnFailure(t, env, repo, cIssue)
+	pIssue, _, pItem := prepareMemberExactPath(t, env, repo, base, "conflictP", poisonPath, "POISON — this member fails the combined check\n", pausedLabel)
+	repauseOnFailure(t, env, repo, pIssue)
 
-	// Back to back, in merge order, so no train worker can form a partial batch.
+	queueInObservedOrder(t, env, repo, []queuedMember{{aIssue, aItem}, {bIssue, bItem}, {cIssue, cItem}, {pIssue, pItem}})
 	placeOffset := LogOffset(t, env)
-	for _, m := range []struct {
-		issue int
-		item  string
-	}{{aIssue, aItem}, {bIssue, bItem}, {cIssue, cItem}, {pIssue, pItem}} {
-		SetIssueStatus(t, env, m.item, "Queued")
-	}
-	// Only after every member is placed (the placement above stays back to back):
-	// confirm the board listing shows each item, as the train worker will read it.
-	for _, m := range []int{aIssue, bIssue, cIssue, pIssue} {
-		AwaitBoardItemVisible(t, env, repo, m, awaitSeedTimeout)
+	if errs := removePausedConcurrently(env, repo, []int{aIssue, bIssue, cIssue, pIssue}); len(errs) > 0 {
+		t.Fatalf("could not release the members (they stay paused; nothing has formed): %v", errs)
 	}
 	t.Logf("queued A=#%d B=#%d C=#%d P=#%d (shared path %s); verifying batch composition", aIssue, bIssue, cIssue, pIssue, sharedPath)
 

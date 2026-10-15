@@ -224,17 +224,25 @@ func TestLocalAPIStatusWorkerIdleAndUnknownFields(t *testing.T) {
 	if st.Worker.TurnsUsed.Valid {
 		t.Errorf("turns for an in-flight worker must be unknown")
 	}
-	if !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 50 {
-		t.Errorf("max_turns = %+v, want 50 from the stage", st.Worker.MaxTurns)
+	if st.Worker.MaxTurns.Valid {
+		t.Errorf("max_turns = %+v before the invocation reports its budget, want unknown", st.Worker.MaxTurns)
+	}
+	// The invocation's effective budget (here a fabrik:extend-turns pre-grant of 2x
+	// the stage's 50) is what is reported, not the stage default.
+	e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 5, Turns: 0, Max: 100})
+	if st = status(t, e, "5"); !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 100 {
+		t.Errorf("max_turns = %+v, want the invocation's 100", st.Worker.MaxTurns)
 	}
 	if st.Attention.State != "working" {
 		t.Errorf("attention: %+v", st.Attention)
 	}
 
 	e.seedAPIItem(t, 6, "Implement")
+	// An incomplete stage with nothing gating it and no worker is waiting for
+	// dispatch, never idle (#2121 R3).
 	idle := status(t, e, "6")
-	if idle.Attention.State != "idle" {
-		t.Errorf("idle item: %+v", idle.Attention)
+	if idle.Attention.State != "waiting" || idle.Attention.Code != "waiting-for-dispatch" {
+		t.Errorf("dispatchable item: %+v", idle.Attention)
 	}
 	m := toJSON(t, idle)
 	for _, f := range []string{"as_of", "last_poll_attempt_at", "last_poll_success_at", "since_last_poll_success_seconds", "daemon_uptime_seconds"} {
@@ -299,6 +307,14 @@ func TestLocalAPIStatusPRBlockersAndComment(t *testing.T) {
 	e.store.Apply(itemstate.PRDetailsUpdated{Repo: "owner/repo", Number: 8, PRNumber: 20, State: "open"})
 	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 8, SHA: "abc"})
 	e.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "abc", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "failure"}})
+	// Raw cached check runs are not a verdict (#2122): ci stays unknown until
+	// the poll-side record exists.
+	if st := status(t, e, "8"); st.PR.CI.Valid {
+		t.Errorf("ci = %+v from cached runs alone, want unknown", st.PR.CI)
+	}
+	now := e.now()
+	e.store.Apply(itemstate.PRFactsObserved{Repo: "owner/repo", Number: 8, PRNumber: 20, Facts: itemstate.PRFacts{State: "open", HeadSHA: "abc", ObservedAt: now}})
+	e.store.Apply(itemstate.CIVerdictObserved{Repo: "owner/repo", Number: 8, Verdict: itemstate.CIVerdictRecord{Verdict: "red", HeadSHA: "abc", Failing: []string{"ci"}, ObservedAt: now}})
 
 	st := status(t, e, "8")
 	if st.PR.State != "linked" || !st.PR.Number.Valid || st.PR.Number.V != 20 {
@@ -725,6 +741,9 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no localapi source files found: %v", err)
 	}
+	// attention_input.go builds the classifier input the local API serves (#2120),
+	// so it is read-path source whatever its name says.
+	files = append(files, "attention_input.go")
 	forbidden := []string{"e.client", "e.readClient", "FetchLabelAppliedAt", "labelAppliedAt(", "store.Get(", "e.cache()", ".FetchItem(", "FetchProjectItem"}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -741,6 +760,44 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 			for _, bad := range forbidden {
 				if strings.Contains(line, bad) {
 					t.Errorf("%s:%d reaches a GitHub-capable path (%q): %s", f, i+1, bad, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
+// TestReadSideSourcesNeverRunThePollSideAnchorRecorder pins #2120 R3 ("no new
+// per-request GitHub calls") for every file that feeds the classifier on a
+// request or a channel tick: the GitHub time of a pending decision is recorded
+// by settleDecisionAnchors on the poll goroutine (decision_anchor.go) and only
+// read here, so none of these files may call the recorder or any labelAppliedAt
+// path (which falls back to a live FetchLabelAppliedAt).
+func TestReadSideSourcesNeverRunThePollSideAnchorRecorder(t *testing.T) {
+	var files []string
+	for _, pat := range []string{"localapi*.go", "channel_*.go"} {
+		m, err := filepath.Glob(pat)
+		if err != nil || len(m) == 0 {
+			t.Fatalf("no %s files found: %v", pat, err)
+		}
+		files = append(files, m...)
+	}
+	files = append(files, "attention_input.go")
+	forbidden := []string{"settleDecisionAnchors", "labelAppliedAt", "FetchLabelAppliedAt"}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, bad := range forbidden {
+				if strings.Contains(line, bad) {
+					t.Errorf("%s:%d runs poll-side anchor code on the read side (%q): %s", f, i+1, bad, strings.TrimSpace(line))
 				}
 			}
 		}

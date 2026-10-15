@@ -327,10 +327,6 @@ func TestReconcileTick_ZeroDriftCapturesMilestones(t *testing.T) {
 // they are not recorded as engine writes.
 func engineWriteReconcileEngine(t *testing.T, client *mockGitHubClient, labels ...string) (*Engine, *boardcache.CacheImpl, *chanSink, time.Time) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng, sink := channelEngineOn(t, eng, 0, nil)
 	t1 := time.Now().Add(-time.Hour).Truncate(time.Second)

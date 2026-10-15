@@ -27,6 +27,9 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	// never mistaken for a fresh one. Wall clock, not e.now(): the store stamps
 	// engine writes with time.Now() and SetClock only moves e.now().
 	fetchedAt := time.Now()
+	// factsAt stamps the overseer PR facts on the engine clock (#2122), so the
+	// read side compares like with like and a test clock stays coherent.
+	factsAt := e.now()
 	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		_, graphqlStats := e.client.RateLimitStats()
@@ -76,7 +79,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 
 		// Stage-membership guard: whether the item's column has a matching Fabrik stage
 		// that Fabrik actually dispatches work for. Unmanaged stages (e.g. Backlog) are
-		// treated as unconfigured here even though a Stage exists for them — dispatch
+		// not deep-fetched here even though a Stage exists for them — dispatch
 		// never touches them, so deep-fetching them would be wasted work (issue #778).
 		// The guard must come after newKeys[key]=true so unconfigured items are not
 		// falsely evicted from the store by the post-loop tombstoning pass (lines below).
@@ -87,12 +90,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if snapErr != nil {
 			// New item on board — skip entirely if not in a configured stage.
 			if !configuredStage {
-				// A parking column (Backlog) is still on the board: seed the card's
-				// identity and column so a later hand move out of it is a real
-				// column change (#2123) rather than a first sight. No deep fetch
-				// (#778) and no labels (LabelsAbsent): the first label-bearing
-				// population is the baseline.
-				if matchedStage != nil && matchedStage.Unmanaged {
+				// A parking column is still on the board: seed the card's identity
+				// and column so a later hand move out of it is a real column
+				// change (#2123) rather than a first sight. The predicate is the
+				// shared stages.IsParkingColumn — an unmanaged stage of any name,
+				// plus the legacy Backlog with no stage — so a card there is also
+				// announced as an arrival (#2187). No deep fetch (#778) and no
+				// labels (LabelsAbsent): the first label-bearing population is
+				// the baseline.
+				if stages.IsParkingColumn(e.cfg.Stages, pi.Status) {
 					e.store.Apply(itemstate.FromProbe{Inner: itemstate.IssueOpened{Item: gh.ProjectItem{
 						ID:             pi.ContentID,
 						ItemID:         pi.ItemID,
@@ -258,6 +264,28 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			}})
 		}
 
+		// The probe's linked-PR scalars become the overseer PR facts (#2122, ADR
+		// 2122): quiet (FromProbe + the non-wake PRFactsChanged flag), stamped
+		// with the time the probe query ran, and kept apart from the fields the
+		// gates read. A probe that carried no scalars (or no linked PR) writes
+		// nothing, so a fact is never defaulted.
+		if pf := pi.LinkedPRFacts; pf.Known && pi.LinkedPRNumber != 0 && !e.prFactsRefreshDisabledForTest {
+			e.store.Apply(itemstate.FromProbe{Inner: itemstate.PRFactsObserved{
+				Repo:     repo,
+				Number:   pi.Number,
+				PRNumber: pi.LinkedPRNumber,
+				Facts: itemstate.PRFacts{
+					State:          pf.State,
+					Draft:          pf.Draft,
+					Merged:         pf.Merged,
+					Mergeable:      pf.Mergeable,
+					MergeableState: pf.MergeableState,
+					HeadSHA:        pi.LinkedPRHeadSHA,
+					ObservedAt:     factsAt,
+				},
+			}})
+		}
+
 		// Existing item in unconfigured column: probe state updated above (keeps
 		// Status current for TUI and itemMayNeedWork), but deep-fetch is wasted work.
 		if !configuredStage {
@@ -265,7 +293,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 
 		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.
-		if cacheImpl.IsItemCacheFresh(repo, pi.Number, pi.EffectiveUpdatedAt) {
+		if cacheImpl.IsItemCacheFresh(repo, pi.Number, boardcache.EvidenceFromProbe(pi)) {
 			continue
 		}
 		e.logf(pi.Number, "cache", "probe: stale — deep-fetching\n")
@@ -286,6 +314,13 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Status:    pi.Status,
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
+
+			// The layer evidence rides along so ItemDeepFetched anchors each
+			// baseline to GitHub's own values (#2180).
+			IssueLayerUpdatedAt:    pi.IssueLayerUpdatedAt,
+			LinkedPRUpdatedAt:      pi.LinkedPRUpdatedAt,
+			IssueCommentTotal:      pi.IssueCommentTotal,
+			IssueCommentTotalKnown: pi.IssueCommentTotalKnown,
 		}
 		if cur, curErr := e.store.Get(repo, pi.Number); curErr == nil {
 			minimal.Status = cur.State().Status

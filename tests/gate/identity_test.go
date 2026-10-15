@@ -16,12 +16,14 @@ type fakeIdentity struct {
 	mu        sync.Mutex
 	logins    map[string]string // token -> login; a missing token fails
 	budgets   map[string]int    // token -> remaining
+	limits    map[string]int    // token -> limit (default 5000)
 	budgetErr error
 	mintErr   error
 	mintEmpty bool     // the mint "succeeds" with no token
 	block     bool     // Budget blocks until its context ends
 	resolves  []string // tokens ResolveLogin was asked about
 	mints     []string // bed dirs MintAppToken was asked about
+	probes    []string // tokens Budget was asked about
 }
 
 // mintedToken is what the fake mints; it must never reach the output.
@@ -37,17 +39,22 @@ func (f *fakeIdentity) ResolveLogin(_ context.Context, token string) (string, er
 	return "", errors.New("HTTP 401: Bad credentials")
 }
 
-func (f *fakeIdentity) Budget(ctx context.Context, token string) (int, string, error) {
+func (f *fakeIdentity) Budget(ctx context.Context, token string) (int, int, string, error) {
 	if f.block {
 		<-ctx.Done()
-		return 0, "", ctx.Err()
+		return 0, 0, "", ctx.Err()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.probes = append(f.probes, token)
 	if f.budgetErr != nil {
-		return 0, "", f.budgetErr
+		return 0, 0, "", f.budgetErr
 	}
-	return f.budgets[token], "2026-10-02T10:15:00Z", nil
+	limit := f.limits[token]
+	if limit == 0 {
+		limit = 5000
+	}
+	return f.budgets[token], limit, "2026-10-02T10:15:00Z", nil
 }
 
 func (f *fakeIdentity) MintAppToken(_ context.Context, bedDir string) (string, error) {
@@ -166,8 +173,8 @@ func TestOSIdentityOpsAreBoundedAndTokenScoped(t *testing.T) {
 				return Result{ExitCode: 1}
 			}
 			writeStdout(c, "arbeithand\n")
-		case strings.Contains(line, "rateLimit { remaining resetAt }"):
-			writeStdout(c, "4210 2026-10-02T10:15:00Z\n")
+		case strings.Contains(line, "rateLimit { limit remaining resetAt }"):
+			writeStdout(c, "5000 4210 2026-10-02T10:15:00Z\n")
 		}
 		return Result{}
 	}
@@ -180,9 +187,9 @@ func TestOSIdentityOpsAreBoundedAndTokenScoped(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Bad credentials") || strings.Contains(err.Error(), "tok-2") {
 		t.Errorf("a failure carries gh's error and never the token: %v", err)
 	}
-	rem, reset, err := ops.Budget(context.Background(), "tok-1")
-	if err != nil || rem != 4210 || reset != "2026-10-02T10:15:00Z" {
-		t.Errorf("budget: %d %q %v", rem, reset, err)
+	rem, limit, reset, err := ops.Budget(context.Background(), "tok-1")
+	if err != nil || rem != 4210 || limit != 5000 || reset != "2026-10-02T10:15:00Z" {
+		t.Errorf("budget: %d/%d %q %v", rem, limit, reset, err)
 	}
 	for _, c := range fe.callsNamed("gh") {
 		if !c.Session || c.Timeout != g.Cfg.GHAPITimeout || envValue(c.Env, "GH_TOKEN") == "" {
@@ -307,8 +314,8 @@ func TestLogIdentityBudget(t *testing.T) {
 		g.logIdentityBudget(context.Background(), Cell{Auth: "app", Train: "on"}, "start")
 		out := g.Out.(interface{ String() string }).String()
 		for _, want := range []string{
-			"== identity budget (leg: app/on, start): app:77 fabrik-bed[bot] — 4000 remaining, resets 2026-10-02T10:15:00Z ==",
-			"== identity budget (leg: app/on, start): user:alice — 3000 remaining, resets 2026-10-02T10:15:00Z ==",
+			"== identity budget (leg: app/on, start): app:77 fabrik-bed[bot] (engine) — 4000 remaining, resets 2026-10-02T10:15:00Z ==",
+			"== identity budget (leg: app/on, start): user:alice (harness) — 3000 remaining, resets 2026-10-02T10:15:00Z ==",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in:\n%s", want, out)
@@ -348,7 +355,7 @@ func TestLogIdentityBudget(t *testing.T) {
 		g := setup(t, fi)
 		g.logIdentityBudget(context.Background(), Cell{Auth: "app", Train: "on"}, "start")
 		out, errs := g.Out.(interface{ String() string }).String(), g.Err.(interface{ String() string }).String()
-		if strings.Contains(out, "9999") || !strings.Contains(errs, "no token for app:77") || !strings.Contains(out, "user:alice — 3000") {
+		if strings.Contains(out, "9999") || !strings.Contains(errs, "no token for app:77") || !strings.Contains(out, "user:alice (harness) — 3000") {
 			t.Errorf("out=%q err=%q", out, errs)
 		}
 	})
@@ -400,7 +407,7 @@ func TestRunLegIdentityBudgetAndBannerCheck(t *testing.T) {
 		}
 		out := g.Out.(interface{ String() string }).String()
 		for _, which := range []string{"start", "end"} {
-			if !strings.Contains(out, "== identity budget (leg: app/on, "+which+"): app:77 fabrik-bed[bot] — 4999 remaining") {
+			if !strings.Contains(out, "== identity budget (leg: app/on, "+which+"): app:77 fabrik-bed[bot] (engine) — 4999 remaining") {
 				t.Errorf("no %s line for the App:\n%s", which, out)
 			}
 		}
@@ -417,4 +424,52 @@ func TestRunLegIdentityBudgetAndBannerCheck(t *testing.T) {
 			t.Error("the suite must not run on an unscheduled identity")
 		}
 	})
+}
+
+// #2263: the limit is the real one when GitHub reports it, 5,000 otherwise.
+func TestParseBudget(t *testing.T) {
+	for _, c := range []struct {
+		in         string
+		rem, limit int
+		wantErr    bool
+	}{
+		{"5000 4210 2026-10-02T10:15:00Z", 4210, 5000, false},
+		{"12500 100 2026-10-02T10:15:00Z", 100, 12500, false},
+		{"null 4210 2026-10-02T10:15:00Z", 4210, 5000, false},
+		{"0 4210 2026-10-02T10:15:00Z", 4210, 5000, false},
+		{"5000 junk x", 0, 0, true},
+	} {
+		rem, limit, _, err := parseBudget(c.in)
+		if (err != nil) != c.wantErr || rem != c.rem || limit != c.limit {
+			t.Errorf("parseBudget(%q) = %d/%d err=%v", c.in, rem, limit, err)
+		}
+	}
+}
+
+// #2263: an app cell charges its App as the engine and the bed token's user as
+// the harness; a pat cell charges the one user, as the engine (exclusive wins
+// the key) — and the budget line says both. Without the split every identity is
+// engine.
+func TestIdentitySetRoles(t *testing.T) {
+	g, _, _, _ := testGate(t)
+	g.Cfg.BedToken = "token-a"
+	mustWrite(t, g.Cfg.TestBed+"/.env", "FABRIK_TOKEN=token-a\nE2E_APP_INSTALLATION_ID=77\n")
+	g.login = "alice"
+	roles := func(auth string) string {
+		var parts []string
+		for _, id := range g.identitySet(auth) {
+			parts = append(parts, id.Key+"="+id.roleLabel())
+		}
+		return strings.Join(parts, ",")
+	}
+	if got := roles("app"); got != "app:77=engine,user:alice=harness" {
+		t.Errorf("app roles: %s", got)
+	}
+	if got := roles("pat"); got != "user:alice=engine+harness" {
+		t.Errorf("pat roles: %s", got)
+	}
+	g.roleSplitDisabledForTest = true
+	if got := roles("app"); got != "app:77=engine,user:alice=engine" {
+		t.Errorf("without the split every identity is engine: %s", got)
+	}
 }

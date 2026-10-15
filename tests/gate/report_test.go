@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -201,6 +202,190 @@ func TestExplicitSHAIsUsedVerbatim(t *testing.T) {
 		got, code := g.resolveSHA(t.Context(), "coverage", sha, true)
 		if code != 0 || got != sha {
 			t.Errorf("resolveSHA(%q, verbatim) = %q, %d; want it returned unchanged", sha, got, code)
+		}
+	}
+}
+
+// writeFile writes one named file into an archived invocation directory.
+func writeFile(t *testing.T, archive, cell, inv, name, body string) {
+	t.Helper()
+	dir := filepath.Join(archive, cell, inv)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The file names come from the writer's own helpers, so a rename there breaks this test
+// instead of silently emptying the report (the #2257 failure mode).
+func phaseFile(phase string, retry int) string {
+	base := "go-test.json"
+	if retry > 0 {
+		base = filepath.Base(retryLogPath(base, retry))
+	}
+	return filepath.Base(phaseLogPath(base, Phase{Name: phase}))
+}
+
+const phasedInv = "20260101T000000Z"
+
+// Since #1977 a leg archives one stream per phase and no bare go-test.json.
+func TestBuildRuntimeReportReadsPhasedInvocationWithRetry(t *testing.T) {
+	archive := t.TempDir()
+	inconclusive := `{"Action":"skip","Package":"p","Test":"TestSeeded","Elapsed":3,"Output":"E2E-INCONCLUSIVE: lag"}` + "\n"
+	writeFile(t, archive, "app-on", phasedInv, phaseFile("shared", 0), reportEv("pass", "TestFull", 600)+inconclusive)
+	writeFile(t, archive, "app-on", phasedInv, phaseFile("default-base-train", 0), reportEv("pass", "TestTrain", 50))
+	writeFile(t, archive, "app-on", phasedInv, phaseFile("exclusive", 0), reportEv("pass", "TestExcl", 70))
+	// TestSeeded first ran in the shared phase; the retry re-ran it in its own phase stream.
+	writeFile(t, archive, "app-on", phasedInv, phaseFile("shared", 1), reportEv("pass", "TestSeeded", 240))
+
+	reg := testRegistry()
+	reg.Tests = append(reg.Tests, registry.Entry{Name: "TestTrain"}, registry.Entry{Name: "TestExcl"})
+	rep, err := BuildRuntimeReport("s", archive, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]RuntimeRow{}
+	for _, r := range rep.Rows {
+		byName[r.Test] = r
+	}
+	for name, want := range map[string]float64{"TestFull": 600, "TestTrain": 50, "TestExcl": 70, "TestSeeded": 240} {
+		if got := byName[name].Seconds["app-on"]; got != want {
+			t.Errorf("%s app-on = %v, want %v", name, got, want)
+		}
+	}
+	if len(rep.Unmeasured) != 1 || rep.Unmeasured[0] != "TestNeverRan" {
+		t.Fatalf("unmeasured = %v, want only TestNeverRan", rep.Unmeasured)
+	}
+}
+
+func TestReadInvocationEventsRetryOrderingAndLayouts(t *testing.T) {
+	skipEv := func(test string) string {
+		return `{"Action":"skip","Package":"p","Test":"` + test + `","Elapsed":1,"Output":"E2E-INCONCLUSIVE: x"}` + "\n"
+	}
+	elapsed := func(t *testing.T, evs []Event, test string) float64 {
+		t.Helper()
+		for _, tm := range Timings(evs) {
+			if tm.Test == test {
+				if tm.Result == "skip" {
+					return -1
+				}
+				return tm.Elapsed
+			}
+		}
+		return -2
+	}
+
+	t.Run("numeric order: retry-10 after retry-9, with a gap", func(t *testing.T) {
+		a := t.TempDir()
+		writeFile(t, a, "c", "i", "go-test.shared.json", skipEv("TestA"))
+		writeFile(t, a, "c", "i", "go-test.retry-9.shared.json", reportEv("pass", "TestA", 9))
+		writeFile(t, a, "c", "i", "go-test.retry-10.shared.json", reportEv("pass", "TestA", 10))
+		evs, err := readInvocationEvents(filepath.Join(a, "c", "i"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := elapsed(t, evs, "TestA"); got != 10 {
+			t.Fatalf("TestA = %v, want retry-10's 10 (lexical order would pick retry-9)", got)
+		}
+	})
+	t.Run("mixed layout and cross-phase retry", func(t *testing.T) {
+		a := t.TempDir()
+		writeFile(t, a, "c", "i", "go-test.json", reportEv("pass", "TestA", 1)+skipEv("TestB"))
+		writeFile(t, a, "c", "i", "go-test.exclusive.json", reportEv("pass", "TestC", 3))
+		writeFile(t, a, "c", "i", "go-test.retry-1.exclusive.json", reportEv("pass", "TestB", 2))
+		evs, err := readInvocationEvents(filepath.Join(a, "c", "i"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for test, want := range map[string]float64{"TestA": 1, "TestB": 2, "TestC": 3} {
+			if got := elapsed(t, evs, test); got != want {
+				t.Errorf("%s = %v, want %v", test, got, want)
+			}
+		}
+	})
+	t.Run("no stream yields nil events", func(t *testing.T) {
+		a := t.TempDir()
+		writeFile(t, a, "c", "i", "phases.json", "{}")
+		evs, err := readInvocationEvents(filepath.Join(a, "c", "i"))
+		if err != nil || evs != nil {
+			t.Fatalf("events = %v, err = %v; want nil, nil", evs, err)
+		}
+	})
+	t.Run("classifyStreamName", func(t *testing.T) {
+		for name, want := range map[string]struct {
+			n  int
+			ok bool
+		}{
+			"go-test.json": {0, true}, "go-test.shared.json": {0, true}, "go-test.default-base-train.json": {0, true},
+			"go-test.retry-2.json": {2, true}, "go-test.retry-12.exclusive.json": {12, true},
+			"phases.json": {0, false}, "go-test.log": {0, false},
+		} {
+			if n, ok := classifyStreamName(name); n != want.n || ok != want.ok {
+				t.Errorf("classifyStreamName(%q) = %d, %v; want %d, %v", name, n, ok, want.n, want.ok)
+			}
+		}
+	})
+}
+
+func TestReportPrintsPhaseWallClock(t *testing.T) {
+	archive := t.TempDir()
+	writeFile(t, archive, "app-on", phasedInv, phaseFile("shared", 0), reportEv("pass", "TestFull", 600))
+	writeFile(t, archive, "app-on", phasedInv, "phases.json", `{"label":"app/on","phases":[
+		{"name":"shared","tests":12,"parallel":"4","wall_ns":3720000000000},
+		{"name":"exclusive","tests":3,"parallel":"1","wall_ns":600000000000}],
+		"retry":{"name":"retry","tests":1,"parallel":"1","wall_ns":90000000000}}`)
+	// A resume pass records only the phases it re-ran; it is listed separately.
+	writeFile(t, archive, "app-on", "20260102T000000Z", "phases.json", `{"label":"app/on","phases":[{"name":"exclusive","tests":3,"parallel":"1","wall_ns":300000000000}]}`)
+	// Malformed: noted, never fatal. Absent (pat-off): no entry.
+	writeFile(t, archive, "pat-on", phasedInv, "phases.json", "{not json")
+	writeFile(t, archive, "pat-off", phasedInv, phaseFile("shared", 0), reportEv("pass", "TestFull", 5))
+
+	rep, err := BuildRuntimeReport("s", archive, testRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Phases) != 3 {
+		t.Fatalf("phases = %+v, want 3 entries (2 app-on invocations + the malformed pat-on)", rep.Phases)
+	}
+	out := rep.Format()
+	for _, want := range []string{
+		"phase wall-clock", "app-on  " + phasedInv, "20260102T000000Z",
+		"shared", "12 test(s)", "-parallel=4", "wall 1h2m0s", "wall 10m0s", "retry", "wall 1m30s",
+		"pat-on  " + phasedInv + "  phases.json malformed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Format() missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "pat-off  ") {
+		t.Errorf("a cell with no phases.json must print no phase entry:\n%s", out)
+	}
+	data, err := json.Marshal(rep)
+	if err != nil || !strings.Contains(string(data), `"phases"`) {
+		t.Fatalf("JSON lacks phases: %s, %v", data, err)
+	}
+	// No phases.json anywhere: no section at all.
+	if strings.Contains((RuntimeReport{SHA: "s"}).Format(), "phase wall-clock") {
+		t.Error("a report without phases.json must print no phase section")
+	}
+}
+
+func TestReportCmdAgainstAPhasedFakeArchive(t *testing.T) {
+	root := t.TempDir()
+	sha := strings.Repeat("f", 40)
+	l := &Ledger{Root: root, SHA: sha}
+	writeFile(t, l.ArchiveDir(), "app-on", phasedInv, phaseFile("shared", 0), reportEv("pass", "TestSmokeSingleRepoFullPipeline", 1200))
+	writeFile(t, l.ArchiveDir(), "app-on", phasedInv, "phases.json", `{"label":"app/on","phases":[{"name":"shared","tests":1,"parallel":"4","wall_ns":1200000000000}]}`)
+	var out, errb strings.Builder
+	g := NewGate(Config{CoverageDir: root}, &out, &errb)
+	if code := g.ReportCmd(t.Context(), []string{"--sha", sha}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, want := range []string{"1200  TestSmokeSingleRepoFullPipeline", "phase wall-clock", "wall 20m0s"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report missing %q:\n%s", want, out.String())
 		}
 	}
 }

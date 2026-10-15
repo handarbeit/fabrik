@@ -1953,7 +1953,8 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 	var headBefore string
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
-		tag: "review-reinvoke",
+		tag:  "review-reinvoke",
+		kind: itemstate.WorkerKindReviewReinvoke,
 		// #1812: an invocation that provably never ran (usage limit, api_error,
 		// apiKeyHelper) is refunded by dispatchReinvoke, which also skips the
 		// after hook below. blockedCharged mirrors handleReviewGate's

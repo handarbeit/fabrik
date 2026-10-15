@@ -40,6 +40,9 @@ func TestDriftCheck(t *testing.T) {
 		{"engine diff invalidates", true, "tests/e2e/foo_test.go\nengine/poll.go\n", "", false, []string{"engine/poll.go"}, ""},
 		{"untracked engine file invalidates", true, "tests/e2e/x.go\n", "engine/new.go\n", false, []string{"engine/new.go"}, ""},
 		{"untracked test file is fine", true, "", "tests/e2e/new_test.go\n", true, nil, ""},
+		{"sim script and dev guide are fine", true, "scripts/sim/run.sh\nCLAUDE.md\n", "", true, nil, ""},
+		{"other docs and embedded docs invalidate", true, "docs/USER_GUIDE.md\nplugin/fabrik-workflows/skills/review/SKILL.md\ntests/sim/x_test.go\n", "", false,
+			[]string{"docs/USER_GUIDE.md", "plugin/fabrik-workflows/skills/review/SKILL.md", "tests/sim/x_test.go"}, ""},
 		{"similar prefix is not allowed", true, "tests/e2e2/x.go\nscripts/e2e-other/y\n", "", false, []string{"scripts/e2e-other/y", "tests/e2e2/x.go"}, ""},
 		{"unreachable sha fails closed", false, "", "", false, nil, "git fetch"},
 	}

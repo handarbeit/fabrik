@@ -175,7 +175,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		}
 		readOnly := m["annotations"].(map[string]any)["readOnlyHint"] == true
 		switch m["name"] {
-		case ToolSubscribe, ToolUnsubscribe, ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance:
+		case ToolSubscribe, ToolUnsubscribe, ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked:
 			if readOnly {
 				t.Errorf("tool %v changes state and must not be annotated read-only", m["name"])
 			}
@@ -185,7 +185,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_advance,fabrik_clear_claude_limit" {
+	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_situation,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_advance,fabrik_move_parked,fabrik_clear_claude_limit" {
 		t.Errorf("tools = %v", names)
 	}
 

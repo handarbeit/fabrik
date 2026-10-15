@@ -11,7 +11,8 @@ import (
 
 const (
 	// skillDeprecatedType is the warnings-panel type of the once-per-startup
-	// bare-reference deprecation notice (ADR 2137, FR-004).
+	// deprecated-reference notice (ADR 2137, FR-004; #2140 widened it from the
+	// bare form to the pre-rename "fabrik:fabrik-*" form too).
 	skillDeprecatedType = "skill_reference_deprecated"
 	// skillUnresolvedType is the panel type of a reference no loaded plugin
 	// provides (FR-005); the subject is "<stage>.<key>".
@@ -20,7 +21,7 @@ const (
 
 // reportStageSkills checks every skill-valued key of every configured stage
 // against the loaded plugins and reports the result to the log and the
-// warnings panel: one deprecation notice listing all bare references, and one
+// warnings panel: one deprecation notice listing all bare and pre-rename references, and one
 // warning per unresolvable reference. Both are Reconciled, so a fixed
 // configuration clears them. The check runs to completion before either
 // Reconcile, as warnings.Reconcile requires.
@@ -28,7 +29,7 @@ func (e *Engine) reportStageSkills(stageList []*stages.Stage, w io.Writer) {
 	if e.skillResolver == nil {
 		return
 	}
-	var bare []string
+	var deprecatedRefs []string
 	var unresolved []warnings.Condition
 	for _, s := range stageList {
 		for _, kv := range stageSkillRefs(s, nil) {
@@ -45,20 +46,20 @@ func (e *Engine) reportStageSkills(stageList []*stages.Stage, w io.Writer) {
 			if len(res.Others) > 0 {
 				entry += fmt.Sprintf(" (also provided by %s; the base plugin or first loaded wins)", strings.Join(res.Others, ", "))
 			}
-			bare = append(bare, entry)
+			deprecatedRefs = append(deprecatedRefs, entry)
 		}
 	}
 
 	var deprecated []warnings.Condition
-	if len(bare) > 0 {
-		list := strings.Join(bare, "; ")
+	if len(deprecatedRefs) > 0 {
+		list := strings.Join(deprecatedRefs, "; ")
 		deprecated = append(deprecated, warnings.Condition{
-			Subject: "bare",
+			Subject: "deprecated",
 			Level:   warnings.LevelNotice,
-			Title:   fmt.Sprintf("%d stage skill reference(s) use the deprecated bare form", len(bare)),
-			Detail: fmt.Sprintf("These references name a skill without its plugin and were resolved against the loaded plugins: %s.\n\n"+
-				"Fix: write them as <plugin>:<skill> in the stage YAML; `fabrik upgrade` migrates them (see docs/USER_GUIDE.md).", list),
-			LogLine: fmt.Sprintf("stage skill references use the deprecated bare form (resolved: %s) — write them as <plugin>:<skill>; `fabrik upgrade` migrates them. See docs/USER_GUIDE.md.", list),
+			Title:   fmt.Sprintf("%d stage skill reference(s) use a deprecated form", len(deprecatedRefs)),
+			Detail: fmt.Sprintf("These references name a skill without its plugin (bare), or use the pre-rename form fabrik:fabrik-<stage> of the base plugin now called fabrik-stages, and were resolved against the loaded plugins: %s.\n\n"+
+				"Fix: run `fabrik upgrade`, which rewrites them to <plugin>:<skill> (see docs/USER_GUIDE.md).", list),
+			LogLine: fmt.Sprintf("stage skill references use a deprecated form — bare, or the pre-rename fabrik:fabrik-<stage> (resolved: %s) — run `fabrik upgrade` to rewrite them. See docs/USER_GUIDE.md.", list),
 		})
 	}
 	if err := warnings.Reconcile(w, skillDeprecatedType, deprecated); err != nil {

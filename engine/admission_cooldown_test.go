@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
 // Tests for #2096 (ADR 2096): an expired cooldown admits an item once and is then
-// consumed; the paused-item backstop fetches once per baseline; the merge gate
+// consumed; a paused item reads through the cache (#2180); the merge gate
 // records a short re-check cooldown for transient claims. Every time value is
 // derived from one stubClock (never a mix of time.Now() and the stub), so a test
 // cannot pass vacuously on clock-domain skew.
@@ -174,26 +175,47 @@ func TestAdmission_PeriodicReCheckRecursEveryInterval(t *testing.T) {
 	}
 }
 
-// FR-006 / SC-003: across 20 polls with an unchanged baseline the paused backstop
-// makes at most one live fetch; a fresh self-write earns exactly one more; a failed
-// fetch records nothing and is retried. Every poll sees an expired cooldown — the
-// worst case the old sticky expiry produced.
-func TestAdmission_PausedBackstopFetchesOncePerBaseline(t *testing.T) {
-	// The real fetch re-anchors the baseline to GitHub's updatedAt, which is not the
-	// self-write instant; a mock that leaves it alone could not tell "baseline at
-	// decision time" from "baseline after the fetch".
+// FR-006 / SC-003 under the #2180 rule: a paused item admitted by an expired
+// periodic cooldown on every poll reads through the board cache, so across 20
+// polls with an unchanged board it costs zero live fetches; a reply masked by a
+// self-write earns exactly one, after which the cache is settled again; a failed
+// fetch is not recorded as served and is retried at the next admission. Every
+// poll sees an expired cooldown — the worst case the old sticky expiry produced.
+func TestAdmission_PausedReadsThroughCache(t *testing.T) {
 	var fetchErr error
 	client := &mockGitHubClient{}
 	eng, start := cooldownAdmissionEngine(t, client)
-	updatedAt := start.Add(-time.Second)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	updatedAt := start.Add(-time.Minute)
+	total := 1 // GitHub's issue comment total
 	client.fetchItemDetailsFn = func(it *gh.ProjectItem) error {
 		if fetchErr != nil {
 			return fetchErr
 		}
 		it.UpdatedAt = updatedAt
+		it.Comments = nil
+		for i := 1; i <= total; i++ {
+			it.Comments = append(it.Comments, gh.Comment{DatabaseID: i})
+		}
 		return nil
 	}
-	item := gh.ProjectItem{Number: 75, Title: "Just paused", Status: "Research", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}}
+	board := func() *gh.ProjectBoard {
+		return cooldownAdmissionBoard(gh.ProjectItem{
+			Number: 75, Repo: cooldownTestRepo, Title: "Just paused", Status: "Research",
+			Labels:    []string{"fabrik:paused", "fabrik:awaiting-input"},
+			UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
+			IssueCommentTotal: total, IssueCommentTotalKnown: true,
+		})
+	}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: cooldownTestRepo, Number: 75, FreshState: gh.ProjectItem{
+		Number: 75, Repo: cooldownTestRepo, Status: "Research",
+		Labels:    []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments:  []gh.Comment{{DatabaseID: 1}},
+		UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
+		IssueCommentTotal: 1, IssueCommentTotalKnown: true,
+	}})
 	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75}) // the pause write
 
 	step := 0
@@ -204,7 +226,7 @@ func TestAdmission_PausedBackstopFetchesOncePerBaseline(t *testing.T) {
 			now := start.Add(time.Duration(step) * 10 * time.Second)
 			eng.SetClock(stubClock{t: now})
 			eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 75, Reason: "periodic-re-eval", Until: now.Add(-time.Second)})
-			cands, _ := eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{}, map[string]bool{})
+			cands, _ := eng.selectDeepFetchCandidates(board(), "", map[string]bool{}, map[string]bool{})
 			if fetchErr == nil && len(cands) != 1 {
 				t.Fatalf("poll %d: paused item must stay a candidate (#1379), got %d", step, len(cands))
 			}
@@ -212,28 +234,29 @@ func TestAdmission_PausedBackstopFetchesOncePerBaseline(t *testing.T) {
 		return fetchCount(client) - before
 	}
 
-	if got := pollN(20); got != 1 {
-		t.Fatalf("20 polls, unchanged baseline: %d backstop fetches, want 1", got)
+	if got := pollN(20); got != 0 {
+		t.Fatalf("20 polls, unchanged board: %d live fetches, want 0", got)
 	}
-	// A new self-write is a new baseline that may mask a new reply: one more fetch.
+	// A human replies just before the engine's next self-write: the comment total
+	// moves while no updatedAt does.
+	total = 2
 	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75})
 	if got := pollN(20); got != 1 {
-		t.Fatalf("20 polls after a fresh self-write: %d backstop fetches, want 1", got)
+		t.Fatalf("20 polls after a masked reply: %d live fetches, want 1", got)
 	}
-	// A failed fetch must not be recorded as served for the new baseline. (The
+	// A failed fetch records nothing: the cache stays stale, so the masked
+	// comment is still found at the next admission that can reach GitHub. (The
 	// retry is not the next poll: admission consumed the expiry and re-armed
-	// periodic-re-eval, so it comes at the next periodic admission, about
-	// githubRecheckInterval later, or sooner on an observer-driven change.)
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75})
-	snap, _ := eng.store.Get(cooldownTestRepo, 75)
-	newBaseline := snap.State().LastSeenSourceUpdatedAt
+	// periodic-re-eval, and the failure backoff holds the item off.)
+	total = 3
 	fetchErr = errors.New("boom")
 	if got := pollN(1); got != 1 {
-		t.Fatalf("failing backstop fetch: %d calls, want 1", got)
+		t.Fatalf("failing fetch: %d calls, want 1", got)
 	}
-	snap, _ = eng.store.Get(cooldownTestRepo, 75)
-	if snap.PausedBackstopBaseline().Equal(newBaseline) {
-		t.Error("a failed backstop fetch was recorded as served for the new baseline")
+	snap, _ := eng.store.Get(cooldownTestRepo, 75)
+	b := board().Items[0]
+	if cache.IsItemCacheFresh(cooldownTestRepo, 75, boardcache.EvidenceFromItem(&b)) {
+		t.Errorf("a failed fetch must leave the cache stale (baseline %v)", snap.State().LastSeenSourceUpdatedAt)
 	}
 }
 

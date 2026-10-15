@@ -71,6 +71,8 @@ disk, not from what the binary expects.
 - **Shipped defaults are written qualified** (`fabrik:fabrik-<stage>`), so a fresh `fabrik
   init` starts without a deprecation notice. Existing configuration is untouched;
   rewriting it and moving customisations is `fabrik upgrade`'s job (#2139).
+  *(Amended by ADR 2140: the base plugin is now `fabrik-stages` and defaults are
+  written `fabrik-stages:<stage>`.)*
 
 ## Consequences
 
@@ -88,4 +90,4 @@ disk, not from what the binary expects.
 ## Non-goals
 
 - Resolving skills from the project's `.claude/skills/` (#969).
-- Detecting a skill present on disk that fails to register at runtime (#2138).
+- Detecting a skill present on disk that fails to register at runtime — see ADR 2138, which pauses the item instead of this ADR's self-healing shape.

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // The status-line writer (#2048, ADR 2048): one general, engine-wide writer
@@ -86,6 +87,19 @@ func (e *Engine) lastRunSpec() displayFieldSpec {
 	return displayFieldSpec{"last-run", "project_fields.last_run", displayText, e.cfg.LastRunField}
 }
 
+// displayFieldOutcome is how a display field's lookup ended. It feeds only the
+// operator warnings panel (display_field_warnings.go); the writer itself keys
+// off fieldID.
+type displayFieldOutcome int
+
+const (
+	displayUnresolved displayFieldOutcome = iota // not looked up yet, or the lookup failed
+	displayFound
+	displayAbsent   // the project has no field of that name
+	displayMismatch // the name is taken by a field of another type
+	displayOff      // disabled by project_fields.<key>: off
+)
+
 // displayFieldState is one display field's writer state, owned by the Engine.
 // It is in memory only and never read to make a decision: last exists solely
 // to skip a write that would change nothing.
@@ -96,6 +110,7 @@ type displayFieldState struct {
 	projectID string // project the field was resolved on
 	fieldID   string // "" = feature off or field missing / wrong type
 	last      map[string]string
+	outcome   displayFieldOutcome // how the lookup ended (panel only; never read to decide a write)
 
 	// lookupMu serialises field lookups so concurrent first writes make one
 	// request, and guards the failure bookkeeping below.
@@ -130,13 +145,19 @@ func (e *Engine) lookupDisplayField(spec displayFieldSpec, projectID string) (st
 	return f.ID, nil
 }
 
+// lookupFailureKey is the warnings-panel key of a failed lookup of this field.
+func lookupFailureKey(spec displayFieldSpec) string {
+	return displayFieldLookupType + ":" + spec.label
+}
+
 // resolveDisplayField looks the configured field up on the project once and
 // logs the single startup line when the feature is unavailable. It is safe to
-// call repeatedly; only a successful lookup (found or definitively absent) is
-// final, so a transient API error at startup is retried lazily by a later
-// write rather than disabling the feature for the process lifetime. Failed
-// lookups are rate-limited to one per statusLineLookupRetry and warned about
-// once per outage.
+// call repeatedly; only a successful lookup (found, definitively absent or of
+// another type) is final, so a transient API error at startup is retried
+// lazily by a later write rather than disabling the feature for the process
+// lifetime. Failed lookups are rate-limited to one per statusLineLookupRetry and
+// reported to the warnings panel once per outage (#2218); a later successful
+// lookup, or the field being switched off, resolves the entry.
 func (e *Engine) resolveDisplayField(spec displayFieldSpec, s *displayFieldState, projectID string) {
 	s.lookupMu.Lock()
 	defer s.lookupMu.Unlock()
@@ -149,7 +170,8 @@ func (e *Engine) resolveDisplayField(spec displayFieldSpec, s *displayFieldState
 	}
 
 	if spec.name == "" {
-		e.finishDisplayFieldResolve(spec, s, projectID, "", "disabled by "+spec.cfgKey+": off")
+		e.resolveLookupFailure(spec)
+		e.finishDisplayFieldResolve(spec, s, projectID, "", displayOff, "disabled by "+spec.cfgKey+": off")
 		return
 	}
 	if projectID == "" {
@@ -160,25 +182,60 @@ func (e *Engine) resolveDisplayField(spec displayFieldSpec, s *displayFieldState
 		return
 	}
 	id, err := e.lookupDisplayField(spec, projectID)
+	var mismatch *gh.FieldTypeMismatchError
+	if errors.As(err, &mismatch) {
+		// The name exists but is not the right type: a definitive answer, not a
+		// failed lookup. repair-board never writes such a field.
+		s.lookupFailedAt = time.Time{}
+		s.lookupWarned = false
+		e.resolveLookupFailure(spec)
+		e.finishDisplayFieldResolve(spec, s, projectID, "", displayMismatch,
+			fmt.Sprintf("the project board's %q field is not a %s field (%v)", spec.name, spec.kind, mismatch))
+		return
+	}
 	if err != nil {
 		s.lookupFailedAt = e.now()
 		if !s.lookupWarned { // once per outage, not once per retry
 			s.lookupWarned = true
-			e.logf(0, "startup", "warning: could not look up the %q %s field: %v — it is not written until this succeeds (retrying every %s)\n", spec.name, spec.label, err, statusLineLookupRetry)
+			e.reportLookupFailure(spec, err)
 		}
 		return
 	}
 	s.lookupFailedAt = time.Time{}
 	s.lookupWarned = false
+	e.resolveLookupFailure(spec)
 	if id == "" {
-		e.finishDisplayFieldResolve(spec, s, projectID, "",
+		e.finishDisplayFieldResolve(spec, s, projectID, "", displayAbsent,
 			fmt.Sprintf("no %s field named %q on the project board (create one to enable it)", spec.kind, spec.name))
 		return
 	}
-	e.finishDisplayFieldResolve(spec, s, projectID, id, "")
+	e.finishDisplayFieldResolve(spec, s, projectID, id, displayFound, "")
 }
 
-func (e *Engine) finishDisplayFieldResolve(spec displayFieldSpec, s *displayFieldState, projectID, fieldID, why string) {
+// reportLookupFailure records a failed field lookup in the warnings panel (and
+// logs it, through the one Report call). The fingerprint is stable so a
+// dismissal outlives the changing error text.
+func (e *Engine) reportLookupFailure(spec displayFieldSpec, err error) {
+	if rerr := warnings.Report(e.warnWriter("startup"), warnings.Condition{
+		Type:        displayFieldLookupType,
+		Subject:     spec.label,
+		Title:       fmt.Sprintf("Could not look up the %q %s field", spec.name, spec.label),
+		Detail:      fmt.Sprintf("%v\n\nThe field is not written until the lookup succeeds (retrying every %s).", err, statusLineLookupRetry),
+		Fingerprint: spec.label + ":lookup-failed",
+	}); rerr != nil {
+		e.logf(0, "startup", "recording %s lookup warning: %v\n", spec.label, rerr)
+	}
+}
+
+// resolveLookupFailure clears a lookup-failure entry left by an earlier outage
+// (possibly by a previous process) once the lookup has an answer.
+func (e *Engine) resolveLookupFailure(spec displayFieldSpec) {
+	if err := warnings.Resolve(lookupFailureKey(spec)); err != nil {
+		e.logf(0, "startup", "clearing %s: %v\n", lookupFailureKey(spec), err)
+	}
+}
+
+func (e *Engine) finishDisplayFieldResolve(spec displayFieldSpec, s *displayFieldState, projectID, fieldID string, outcome displayFieldOutcome, why string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.attempted {
@@ -187,6 +244,7 @@ func (e *Engine) finishDisplayFieldResolve(spec displayFieldSpec, s *displayFiel
 	s.attempted = true
 	s.projectID = projectID
 	s.fieldID = fieldID
+	s.outcome = outcome
 	if fieldID == "" && !s.logged {
 		s.logged = true
 		e.logf(0, "startup", "%s field unavailable — %s; it will not be written\n", spec.label, why)
@@ -284,11 +342,11 @@ func (e *Engine) writeDisplayField(spec displayFieldSpec, s *displayFieldState, 
 	s.last[key] = value
 	s.mu.Unlock()
 
-	// The write bumps the project item's updatedAt; advance the staleness
-	// baseline like every other self-write (#1090) so the probe does not
-	// re-fetch the item for our own display write.
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	// Deliberately no SelfWriteObserved here (#2180): the board and probe
+	// queries discount a project-item bump explained by a display field's own
+	// updatedAt (projectItemUpdatedAt, #2048/#2049), so this write moves no
+	// updatedAt the cache compares and there is nothing to suppress. Anchoring
+	// the baseline would only hide a concurrent external change.
 }
 
 // truncateStatusLine caps line at statusLineMaxLen characters, counting

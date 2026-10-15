@@ -503,6 +503,9 @@ type StageAttempted struct {
 	Number    int
 	StageName string
 	At        time.Time
+	// Slice marks the invocation as a time slice (turn-cap or max_wall_time
+	// stop): the retry backoff is skipped for the next dispatch (#2232).
+	Slice bool
 }
 
 func (StageAttempted) isMutation()       {}
@@ -792,19 +795,6 @@ type ExpiredCooldownsConsumed struct {
 func (ExpiredCooldownsConsumed) isMutation()       {}
 func (m ExpiredCooldownsConsumed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// PausedBackstopServed records the staleness baseline (LastSeenSourceUpdatedAt)
-// at which the paused-item backstop (#1944) last completed a live fetch, so the
-// backstop fetches at most once per baseline value (#2096). Idempotent; in memory
-// only; wakes nothing.
-type PausedBackstopServed struct {
-	Repo     string
-	Number   int
-	Baseline time.Time
-}
-
-func (PausedBackstopServed) isMutation()       {}
-func (m PausedBackstopServed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
-
 // LabelAppliedAtRecorded records the time the engine itself applied Label to
 // this issue (record-at-write, #1314). Always overwrites any prior entry for
 // the same label — a genuine re-application (applied → removed → re-applied)
@@ -847,31 +837,168 @@ func (m WorkerPIDSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 // the goroutine is started, closing the window between goroutine launch and
 // LocalLockAcquired (which fires only after the GitHub lock label is acquired).
 // LocalLockAcquired overwrites the placeholder with full details.
+//
+// Queued (#2121) marks a worker that has been dispatched but holds no worker slot
+// yet; QueuedSince is when it began waiting. WorkerSlotAcquired clears it. The
+// handle is non-nil either way: it is the claim on the item.
 type WorkerEntered struct {
-	Repo      string
-	Number    int
-	StageName string
-	StartedAt time.Time
+	Repo        string
+	Number      int
+	StageName   string
+	StartedAt   time.Time
+	Kind        string
+	Trigger     string
+	Queued      bool
+	QueuedSince time.Time
 }
 
 func (WorkerEntered) isMutation()       {}
 func (m WorkerEntered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// WorkerRefreshed replaces the Worker handle with a fresh one (StartedAt and
-// LastSignAt reset to StartedAt) without touching Lock. A reinvoke applies it
-// once it holds a semaphore slot and a ready repo, so the PID<=0 stale-worker
-// detector (#1303/#1779) measures from then rather than from dispatch. Unlike
-// LocalLockAcquired it claims no lock: Lock mirrors the fabrik:locked:<id> label,
-// which only stage dispatch applies (#2179, ADR 2179).
-type WorkerRefreshed struct {
-	Repo      string
-	Number    int
-	StageName string
-	StartedAt time.Time
+// WorkerSlotAcquired records that a queued worker now holds a worker slot (#2121):
+// Queued is cleared and StartedAt/LastSignAt are re-stamped to At, so the PID<=0
+// stale-worker detector and the reported start time measure from the slot, not
+// from dispatch. It claims no lock (Lock mirrors the fabrik:locked:<id> label,
+// which only stage dispatch applies, #2179, ADR 2179). It carries WorkerChanged
+// only — never WorkerLifecycleChanged, so it cannot wake the poll. A no-op when
+// the worker has already exited.
+type WorkerSlotAcquired struct {
+	Repo   string
+	Number int
+	At     time.Time
 }
 
-func (WorkerRefreshed) isMutation()       {}
-func (m WorkerRefreshed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+func (WorkerSlotAcquired) isMutation()       {}
+func (m WorkerSlotAcquired) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerKindSet sets the live worker's kind (and trigger) (#2121). It only
+// replaces an empty, stage-run or comment-review kind, so a comment review
+// started inside a reinvoke worker never overrides the reinvoke kind. A no-op
+// when there is no worker.
+type WorkerKindSet struct {
+	Repo    string
+	Number  int
+	Kind    string
+	Trigger string
+}
+
+func (WorkerKindSet) isMutation()       {}
+func (m WorkerKindSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerTriggerSet records what the live worker is addressing (#2121). A no-op
+// when there is no worker.
+type WorkerTriggerSet struct {
+	Repo    string
+	Number  int
+	Trigger string
+}
+
+func (WorkerTriggerSet) isMutation()       {}
+func (m WorkerTriggerSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerTurnsRecorded records the live worker's turn count so far and the turn
+// budget of the invocation it belongs to (#2121). Turns == 0 marks an invocation
+// start: the previous invocation's count is forgotten (turns unknown again) and
+// Max is the new budget. A no-op when there is no worker, or nothing changed.
+type WorkerTurnsRecorded struct {
+	Repo   string
+	Number int
+	Turns  int
+	Max    int
+}
+
+func (WorkerTurnsRecorded) isMutation()       {}
+func (m WorkerTurnsRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// RetryScheduled records a retry the engine has scheduled (#2121). It has no
+// explicit clearing mutation: the retry ends with the next stage-run WorkerEntered
+// (dispatch), and with a pause, a stage:*:complete label, a close or a column move
+// (clearStatusFacts). Every path that gives a retry up escalates to a pause.
+type RetryScheduled struct {
+	Repo   string
+	Number int
+	Retry  PendingRetry
+}
+
+func (RetryScheduled) isMutation()       {}
+func (m RetryScheduled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// GateHoldRecorded records a gate hold (#2121). A repeat of the same gate keeps
+// the original Since and refreshes the rest.
+type GateHoldRecorded struct {
+	Repo   string
+	Number int
+	Hold   GateHold
+}
+
+func (GateHoldRecorded) isMutation()       {}
+func (m GateHoldRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// GateHoldCleared clears the gate hold (#2121). When Gate is non-empty only a
+// hold of that gate is cleared.
+type GateHoldCleared struct {
+	Repo   string
+	Number int
+	Gate   string
+}
+
+func (GateHoldCleared) isMutation()       {}
+func (m GateHoldCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ConflictResolutionSet marks (or, with Active false, clears) a merge-train
+// conflict resolution for a member (#2121).
+type ConflictResolutionSet struct {
+	Repo   string
+	Number int
+	Active bool
+	Queued bool
+	Since  time.Time
+	// GeneralSlot: the resolution holds a general-pool slot (not the reserved
+	// merge-train slot).
+	GeneralSlot bool
+}
+
+func (ConflictResolutionSet) isMutation()       {}
+func (m ConflictResolutionSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// RebaseCauseSet records why fabrik:rebase-needed was applied; an empty Cause
+// clears it (#2121).
+type RebaseCauseSet struct {
+	Repo   string
+	Number int
+	Cause  string
+}
+
+func (RebaseCauseSet) isMutation()       {}
+func (m RebaseCauseSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRFactsObserved records the linked PR's overseer-facing facts (#2122). It is
+// quiet: it returns PRFactsChanged, which is not a wake flag, and it never
+// calls SelfWriteObserved or moves LastSeenPRUpdatedAt/LinkedPRUpdatedAt. A
+// merged or closed PR clears the CI verdict (no open-PR verdict applies).
+type PRFactsObserved struct {
+	Repo   string
+	Number int // issue number
+	// PRNumber, if non-zero, is the PR the facts describe; the facts are dropped
+	// when it differs from the item's linked PR number.
+	PRNumber int
+	Facts    PRFacts
+}
+
+func (PRFactsObserved) isMutation()       {}
+func (m PRFactsObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// CIVerdictObserved records the CI verdict computed for a PR head (#2122). It
+// is dropped when HeadSHA is not the item's current linked-PR head, and never
+// touches LastCIProgressAt (ADR-2059).
+type CIVerdictObserved struct {
+	Repo    string
+	Number  int // issue number
+	Verdict CIVerdictRecord
+}
+
+func (CIVerdictObserved) isMutation()       {}
+func (m CIVerdictObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {

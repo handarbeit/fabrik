@@ -1,6 +1,9 @@
 package gate
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadConfigInconclusiveTunables(t *testing.T) {
 	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -35,5 +38,27 @@ func TestLoadConfigParallelDefaultsAreUnchangedAndOptInRaises(t *testing.T) {
 	c, err = LoadConfig(get(map[string]string{"E2E_PARALLEL": "8", "E2E_PARALLEL_ON": "4"}), "/repo")
 	if err != nil || c.Parallel != "8" || c.ParallelOn != "4" {
 		t.Fatalf("opt-in = %s/%s err=%v, want 8/4", c.Parallel, c.ParallelOn, err)
+	}
+}
+
+// #2263: the shared-identity budget floor is a percentage, 40 by default, 0
+// disables it, and anything else is a hard error like the other tunables.
+func TestLoadConfigSharedIdentityFloor(t *testing.T) {
+	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+	c, err := LoadConfig(get(nil), "/repo")
+	if err != nil || c.SharedIdentityFloor != 40 || c.SharedIdentityReprobe != 5*time.Minute {
+		t.Fatalf("defaults = %d/%v err=%v, want 40/5m", c.SharedIdentityFloor, c.SharedIdentityReprobe, err)
+	}
+	for val, want := range map[string]int{"0": 0, "75": 75, "100": 100, " 25 ": 25} {
+		c, err = LoadConfig(get(map[string]string{"E2E_SHARED_IDENTITY_FLOOR": val}), "/repo")
+		if err != nil || c.SharedIdentityFloor != want {
+			t.Errorf("floor %q = %d err=%v, want %d", val, c.SharedIdentityFloor, err, want)
+		}
+	}
+	for _, bad := range []string{"-1", "101", "forty", "40%", "0.5"} {
+		if _, err := LoadConfig(get(map[string]string{"E2E_SHARED_IDENTITY_FLOOR": bad}), "/repo"); err == nil {
+			t.Errorf("E2E_SHARED_IDENTITY_FLOOR=%q must be a hard error", bad)
+		}
 	}
 }

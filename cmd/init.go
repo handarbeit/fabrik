@@ -726,7 +726,25 @@ func runInit(args []string) error {
 
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
+	fmt.Print(pluginInstallHint())
 	return nil
+}
+
+// pluginInstallHint is the one-line pointer printed at the end of `fabrik init`
+// to the human-facing Claude Code plugin (#2141). A project-scoped plugin entry
+// in .claude/settings.json is not used: Claude Code does not download
+// project-scoped plugins onto a machine that lacks them and gates their MCP
+// servers behind per-server approval, so a printed hint is the practical path.
+func pluginInstallHint() string {
+	return `
+To let Claude Code answer "what's the status of #N?" from this daemon, install the
+Fabrik plugin in your own Claude Code session (needs fabrik on your PATH):
+
+  /plugin marketplace add handarbeit/fabrik
+  /plugin install fabrik@fabrik
+
+Marketplace auto-update is off by default; enable it from /plugin -> Marketplaces.
+`
 }
 
 // runCreateBoard implements R1: it creates a new GitHub Project (v2) board

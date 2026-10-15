@@ -69,6 +69,10 @@ type Gate struct {
 	// once, so it must be safe for concurrent use.
 	OnLeg func(LegResult)
 
+	// Procs is the seam onto host processes for the bed-engine teardown (#2245);
+	// nil means the real one. Stateless, so per-bed views share it.
+	Procs Procs
+
 	// Seams for time and the OS.
 	Sleep func(time.Duration)
 	Now   func() time.Time
@@ -105,6 +109,15 @@ type Gate struct {
 	// pregateRetry is set when a pre-gate step passed (or finally failed) after its
 	// one TSan-crash retry (#1973 R5); recordPregatePass folds it into the record.
 	pregateRetry *pregateRetryNote
+
+	// The sim pre-gate step (#2247). The pre-gate runs on the root Gate only, so
+	// these are not copied to per-bed views. simAttempt counts the attempts of the
+	// current sim step (a TSan-crash retry is the second); simExtraArgs are
+	// forwarded to `go test`; simReaperOpsFn replaces the process-table operations
+	// in tests.
+	simAttempt     int
+	simExtraArgs   []string
+	simReaperOpsFn func() *simReaperOps
 
 	// leftInconclusive is every "leg: test" still INCONCLUSIVE after its leg's
 	// retries (#1973): uncovered, not failed. run() turns a non-empty set into
@@ -144,7 +157,13 @@ type Gate struct {
 
 	// schedWaitHook, if set, observes each identity wait the multi-bed scheduler
 	// logs (tests synchronise on it instead of sleeping).
-	schedWaitHook func(bed string, c Cell, identity string)
+	// reason is "exclusive", "reserved" or "floor" (#2263).
+	schedWaitHook func(bed string, c Cell, identity, reason string)
+
+	// roleSplitDisabledForTest (root only) makes identitySet treat every
+	// identity as RoleEngine — the pre-#2263 exclusive-everything rule — so the
+	// split's tests can show they fail without it.
+	roleSplitDisabledForTest bool
 }
 
 // NewGate wires a Gate around the real OS.
@@ -367,6 +386,11 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 			return err
 		}
 	}
+	// From here the gate mutates the bed (and may start its engine): whatever
+	// way run returns — suite failure, watchdog, a failed start, cancellation —
+	// the engine it left behind is stopped (#2245). Registered only now, so a
+	// pre-gate or preflight failure still spends and touches nothing (ADR-1454).
+	defer g.snapshotBeds()()
 	var preflightText string
 	if g.multiBed() {
 		preflightText, err = g.prepareBeds(ctx, plan.Clean)

@@ -328,6 +328,15 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		return didNotRunPostMerge, nil
 	}
 
+	// Name what this worker is (#2121): a comment review runs inside the stage
+	// worker goroutine under the stage placeholder handle, which would otherwise
+	// read as a plain stage run. WorkerKindSet never overrides a reinvoke kind
+	// (this function also serves the three reinvokes), and the prior kind is
+	// restored when the review ends.
+	if restore := e.markCommentReviewWorker(itemOwnerRepoString(item, e.defaultRepo()), item.Number, comments); restore != nil {
+		defer restore()
+	}
+
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
@@ -402,7 +411,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// can put the branch back instead of leaving an unpushed rebase behind. Empty when
 	// the worktree does not exist yet (nothing to restore to).
 	preRebaseSHA, _ := gitHeadSHA(wm.worktreeDir(item.Number))
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
 	if err != nil {
 		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
@@ -451,6 +460,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		PRNumber:          prNumber,
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,
+		OnTurn:            e.liveTurnRecorder(itemOwnerRepoString(item, e.defaultRepo()), item.Number),
 	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
@@ -577,6 +587,16 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 			}
 			return "", err
 		}
+		// The comment skill (also the stage variant's ci_fix_skill / rebase_skill)
+		// failed to load in the worker (#2138, ADR-2138): the run did none of the
+		// requested work. Pause for a human (the condition cannot self-heal) and
+		// bypass both comment breakers like the usage-limit arm; the kind lets
+		// dispatchReinvoke refund the pre-charged cycle (#1812).
+		var skillLoadErr *claudeSkillLoadError
+		if errors.As(err, &skillLoadErr) {
+			e.handleSkillLoadFailed(item, stage, skillKeyCommentSkill, skillLoadErr)
+			return didNotRunSkillLoadFailed, nil
+		}
 		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
 		// unlike the usage-limit exclusion immediately above: a resume failure
 		// is specific to this issue's own session, not an account-wide
@@ -602,6 +622,11 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	}
 	if err != nil {
 		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
+	}
+	// The comment skill loaded (a failure returned above): drop a stale
+	// warnings-panel entry (#2138).
+	if stage.CommentSkill != "" {
+		e.clearSkillLoadFailed(stage.Name, skillKeyCommentSkill)
 	}
 
 	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
@@ -1034,6 +1059,11 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 	}
 	e.removeEditingLabel(owner, repo, item.Number)
 
+	// A comment-review run that did not block on input leaves no orphaned
+	// fabrik:awaiting-input behind (#1970). Covers comment review and the
+	// review/ci-fix/rebase reinvokes, which all end here.
+	e.clearOrphanAwaitingInput(item)
+
 	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
 		if e.reactToReviewBody(item.Number, c, "rocket", "🚀") {
@@ -1135,10 +1165,24 @@ func isReviewReinvoke(comments []gh.Comment) bool {
 // (item.Comments at dispatch time) — it must NOT be item.Comments from a
 // re-fetch, as that would include comments that arrived during the run and were
 // never processed by the stage.
+//
+// Comments findNewComments still reports as pending are skipped (#2220): a stage
+// entered with a pending comment runs first and leaves that comment for the
+// comment pass, which feedbackGateBlocks guarantees happens before the item
+// advances. Marking it here would consume it silently. What remains are the
+// Fabrik-prefix and bot-notice cases, which findNewComments already ignores.
 func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments []gh.Comment) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
+	pending := make(map[string]bool)
+	for _, c := range filterNewComments(preStageComments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() }) {
+		pending[c.ID] = true
+	}
 	for _, c := range preStageComments {
+		if pending[c.ID] {
+			continue
+		}
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
 			continue
 		}
@@ -1159,5 +1203,34 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	for _, c := range comments {
 		e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.ID, At: time.Now()})
+	}
+}
+
+// markCommentReviewWorker labels the item's live Worker handle as a comment
+// review addressing comments, and returns a func restoring the previous kind and
+// trigger. It returns nil when there is no worker handle or it already carries a
+// reinvoke kind, in which case nothing was changed (#2121).
+func (e *Engine) markCommentReviewWorker(repoStr string, number int, comments []gh.Comment) func() {
+	snap, ok := e.store.Peek(repoStr, number)
+	if !ok {
+		return nil
+	}
+	w := snap.Worker()
+	if w == nil {
+		return nil
+	}
+	switch w.Kind {
+	case "", itemstate.WorkerKindStageRun, itemstate.WorkerKindCommentReview:
+	default:
+		return nil
+	}
+	prevKind, prevTrigger := w.Kind, w.Trigger
+	if prevKind == "" {
+		prevKind = itemstate.WorkerKindStageRun
+	}
+	e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number,
+		Kind: itemstate.WorkerKindCommentReview, Trigger: commentIDsTrigger(comments)})
+	return func() {
+		e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number, Kind: prevKind, Trigger: prevTrigger})
 	}
 }

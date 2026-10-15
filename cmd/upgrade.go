@@ -34,6 +34,18 @@ var upgradeGitHubClient selfupgrade.ReleaseFetcher
 // upgradeReconcilePrompt is the text printed by --reconcile or the TUI [1] option.
 const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
 
+// loadUpgradeDotenv loads .env the way the daemon does (same file, same
+// precedence: a variable already in the environment wins) so the migration sees a
+// FABRIK_PLUGIN_DIRS that lives only there and agrees with the plugin set the
+// daemon would load. Unlike the daemon, a .env that is not gitignored does not stop
+// the upgrade: it is left unloaded and the report says so, since the upgrade is
+// how such a deployment gets repaired.
+func loadUpgradeDotenv(w io.Writer) {
+	if err := config.LoadDotenv(); err != nil {
+		fmt.Fprintf(w, "fabrik upgrade: .env was not loaded (%v); FABRIK_PLUGIN_DIRS set only there was not consulted, so references its plugins provide fall back to the base plugin\n", err)
+	}
+}
+
 // runUpgrade implements the `fabrik upgrade` subcommand.
 // For release builds it first checks for a newer binary, downloads and
 // atomically replaces it if found, then re-execs so the new binary's embedded
@@ -41,19 +53,25 @@ const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin f
 // plugin skills from the current binary's embedded defaults.
 func runUpgrade(args []string) error {
 	fset := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	var force, reconcile bool
+	var force, reconcile, noMigrate bool
 	fset.BoolVar(&force, "force", false, "Overwrite local plugin customizations (destructive)")
 	fset.BoolVar(&reconcile, "reconcile", false, "Print a Claude Code reconciliation prompt and exit")
+	fset.BoolVar(&noMigrate, "no-migrate", false, "Do not migrate stage skill references or move plugin customizations into local-workflows")
 	fset.Usage = func() {
-		fmt.Fprintf(fset.Output(), "Usage: fabrik upgrade [--force] [--reconcile]\n\n")
+		fmt.Fprintf(fset.Output(), "Usage: fabrik upgrade [--force] [--reconcile] [--no-migrate]\n\n")
 		fmt.Fprintf(fset.Output(), "Upgrade the Fabrik binary and refresh embedded plugin skills.\n\n")
 		fmt.Fprintf(fset.Output(), "For release builds: downloads the latest binary from GitHub Releases and\n")
 		fmt.Fprintf(fset.Output(), "re-execs with the updated binary. For dev builds (built from source):\n")
 		fmt.Fprintf(fset.Output(), "rebuilds from origin/main rather than downloading a release binary.\n")
-		fmt.Fprintf(fset.Output(), "In both cases, embedded plugin skills are refreshed on disk.\n")
+		fmt.Fprintf(fset.Output(), "In both cases, embedded plugin skills are refreshed on disk.\n\n")
+		fmt.Fprintf(fset.Output(), "The run also migrates the workflow configuration: stage files' skill references\n")
+		fmt.Fprintf(fset.Output(), "become fully qualified (<plugin>:<skill>), and a .fabrik/plugin with local edits is\n")
+		fmt.Fprintf(fset.Output(), "moved to .fabrik/plugins/local-workflows and a clean base plugin restored. Nothing\n")
+		fmt.Fprintf(fset.Output(), "is committed; review and commit the result yourself.\n")
 		fmt.Fprintf(fset.Output(), "\nFlags:\n")
 		fmt.Fprintf(fset.Output(), "  --force      Overwrite local plugin customizations (destructive)\n")
 		fmt.Fprintf(fset.Output(), "  --reconcile  Print a Claude Code reconciliation prompt and exit\n")
+		fmt.Fprintf(fset.Output(), "  --no-migrate Skip the workflow migration (customized plugins are then refused as before)\n")
 		fmt.Fprintf(fset.Output(), "\nTo update stage YAML files with missing keys, run: fabrik refresh-stages --apply\n")
 	}
 	if err := fset.Parse(args); err != nil {
@@ -96,8 +114,33 @@ func runUpgrade(args []string) error {
 		if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 			return fmt.Errorf("writing installed version: %w", err)
 		}
+		if wrote == 0 {
+			fmt.Println("fabrik upgrade --force: plugin already up to date (nothing to overwrite)")
+			return nil
+		}
 		fmt.Printf("fabrik upgrade --force: overwrote %d plugin file(s) (customizations discarded)\n", wrote)
 		return nil
+	}
+
+	// Workflow migration (#2139): qualify stage skill references and move a
+	// customised plugin into local-workflows. --no-migrate (used by the dev-build
+	// auto-upgrade hook, which must never move files or edit tracked YAML
+	// unattended) keeps the refusal below exactly as it was.
+	if !noMigrate {
+		loadUpgradeDotenv(os.Stderr)
+		plan, err := planMigration(".", strings.HasPrefix(Version, "dev"), os.Getenv("FABRIK_PLUGIN_DIR"))
+		if err != nil {
+			return fmt.Errorf("planning workflow migration: %w", err)
+		}
+		printMigrationNotice(plan, os.Stdout)
+		if plan.Pending() {
+			if err := applyMigration(plan, os.Stdout); err != nil {
+				return fmt.Errorf("workflow migration: %w (re-run 'fabrik upgrade' to complete it)", err)
+			}
+			if plan.RestoreBase {
+				return nil // the base plugin was refreshed as part of the migration
+			}
+		}
 	}
 
 	// Default path: check three-way state before refreshing. Per #1787 R5, the
@@ -128,6 +171,10 @@ func runUpgrade(args []string) error {
 	}
 	if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 		return fmt.Errorf("writing installed version: %w", err)
+	}
+	if wrote == 0 {
+		fmt.Println("fabrik upgrade: plugin already up to date")
+		return nil
 	}
 	fmt.Printf("fabrik upgrade: refreshed %d plugin file(s)\n", wrote)
 	return nil

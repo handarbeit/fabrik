@@ -21,6 +21,10 @@ func (e *Engine) runWorkerSlotsPublisher(ctx context.Context, interval time.Dura
 	emit := func() {
 		trainInUse, trainMax := e.trainSlotUsage()
 		cur := tui.WorkerSlotsEvent{InUse: len(e.sem), Max: cap(e.sem), TrainInUse: trainInUse, TrainMax: trainMax}
+		if e.drainActive() {
+			// #2259: the drain status rides the same sampled event.
+			cur.Draining, cur.DrainLeft = true, len(e.drainWorkers())
+		}
 		if !first && cur == last {
 			return
 		}

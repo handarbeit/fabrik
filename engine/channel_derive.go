@@ -84,6 +84,12 @@ func (ce *channelEvents) evaluateItem(key string, d *dirtyItem) {
 	}
 	st := snap.State()
 	ce.enqueueDerived(ce.announceArrival(key, &st))
+	// The memo is not created here: derive() treats "no memo" as a first sight
+	// and records the silent baseline.
+	if m := ce.memo[key]; m != nil {
+		m.rebaseSeen = d != nil && d.rebaseSeen
+		defer func() { m.rebaseSeen = false }()
+	}
 	ce.closeSettleEpisode(key, &st)
 	ce.enqueueDerived(ce.derive(key, &st, d))
 }
@@ -108,7 +114,7 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		return nil
 	}
 	now := e.now()
-	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelUsageLimitedUntil(now)))
+	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelUsageLimitedUntil(now), e.peekBlockerLookup()))
 	m, known := ce.memo[key]
 	if !known {
 		// First sight of this item (a board population, or an item created
@@ -118,7 +124,9 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		m.pauseKey = pauseFamilyKey(res)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 		ce.cycleNearEvents(m, st, true)
-		return nil
+		// Unlike the pause family, a pending decision is announced at first sight
+		// (once per episode): that is what makes it visible after a restart.
+		return ce.decisionStep(key, m, st, res)
 	}
 	var out []channelevents.Event
 
@@ -145,6 +153,7 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 	}
 
 	out = append(out, ce.cycleNearEvents(m, st, false)...)
+	out = append(out, ce.decisionStep(key, m, st, res)...)
 	return out
 }
 
@@ -171,6 +180,20 @@ func (e *Engine) pauseEventFor(st *itemstate.ItemState, key string, res attentio
 	ev.Content = fmt.Sprintf("%s %s: %s", issueRef(st.Repo, st.Number), lead, res.Summary)
 	ev.Meta["code"] = res.Code
 	ev.Meta["reason"] = res.Summary
+	// The same cause fabrik_status reports for this state (#2121); absent when
+	// the engine does not know one, never guessed.
+	if res.Cause != "" {
+		ev.Meta["cause"] = res.Cause
+	}
+	// A pause-family event that waits on a human says how to act, in the words
+	// of the engine's own pause comment (R-options-1/2): never a generic resume
+	// method that contradicts it.
+	if o := optionsJSON(res.Options); o != "" {
+		ev.Meta["options"] = o
+	}
+	if res.ResumeVia != "" {
+		ev.Meta["resume"] = res.ResumeVia
+	}
 	if !res.ProgressAt.IsZero() {
 		ev.Meta["progress_age_seconds"] = strconv.FormatInt(secs(now.Sub(res.ProgressAt)), 10)
 	}
@@ -227,6 +250,7 @@ func (ce *channelEvents) onTick() {
 	now := e.now()
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
+	look := e.scanBlockerIndex()
 	var out []channelevents.Event
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR || !st.LabelsKnown {
@@ -239,22 +263,30 @@ func (ce *channelEvents) onTick() {
 			// Same baseline derive() records, so a later non-seed evaluation cannot
 			// read an item already at limit-1 as a fresh transition.
 			m = ce.memoFor(key)
-			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, usageLimited)))
+			res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
+			m.pauseKey = pauseFamilyKey(res)
 			m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 			ce.cycleNearEvents(m, st, true)
+			out = append(out, ce.decisionStep(key, m, st, res)...)
 			return
 		}
-		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		if k := pauseFamilyKey(res); k != m.pauseKey {
 			m.pauseKey = k
 			if k != "" {
 				out = append(out, ce.pauseEvent(m, st, k, res, now))
 			}
 		}
+		// The tick also drives the one time-based part of the decision step: the
+		// grace before a lower-bound announcement.
+		out = append(out, ce.decisionStep(key, m, st, res)...)
 	})
 	ce.enqueueDerived(out)
+	ce.remindDecisions()
 	ce.checkClaudeLimit()
 	ce.checkPipeline()
+	ce.checkAnomalies()
+	ce.publishSituations()
 }
 
 // checkClaudeLimit emits claude-usage-limited / -lifted on the edge of the

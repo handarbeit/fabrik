@@ -25,13 +25,14 @@ func panelKeys(t *testing.T) map[string]warnings.Entry {
 func TestReportStageSkills_DeprecationAndUnresolved(t *testing.T) {
 	isolateWarningsFile(t)
 	root := t.TempDir()
-	base := skillPlugin(t, root, "base", plugin.BasePluginName, "fabrik-review", "fabrik-review-comment")
-	org := skillPlugin(t, root, "org", "myorg", "fabrik-review")
+	base := skillPlugin(t, root, "base", plugin.BasePluginName, "review", "review-comment")
+	org := skillPlugin(t, root, "org", "myorg", "review")
 	e := &Engine{skillResolver: newSkillResolver([]string{base, org})}
 
 	list := []*stages.Stage{
-		{Name: "Review", Skill: "fabrik-review", CommentSkill: "fabrik-review-comment"},
-		{Name: "Plan", Skill: "myorg:fabrik-review"},
+		{Name: "Review", Skill: "review", CommentSkill: "review-comment"},
+		{Name: "Plan", Skill: "myorg:review"},
+		{Name: "Legacy", Skill: "fabrik:fabrik-review"},
 		{Name: "Broken", Skill: "nope:x", CommentSkill: "ghost"},
 		{Name: "Prompted", Prompt: "no skill here"},
 	}
@@ -39,11 +40,11 @@ func TestReportStageSkills_DeprecationAndUnresolved(t *testing.T) {
 	e.reportStageSkills(list, &out)
 
 	log := out.String()
-	if strings.Count(log, "deprecated bare form") != 1 {
+	if strings.Count(log, "deprecated form") != 1 {
 		t.Errorf("want exactly one deprecation line, got:\n%s", log)
 	}
-	q := plugin.Qualify(plugin.BasePluginName, "fabrik-review")
-	for _, want := range []string{"Review.skill → " + q, "Review.comment_skill → " + plugin.Qualify(plugin.BasePluginName, "fabrik-review-comment"), "also provided by myorg:fabrik-review", "fabrik upgrade"} {
+	q := plugin.Qualify(plugin.BasePluginName, "review")
+	for _, want := range []string{"Review.skill → " + q, "Review.comment_skill → " + plugin.Qualify(plugin.BasePluginName, "review-comment"), "Legacy.skill → " + q, "also provided by myorg:review", "fabrik upgrade"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
 		}
@@ -53,7 +54,7 @@ func TestReportStageSkills_DeprecationAndUnresolved(t *testing.T) {
 	}
 
 	panel := panelKeys(t)
-	if _, ok := panel[skillDeprecatedType+":bare"]; !ok {
+	if _, ok := panel[skillDeprecatedType+":deprecated"]; !ok {
 		t.Errorf("deprecation entry missing: %v", panel)
 	}
 	for _, key := range []string{skillUnresolvedType + ":Broken.skill", skillUnresolvedType + ":Broken.comment_skill"} {

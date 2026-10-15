@@ -95,7 +95,7 @@ All 29 functions of the bash `run.sh`, plus its top-level code.
 | `check_reviewer_reachable` | `consumers.go`: `Gate.CheckReviewerReachable` |
 | `run_pregate` | `pregate.go`: `Gate.RunPregate` |
 | `preflight_bed` | `bed.go`: `Gate.PreflightBed` |
-| `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` |
+| `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` (preflight/idle stop, SIGTERM); the exit-time stop is `teardown.go` (below) |
 | `write_isolated_bed_gitconfig` | `bed.go`: `Gate.WriteIsolatedBedGitconfig` |
 | `preflight_bed_start` | `bed.go`: `Gate.StartBed` and `Gate.BedStartCmd` — which also enables the test-only poll hold/trigger seam (#1978) via `pollctl.Env`; `lifecycle.go`'s `StartFabrikTestBed` appends the same entry so a restarted bed keeps it |
 | `prepare_bed_and_reset` | `bed.go`: `Gate.PrepareBedAndReset` |
@@ -165,7 +165,7 @@ a run" is the operator's view; this is the map.
 | `resume.go` | `SelectedTests` (Go `-run`/`-skip` rules), `RequiredTests`, `ResumeCells`, regex builder + size guard |
 | `coverage.go`, `coverage_cmd.go` | `Evaluator`, `Report`, `gate coverage` (exit 0 / `ExitCoverageIncomplete` 8) |
 | `archive.go`, `loadavg*.go` | per-leg archive, engine-log segment sampler, bed-config hash, load average, retention |
-| `report.go` | `gate report` (#1992): measured per-test runtime from the archive's `go-test.json`, joined with the registry's `entry`/`traversal` fields; `--baseline` prints the before/after delta. Model quota is not recorded anywhere, so it reports a labelled proxy (pipeline stages not driven) |
+| `report.go` | `gate report` (#1992): measured per-test runtime from the archive's per-phase `go-test.<phase>.json` streams and their `go-test.retry-N.<phase>.json` retries (bare `go-test.json` for the no-registry / pre-#1977 layout), plus each invocation's per-phase wall-clock from `phases.json` (#2257), joined with the registry's `entry`/`traversal` fields; `--baseline` prints the before/after delta. Model quota is not recorded anywhere, so it reports a labelled proxy (pipeline stages not driven) |
 
 Deltas this adds to the port: `ParseRunArgs` consumes `--clean` **and** `--resume` as leading flags
 in either order; exit code 8 exists (only under `--resume` and `coverage`); the per-leg `-json` log
@@ -212,6 +212,19 @@ the guard audit; this is the map.
 | `config.go` | `Matrix` (`E2E_MATRIX`: `sparse` default, `full`, else `ExitUsage`; zero value = full), `InconclusiveRetries` (`E2E_INCONCLUSIVE_RETRIES`, default 2, 0 disables), `InconclusiveWarn` (`E2E_INCONCLUSIVE_WARN`, default 3) |
 | `pregate_signature.go`, `pregate.go` | `crashScanner`/`IsTSanForkCrash` (streamed, per-line, vetoed by any panic / `fatal error:` / `WARNING: DATA RACE` / goroutine dump) and `runPregateStep`'s one-shot retry |
 | `ledger_wire.go` | `pregateRetryNote` → `pregate/<head>.retries.jsonl`; `retried`/`load_avg` on the pass record; the pre-gate line in the coverage summary |
+
+### Sim pre-gate diagnostics (#2247, ADR-2247)
+
+The sim step runs `scripts/sim/run.sh --all -json` (`runSimSuite`, shared by `RunPregate` and the `gate sim` subcommand `scripts/cut-release.sh` runs) and decodes the stream as it arrives.
+
+| File | Holds |
+|---|---|
+| `sim_stream.go` | `simTracker` (per top-level test: running since when — the clock restarts on `cont`, since `-parallel` queueing is not run time —, queued, ended; subtests fold into the parent) and `simStreamWriter` (raw JSONL, rendered timeline, terminal, and the **decoded** output text fed to `crashScanner`) |
+| `sim_run.go` | `runSimSuite`/`RunSim`; the heartbeat (`PregateHeartbeat`, 3 min, advisory only — never changes the exit code); `simThreshold` (SLOW past 3× the last recorded duration, at least 1 min, 5 min with no history); the failure summary (still-running tests with elapsed, the ceiling message, the dump path, the archive) and the passing run's slowest-10 table |
+| `sim_archive.go` | `.e2e-coverage/pregate/<head>.sim[.aN].{jsonl,log,dump.<pid>.txt,timings.json}` (one dump per hung test binary; a TSan-crash retry is `.a2`); `prunePregateSimArchive` keeps the newest `CoverageKeepSHAs` heads' files and never touches `<head>.json`, `<head>.retries.jsonl` or `sim-timings.json` (the rolling baseline, written by passing runs only). With the ledger disabled the files go to a fresh temp directory whose path is printed |
+| `sim_reaper*.go` | the stuck-binary reaper: ADR-2128's positive-evidence rule applied from outside the process (member of the sim's own session, `.test` command, same start token seen for `SIM_TEST_CEILING` + `PregateReapGrace` (2 min), start token re-read immediately before a single-PID SIGKILL). It is wired by `Cmd.OnStart`, which hands it the child's PID (= SID) |
+
+Deliberate deltas: the terminal no longer shows every test's output — it shows non-JSON lines, package-level output, only the first line of a goroutine dump, and a failed test's own output (the full stream is in the archive, whose path is printed); `crashScanner` is fed decoded text and additionally vetoes the testlife ceiling message and dump header (a hang that hit its ceiling is never a TSan crash). A hang can be forced locally by adding a temporary `t.Parallel()` test that blocks forever and running `SIM_TEST_CEILING=15s gate sim -run <Test>`: the summary names the test and `<head>.sim.dump.<pid>.txt` shows where it blocked. The `-race` exit hang itself cannot be unit-tested; the reaper's rule is covered with a fake process table.
 
 Deltas this adds: the suite step of `RunLeg` is now `runSuiteAttempt` and may run more than once
 per leg (only for the leg's own inconclusive tests, before the post-suite watchdog and the RUN
@@ -269,8 +282,8 @@ process**, serialized only where they share a GitHub identity.
 |---|---|
 | `config.go` | `Config.BedDirs`, `parseBeds` (absolute paths; an empty entry, a duplicate by real path — symlinks included — or more than 26 beds is `ExitUsage`) |
 | `beds.go` | `BedSpec`, `resolveBedSpec`, the per-bed views (`buildBedGates`/`newBedGate`), `bedEnv`, `prefixWriter`, `CheckBedTopology`, `prepareBeds` |
-| `identity.go` | `Identity`, `IdentityOps`/`osIdentityOps`, `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
-| `multibed.go` | `MultiBedScheduler`: assignment, identity-set registry, D8 failure semantics, the closing summary |
+| `identity.go` | `Identity` + `Role` (engine/harness, #2263), `IdentityOps`/`osIdentityOps` (`Budget` returns the limit too), `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
+| `multibed.go` | `MultiBedScheduler`: assignment, the role-aware identity registry (`idHold`/`resv`), the shared-identity budget floor and its epoch-versioned probe, D8 failure semantics, the closing summary |
 | `consumers.go` | `FindCompetingTokenConsumersExcluding`; the #1684 check per bed |
 | `reset.go`, `cmd/gate/main.go` | `ResetBeds`, `gate reset --bed <dir>` |
 | `ledger.go`, `ledger_recorder.go`, `archive.go` | `Record.Bed`, `VoidBed`, `bed.json`, per-bed `NoteBedConfig` |
@@ -295,7 +308,7 @@ process**, serialized only where they share a GitHub identity.
   **serially**, followed by the engine-SHA check. Nothing live runs before the pre-gate.
 * **Topology refusal (exit 7, before the pre-gate).** Two beds with the same App installation (when an
   app leg is planned), the same board, or a shared repo, or a bed with no `FABRIK_TOKEN`. Two beds
-  sharing a harness login are **not** refused — they serialize.
+  sharing a harness login are **not** refused — their harness use of it is shared (#2263, below).
 * **Competing consumers (D5).** The #1684 check runs per bed against that bed's token with **every**
   configured bed's directory excluded, over one process listing, using all requested auth modes
   (the greedy fallback can send any cell to any bed). Another bed's engine is never a competitor; any
@@ -303,9 +316,11 @@ process**, serialized only where they share a GitHub identity.
 * **Engine SHA (D11).** `E2E_BED_REF`, `E2E_BED_NO_BUILD` and `E2E_SKIP_PREP` apply to every bed;
   beds resolving to different engine SHAs (including `E2E_SKIP_PREP`'s bed-HEAD path) refuse with
   exit 7, because the ledger is per SHA.
-* **Identities (D3/D4).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
+* **Identities (D3/D4, roles #2263).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
   `user:<login>` of the bed's `FABRIK_TOKEN` (the engine's PAT on a pat leg and the harness's token
-  on every leg), deduplicated and sorted. An unresolvable login refuses (exit 7); with no resolver
+  on every leg), deduplicated and sorted. Each carries a **role**: the engine's identity is `engine`
+  (exclusive — no other cell holds it in any role), the harness token's user is `harness` (shared
+  by any number of cells). On a pat leg both are one key and `engine` wins (`engine+harness`). An unresolvable login refuses (exit 7); with no resolver
   configured, the key falls back to `token:<hash>` so equal tokens still collide. After every app
   leg's restart, `verifyBedAppIdentity` reads the last startup in `bed-run.log` and refuses (exit 7)
   unless its `identity: GitHub App installation <N>` line names the `.env` installation;
@@ -319,25 +334,45 @@ process**, serialized only where they share a GitHub identity.
   in order, each after the previous one has claimed a cell or registered a wait, so bed A gets first
   claim on a shared identity, and while bed A's next cell waits it **reserves** that cell's
   identities, so a shared-queue bed cannot keep re-acquiring them ahead of it. Each wait is
-  logged once: `== waiting: <cell> on bed B needs <identity>, held by bed A (<cell>) ==` (or
-  `…, reserved for bed A's next cell ==`).
+  logged once per distinct reason: `== waiting: <cell> on bed B needs <identity> exclusively, held by
+  bed A (<cell>) ==` (`… as harness` when the holder only shares it; `needs <identity> (harness),
+  held exclusively by …` for a harness use blocked by an engine holder), `…, reserved for bed A's next
+  cell ==`, or the budget floor (below). Reservations carry the role: an engine reservation blocks
+  every other bed, a harness reservation only another bed's engine use.
+* **Shared-identity budget floor (#2263, ADR-2263).** A cell joining an identity others already hold
+  as harness starts only if its remaining GraphQL budget is at least `E2E_SHARED_IDENTITY_FLOOR`
+  percent (default 40; `0` disables the floor and its probe; non-numeric or outside 0-100 is
+  `ExitUsage`) of its real limit (`rateLimit { limit remaining resetAt }`; 5,000 if GitHub reports
+  none). The first holder is never probed. `next()` does no I/O: it returns the identities to read,
+  the bed's loop probes them outside the scheduler lock (`probeShared`, bounded by `GHAPITimeout`,
+  with the joiner's own harness token) and calls `next()` again; a reading is valid only for the
+  epoch it was taken in (the epoch moves on every acquire and release), so one reading admits at
+  most one join. A bed waiting on the floor re-probes when the next leg finishes or after
+  `Config.SharedIdentityReprobe` (5m) and logs `… shares user:x (harness) with bed A (app/on), but its
+  budget is below the floor: 1500 of 5000 remaining (floor 40%), resets <t> …` (or `could not be
+  read (<err>)`: an unreadable budget counts as below the floor). Its engine is stopped like in any
+  other wait. `Gate.roleSplitDisabledForTest` makes every identity `engine` (the pre-#2263 rule) so
+  the tests can show they fail without the split.
 * **Idle engines are stopped.** A running engine polls with its identity whether or not a leg is
   using it, so a bed's engine is stopped (`stopIdleEngine`, SIGTERM via `StopBedInstance`) while
   the bed waits for an identity and once it has no more cells; every leg's `TestSwitchTrainMode`
   restart starts it again. This is what keeps D5's exclusion of the beds' own engines from the
-  #1684 check safe: no bed's engine spends an identity another bed's leg holds. (A single-bed run
-  leaves its bed running after the last leg, as before.)
+  #1684 check safe: no bed's engine spends an identity another bed's leg holds. Every bed's
+  engine is also stopped when the gate exits (see "Bed engine teardown on every exit"), cancel
+  included.
 * **Failure (D8).** A failing leg lets the other beds' **running** legs finish but no new cell starts.
   RUN INVALID (exit 3) is narrower: that bed's records for the cell are voided (`VoidBed`), its
-  engine identity is marked exhausted, cells charging it are not started, and everything else goes on.
+  engine identity is marked exhausted, cells charging it **in either role** are not started, and
+  everything else goes on.
   The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
   probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
   watchdog. `== multi-bed summary ==` lists
   every bed's cells with their outcome, every cell that never started with why, and any exhausted
   identity.
 * **Budget lines (R5, also on one bed).** At leg start and end, one
-  `== identity budget (leg: app/on, start): app:12345 fabrik-bed[bot] — 4210 remaining, resets … ==`
-  line per identity in the cell's set (`rateLimit { remaining resetAt }`; App identities mint an
+  `== identity budget (leg: app/on, start): app:12345 fabrik-bed[bot] (engine) — 4210 remaining, resets … ==`
+  line per identity in the cell's set, marked `(engine)`, `(harness)` or `(engine+harness)`
+  (`rateLimit { limit remaining resetAt }`; App identities mint an
   installation token per probe). A failure warns and never gates; no token text reaches the output.
   The existing `budget_before`/`budget_after` harness-token lines are unchanged.
 * **Ledger and archive (R4).** Every bed writes the one per-SHA ledger. Records carry `bed` (the
@@ -357,8 +392,46 @@ process**, serialized only where they share a GitHub identity.
 Single-bed behaviour (R6) is unchanged by construction: no views, `SerialScheduler`, no prefix, no
 bed variables in a leg's environment. The only additions are the identity budget lines, the
 `bed-identity` live preflight (a warning, not a refusal, when the login cannot be resolved), the
-banner cross-check on app legs, and the bed attribution in records and archives. The live two-bed
-run, and standing up the second bed, are #1990's.
+banner cross-check on app legs, and the bed attribution in records and archives (plus, since #2263,
+the role marker on a budget line). The live two-bed run, and standing up the second bed, are #1990's.
+
+### Second bed (#2263, #1990)
+
+The prerequisites for bed B, how to verify each, the bed `.env` keys and how to retire a bed are in
+`tests/e2e/README.md`, "Second bed: prerequisites, verification, retirement". In short: App
+`fabrik-bed-2`, repos `handarbeit/fabrik-test-gamma`/`-delta`, board `handarbeit` #7, checkout
+`~/dev/fabrik-test-2`, and a bed `.env` with `FABRIK_TOKEN`, `FABRIK_TEST_REPO_ALPHA`/`_BETA`,
+`FABRIK_TEST_PROJECT_OWNER`/`_NUMBER` and `E2E_APP_ID`/`E2E_APP_PRIVATE_KEY_PATH`/
+`E2E_APP_INSTALLATION_ID`. Run `E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2 scripts/e2e/run.sh`.
+Tune the sharing with `E2E_SHARED_IDENTITY_FLOOR` (percent of the limit; default 40).
+
+## Bed engine teardown on every exit (#2245, ADR-2245)
+
+`Gate.run` defers `teardown.go`'s stop once it reaches the point where it mutates the bed (after
+the pre-gate and live preflights, so a pre-gate or precondition failure still touches nothing,
+ADR-1454). It runs on every return from there — suite pass or failure, post-suite watchdog, a
+failure after the engine was started, SIGINT/SIGTERM of the gate (on a context detached from the
+cancelled one, bounded by counted waits) — and in a multi-bed run covers each bed's view, in
+parallel. It never changes the exit code; a failed stop only warns.
+
+* **Ownership (R2).** The engine that outlives a gate is the harness's successor from the
+  last `TestSwitchTrainMode` restart, not the PID `StartBed` launched, so a PID recorded at start
+  is stale. The gate instead snapshots the lock-holder that existed before it touched the bed
+  (`pid` + start token). At exit the engine in `<bed>/.fabrik/fabrik.lock` is stopped only if it
+  is live, its start token is readable and differs from the snapshot, and it still holds the
+  lock's flock (a stale pid recycled by an unrelated process does not). Anything else is left
+  running, with the reason in the log line.
+* **Ladder (R1).** SIGINT to the engine, wait `StopWait`; a second SIGINT (the engine's force-quit,
+  ADR-1393), wait `KillGrace`; then `sessionreap.SignalGroup` (PID + start token re-checked,
+  ADR-1957) SIGTERM and SIGKILL, `KillGrace` each. No new knob.
+* **Log line (R3).** One per bed: `== bed engine: stopped pid N (...) ==`, `== bed engine: none
+  running at exit, nothing to stop ==`, or `warning: bed engine: left pid N running — <why>`.
+* **Seam.** `Gate.Procs` (`procs.go`; real `osProcs`, scripted `fakeProcs` in tests) covers
+  liveness, signals, start tokens and the flock probe, which are direct syscalls outside the
+  `Commander`.
+* **Gaps.** SIGKILL of the gate itself cannot run a `defer`. An engine an operator starts by hand
+  in the bed *during* a run is indistinguishable from the harness's and is stopped too.
+  `E2E_SKIP_PREP` leaves a pre-existing engine alone unless a leg's restart replaced it.
 
 ## Behaviour deltas and quirks
 

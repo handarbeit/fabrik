@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -206,4 +207,112 @@ func diagFailingChecks(diag *trainCIDiagnostic) []string {
 	names = append(names, diag.FailedContexts...)
 	sort.Strings(names)
 	return names
+}
+
+// emitRetryScheduled records that a stage retry is now waiting to be dispatched
+// (#2170): item's stage did not complete and will be retried after the backoff.
+// due is the first instant the retry may run, on the engine clock (e.now() +
+// the backoff): the item's LastAttemptAt is wall-clock and its retry-backoff
+// cooldown is consumed on admission (ADR 2096), so neither can supply it later.
+// cause is one of wall-time-kill, inactivity-kill, max-turns, api-error,
+// resume-failure, tools-denied, claude-usage-limit, incomplete, error.
+//
+// The fact is also written to the Store (#2121) — before the hub check, so
+// fabrik_status can say "retry pending after a <cause>" on a daemon with no hub.
+// This is the single write point for both copies.
+func (e *Engine) emitRetryScheduled(item gh.ProjectItem, stage *stages.Stage, cause string, due time.Time) {
+	if stage == nil {
+		return
+	}
+	repo := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.RetryScheduled{Repo: repo, Number: item.Number,
+		Retry: itemstate.PendingRetry{Stage: stage.Name, Cause: cause, Due: due, At: e.now()}})
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "retry-scheduled")
+	ce.recordRetry(repo, item.Number, stage.Name, cause, due)
+}
+
+// emitDispatchDeferred records that dispatch of the given issue keys was refused
+// for lack of a worker slot (ADR 2114): it is both the "no worker slot" reason for
+// a due retry and the "queued" exclusion for a gate hold.
+func (e *Engine) emitDispatchDeferred(issueKeys []string) {
+	ce := e.channelEvents()
+	if ce == nil || len(issueKeys) == 0 {
+		return
+	}
+	defer e.anomalyHookRecover(0, "dispatch-deferred")
+	ce.recordDeferred(issueKeys, e.now())
+}
+
+// noteGateHold records that a gate the engine applies is holding item's advance
+// or landing, with the holding reason as the engine logs it and, for the
+// feedback gate, the pending feedback IDs. Called on every evaluation that holds;
+// the first call starts the hold and later calls re-confirm it.
+//
+// The hold is also written to the Store (#2121), before the hub check, so
+// fabrik_status can name it on a daemon with no hub; the Store keeps the first
+// call's Since and the latest call's ConfirmedAt.
+func (e *Engine) noteGateHold(item gh.ProjectItem, gate, reason string, ids []string) {
+	repo := itemOwnerRepoString(item, e.defaultRepo())
+	now := e.now()
+	if snap, ok := e.store.Peek(repo, item.Number); ok {
+		// A hold the gate has not re-confirmed within its lapse ended; this call
+		// starts a new one rather than inheriting the old Since.
+		if old := snap.State().GateHold; old != nil && old.Gate == gate && now.Sub(old.ConfirmedAt) > e.wedgeLapseFor(gate) {
+			e.store.Apply(itemstate.GateHoldCleared{Repo: repo, Number: item.Number, Gate: gate})
+		}
+	}
+	e.store.Apply(itemstate.GateHoldRecorded{Repo: repo, Number: item.Number,
+		Hold: itemstate.GateHold{Gate: gate, Reason: reason, IDs: ids, Since: now, ConfirmedAt: now}})
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "gate-hold")
+	status := item.Status
+	if status == "" {
+		if snap, ok := e.store.Peek(repo, item.Number); ok {
+			status = snap.State().Status
+		}
+	}
+	ce.recordGateHold(repo, item.Number, status, gate, reason, ids, e.now())
+}
+
+// noteGateClear records that gate is no longer holding item.
+func (e *Engine) noteGateClear(item gh.ProjectItem, gate string) {
+	repo := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.GateHoldCleared{Repo: repo, Number: item.Number, Gate: gate})
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "gate-clear")
+	ce.recordGateClear(repo, item.Number, gate)
+}
+
+func (e *Engine) anomalyHookRecover(issue int, what string) {
+	if r := recover(); r != nil {
+		e.logf(issue, "channel", "%s hook panic recovered: %v\n", what, r)
+	}
+}
+
+// channelReevaluate asks the deriver to re-derive one item's events after the
+// debounce, for a change that carries no store flag of its own (the poll-side
+// recorder landing a pending decision's GitHub time, #2120). A void,
+// non-blocking call; a no-op with no hub.
+func (e *Engine) channelReevaluate(repo string, number int) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	key := issueRef(repo, number)
+	ce.mu.Lock()
+	if ce.dirty[key] == nil {
+		ce.dirty[key] = &dirtyItem{due: time.Now().Add(e.chanDebounce())}
+	}
+	ce.mu.Unlock()
+	ce.signal()
 }

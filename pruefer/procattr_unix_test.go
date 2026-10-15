@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/handarbeit/fabrik/internal/sessionreap"
 )
 
 // startSleeper starts a detached "sleep" process in its own process group
@@ -110,52 +112,112 @@ func TestKillProcGroup_NilProcess_NoOp(t *testing.T) {
 	killProcGroup(cmd, 42, "test") // must not panic
 }
 
+// readPIDFile returns the PID in path, or 0 if the file is absent, empty or
+// not yet fully written.
+func readPIDFile(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
 // startSessionWorker starts a Setsid worker whose child setpgrp()s itself
 // (via perl; dash has no usable `set -m`) into a separate process group of the same session — the
 // shape of a Claude Bash-tool command that kill(-pid, …) cannot reach (#1989).
+//
+// The child writes its own PID (`$$`) only after perl has run setpgrp and
+// exec'd, so the PID file is positive evidence that the child already has its
+// final shape (own group, default SIGINT/SIGQUIT). Writing `$!` from the leader
+// instead (#2261) published the PID straight after the fork, before the child
+// had moved out of the worker's group, so a loaded host saw a mis-shaped child.
 func startSessionWorker(t *testing.T) (worker *exec.Cmd, childPID int) {
 	t.Helper()
 	pidFile := t.TempDir() + "/child.pid"
-	cmd := exec.Command("sh", "-c", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sleep 60 &\necho $! > "+pidFile+"\nwait\n")
+	script := "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' " +
+		"sh -c 'echo $$ > \"$1\"; exec sleep 60' sh \"$1\" &\nwait\n"
+	cmd := exec.Command("sh", "-c", script, "sh", pidFile)
 	setCmdProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	go cmd.Wait() // reap the leader; avoids a zombie session member
-	deadline := time.Now().Add(5 * time.Second)
+	// Registered before any wait so an early Fatal leaves no strays. The child
+	// is in a separate group, so it is killed by PID, read from the file in
+	// case the failure happened before this function saw it.
+	t.Cleanup(func() {
+		if pid := readPIDFile(pidFile); pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	})
+	worker = cmd
+	deadline := time.Now().Add(10 * time.Second)
+	for childPID == 0 && time.Now().Before(deadline) {
+		if childPID = readPIDFile(pidFile); childPID == 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if childPID == 0 {
+		t.Fatal("fixture: child pid never written")
+	}
+	// Belt and braces: the shape should already hold; poll rather than assert
+	// once so a slow host cannot turn a fixture delay into a reap failure.
+	var sid, pgid int
 	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(pidFile); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
-				childPID = pid
-				break
-			}
+		sid, _ = unix.Getsid(childPID)
+		pgid, _ = unix.Getpgid(childPID)
+		if sid == cmd.Process.Pid && pgid == childPID {
+			return cmd, childPID
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if childPID == 0 {
-		t.Fatal("child pid never written")
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	})
-	sid, _ := unix.Getsid(childPID)
-	pgid, _ := unix.Getpgid(childPID)
-	if sid != cmd.Process.Pid || pgid == cmd.Process.Pid {
-		t.Fatalf("fixture: child sid=%d pgid=%d worker=%d; want same session, different group", sid, pgid, cmd.Process.Pid)
-	}
-	return cmd, childPID
+	t.Fatalf("fixture: child pid=%d sid=%d pgid=%d worker=%d; want same session, own separate group", childPID, sid, pgid, cmd.Process.Pid)
+	return nil, 0
 }
 
+// processLive reports whether pid is a live process. Unlike isProcessAlive
+// (kill(pid, 0), which succeeds for a zombie) it treats a dead-but-unreaped
+// process as gone, as the production reap does (sessionreap.Members excludes
+// zombies). A killed child whose parent has died is reparented to init and
+// stays a zombie until init reaps it, which on a container whose PID 1 never
+// reaps is for ever.
+func processLive(pid int) bool {
+	if !isProcessAlive(pid) {
+		return false
+	}
+	sid, err := unix.Getsid(pid)
+	if err != nil {
+		return false // vanished between the probe and now
+	}
+	members, err := sessionreap.Members(sid, sessionreap.Options{})
+	if err != nil {
+		return true // cannot tell: do not report a possible survivor as dead
+	}
+	for _, m := range members {
+		if m == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// waitDead waits up to d for pid to be gone (absent, or a zombie awaiting
+// reap). d is a failure bound only: the passing path returns as soon as the
+// process is gone.
 func waitDead(pid int, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if !isProcessAlive(pid) {
+		if !processLive(pid) {
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return !isProcessAlive(pid)
+	return !processLive(pid)
 }
 
 func TestSetCmdProcAttr_MakesSessionLeader(t *testing.T) {
@@ -184,7 +246,7 @@ func TestReapReviewSession_PostExitSweepKillsSameSessionChild(t *testing.T) {
 	if !waitDead(worker.Process.Pid, 3*time.Second) {
 		t.Fatal("leader did not die")
 	}
-	if !isProcessAlive(child) {
+	if !processLive(child) {
 		t.Fatal("fixture: child died with the leader")
 	}
 	if n := reapReviewSession(worker.Process.Pid, 1, "clean_exit"); n < 1 {
@@ -264,7 +326,7 @@ func TestKillProcGroupGraceful_ReapsBashToolCommandSession(t *testing.T) {
 	defer stop()
 	killProcGroupGraceful(worker.Process.Pid, 1, "t", "max_wall_time", 300*time.Millisecond, 300*time.Millisecond)
 	if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
-		t.Fatalf("Bash-tool command session survived the stop (child alive=%v shell alive=%v)", isProcessAlive(child), isProcessAlive(shell))
+		t.Fatalf("Bash-tool command session survived the stop (child alive=%v shell alive=%v)", processLive(child), processLive(shell))
 	}
 }
 
@@ -282,25 +344,15 @@ func TestReapReviewSession_PostExitSweepReapsSampledCommandSession(t *testing.T)
 	if !waitDead(worker.Process.Pid, 3*time.Second) {
 		t.Fatal("worker did not die")
 	}
-	if !isProcessAlive(child) || !isProcessAlive(shell) {
+	if !processLive(child) || !processLive(shell) {
 		t.Fatal("fixture: command session died with the worker")
 	}
 	if n := reapReviewSession(worker.Process.Pid, 1, "clean_exit"); n < 2 {
 		t.Errorf("reapReviewSession = %d, want >= 2 (shell and child)", n)
 	}
 	if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
-		t.Fatalf("command session survived the post-exit sweep (child alive=%v shell alive=%v)", isProcessAlive(child), isProcessAlive(shell))
+		t.Fatalf("command session survived the post-exit sweep (child alive=%v shell alive=%v)", processLive(child), processLive(shell))
 	}
-}
-func waitGone(pid int, d time.Duration) bool {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if !isProcessAlive(pid) {
-			return true
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return !isProcessAlive(pid)
 }
 
 // The normal post-exit state (#1957 R1): the worker leader has exited and been
@@ -322,7 +374,7 @@ func TestKillProcGroup_PostExitGrandchildIsKilled(t *testing.T) {
 		t.Fatal("fixture: leader still alive after Wait")
 	}
 	killProcGroup(cmd, 42, "test")
-	if !waitGone(grandchild, 3*time.Second) {
+	if !waitDead(grandchild, 3*time.Second) {
 		t.Fatal("post-exit grandchild survived killProcGroup")
 	}
 }

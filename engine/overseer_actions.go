@@ -19,7 +19,8 @@ import (
 // The overseer actions (#1969, ADR-1966-c): the mutating requests a
 // Claude Code session overseeing the pipeline can make over the local socket —
 // promote, set_autonomy, revalidate, clear_claude_limit and (#2126, ADR 2126,
-// in overseer_advance.go) advance. Each performs an
+// in overseer_advance.go) advance and (#2188, ADR 2188, in overseer_park.go)
+// move_parked. Each performs an
 // existing, documented transition through the engine's own client and
 // write-through helpers, then posts a 🏭 audit comment naming the requester.
 //
@@ -329,6 +330,13 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 // (stages.IsParkingColumn: an unmanaged stage, or the legacy Backlog column of
 // an install with no Backlog stage), otherwise the reason a promote is refused.
 func (a *overseerActor) parkingRefusal(status string) string {
+	return a.parkedSourceRefusal(status, "promote only moves items out of an unmanaged parking column; use fabrik_advance to move a completed stage one column forward")
+}
+
+// parkedSourceRefusal is the shared source-side parking predicate: "" when
+// status is a parking column, else the reason the action is refused. pipelineHint
+// is the action-specific tail appended for an item in a pipeline column.
+func (a *overseerActor) parkedSourceRefusal(status, pipelineHint string) string {
 	if status == "" {
 		return "has no known board column, so it is not established as parked"
 	}
@@ -338,7 +346,7 @@ func (a *overseerActor) parkingRefusal(status string) string {
 	if a.e.stageByName(status) == nil {
 		return fmt.Sprintf("is in column %q, which has no configured stage", status)
 	}
-	return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column; use fabrik_advance to move a completed stage one column forward", status)
+	return fmt.Sprintf("is already in the pipeline column %q; %s", status, pipelineHint)
 }
 
 // SetAutonomy makes the item's autonomy exactly the requested mode. Writes run

@@ -89,7 +89,7 @@ scripts/cut-release.sh v0.0.67
 The script handles, in order:
 1. **Pre-flight** — on main; ff'd to origin/main; tag `<version>` not already taken locally or on origin; `release-notes/<version>.md` exists, heading is exactly `# Fabrik <version>`, and contains a `## Summary` section. Working tree must be clean except for `release-notes/<version>.md` (either untracked or modified) — any other dirty file aborts.
 2. **PAT identity check** — reads `FABRIK_TOKEN` from `.env`; aborts unless `gh api user` resolves to `@arbeithand`.
-3. `go build ./...` and `go test -race ./...`. Skippable only via `--skip-tests` (last resort).
+3. `go build ./...`. No local `go test -race ./...`: CI runs it on every PR (removed in v0.0.84).
 4. Stages `release-notes/<version>.md` and commits it with `GIT_AUTHOR_*` + `GIT_COMMITTER_*` env vars so the commit is `arbeithand <handarbeit@handarbeit.io>`. Verifies the resulting `%an <%ae>` matches; aborts otherwise.
 5. Pushes the release-notes commit, then tags and pushes the tag — both with `credential.helper=` and `credential.https://github.com.helper=` nuked, plus PAT-in-URL. This is the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
 6. Polls for the release workflow run, watches it, and **explicitly re-checks** `conclusion == "success"` via `gh run view` (the `--exit-status` flag alone is not trusted).
@@ -97,7 +97,7 @@ The script handles, in order:
 8. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
 
 Flags:
-- `--skip-tests` — skip the race-tested suite (use only if it's already known-green from a recent run).
+- `--skip-tests` — accepted and ignored (the local race suite was removed).
 - `--no-doc-issue` — skip the doc-update issue creation.
 
 ### 4. Report back

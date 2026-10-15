@@ -58,9 +58,12 @@ func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 		// only tells the new process why it started (the fabrik.log banner, #2094).
 		ExtraEnv: []string{"FABRIK_DEV_REEXEC=1"},
 		PostBuildHook: func(exe, dir string) error {
-			// Refresh plugin skills from the new binary.
+			// Refresh plugin skills from the new binary. --no-migrate: this runs
+			// unattended in the daemon's working tree, and the workflow migration
+			// (#2139) moves files and edits tracked stage YAML, which only an
+			// operator running `fabrik upgrade` by hand should do.
 			e.logf(0, "upgrade", "refreshing plugin skills\n")
-			upgradeCmd := exec.Command(exe, "upgrade")
+			upgradeCmd := exec.Command(exe, "upgrade", "--no-migrate")
 			upgradeCmd.Dir = dir
 			if out, err := upgradeCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("%w\n%s", err, out)

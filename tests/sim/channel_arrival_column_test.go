@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/stages"
@@ -37,6 +36,7 @@ func typesOf(sink *simSink, typ channelevents.EventType) []channelevents.Event {
 }
 
 func TestChannelItemAddedForPostStartupArrivalOnly(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	_, sink := startChannel(t, env)
 
@@ -44,7 +44,7 @@ func TestChannelItemAddedForPostStartupArrivalOnly(t *testing.T) {
 	fileParked(t, env, "startup managed", "Specify", "fabrik:cruise")
 	fileParked(t, env, "startup parked", "Backlog")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if got := typesOf(sink, channelevents.ItemAdded); len(got) != 0 {
 		t.Fatalf("items present at startup produced item-added: %+v", got)
 	}
@@ -55,7 +55,7 @@ func TestChannelItemAddedForPostStartupArrivalOnly(t *testing.T) {
 	// Arrives after startup already on cruise.
 	num := fileParked(t, env, "late arrival", "Specify", "fabrik:cruise")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.ItemAdded, num)
 	if len(got) != 1 {
 		t.Fatalf("item-added for #%d = %d, want exactly 1 (all events: %+v)", num, len(got), sink.all())
@@ -69,7 +69,7 @@ func TestChannelItemAddedForPostStartupArrivalOnly(t *testing.T) {
 	}
 	// Later polls never announce it again.
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if n := len(sink.ofType(channelevents.ItemAdded, num)); n != 1 {
 		t.Fatalf("item-added repeated: %d", n)
 	}
@@ -80,6 +80,7 @@ func TestChannelItemAddedForPostStartupArrivalOnly(t *testing.T) {
 // silent. Opening the gate first announces them, which is what the first test's
 // silence rests on.
 func TestChannelItemAddedStartupSilenceIsNotVacuous(t *testing.T) {
+	t.Parallel()
 	for _, open := range []bool{false, true} {
 		env := NewEnv(t, EnvOptions{Stages: lifecycleStages()})
 		_, sink := startChannel(t, env)
@@ -88,7 +89,7 @@ func TestChannelItemAddedStartupSilenceIsNotVacuous(t *testing.T) {
 		}
 		fileParked(t, env, "startup managed", "Specify", "fabrik:cruise")
 		RunPolls(t, env, 3)
-		settleWait()
+		settleWait(env)
 		n := len(typesOf(sink, channelevents.ItemAdded))
 		if !open && n != 0 {
 			t.Fatalf("startup item announced with the gate closed: %+v", sink.all())
@@ -100,6 +101,7 @@ func TestChannelItemAddedStartupSilenceIsNotVacuous(t *testing.T) {
 }
 
 func TestChannelItemAddedScopes(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	hub, allSink := startChannel(t, env)
 	cruiseSink, yoloSink := &simSink{}, &simSink{}
@@ -115,7 +117,7 @@ func TestChannelItemAddedScopes(t *testing.T) {
 	RunPolls(t, env, 3)
 	num := fileParked(t, env, "scoped", "Specify", "fabrik:cruise")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if len(cruiseSink.ofType(channelevents.ItemAdded, num)) != 1 {
 		t.Fatalf("a subscriber watching fabrik:cruise must learn of the arrival: %+v (S saw %+v)", cruiseSink.all(), allSink.all())
 	}
@@ -125,18 +127,19 @@ func TestChannelItemAddedScopes(t *testing.T) {
 }
 
 func TestChannelColumnChangedHumanMove(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	_, sink := startChannel(t, env)
 	num := fileParked(t, env, "parked then moved", "Backlog")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if got := typesOf(sink, channelevents.ColumnChanged); len(got) != 0 {
 		t.Fatalf("startup produced column-changed: %+v", got)
 	}
 
 	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, num, false, "Specify")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.ColumnChanged, num)
 	if len(got) != 1 {
 		t.Fatalf("column-changed = %d, want exactly 1 (all: %+v)", len(got), sink.all())
@@ -154,6 +157,7 @@ func TestChannelColumnChangedHumanMove(t *testing.T) {
 }
 
 func TestChannelColumnChangedEngineAdvanceIsFabrikOnce(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	t.Cleanup(env.Engine.RegisterObservers()) // the poll admits work reactively (ADR-1592)
 	_, sink := startChannel(t, env)
@@ -161,7 +165,7 @@ func TestChannelColumnChangedEngineAdvanceIsFabrikOnce(t *testing.T) {
 	RunPolls(t, env, 3)
 	num := FileIssue(t, env, "advances", "body", "Specify", "fabrik:cruise")
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ColumnChanged, num)) >= 2
 	}, 60)
 
@@ -187,6 +191,7 @@ func TestChannelColumnChangedEngineAdvanceIsFabrikOnce(t *testing.T) {
 }
 
 func TestChannelProgressViaColumnDropsStageLabels(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	t.Cleanup(env.Engine.RegisterObservers())
 	hub, control := startChannel(t, env) // "S": no option, every label
@@ -200,7 +205,7 @@ func TestChannelProgressViaColumnDropsStageLabels(t *testing.T) {
 	RunPolls(t, env, 3)
 	num := FileIssue(t, env, "noisy", "body", "Specify", "fabrik:cruise")
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(progress.ofType(channelevents.ColumnChanged, num)) >= 2
 	}, 60)
 
@@ -263,6 +268,7 @@ func labelEventCount(sink *simSink) int {
 // publishes a real change exactly once. The legacy baseline rule makes the same
 // scenario flood, which is what shows the silence is the rule's doing.
 func TestChannelRestartIsSilent(t *testing.T) {
+	t.Parallel()
 	for _, legacy := range []bool{true, false} {
 		legacy := legacy
 		name := "new-rule"
@@ -274,8 +280,7 @@ func TestChannelRestartIsSilent(t *testing.T) {
 			open, _ := restartWorld(t, env)
 
 			dir := t.TempDir()
-			restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
-			t.Cleanup(restore)
+			env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour) // carried to r by RestartEnv
 			r := RestartEnv(t, env)
 			r.BoardCache, r.Wake = r.Engine.UseBoardCacheForTest()
 			r.Engine.SetLegacyLabelBaselineForTest(legacy)
@@ -293,7 +298,7 @@ func TestChannelRestartIsSilent(t *testing.T) {
 
 			// Wave 1: bootstrap from the label-less probe, then the first deep fetches.
 			RunPolls(t, r, 4)
-			settleWait()
+			settleWait(r)
 			wave1 := labelEventCount(sink)
 
 			// Wave 2: the first reconcile, which carries every label on every item.
@@ -303,7 +308,7 @@ func TestChannelRestartIsSilent(t *testing.T) {
 			}
 			r.BoardCache.Reconcile(board)
 			RunPolls(t, r, 2)
-			settleWait()
+			settleWait(r)
 			total := labelEventCount(sink)
 
 			if legacy {
@@ -330,7 +335,7 @@ func TestChannelRestartIsSilent(t *testing.T) {
 				t.Fatal(err)
 			}
 			RunPolls(t, r, 3)
-			settleWait()
+			settleWait(r)
 			got := sink.ofType(channelevents.LabelApplied, open[0])
 			if len(got) != 1 || got[0].Label != "operator-label" {
 				t.Fatalf("real label change after baseline: %+v", sink.all())
@@ -349,11 +354,12 @@ func indexOfEvent(evs []channelevents.Event, pred func(channelevents.Event) bool
 }
 
 func TestChannelManualCloseNamesColumn(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	_, sink := startChannel(t, env)
 	num := fileParked(t, env, "to be closed", "Specify")
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if got := typesOf(sink, channelevents.Closed); len(got) != 0 {
 		t.Fatalf("closed before any close: %+v", got)
 	}
@@ -361,7 +367,7 @@ func TestChannelManualCloseNamesColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	got := sink.ofType(channelevents.Closed, num)
 	if len(got) != 1 {
 		t.Fatalf("closed events = %d, want 1 (all: %+v)", len(got), sink.all())
@@ -382,6 +388,7 @@ func TestChannelManualCloseNamesColumn(t *testing.T) {
 // under yolo and checks that `merged` precedes the close and every close-tracking
 // event, which say they belong to the landing.
 func TestChannelLandingPublishesMergedBeforeCloseTracking(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
 	t.Cleanup(env.Engine.RegisterObservers())
 	env.Sim.Sim().SeedRepoAccess(env.OwnerRepo, gh.RepoAccess{AllowAutoMerge: false, CanPush: true})
@@ -390,7 +397,7 @@ func TestChannelLandingPublishesMergedBeforeCloseTracking(t *testing.T) {
 	RunPolls(t, env, 3)
 	num := FileIssue(t, env, "lands", "body", "Specify", "fabrik:yolo")
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.Merged, num)) > 0 && len(sink.ofType(channelevents.Closed, num)) > 0
 	}, 120)
 
@@ -418,4 +425,190 @@ func TestChannelLandingPublishesMergedBeforeCloseTracking(t *testing.T) {
 
 func closeTrackingLabelForTest(l string) bool {
 	return l == "fabrik:awaiting-close" || l == "fabrik:awaiting-member-close" || strings.HasPrefix(l, "fabrik:credited-pr:")
+}
+
+// reconcileBoard runs one board reconcile, which is what supplies labels to a
+// card the probe seeded without any (the sim never runs the reconcile loop).
+func reconcileBoard(t *testing.T, env *Env) {
+	t.Helper()
+	board, err := env.Sim.FetchProjectBoard(env.Owner, env.Repo, env.ProjectNum, env.cfg.OwnerType)
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	env.BoardCache.Reconcile(board)
+}
+
+// settleArrival runs the polls and reconcile that carry a late arrival through to
+// announcement.
+func settleArrival(t *testing.T, env *Env) {
+	t.Helper()
+	RunPolls(t, env, 3)
+	reconcileBoard(t, env)
+	RunPolls(t, env, 2)
+	settleWait(env)
+}
+
+// arrivalThenMove files a card into `from` after startup and moves it to `to`,
+// asserting one item-added (column=from) then one column-changed (from > to)
+// and no second item-added. Shared by the parking-column scenarios (#2187).
+func arrivalThenMove(t *testing.T, env *Env, sink *simSink, from, to string) {
+	t.Helper()
+	fileParked(t, env, "startup", "Specify")
+	RunPolls(t, env, 3)
+	settleWait(env)
+	num := fileParked(t, env, "filed late", from)
+	settleArrival(t, env)
+	got := sink.ofType(channelevents.ItemAdded, num)
+	if len(got) != 1 || got[0].Meta["column"] != from {
+		t.Fatalf("item-added for #%d in %s = %+v, want exactly 1 (all: %+v)", num, from, got, sink.all())
+	}
+	if len(typesOf(sink, channelevents.ColumnChanged)) != 0 {
+		t.Fatalf("an arrival produced column-changed: %+v", typesOf(sink, channelevents.ColumnChanged))
+	}
+
+	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, num, false, to)
+	settleArrival(t, env)
+	moved := sink.ofType(channelevents.ColumnChanged, num)
+	if len(moved) != 1 || moved[0].Meta["from"] != from || moved[0].Meta["to"] != to {
+		t.Fatalf("column-changed = %+v, want exactly one %s > %s", moved, from, to)
+	}
+	if n := len(sink.ofType(channelevents.ItemAdded, num)); n != 1 {
+		t.Fatalf("item-added after the move = %d, want still 1", n)
+	}
+}
+
+// A card filed into an unmanaged column after startup is announced once; the
+// later move into a managed column is a column-changed and not a second arrival
+// (#2187 FR-001, FR-006).
+func TestChannelItemAddedForPostStartupBacklogArrival(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), BoardCache: true})
+	_, sink := startChannel(t, env)
+	arrivalThenMove(t, env, sink, "Backlog", "Specify")
+}
+
+// The rule is keyed on the stage's unmanaged flag, never the name "Backlog": a
+// second unmanaged stage behaves identically (#2187).
+func TestChannelItemAddedForSecondUnmanagedColumn(t *testing.T) {
+	t.Parallel()
+	stgs := append([]*stages.Stage{{Name: "Triage", Order: -1, Unmanaged: true}}, lifecycleStages()...)
+	env := NewEnv(t, EnvOptions{Stages: stgs, BoardCache: true})
+	_, sink := startChannel(t, env)
+	arrivalThenMove(t, env, sink, "Triage", "Backlog")
+}
+
+// Installs that predate backlog.yaml have a Backlog board column and no Backlog
+// stage; stages.IsParkingColumn treats it as a parking column, so a card filed
+// there is seeded by the probe and announced (#2187).
+func TestChannelItemAddedForLegacyBacklogArrival(t *testing.T) {
+	t.Parallel()
+	cols := append([]string{"Backlog"}, stageColumns(smokeStages())...)
+	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Columns: cols, BoardCache: true})
+	_, sink := startChannel(t, env)
+	arrivalThenMove(t, env, sink, "Backlog", "Specify")
+}
+
+// unconfiguredColumns is the smoke pipeline's board plus a column no stage owns.
+func unconfiguredColumns() []string {
+	return append([]string{"Mystery"}, stageColumns(lifecycleStages())...)
+}
+
+// A card first seen after startup in a column with no configured stage is never
+// announced, however the Store learns of it (here a reconcile, which marks it
+// Created); moving it into a configured column is one column-changed (#2187
+// FR-002).
+func TestChannelItemAddedSkipsUnconfiguredColumnArrival(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), Columns: unconfiguredColumns(), BoardCache: true})
+	_, sink := startChannel(t, env)
+	fileParked(t, env, "startup", "Specify")
+	RunPolls(t, env, 3)
+	settleWait(env)
+
+	num := fileParked(t, env, "outside the known columns", "Mystery")
+	settleArrival(t, env)
+	if got := typesOf(sink, channelevents.ItemAdded); len(got) != 0 {
+		t.Fatalf("item-added for a card in an unconfigured column: %+v", got)
+	}
+
+	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, num, false, "Specify")
+	settleArrival(t, env)
+	if got := typesOf(sink, channelevents.ItemAdded); len(got) != 0 {
+		t.Fatalf("a move into a configured column produced item-added: %+v", got)
+	}
+	if got := sink.ofType(channelevents.ColumnChanged, num); len(got) != 1 || got[0].Meta["from"] != "Mystery" {
+		t.Fatalf("column-changed = %+v, want exactly one from Mystery", got)
+	}
+}
+
+// A restart with an item in an unconfigured column and a subscriber attached
+// across it announces nothing for the pre-existing items, then still announces a
+// genuine post-restart addition exactly once (#2187 FR-002).
+func TestChannelRestartIsSilentForUnconfiguredColumn(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: lifecycleStages(), Columns: unconfiguredColumns(), BoardCache: true})
+	stageLabels := []string{"stage:Specify:complete", "fabrik:cruise", "enhancement"}
+	fileParked(t, env, "managed", "Specify", stageLabels...)
+	FileIssue(t, env, "mystery", "body", "Mystery", stageLabels...)
+	fileParked(t, env, "parked", "Backlog")
+	RunPolls(t, env, 4)
+
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour) // carried to r by RestartEnv
+	r := RestartEnv(t, env)
+	r.BoardCache, r.Wake = r.Engine.UseBoardCacheForTest()
+	hub := r.Engine.StartChannelEventsForTest(t.TempDir())
+	if hub == nil {
+		t.Fatal("hub did not start")
+	}
+	t.Cleanup(r.Engine.StopChannelEventsForTest)
+	none := []string{}
+	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "S", ExcludeLabels: &none}); err != nil {
+		t.Fatal(err)
+	}
+	sink := &simSink{}
+	hub.Attach("S", sink)
+
+	RunPolls(t, r, 4)
+	reconcileBoard(t, r)
+	RunPolls(t, r, 2)
+	settleWait(r)
+	if got := typesOf(sink, channelevents.ItemAdded); len(got) != 0 {
+		t.Fatalf("restart produced item-added: %+v", got)
+	}
+
+	num := fileParked(t, r, "genuinely new", "Specify", "fabrik:cruise")
+	settleArrival(t, r)
+	if got := sink.ofType(channelevents.ItemAdded, num); len(got) != 1 {
+		t.Fatalf("a real post-restart arrival: item-added = %d, want 1 (all: %+v)", len(got), sink.all())
+	}
+	if n := len(typesOf(sink, channelevents.ItemAdded)); n != 1 {
+		t.Fatalf("total item-added = %d, want 1", n)
+	}
+}
+
+// The probe seeds a legacy Backlog card (no Backlog stage, the column literal
+// only) so a hand move out of it before any reconcile is a real column-changed
+// rather than a first sight in the new column. Reverting the probe branch to
+// "matched stage is unmanaged" leaves the card unseeded and this fails (#2187).
+func TestChannelLegacyBacklogMoveBeforeReconcileIsColumnChange(t *testing.T) {
+	t.Parallel()
+	cols := append([]string{"Backlog"}, stageColumns(smokeStages())...)
+	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Columns: cols, BoardCache: true})
+	_, sink := startChannel(t, env)
+	fileParked(t, env, "startup", "Specify")
+	RunPolls(t, env, 3)
+	settleWait(env)
+
+	num := fileParked(t, env, "filed late", "Backlog")
+	RunPolls(t, env, 3) // probe only: no reconcile has run
+	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, num, false, "Specify")
+	RunPolls(t, env, 3)
+	settleWait(env)
+	got := sink.ofType(channelevents.ColumnChanged, num)
+	if len(got) != 1 || got[0].Meta["from"] != "Backlog" || got[0].Meta["to"] != "Specify" {
+		t.Fatalf("column-changed = %+v, want exactly one Backlog > Specify (all: %+v)", got, sink.all())
+	}
+	if n := len(sink.ofType(channelevents.ItemAdded, num)); n > 1 {
+		t.Fatalf("item-added = %d, want at most 1", n)
+	}
 }

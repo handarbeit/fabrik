@@ -57,9 +57,48 @@ type ItemState struct {
 	// meaning themselves. Reset to "now" on every fresh Store.Reset (bootstrap/
 	// restart) for every item, since there is no durable cross-restart source
 	// for "when did this item truly enter its current Status" — see ADR-1833.
+	// It is "first seen by this process" (attention, local API); the merge-train
+	// order uses StatusAtGitHub where known (ADR-2246).
 	StatusEnteredAt time.Time
+	// StatusAtGitHub is GitHub's own time for the move into the current Status:
+	// the Status single-select value's updatedAt from a listing or probe, or the
+	// projects_v2_item webhook's updated_at (#2246, ADR-2246). Zero means unknown
+	// (direct-GraphQL path, engine's own write, a payload without the time) and
+	// callers fall back to StatusEnteredAt. Assigned only inside the same
+	// "Status changed" guard as StatusEnteredAt, so it is once per transition and
+	// never moves backwards on a stale re-read. Second resolution: same-second
+	// moves tie.
+	StatusAtGitHub time.Time
+	// EligibilityChangedAt is the time the item's eligibility to proceed last
+	// changed while this process was watching: a fabrik:cruise, fabrik:yolo,
+	// fabrik:blocked or fabrik:paused label, or a stage:*:complete label, was
+	// added or removed (#2120 R3). Daemon time, stamped only from a before/after
+	// label diff of an item the store already held — a population or baseline
+	// never stamps — so it is zero ("unknown") after a restart and for changes
+	// made while the daemon was down. The classifier takes the later of this and
+	// the GitHub time of the deciding fact, so an unknown stamp can only make an
+	// age longer, never shorter.
+	EligibilityChangedAt time.Time
+	// StatusMovedAt is the time the item was seen to move between two known board
+	// columns while this process was watching (#2120 R3). Like EligibilityChangedAt
+	// it is stamped only for an item the store already held with a known Status, so
+	// a population never stamps and it is zero ("unknown") after a restart. Unlike
+	// StatusEnteredAt it therefore says a real move happened, which is what lets the
+	// classifier date "the blocker was parked" instead of only "first seen".
+	StatusMovedAt time.Time
 	// UpdatedAt is max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt).
 	UpdatedAt time.Time
+
+	// IssueLayerUpdatedAt, LinkedPRUpdatedAt and IssueCommentTotal(Known) are the
+	// layered board evidence the cache-serve decision compares (#2180): the same
+	// UpdatedAt split into its issue/project-item and linked-PR parts, plus
+	// GitHub's issue comment total. Written by the probe and board listings
+	// (and carried through a deep fetch); zero / unknown when the producer did
+	// not capture them. Mirrors of the last board read, not engine state.
+	IssueLayerUpdatedAt    time.Time
+	LinkedPRUpdatedAt      time.Time
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
 
 	// BlockedBy holds issues that must be closed before this one can advance.
 	BlockedBy []gh.Dependency
@@ -92,11 +131,6 @@ type ItemState struct {
 	// entry deliberately kept past expiry is "archive-eligible-at", an absolute
 	// "eligible since" timestamp rather than a gate.
 	CooldownAt map[string]time.Time
-	// PausedBackstopBaseline is the LastSeenSourceUpdatedAt value at which the
-	// paused-item backstop (#1944) last completed a live fetch. The backstop
-	// fetches only while the current baseline differs from it (#2096). Zero
-	// means never served. In memory only, like the rest of the store.
-	PausedBackstopBaseline time.Time
 	// LabelAppliedAt maps label name → the time the engine itself most recently
 	// applied that label to this issue (record-at-write, #1314). Deliberately a
 	// separate map from CooldownAt, not a repurposing of it: CooldownAt's
@@ -116,8 +150,29 @@ type ItemState struct {
 	// keep-first and read by gates — this map is read only by the reconcile
 	// protection. In memory only; entries expire after the grace period.
 	EngineWriteAt map[string]time.Time
-	// Worker is present when a worker is in-flight for this item.
+	// Worker is present when a worker is in-flight for this item — or queued
+	// for a worker slot (Worker.Queued, #2121): the handle is the claim on the
+	// item, and the dispatch guards rely on it being non-nil from dispatch.
 	Worker *WorkerHandle
+
+	// PendingRetry is the retry the engine has actually scheduled after a failed
+	// invocation (#2121): written from emitRetryScheduled whether or not a
+	// channel hub runs, cleared on dispatch, completion, pause and close. In
+	// memory only.
+	PendingRetry *PendingRetry
+	// GateHold is the advance/landing gate currently holding the item (#2121),
+	// written from noteGateHold, cleared by noteGateClear. In memory only.
+	GateHold *GateHold
+	// ConflictResolution is set while a merge-train conflict resolution for this
+	// member is queued for, or holding, a worker slot (#2121). A separate field
+	// rather than a Worker handle on purpose: the stale-worker detector,
+	// shutdown pause, janitor and overseer refusals all treat Worker as a stage
+	// worker. In memory only.
+	ConflictResolution *ConflictResolution
+	// RebaseCause records why fabrik:rebase-needed was applied when the engine
+	// knows ("after-landing": a post-landing merge-tree conflict, #2047);
+	// empty = unknown. Cleared when the label is removed. In memory only.
+	RebaseCause string
 
 	// Terminal is set by the engine after a deep-fetch confirms the item satisfies
 	// the terminal predicate (cleanup-stage status + stage:<Name>:complete label + no
@@ -143,10 +198,24 @@ type ItemState struct {
 	// advances it to time.Now() at each of Fabrik's own self-write call sites
 	// (label add/remove, comment post, issue body edit, board status move) so a
 	// self-caused GitHub updatedAt bump isn't mistaken for external staleness on
-	// the next probe cycle. Both writers share the same monotonic guard in
-	// applyToItem, and DeepFetchInvalidated's zero-reset always wins against a
-	// stale SelfWriteObserved racing behind it.
+	// the next probe cycle. Only SelfWriteObserved is monotonic: ItemDeepFetched
+	// assigns the fetched value unconditionally (it may lower a clock-anchored
+	// baseline, which is how a real refetch cures both masking and clock skew),
+	// and DeepFetchInvalidated's zero-reset always wins against a stale
+	// SelfWriteObserved racing behind it.
+	//
+	// This is the ISSUE-layer baseline (#2180): the engine writes the issue and
+	// project item, so only that layer is allowed to be self-write anchored. The
+	// linked PR's updatedAt is compared against LastSeenPRUpdatedAt instead.
 	LastSeenSourceUpdatedAt time.Time
+
+	// LastSeenPRUpdatedAt is the linked PR's own updatedAt observed at the last
+	// deep fetch (#2180). It is written only from GitHub values (ItemDeepFetched)
+	// and never by SelfWriteObserved, so an engine write on the issue layer
+	// cannot hide a later PR-side change (review, thread comment, PR comment).
+	// Zero means "not captured": the cache then falls back to the overall
+	// updatedAt compare against LastSeenSourceUpdatedAt.
+	LastSeenPRUpdatedAt time.Time
 
 	// LastDeepFetchFailureAt is the time the most recent deep fetch attempt failed.
 	// Replaces engine.deepFetchFailureTime[iKey].
@@ -214,6 +283,48 @@ type CommentBreakerState struct {
 	LastAuthor string
 }
 
+// PRFacts are the linked PR's state facts as last observed by the poll (#2122).
+// The zero value (ObservedAt zero) means "never captured" and renders unknown.
+type PRFacts struct {
+	// State is "open" or "closed"; Merged is true for a merged PR.
+	State  string
+	Draft  bool
+	Merged bool
+	// Mergeable is nil when GitHub has not computed it (UNKNOWN).
+	Mergeable *bool
+	// MergeableState uses REST mergeable_state vocabulary ("clean", "blocked",
+	// ...); empty when unknown.
+	MergeableState string
+	// HeadSHA is the head the facts were read for.
+	HeadSHA string
+	// ObservedAt is when the poll last read these facts from GitHub.
+	ObservedAt time.Time
+}
+
+// CIVerdictRecord is the green-and-complete CI verdict for one PR head,
+// computed poll-side by the gates' own classifier (#2122). It is valid only for
+// HeadSHA and is cleared when the head changes.
+type CIVerdictRecord struct {
+	// Verdict is "green", "red", "pending", "none" or "unknown"; empty = never
+	// computed.
+	Verdict string
+	// HeadSHA is the head the verdict was computed for.
+	HeadSHA string
+	// Failing names the failing checks when the verdict is red.
+	Failing []string
+	// RunsFingerprint identifies the check-run set the verdict was computed from,
+	// so an unchanged set is not re-classified.
+	RunsFingerprint string
+	// ObservedAt is when the verdict was last confirmed.
+	ObservedAt time.Time
+	// LiveReadAt is when the check runs behind the verdict were last read from
+	// GitHub rather than from the cache. A verdict may be restamped without a
+	// read only while this is recent: a cached READY set is served on trust
+	// forever and nothing on a poll-only deployment refreshes it, so a rerun
+	// that turns red on the same head would otherwise never be seen.
+	LiveReadAt time.Time
+}
+
 // LinkedPRState holds the state of the closing pull request for an issue.
 type LinkedPRState struct {
 	Number int
@@ -233,6 +344,14 @@ type LinkedPRState struct {
 	ThreadComments      []gh.Comment
 	ResolvedThreadCount int
 	CheckRuns           []gh.CheckRun
+
+	// Facts and CIVerdict are the overseer-facing PR facts (#2122, ADR-2122).
+	// They are separate from State/Draft/Merged/Mergeable/MergeableState/
+	// CheckRuns above, which the gates read: nothing a gate consults is written
+	// by PRFactsObserved or CIVerdictObserved, so populating them cannot change
+	// gate semantics. Written only by the poll goroutine; read by the local API.
+	Facts     PRFacts
+	CIVerdict CIVerdictRecord
 
 	// IsMergeQueueEnabled is true when the repository has the merge queue feature
 	// enabled. Populated from GraphQL via FetchItemDetails; zero until first deep fetch.
@@ -300,6 +419,29 @@ type LinkedPRState struct {
 	LastCIProgressAt time.Time
 }
 
+// ObservedHead is the head SHA the overseer view reports for the PR: the one
+// the engine's own paths recorded, else the head the PR facts were read for
+// (an engine without the board probe never records one outside a gate). It
+// only reads; nothing the gates consult is written from it (#2122).
+func (l *LinkedPRState) ObservedHead() string {
+	if l.HeadSHA != "" {
+		return l.HeadSHA
+	}
+	return l.Facts.HeadSHA
+}
+
+// AgreedHead is the head SHA a CI verdict may be computed for or shown against.
+// It is ObservedHead unless the engine-recorded head and the head the PR facts
+// were read for are both known and disagree: then it is "" (unknown), because
+// neither side is known to be the newer one, and a verdict for either could be
+// a false green for a PR that has moved on (#2122).
+func (l *LinkedPRState) AgreedHead() string {
+	if l.HeadSHA != "" && l.Facts.HeadSHA != "" && l.HeadSHA != l.Facts.HeadSHA {
+		return ""
+	}
+	return l.ObservedHead()
+}
+
 // StageState holds per-stage attempt counters and cycle counts.
 // Keys are stage names (e.g. "Implement", "Review").
 type StageState struct {
@@ -309,6 +451,10 @@ type StageState struct {
 	// LastAttemptAt records the last invocation timestamp per stage.
 	// Replaces engine.processedSet[stageKey] for retry-suppression.
 	LastAttemptAt map[string]time.Time
+	// BackoffExempt marks a stage whose last invocation ended as a time slice
+	// (turn-cap or max_wall_time stop, #2232): the dispatch retry backoff does not
+	// apply to it. Rewritten by every StageAttempted; in memory only.
+	BackoffExempt map[string]bool
 	// PausedByEngine records engine-initiated pauses (vs user-initiated).
 	// Replaces engine.pausedDueToRetries[stageKey].
 	PausedByEngine map[string]bool
@@ -439,9 +585,76 @@ type LockState struct {
 type WorkerHandle struct {
 	PID       int
 	StageName string
+	// StartedAt is the time the worker started running. For a queued worker
+	// (Queued) it is the dispatch time; WorkerSlotAcquired re-stamps it to the
+	// slot-acquired time (#2121).
 	StartedAt time.Time
 	// LastSignAt is updated by worker heartbeats; a stale heartbeat implies the worker died.
 	LastSignAt time.Time
+	// Kind is the worker kind (the WorkerKind* constants); empty = unknown.
+	Kind string
+	// Trigger names what the worker is addressing (comment or review-body ids,
+	// comma separated); empty = none or unknown.
+	Trigger string
+	// Queued is true while the worker is waiting for a worker slot and holds
+	// none (#2121). QueuedSince is when it began waiting.
+	Queued      bool
+	QueuedSince time.Time
+	// TurnsUsed is the live turn count; meaningful only when TurnsKnown.
+	TurnsUsed  int
+	TurnsKnown bool
+	// TurnsMax is the turn budget the current invocation actually runs with (the
+	// stage's, a comment review's, or an extended one); 0 = unknown or unlimited.
+	// It is set when an invocation starts, so it is known before the first turn.
+	TurnsMax int
+}
+
+// Worker kinds (#2121). An empty Kind on a stage dispatch's handle means
+// WorkerKindStageRun.
+const (
+	WorkerKindStageRun       = "stage-run"
+	WorkerKindCommentReview  = "comment-review"
+	WorkerKindReviewReinvoke = "review-reinvoke"
+	WorkerKindCIFixReinvoke  = "ci-fix-reinvoke"
+	WorkerKindRebaseReinvoke = "rebase-reinvoke"
+	WorkerKindTrainConflict  = "merge-train-conflict"
+)
+
+// PendingRetry is a retry the engine has scheduled (#2121).
+type PendingRetry struct {
+	Stage string
+	// Cause is the engine's cause for the retry: wall-time-kill, inactivity-kill,
+	// max-turns, api-error, ...
+	Cause string
+	// Due is when the retry becomes dispatchable; zero = unknown.
+	Due time.Time
+	// At is when the retry was scheduled.
+	At time.Time
+}
+
+// GateHold is an advance/landing gate holding an item (#2121).
+type GateHold struct {
+	// Gate is one of feedback, review, ci, merge.
+	Gate string
+	// Reason is a short engine-worded reason.
+	Reason string
+	// IDs are the pending feedback identifiers when the gate is the feedback gate.
+	IDs []string
+	// Since is when the hold was first recorded; ConfirmedAt when the gate last
+	// confirmed it.
+	Since       time.Time
+	ConfirmedAt time.Time
+}
+
+// ConflictResolution marks a merge-train conflict resolution for a member item
+// (#2121). Queued is true while it waits for a worker slot.
+type ConflictResolution struct {
+	Queued bool
+	Since  time.Time
+	// GeneralSlot is true when the running resolution holds a slot of the general
+	// (max_concurrent) pool rather than the reserved merge-train slot; health
+	// counts it in in_use only then.
+	GeneralSlot bool
 }
 
 // TokenUsage records Claude API token counts for a single invocation.

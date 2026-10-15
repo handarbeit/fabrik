@@ -27,13 +27,15 @@ func (e *Engine) channelStreamer() localapi.Streamer {
 
 func (s channelStreamer) Subscribe(p localapi.SubscribeParams) (*localapi.SubscribeResult, error) {
 	sub := channelevents.Subscription{
-		Subscriber:        p.Subscriber,
-		Repos:             p.Repos,
-		Milestone:         p.Milestone,
-		Labels:            p.Labels,
-		ExcludeLabels:     p.ExcludeLabels,
-		DigestSeconds:     p.DigestSeconds,
-		ProgressViaColumn: p.ProgressViaColumn,
+		Subscriber:         p.Subscriber,
+		Repos:              p.Repos,
+		Milestone:          p.Milestone,
+		Labels:             p.Labels,
+		ExcludeLabels:      p.ExcludeLabels,
+		DigestSeconds:      p.DigestSeconds,
+		ProgressViaColumn:  p.ProgressViaColumn,
+		RemindAfterSeconds: p.RemindAfterSeconds,
+		SituationSeconds:   p.SituationSeconds,
 	}
 	// Version skew is the normal case (the daemon self-upgrades, a shim lives as
 	// long as its Claude session), so a request naming an event type this daemon
@@ -54,6 +56,10 @@ func (s channelStreamer) Subscribe(p localapi.SubscribeParams) (*localapi.Subscr
 		return nil, localapi.Errorf(localapi.CodeBadRequest, "unknown event type %s; no known event type left to subscribe to, so nothing was changed", strings.Join(names, ", "))
 	}
 	sub.Events = kept
+	// No events list: the semantic family, without the raw label events (#2169
+	// R3). The marker is what tells this subscription from one persisted before
+	// the change, which keeps meaning "every type".
+	sub.EventsDefault = len(kept) == 0
 	backend := localAPIBackend{e: s.e}
 	for _, ref := range p.Issues {
 		repo, n, err := backend.resolveIssue(ref)
@@ -72,6 +78,7 @@ func (s channelStreamer) Subscribe(p localapi.SubscribeParams) (*localapi.Subscr
 		s.e.catchUp(stored.Subscriber, stored.ID)
 	}
 	res := &localapi.SubscribeResult{Subscription: stored, Subscriptions: s.hub.Subscriptions(p.Subscriber)}
+	res.Notes = subscribeNotes(stored)
 	for _, m := range mapped {
 		res.Mapped = append(res.Mapped, localapi.EventMapping{From: string(m.From), To: string(m.To)})
 	}
@@ -96,4 +103,26 @@ func (s channelStreamer) Attach(p localapi.AttachParams, sink channelevents.Sink
 		s.e.catchUp(p.Subscriber, "")
 	}
 	return s.hub.Attach(p.Subscriber, sink), nil
+}
+
+// subscribeNotes warns about filters that only shape label events when the
+// subscription does not take them.
+func subscribeNotes(sub channelevents.Subscription) []string {
+	if sub.TakesLabelEvents() {
+		return nil
+	}
+	var set []string
+	if len(sub.Labels) > 0 {
+		set = append(set, "labels")
+	}
+	if sub.ExcludeLabels != nil {
+		set = append(set, "exclude_labels")
+	}
+	if sub.ProgressViaColumn {
+		set = append(set, "progress_via_column")
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return []string{strings.Join(set, ", ") + " only shape label events, which are opt-in and not in this subscription: name label-applied and/or label-removed in events to receive them"}
 }

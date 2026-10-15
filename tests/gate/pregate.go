@@ -64,19 +64,17 @@ func (g *Gate) RunPregate(ctx context.Context) error {
 
 	g.outln("== pre-gate: sim suite + github wire-contract tests (R1, #1454) ==")
 	g.pregateRetry = nil
-	if err := g.runPregateStep(ctx, "sim suite", func(out, errw io.Writer) Cmd {
-		return Cmd{
-			Name: g.Cfg.RepoRoot + "/scripts/sim/run.sh", Args: []string{"--all"},
-			Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: out, Stderr: errw,
-		}
-	}, "pre-gate: sim suite failed — aborting before touching the live bed or making any live call."); err != nil {
+	g.simAttempt, g.simExtraArgs = 0, nil
+	if err := g.runPregateStep(ctx, "sim suite", g.runSimSuite,
+		"pre-gate: sim suite failed — aborting before touching the live bed or making any live call."); err != nil {
 		return err
 	}
-	if err := g.runPregateStep(ctx, "github wire-contract tests", func(out, errw io.Writer) Cmd {
-		return Cmd{
+	if err := g.runPregateStep(ctx, "github wire-contract tests", func(ctx context.Context, sc *crashScanner) Result {
+		return g.Exec.Run(ctx, Cmd{
 			Name: "go", Args: []string{"test", "-race", "-count=1", "./github/..."},
-			Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: out, Stderr: errw, Session: true, Grace: g.Cfg.KillGrace,
-		}
+			Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: io.MultiWriter(g.Out, sc), Stderr: io.MultiWriter(g.Err, sc),
+			Session: true, Grace: g.Cfg.KillGrace,
+		})
 	}, "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call."); err != nil {
 		return err
 	}
@@ -91,12 +89,14 @@ func (g *Gate) RunPregate(ctx context.Context) error {
 // once, the retry is recorded (with the host load average, which is the usual
 // cause) and the second result is final. A second crash, or any other failure,
 // is the same hard stop as ever. Output still streams to the terminal as it
-// arrives; it is only scanned, never buffered.
-func (g *Gate) runPregateStep(ctx context.Context, name string, mk func(out, errw io.Writer) Cmd, failMsg string) error {
+// arrives; it is only scanned, never buffered. attempt runs the step once and
+// must feed the scanner TEXT (the sim step decodes its `go test -json` stream
+// first: raw JSON lines all begin `{"Time"`, which would defeat the scanner's
+// line-anchored veto of a genuine panic or data race, #2247).
+func (g *Gate) runPregateStep(ctx context.Context, name string, attempt func(ctx context.Context, sc *crashScanner) Result, failMsg string) error {
 	run := func() (Result, *crashScanner) {
 		sc := &crashScanner{}
-		res := g.Exec.Run(ctx, mk(io.MultiWriter(g.Out, sc), io.MultiWriter(g.Err, sc)))
-		return res, sc
+		return attempt(ctx, sc), sc
 	}
 	res, sc := run()
 	if res.ExitCode == 0 {

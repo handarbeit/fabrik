@@ -1238,3 +1238,20 @@ func TestStatusEditWebhookCarriesSenderTimeAndEcho(t *testing.T) {
 		t.Fatalf("StatusAt = %v", got.StatusAt)
 	}
 }
+
+// A review that arrives by webhook carries the SHA it was submitted against, so
+// the read surface can place it at the PR head without waiting for a deep
+// fetch (#2127 R5).
+func TestPRReviewWebhookCarriesCommitID(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	c.ApplyDelta("pull_request_review", []byte(`{"action":"submitted","review":{"id":1001,"state":"commented","commit_id":"abc123","user":{"login":"bot"}},"pull_request":{"number":42},"repository":{"full_name":"owner/repo"}}`))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Fatalf("want 1 review; got %+v", s.LinkedPR)
+	}
+	if got := s.LinkedPR.Reviews[0].CommitID; got != "abc123" {
+		t.Errorf("CommitID = %q, want abc123", got)
+	}
+}

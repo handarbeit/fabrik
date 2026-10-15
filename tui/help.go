@@ -48,8 +48,10 @@ KEYBOARD SHORTCUTS
                [2] Overwrite — prompts you to type OVERWRITE to confirm
                    (destructive: discards all local changes in .fabrik/plugin/)
                [3] Cancel — dismisses the dialog
+               To keep your edits AND get skill updates again, quit and run
+               "fabrik upgrade" (moves them to .fabrik/plugins/local-workflows)
     w          Wake: reset idle backoff and poll immediately
-    ctrl+r     Force refresh (same as SIGHUP)
+    ctrl+r     Restart gracefully (SIGHUP): drain workers; press again to restart now
     ?          Toggle this help panel
     q          Quit
     ctrl+c     Force quit

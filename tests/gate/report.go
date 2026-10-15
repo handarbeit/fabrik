@@ -7,13 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/handarbeit/fabrik/tests/e2e/registry"
 )
 
 // `gate report` (ReportCmd): the live suite's measured runtime per test, read from the
-// per-leg archive's go-test.json streams (#1972) and joined with the registry's
+// per-leg archive's go-test streams (#1972; one per phase since #1977, plus their INCONCLUSIVE retries) and joined with the registry's
 // entry-stage / traversal fields (#1992, R1/R5). It is read-only — it starts no bed,
 // runs no test and writes nothing.
 //
@@ -55,6 +57,18 @@ type RuntimeReport struct {
 	StagesSkipped int `json:"stages_skipped_total"`
 	// Unmeasured lists registry tests with no archived timing.
 	Unmeasured []string `json:"unmeasured,omitempty"`
+	// Phases is each invocation's per-phase wall-clock from its phases.json (#2257), by
+	// cell then invocation, oldest first. Every invocation is listed rather than only the
+	// latest: a --resume pass records just the phases it re-ran.
+	Phases []CellPhases `json:"phases,omitempty"`
+}
+
+// CellPhases is one invocation's phases.json: Summary, or Note when it was unreadable.
+type CellPhases struct {
+	Cell       string      `json:"cell"`
+	Invocation string      `json:"invocation"`
+	Summary    *LegSummary `json:"summary,omitempty"`
+	Note       string      `json:"note,omitempty"`
 }
 
 // stagesBefore maps an entry stage to the number of pipeline stages before it.
@@ -73,7 +87,7 @@ func stagesBefore(s registry.Stage) int {
 	return 0 // "none" (files no item) or unrecorded
 }
 
-// BuildRuntimeReport reads <archiveDir>/<cell>/<invocation>/go-test.json for every cell and
+// BuildRuntimeReport reads the go-test streams of <archiveDir>/<cell>/<invocation>/ for every cell and
 // joins the timings with reg. Invocation directory names are sortable, so for each
 // (cell, test) the latest invocation that ran it wins — a --resume pass supersedes an
 // interrupted one.
@@ -83,6 +97,7 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		byName[e.Name] = e
 	}
 	seconds := map[string]map[string]float64{} // test -> cell -> seconds
+	var phases []CellPhases
 
 	cells, err := os.ReadDir(archiveDir)
 	if err != nil && !os.IsNotExist(err) {
@@ -104,7 +119,11 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		}
 		sort.Strings(names) // oldest first, so a later invocation overwrites an earlier one
 		for _, inv := range names {
-			events, err := readInvocationEvents(filepath.Join(archiveDir, cell.Name(), inv))
+			invDir := filepath.Join(archiveDir, cell.Name(), inv)
+			if sum, note := readInvocationPhases(invDir); sum != nil || note != "" {
+				phases = append(phases, CellPhases{Cell: cell.Name(), Invocation: inv, Summary: sum, Note: note})
+			}
+			events, err := readInvocationEvents(invDir)
 			if err != nil {
 				return RuntimeReport{}, fmt.Errorf("reading %s/%s: %w", cell.Name(), inv, err)
 			}
@@ -120,7 +139,7 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		}
 	}
 
-	rep := RuntimeReport{SHA: sha, ByEntry: map[registry.Stage]float64{}}
+	rep := RuntimeReport{SHA: sha, ByEntry: map[registry.Stage]float64{}, Phases: phases}
 	tests := append([]registry.Entry(nil), reg.Tests...)
 	for name := range seconds {
 		if _, known := byName[name]; !known { // archived but not in this registry: keep its time
@@ -147,36 +166,106 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 	return rep, nil
 }
 
-// readInvocationEvents is one invocation's effective event stream: go-test.json with every
-// go-test.retry-N.json (the INCONCLUSIVE retries, #1973) merged in by mergeAttempts, so the
-// last attempt wins per test exactly as the gate itself classifies it. A test that
-// self-skipped as inconclusive and then ran in a retry is therefore timed from the retry.
-// An invocation with no go-test.json yields nil events.
+// streamPrefix and streamSuffix bracket every archived `go test -json` stream's name:
+// go-test.json, go-test.<phase>.json, go-test.retry-N.json, go-test.retry-N.<phase>.json.
+const (
+	streamPrefix = "go-test."
+	streamSuffix = ".json"
+)
+
+// classifyStreamName reports whether name is an archived go-test stream and, if so,
+// which attempt it belongs to: 0 for a first-attempt stream (the bare go-test.json of
+// the no-registry / pre-#1977 layout or a go-test.<phase>.json), n for a
+// go-test.retry-n[.<phase>].json. The retry form is matched first, so a phase is never
+// mistaken for a retry; any other middle part is a phase name, which keeps this free of
+// a hard-coded phase list (hyphenated names such as default-base-train included).
+func classifyStreamName(name string) (retry int, ok bool) {
+	if name == "go-test.json" {
+		return 0, true
+	}
+	if !strings.HasPrefix(name, streamPrefix) || !strings.HasSuffix(name, streamSuffix) {
+		return 0, false
+	}
+	mid := strings.TrimSuffix(strings.TrimPrefix(name, streamPrefix), streamSuffix)
+	if rest, found := strings.CutPrefix(mid, "retry-"); found {
+		num, _, _ := strings.Cut(rest, ".")
+		if n, err := strconv.Atoi(num); err == nil && n > 0 {
+			return n, true
+		}
+	}
+	return 0, true
+}
+
+// readInvocationEvents is one invocation's effective event stream. Every first-attempt
+// stream (go-test.json and each go-test.<phase>.json; phases are test-disjoint, so they
+// concatenate) forms the base; each INCONCLUSIVE retry attempt (#1973) — all of its
+// go-test.retry-N[.<phase>].json streams together — is then merged in, in ascending
+// numeric order, by mergeAttempts, so the last attempt wins per test exactly as the
+// gate itself classifies it. A test that self-skipped as inconclusive and then ran in a
+// retry is therefore timed from the retry. An invocation with no stream yields nil events.
 func readInvocationEvents(dir string) ([]Event, error) {
-	first := filepath.Join(dir, "go-test.json")
-	events, err := readEventsFile(first)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	for n := 1; ; n++ {
-		retry, err := readEventsFile(retryLogPath(first, n))
-		if err != nil {
-			if os.IsNotExist(err) {
-				return events, nil
-			}
-			return nil, err
+	attempts := map[int][]string{}
+	for _, e := range entries { // ReadDir is sorted by name, so each attempt reads deterministically
+		if e.IsDir() {
+			continue
 		}
-		events = mergeAttempts(events, retry)
+		if n, ok := classifyStreamName(e.Name()); ok {
+			attempts[n] = append(attempts[n], e.Name())
+		}
 	}
+	nums := make([]int, 0, len(attempts))
+	for n := range attempts {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	var events []Event
+	for _, n := range nums {
+		var attempt []Event
+		for _, name := range attempts[n] {
+			evs, err := readEventsFile(filepath.Join(dir, name))
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", name, err)
+			}
+			attempt = append(attempt, evs...)
+		}
+		if n == 0 {
+			events = attempt
+		} else {
+			events = mergeAttempts(events, attempt)
+		}
+	}
+	return events, nil
+}
+
+// readInvocationPhases reads an invocation's phases.json (#1977). A missing file is not
+// an error (pre-#1977 and killed legs have none): it returns nil, "". An unreadable or
+// malformed one returns nil and a one-line note, never an error.
+func readInvocationPhases(dir string) (*LegSummary, string) {
+	data, err := os.ReadFile(filepath.Join(dir, "phases.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ""
+		}
+		return nil, fmt.Sprintf("phases.json unreadable: %v", err)
+	}
+	var s LegSummary
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Sprintf("phases.json malformed: %v", err)
+	}
+	return &s, ""
 }
 
 // Format renders the table for a terminal.
 func (r RuntimeReport) Format() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "live suite runtime for %s (measured: go-test.json Elapsed per test per cell)\n\n", shortSHA(r.SHA))
+	fmt.Fprintf(&b, "live suite runtime for %s (measured: go-test per-phase stream Elapsed per test per cell)\n\n", shortSHA(r.SHA))
 	fmt.Fprintf(&b, "%-10s  %-9s  %-4s  %8s  %s\n", "entry", "traversal", "skip", "seconds", "test")
 	for _, row := range r.Rows {
 		mark := ""
@@ -195,9 +284,28 @@ func (r RuntimeReport) Format() string {
 	for _, e := range entries {
 		fmt.Fprintf(&b, "  entry %-10s %8.0fs\n", e, r.ByEntry[registry.Stage(e)])
 	}
+	r.formatPhases(&b)
 	fmt.Fprintf(&b, "\nmodel quota: not recorded by the ledger or the archive. Proxy: %d pipeline stage(s) not driven across the (test, cell) runs above\n"+
 		"(entering at stage k skips k real Claude invocations plus their CI/review waits). Token figures live in the stage-comment footers on GitHub.\n", r.StagesSkipped)
 	return b.String()
+}
+
+// formatPhases prints each invocation's per-phase wall-clock (phases.json), if any.
+func (r RuntimeReport) formatPhases(b *strings.Builder) {
+	if len(r.Phases) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nphase wall-clock (phases.json, per cell and invocation):\n")
+	for _, cp := range r.Phases {
+		if cp.Summary == nil {
+			fmt.Fprintf(b, "  %s  %s  %s\n", cp.Cell, cp.Invocation, cp.Note)
+			continue
+		}
+		fmt.Fprintf(b, "  %s  %s\n", cp.Cell, cp.Invocation)
+		for _, p := range cp.Summary.stats() {
+			fmt.Fprintf(b, "    %-19s %2d test(s)  -parallel=%-2s  wall %s\n", p.label(), p.Tests, p.Parallel, p.Wall.Round(time.Second))
+		}
+	}
 }
 
 // hasEntries reports whether any row carries an entry stage: a baseline from before

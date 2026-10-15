@@ -552,7 +552,8 @@ suite *less* reliable, backwards from the intended relationship.
 the e2e gate runner's pre-gate (behind `scripts/e2e/run.sh`) go through — see that script's own header
 comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
 `scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
-cores)`**, overridable via the environment — not a flat number: a flat cap
+cores)`** when it was written (since #2228 that is the macOS/non-Linux value;
+Linux is `min(16, host cores)`, see below), overridable via the environment — not a flat number: a flat cap
 would *increase* concurrent git-spawning on any host with fewer cores than
 the cap, versus the previous `GOMAXPROCS`-derived default, so a low-core
 host is never worse off than before this change, while every host still
@@ -569,12 +570,21 @@ is why `scripts/sim/run.sh` now also passes an explicit `-timeout
 has room to actually finish instead of looking nonviable against a hidden
 default.
 
-**This now also applies to a bare `go test -race ./...`** (both
-`scripts/cut-release.sh` step 4 and CI's own `go test` step, REQ3/REQ4,
-#1677) — the previous version of this section stated the cap did *not*
+**The ceiling is now per OS (#2228, ADR 2228).** The 4 above was measured on
+macOS. On Linux (GitHub Actions `ubuntu-latest`, x86-64, 4 vCPU; 15 runs, five
+each at 4, 8 and 16) every `-race` run was clean at every level and the wall
+time fell from ~405 s at 4 to ~182 s at 16, so `default_race_parallel` is
+`min(cores, 16)` on Linux and `min(cores, 4)` elsewhere. The crash is treated
+as macOS-specific; CI re-validates the Linux value on every PR. Sharding the
+sim across CI jobs was measured and rejected in the same ADR.
+
+**This now also applies to a bare `go test -race ./...`** (CI's own
+`go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
+until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*
 apply there, reasoning that CI's 2–4-core runners never hit this class of
-contention. That reasoning still holds for CI (the cap is a no-op there in
-practice), but not for a bare `go test -race ./...` run by hand on a
+contention. That reasoning held for CI while the ceiling was 4 (a no-op on
+2–4-core runners); since #2228 CI's Linux value is 16 and is measured, not
+assumed. It never held for a bare `go test -race ./...` run by hand on a
 high-core-count release-cutting workstation, which exercises the exact same
 `tests/sim` package as `scripts/sim/run.sh` and is just as capable of
 reproducing the SIGSEGV — confirmed during the same v0.0.81 release cut
@@ -1080,7 +1090,7 @@ noticed, and none would have been caught by reading the tests — every suite lo
 thorough until someone actually ran the mutation.
 
 The convention below (R1–R3; R4 is a review-time obligation and lives in the
-`fabrik-review` skill instead) applies identically whether the guard is a Go function
+`review` skill instead) applies identically whether the guard is a Go function
 returning `(bool, string)` or a bash function with an exit code and stdout — it is not
 specific to this package's own Go-and-`simgh` regime.
 
@@ -1138,7 +1148,7 @@ applies the identical discipline at package scale (neutralize each modeled `simg
 behavior in turn, fail loudly if any leaves the suite green); treat a new guard test the
 same way before trusting it. The review-time version of this obligation (R4 — state which
 mutation a new guard's test catches, and show it turning the test red) is a
-`fabrik-review` skill checklist item, not a sim-bed one, since it's an author obligation
+`review` skill checklist item, not a sim-bed one, since it's an author obligation
 applied during review, not a testing-layer property.
 
 ## Running it
@@ -1159,8 +1169,24 @@ the repo-wide `skipIfNoGit` convention.
 
 ## Channel events (`channel_events_test.go`, #1968)
 
-Scenarios that drive the real engine through `PollOnce` with the channel hub started through the engine's `StartChannelEventsForTest` seam (and `SetChannelTimingForTest` to shorten the deriver's debounce), so the validate-settled anchor is exercised against the real gate chain: not emitted at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` holds nor while the review gate holds; emitted exactly once when both clear (cruise: `next=waiting-for-human`; yolo: captured before the same-pass merge, `next=auto-merge`); emitted again after `fabrik:revalidate`; and `TestChannelEventsAreObservationOnly` (R10), which runs one scenario with and without a hub and subscriber and requires the same ordered GitHub mutations and the same final labels. These tests are not `t.Parallel`: the deriver's timing is package-level and serial tests finish before any parallel test resumes. The sim delivers no `check_run` webhooks, so a settled event's `ci` is `unknown` here by design.
+Scenarios that drive the real engine through `PollOnce` with the channel hub started through the engine's `StartChannelEventsForTest` seam (and `Engine.SetChannelTimingForTest` to shorten the deriver's debounce), so the validate-settled anchor is exercised against the real gate chain: not emitted at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` holds nor while the review gate holds; emitted exactly once when both clear (cruise: `next=waiting-for-human`; yolo: captured before the same-pass merge, `next=auto-merge`); emitted again after `fabrik:revalidate`; and `TestChannelEventsAreObservationOnly` (R10), which runs one scenario with and without a hub and subscriber and requires the same ordered GitHub mutations and the same final labels. These tests are `t.Parallel` (#2210): every channel test seam is scoped to the `Env`'s own `Engine`, so no test sees another's timing or neutralisation (see "Channel test seams are per-Engine" below). The sim delivers no `check_run` webhooks, so a settled event's `ci` is `unknown` here by design.
 
+
+## Channel test seams are per-Engine, and waits are drain-driven (#2210)
+
+`tests/sim` had grown back to the CI per-package timeout because the channel tests ran serially: their seams were process-globals, and a non-vacuity test that disables a fix globally would corrupt a parallel positive test. They are now fields on the `Engine` (`engine/channel_settings.go`, ADR 2210): `Engine.SetChannelTimingForTest`, `SetChannelReadyTimeoutForTest`, `SetSituationMinForTest`, `SetDecisionAnchorGraceForTest` and the `Set*DisabledForTest` neutralisations (`SetAnomalyDetectorsDisabledForTest`, `SetDecisionPendingDisabledForTest`, `SetSettlementWithdrawalDisabledForTest`, `SetSettleCauseDisabledForTest`, `SetSituationDedupDisabledForTest`, `SetDowntimeDeltasDisabledForTest`, `SetReviewReinvokeDisabledForTest`). Call them on `env.Engine` **before** `StartChannelEventsForTest` for the timing and ready/situation values (they are read at start); the neutralisations are read at use. `RestartEnv` copies them to the rebuilt engine (`CopyChannelTestSettingsFrom`). A new channel seam must be per-Engine too; do not add a package-level variable.
+
+`settleWait(env)` (`channel_events_test.go`) no longer sleeps. It calls `Engine.DrainChannelEventsForTest`, which makes every debounced item due, waits for the channel consumer to go idle (empty queue, no dirty item, no settle candidate, no pass in flight), runs a pending restart readiness pass, and then waits until the hub owes no attached subscriber a deliverable batch (`Hub.Deliverable`; a digest the hub is deliberately holding does not count). A poll's store observers run synchronously, so once `PollOnce` has returned everything it changed is already enqueued. The wait is capped by `drainCap` (30 s) and fails the test naming the stage that did not drain. With no hub running it returns at once.
+
+Some effects have no drain point: scheduled situation digests, reminders, anomaly detectors and the stall events are driven by the deriver's own ticker, and "nothing further is published" assertions need a window to elapse. Those use `waitRealTime(t, d, why)`, whose required `why` documents the reason at the call site. Use it only for those; if the awaited effect follows an enqueued change, use `settleWait`.
+
+## Every sim test file is parallel or exempt (#2210)
+
+`parallel_guard_test.go` (`TestEverySimTestFileIsParallelOrExempt`) parses every `*_test.go` here and fails, naming `file.go:TestName`, when a top-level `Test` function has no `t.Parallel()` in its own body (one inside a `t.Run` closure does not count) and neither it nor its file is on `parallelExempt`. It is per test, ignores comments and strings, and also rejects a stale or reasonless exemption. `TestParallelGuardFixtures` proves it fails on a serial fixture file. Current exemptions, each with its reason in the map: `advance_until_test.go` and `main_guard_test.go` (re-exec the test binary as a subprocess), `display_field_warnings_test.go` and the one `TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns` test (both redirect the process-global `warnings.WarningsPathOverride`). A test or file is exempt only for a named process-global or subprocess, never because it is slow.
+
+## Real git ahead of the macOS xcrun shim (#2210 R6)
+
+On macOS `/usr/bin/git` is Apple's `xcrun` shim: every call resolves the developer directory and then execs the real git (about 10-13 ms against about 6 ms for the real binary, measured over 200 runs on the release host). The sim starts real `git` thousands of times, so `TestMain` calls `preferRealGit` (`realgit.go`): on `darwin` it runs `xcrun -f git` once and, when that yields an absolute, executable path and `PATH`'s `git` is Apple's shim (`/usr/bin/git`) or absent, prepends its directory to `PATH` before any test runs and logs one line naming the git chosen. Any failure (no `xcrun`, empty or relative output, a non-executable path, the same git as `PATH`'s, or a non-shim git such as Homebrew's, which is the developer's choice) leaves `PATH` unchanged, and it does nothing off darwin. It runs after `testenv.ScrubProcess` and does not touch the git-config isolation `testenv.IsolateGit` provides. `SIM_REAL_GIT=off` disables it, to measure the difference. `TestRealGitDir` covers the fallback cases against the pure resolver `realGitDir`.
 
 ## Test-binary lifetime (#2128)
 
@@ -1168,4 +1194,12 @@ Scenarios that drive the real engine through `PollOnce` with the channel hub sta
 
 - **Hard ceiling.** The binary exits with status 2 and a message naming the ceiling after `SIM_TEST_CEILING` (a Go duration; default `30m`), regardless of `-test.timeout` (0 or huge included). The default is clear of the slowest legitimate full run (~11 min at `-parallel 4` on the 28-core host, CI ~7–8 min, `SIM_TIMEOUT` 20m, so an ordinary `-test.timeout` panic fires first and keeps its goroutine dump); raise it for a deliberately long run or an unusually slow host, never to 0.
 - **Owner watch.** Under a Claude worker, `FABRIK_WORKER_OWNER` names the worker's owner file; the binary exits within about 5 s once that worker is gone (PID absent or recycled). A live worker with a background run whose launching shell has exited is left alone, and an unresolved or unreadable owner never causes an exit.
+- **Main parent watch (#2226).** Without an owner marker, the binary watches the process that started it (normally `go test`; PID plus start token captured at install) and exits within about a second of that parent being gone, so a reparented `sim.test` cannot run on unnoticed. An owner marker takes precedence (the owner watch is then the lifetime); an unreadable parent identity, or a parent that is already init at start, never causes an exit.
+- **Bounded exit (#2226).** Every bail (ceiling, owner watch, parent watches) arms a watchdog before requesting exit; if the process is still alive after 5 s it `SIGKILL`s itself, so an exit that hangs under `-race` still leaves no orphan.
 - **Re-exec'd helpers.** Tests that re-exec the test binary (`os.Args[0]`) must use `testlife.ReExecCommand(timeout, args...)`, not a bare `exec.Command`: it adds an explicit `-test.timeout`, a context deadline and a parent-liveness check so the helper dies with its parent.
+- **Goroutine dump (#2247).** Before any bail exits it writes every goroutine's stack (`runtime/pprof` goroutine profile, `debug=2`) to a file and then to stderr, so a hang and a merely slow run no longer look the same. The file is `SIM_TEST_DUMP_FILE` when set with the PID inserted before its extension, so test binaries running side by side each keep their own dump (the gate sets it to `.e2e-coverage/pregate/<head>.sim.dump.txt`, so dumps land at `<head>.sim.dump.<pid>.txt`), otherwise `<tmp>/<name>-goroutines-<pid>.txt` — never the working directory, which is this package's source tree. The dump is built in its own goroutine and waited for at most 3 s (inside the 5 s self-kill grace, which it never extends); a dump that is not ready in time is skipped, and a failed write is reported and ignored. `Options.DisableDump` is the neutralisation seam. The dump only matters when the ceiling is below `-test.timeout` (an ordinary timeout panic already dumps).
+- **A binary stuck inside exit.** The self-kill above is a Go timer in the process it kills, so it cannot fire when the process is stuck in its exit path — seen on 2026-10-13 with two `-race` binaries spinning for about an hour after "exiting". The gate therefore also reaps from outside (see `tests/gate/README.md`, "Sim pre-gate diagnostics"): it SIGKILLs a `.test` member of the sim's session that has been seen, with the same start token, for ceiling + 2 min. A bare `go test` or a hand-run `scripts/sim/run.sh` has no such cover.
+
+## Log attribution (#2247)
+
+`NewEnv` installs a per-Engine log sink (`engine.SetLogSinkForTest`, `logsink.go`), so every engine log line a sim Env prints reads `2026-10-14T16:11:02.123Z [TestName] [#N tag] message`: wall-clock time and the owning test's name, written in one mutex-guarded `Write` so lines never interleave mid-line. Lines written after the test's cleanup are dropped. `EnvOptions.LogOut` redirects them (default stdout). Only `logEvent` lines are attributed; the engine's few direct prints (`claude.go`, `worktree.go`) and the package-global `gh.Logf` stay anonymous because they have no Engine to route through. With `go test -json` the gate archives these lines in `<head>.sim.log`.

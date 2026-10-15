@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -138,7 +139,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// poll()'s one-snapshot-per-cycle architecture as a whole, not something
 		// introduced by this scan. Accepted as-is — closing it would mean re-fetching
 		// UpdatedAt mid-poll, which no part of poll() currently does anywhere.
-		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, item.UpdatedAt) {
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, boardcache.EvidenceFromItem(&item)) {
 			e.logf(item.Number, "awaiting-ci-settle", "reading details from cache\n")
 		} else {
 			e.logf(item.Number, "awaiting-ci-settle", "deep-fetching details from GitHub\n")
@@ -193,7 +194,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// guards (classifyCIFromCheckRuns et al., ci.go) only fire once
 		// checkCIGate is actually reached — but any silent claim earlier in the
 		// chain (confirmed possible via a stale cached CheckRunsPending read,
-		// closed by RefreshCheckRunsLive below for that specific cause, but not
+		// closed by FetchCheckRuns' live confirmation of PENDING sets (#2180) for that specific cause, but not
 		// provably the only way it can happen) makes checkCIGate unreachable,
 		// leaving those inner guards dead. This check does not depend on the
 		// handler chain at all, so it bounds the whole class rather than just
@@ -263,40 +264,9 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 			}
 		}
 
-		// #1303: prime the store with a genuinely fresh check-run read before
-		// the handler chain runs. FetchCheckRuns' general cache-trust contract
-		// deliberately still serves a cached PENDING classification (see its
-		// doc comment) — on a webhook-less deployment nothing else ever
-		// supersedes that snapshot, which is exactly the confirmed mechanism
-		// behind this item silently latching in checkMergeabilityGate's
-		// PRMergeUnsettled branch forever. Scoped to this one caller (the
-		// bounded fabrik:awaiting-ci item set already deep-fetched
-		// unconditionally above) rather than changing FetchCheckRuns' cache
-		// trust for its ~35 other call sites. Non-fatal on error — falls
-		// through to whatever FetchCheckRuns' own cache-trust check decides,
-		// matching FetchItemDetails' failure handling above.
-		//
-		// #1325: item.LinkedPRHeadSHA here has two possible provenances,
-		// depending on whether the FetchItemDetails call above (via
-		// e.readClient, normally boardcache.CacheImpl) hit or missed the
-		// cache. On a miss, it comes from that call's own live GraphQL
-		// deep-fetch (headRefOid). On a hit — the common case, and the one
-		// this guard exists to rescue — it comes from copyDeepFieldsFromState
-		// reading the store's ItemState.LinkedPR.HeadSHA, which is kept fresh
-		// independently of this call by every deep fetch and by
-		// pull_request/check_run webhook deltas (boardcache/delta.go). Before
-		// #1325, copyDeepFieldsFromState never populated this field on a
-		// cache hit, so this guard passed only when a miss had just happened
-		// — exactly the one case where the guard's rescue wasn't needed.
-		if item.LinkedPRHeadSHA != "" && item.LinkedPRNumber != 0 {
-			if c := e.cache(); c != nil {
-				shaShort := item.LinkedPRHeadSHA[:min(8, len(item.LinkedPRHeadSHA))]
-				e.logf(item.Number, "awaiting-ci-settle", "refreshing check runs live for sha=%s\n", shaShort)
-				if err := c.RefreshCheckRunsLive(owner, repoName, item.LinkedPRHeadSHA); err != nil {
-					e.logf(item.Number, "awaiting-ci-settle", "could not refresh check runs live for sha=%s: %v — falling back to cache\n", shaShort, err)
-				}
-			}
-		}
+		// The check-run cache no longer trusts a PENDING snapshot without a recent
+		// live confirmation (boardcache.FetchCheckRuns, #2180), which subsumes the
+		// #1303 per-poll prime that used to sit here.
 
 		// The item resolved to a real wait_for_ci stage this pass — clear any
 		// orphan-retry count so a transient bounce through a stray column doesn't

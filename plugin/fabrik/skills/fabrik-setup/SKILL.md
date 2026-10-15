@@ -19,7 +19,7 @@ Confirm the user has — or help them obtain — each of these. Don't proceed pa
    ```
    Note this value rotates whenever the user re-runs `gh auth login` or `gh auth refresh` — a `.env` pinned to a stale copy will start failing after a re-auth. A classic PAT (create at https://github.com/settings/tokens, select "Tokens (classic)") is the alternative if they want a token independent of their `gh` CLI session.
 
-   **Identity-mismatch trap:** if they're reusing a token copied from another Fabrik project's `.env`, it may belong to a *different* GitHub account than the one the Project board is under — a classic, correctly-scoped token, so nothing about it looks wrong. It fails as `NOT_FOUND: Could not resolve to a ProjectV2`, which reads like a wrong project number, not a wrong identity. Have them check: `gh api graphql -f query='{ viewer { login } }'` should match `user:` in `config.yaml`.
+   **Identity-mismatch trap:** if they're reusing a token copied from another Fabrik project's `.env`, it may belong to a *different* GitHub account than the one the Project board is under — a classic, correctly-scoped token, so nothing about it looks wrong. It fails as `NOT_FOUND: Could not resolve to a ProjectV2`, which reads like a wrong project number, not a wrong identity. Have them check: `gh api user --jq .login` should match `user:` in `config.yaml`.
 4. **`gh` CLI authenticated** (`gh auth status`) — needed for the binary download path, for `FABRIK_TOKEN=$(gh auth token)` above, and convenient for many Fabrik workflows.
 5. **Go 1.26.1+** — only required if they want to build from source instead of downloading a release binary.
 
@@ -75,7 +75,7 @@ Points `fabrik init` at a Project board that already exists (see Step 4 for buil
 Either way, `fabrik init` creates:
 
 - `.fabrik/stages/` — stage YAML configs (commit these to git if you want them version-controlled per project)
-- `.fabrik/plugin/` — the worker-side Claude Code plugin. **Not gitignored** — per-project skill customization here is a documented feature (`fabrik upgrade` detects local edits and refuses to clobber them rather than silently overwriting). Don't tell the user this directory is excluded from git tracking.
+- `.fabrik/plugin/` — the base worker-side Claude Code plugin (`fabrik-stages`), written from the binary. It is not gitignored, but it is not where customisations go: `fabrik upgrade` restores it, moving any local edits into `.fabrik/plugins/local-workflows/`. Project-specific skills live in `.fabrik/plugins/local-workflows/` and are referenced from stage YAML as `local-workflows:<skill>` (see the User Guide's workflow migration section).
 - `.fabrik/config.yaml` — project config template, populated with values from `--create-board` or the Project URL
 
 If the user runs `fabrik init` without `--create-board` or a URL, it falls back to interactive prompts, or writes a commented template if non-interactive.
@@ -85,7 +85,7 @@ If the user runs `fabrik init` without `--create-board` or a URL, it falls back 
 - `.git/info/exclude` is **machine-local** — it doesn't travel with the repo. A second machine or a fresh clone starts without any of it. If they want the exclusion to travel with the repo, recommend a `.gitignore` snippet instead (see below).
 - A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log` (plus its rotated `.fabrik/fabrik.log.N` backups), `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
 
-Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabrik/plugin/` is deliberately *not* in this list — see above):
+Suggested `.gitignore` snippet for anyone who wants this to travel (`.fabrik/plugin/` and `.fabrik/plugins/` are deliberately *not* in this list: commit the stage configs and any `local-workflows` skills):
 
 ```
 .fabrik/repos/
@@ -143,6 +143,17 @@ Useful flags for the first run:
 - `fabrik --notui` — disables the TUI dashboard (plain log output instead).
 - The TUI dashboard is the default UI; press `?` for keybinds.
 
+## Step 6 — install the `fabrik` plugin in the user's own session (optional)
+
+This plugin is what lets Claude answer "what's the status of #N?" from the running daemon. If they are reading this skill they probably have it, but the *version* has to match their binary. In Claude Code:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik@fabrik
+```
+
+The plugin starts `fabrik mcp` for the session, so `fabrik` must be on `PATH`. It asks for two optional settings: a **subscriber name** (needed only for the overseer actions and pushed events; pick a stable name such as the topic you are working on, never a PID) and a **Fabrik directory** (leave empty to use the session's own directory). Marketplace auto-update is off by default for third-party marketplaces; the user can turn it on from the marketplace's entry in `/plugin`. A session-start notice tells them if the plugin and the binary versions differ. If they previously registered the server by hand with `claude mcp add fabrik -- fabrik mcp`, have them remove that (`claude mcp remove fabrik`) so there is only one.
+
 ## Compatibility gotcha
 
 **Global Claude Code plugins can interfere with worker sessions.** The `superpowers` plugin in particular causes duplicate comments. Check with:
@@ -165,4 +176,4 @@ Once they're up:
 ## What this skill is not
 
 - **Not a runbook for Fabrik in production** — auth setup, multi-repo, SSH cloning, observability all live in the User Guide. Point users there when they ask.
-- **Not for users who already have `.fabrik/`** — if `.fabrik/` exists, Fabrik is already initialized; the user wants the supervisor skill, not setup. If they're trying to *re-init* or *upgrade*, point them at `fabrik upgrade` rather than re-running `fabrik init`.
+- **Not for users who already have `.fabrik/`** — if `.fabrik/` exists, Fabrik is already initialized; the user wants the supervisor skill, not setup. If they're trying to *re-init* or *upgrade*, point them at `fabrik upgrade` rather than re-running `fabrik init` (the supervisor skill's "Upgrading a project" has the full sequence: stop the daemon first).

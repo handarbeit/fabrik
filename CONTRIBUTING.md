@@ -22,6 +22,7 @@ gofmt -s -d .         # fix with: gofmt -s -w .
 ```
 
 CI runs `go test -race`, `go vet`, `gofmt -s -l`, and the docs-drift check on every PR.
+A PR that changes no Go build input (for example a change confined to release notes or ADRs) skips the Go suites; the job still reports success, so the required check passes.
 
 ## Documentation bundle
 

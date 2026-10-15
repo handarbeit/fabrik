@@ -132,17 +132,22 @@ type ProjectItem struct {
 	// cheap durable "entered this Status" signal exists via REST/GraphQL for
 	// Project v2 items. See ADR-1833.
 	StatusEnteredAt time.Time
-	URL             string
-	Repo            string // "owner/repo" (e.g., "acme/widgets")
-	IsPR            bool   // True if this item is a Pull Request (vs an Issue)
-	IsClosed        bool   // True if the underlying GitHub Issue is closed (always false for PRs)
-	UpdatedAt       time.Time
-	Labels          []string
-	Assignees       []string
-	Comments        []Comment
-	Author          string
-	BlockedBy       []Dependency // Issues that must be closed before this one can advance
-	LinkedPRNumber  int          // PR number of the first linked PR (0 if none); for REST re-request calls
+	// StatusAtGitHub is GitHub's own time for the Status value (the Status
+	// single-select value's updatedAt), i.e. when the item last moved column.
+	// Zero means unknown (nil value, unparseable time, GitHubAdapter paths that
+	// do not select it). It orders the merge-train batch; see ADR-2246.
+	StatusAtGitHub time.Time
+	URL            string
+	Repo           string // "owner/repo" (e.g., "acme/widgets")
+	IsPR           bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed       bool   // True if the underlying GitHub Issue is closed (always false for PRs)
+	UpdatedAt      time.Time
+	Labels         []string
+	Assignees      []string
+	Comments       []Comment
+	Author         string
+	BlockedBy      []Dependency // Issues that must be closed before this one can advance
+	LinkedPRNumber int          // PR number of the first linked PR (0 if none); for REST re-request calls
 	// LinkedPRNumberShallow is the PR number of the first linked PR from the shallow board query (0 if none).
 	// Populated only during shallow board parse. Linkage drift detection was previously performed
 	// by Reconcile using this field; that responsibility has moved to the probe loop
@@ -186,6 +191,21 @@ type ProjectItem struct {
 	// known, so the first label-bearing population is a silent baseline (#2123).
 	// Negative on purpose: a producer that forgets it fails noisy, never silent.
 	LabelsAbsent bool
+
+	// IssueLayerUpdatedAt is the issue-and-project-item part of UpdatedAt: the
+	// later of content.updatedAt and the project item's updatedAt (display-field
+	// bumps discounted), without the linked PR's updatedAt. Zero means the
+	// producer did not capture the layers separately; the cache then falls back
+	// to UpdatedAt (#2180).
+	IssueLayerUpdatedAt time.Time
+	// LinkedPRUpdatedAt is the first linked PR's own updatedAt (zero when there
+	// is no linked PR or the producer did not capture it). The engine never
+	// anchors this layer to its own writes (#2180).
+	LinkedPRUpdatedAt time.Time
+	// IssueCommentTotal is GitHub's `comments { totalCount }` for the issue
+	// (not the linked PR). Meaningful only when IssueCommentTotalKnown.
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
 }
 
 // Milestone is the minimal milestone identity Fabrik caches per item.
@@ -312,10 +332,35 @@ type BoardProbeItem struct {
 	State              string
 	Repo               string
 	EffectiveUpdatedAt time.Time
-	LinkedPRNumber     int
-	LinkedPRUpdatedAt  time.Time
-	LinkedPRHeadSHA    string // headRefOid from GraphQL probe query; empty if no linked PR
-	Status             string
+	// IssueLayerUpdatedAt is EffectiveUpdatedAt without the linked PR's
+	// updatedAt: the issue and project-item layers only (#2180).
+	IssueLayerUpdatedAt time.Time
+	// IssueCommentTotal is GitHub's `comments { totalCount }` for the issue;
+	// meaningful only when IssueCommentTotalKnown (#2180).
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
+	LinkedPRNumber         int
+	LinkedPRUpdatedAt      time.Time
+	LinkedPRHeadSHA        string // headRefOid from GraphQL probe query; empty if no linked PR
+	// LinkedPRFacts are the linked PR's state scalars from the probe (#2122);
+	// Known is false when no linked PR was returned.
+	LinkedPRFacts ProbePRFacts
+	Status        string
+	// StatusAtGitHub is GitHub's time for the Status value; zero = unknown (#2246).
+	StatusAtGitHub time.Time
+}
+
+// ProbePRFacts are the probe query's linked-PR scalars mapped onto the REST
+// vocabulary (#2122). Known is false when the probe returned no linked PR.
+type ProbePRFacts struct {
+	Known bool
+	// State is "open" or "closed"; Merged is true for a merged PR.
+	State  string
+	Draft  bool
+	Merged bool
+	// Mergeable is nil when GitHub reports UNKNOWN.
+	Mergeable      *bool
+	MergeableState string
 }
 
 // HasReaction returns true if the comment has at least one reaction of the given type.

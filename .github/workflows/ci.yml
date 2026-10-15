@@ -22,10 +22,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # #2254, ADR-2254 (amending ADR-1857): decide whether this diff can affect
+      # any Go build or test input. If every changed path is skippable the Go
+      # steps below are skipped by their `if:` and the job still ends `success`
+      # under the same name — a step-level early exit, never a workflow `paths:`
+      # filter, which would leave the required checks pending forever. Any doubt
+      # (unreadable diff, unknown path, not a merge commit) runs everything: the
+      # `!= 'true'` conditions also run everything if this step's output is missing.
+      # fetch-depth 2 gives the synthetic PR merge commit its base parent (HEAD^1).
+      - name: Classify the diff (skip Go suites when no Go build input changed)
+        id: classify
+        run: bash scripts/ci/classify-diff.sh
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        if: steps.classify.outputs.skip != 'true'
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -33,6 +48,7 @@ jobs:
       # contributors to run locally (`gofmt -s -d .` / `gofmt -s -w .`).
       # Cheapest check in the job (no build), so it runs first.
       - name: gofmt
+        if: steps.classify.outputs.skip != 'true'
         run: |
           files=$(gofmt -s -l .)
           if [ -n "$files" ]; then
@@ -47,9 +63,11 @@ jobs:
       # `go vet ./...` matches no packages under tests/e2e, so that code is
       # never vetted at all.
       - name: go vet
+        if: steps.classify.outputs.skip != 'true'
         run: go vet -tags e2e ./...
 
       - name: Test hygiene lint
+        if: steps.classify.outputs.skip != 'true'
         run: |
           if grep -rn '"/tmp/' --include="*_test.go" .; then
             echo "ERROR: hardcoded /tmp/ paths found in test files. Use t.TempDir() instead."
@@ -61,18 +79,18 @@ jobs:
           fi
 
       - name: go test
-        # -parallel capped via scripts/lib/parallel.sh's default_race_parallel
-        # (REQ4, #1677): this invocation includes the same git-forking
-        # tests/sim package that scripts/sim/run.sh's own SIM_PARALLEL caps
-        # locally — capping it here too keeps both entry points coherent
-        # rather than one being a no-op protection. CI's runners are 2-4
-        # cores (well below the min(4, cores) ceiling), so this is a no-op
-        # in practice today and exists for future-proofing / consistency,
-        # not because CI has ever reproduced the fork/exec SIGSEGV this cap
-        # guards against — see scripts/lib/parallel.sh's own header comment.
+        if: steps.classify.outputs.skip != 'true'
+        # -parallel comes from scripts/lib/parallel.sh's default_race_parallel
+        # (#1677, ADR-2228): 16 on Linux, 4 elsewhere (or the core count when
+        # lower). The cap of 4 exists for macOS, where a -race binary forking
+        # git from many goroutines crashed. On CI's 4-vCPU Linux runner one
+        # measurement run (ADR-2228) saw no crash in 5 runs at 16 (and 5 each at
+        # 4 and 8), cutting tests/sim from ~405 s to ~182 s. Five runs only bound
+        # the crash rate loosely, so every PR's run at 16 is the real validation:
+        # a fork/exec SIGSEGV or tsan CHECK failure in this step means revisit it.
         run: |
           source scripts/lib/parallel.sh
-          go test -race -timeout 10m -parallel "$(default_race_parallel)" ./...
+          go test -race -timeout 20m -parallel "$(default_race_parallel)" ./...
 
       # Compile the e2e suite without running it. The scenarios are behind the
       # `e2e` build tag and drive a real Fabrik bed against real repos, so they
@@ -84,6 +102,7 @@ jobs:
       # package code) and exits without executing a scenario or making any
       # network call. There is no TestMain, so nothing runs. Takes <1s.
       - name: compile e2e suite (not run)
+        if: steps.classify.outputs.skip != 'true'
         run: go test -tags e2e -run '^$' ./tests/e2e/...
 
       # The live-gate runner (scripts/e2e/run.sh is a shim over tests/gate,
@@ -103,6 +122,7 @@ jobs:
       # helper directly: R4 refusals, live own group, post-exit grandchild,
       # foreign leader.
       - name: killgroup helper test (#1957)
+        if: steps.classify.outputs.killgroup != 'false'
         run: bash scripts/lib/killgroup_test.sh
 
       # cut-release.sh's flag parsing — in particular --skip-integration's
@@ -111,6 +131,7 @@ jobs:
       # bed, network, git remote, or publish path touched; see that script's
       # own dispatch-guard comment for why sourcing it here is safe.
       - name: cut-release flag/gate regression test (#1454)
+        if: steps.classify.outputs.cut_release != 'false'
         run: bash scripts/cut_release_gate_test.sh
 
       # ADR citation integrity. ADRs are numbered after their originating
@@ -122,14 +143,8 @@ jobs:
       # sources rather than verifying any claim. Pure text/filesystem check —
       # no build, no network.
       - name: ADR reference integrity
+        if: steps.classify.outputs.adr_refs != 'false'
         run: bash scripts/check-adr-references.sh
-
-      # Cross-file invariants in the entwurf plugin. Four review rounds found the
-      # same class of defect every time — a rule fixed in one skill and left broken
-      # in its mirror — so the mirrors are asserted mechanically rather than by
-      # review. Pure text check: no build, no network.
-      - name: Entwurf plugin consistency
-        run: python3 scripts/check-entwurf-consistency.py
 
   # The suite again, in a worker-shaped environment (#2027, ADR-2027): dummy
   # App/PAT/webhook/reviewer/GH_TOKEN values plus an ADR-1846-shaped
@@ -142,10 +157,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      # See the classify step in the `test` job (#2254, ADR-2254).
+      - name: Classify the diff (skip Go suites when no Go build input changed)
+        id: classify
+        run: bash scripts/ci/classify-diff.sh
       - name: Set up Go
-        uses: actions/setup-go@v5
+        if: steps.classify.outputs.skip != 'true'
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: go test (worker-shaped env)
+        if: steps.classify.outputs.skip != 'true'
         run: bash scripts/ci/worker-shaped-test.sh

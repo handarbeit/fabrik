@@ -2,6 +2,7 @@ package claudeerr
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -89,5 +90,21 @@ func TestErrorsAs_MatchesConcreteTypes(t *testing.T) {
 	var target *UsageLimitError
 	if !errors.As(err, &target) {
 		t.Error("errors.As should match *UsageLimitError")
+	}
+}
+
+func TestKilledError_IsTransparent(t *testing.T) {
+	turn := &TurnLimitError{TerminalReason: "error_max_turns", NumTurns: 3}
+	k := &KilledError{Cause: KillWallTime, Err: turn}
+	if k.Error() != turn.Error() {
+		t.Errorf("Error() = %q, want the wrapped message %q", k.Error(), turn.Error())
+	}
+	var got *TurnLimitError
+	if !errors.As(k, &got) || got != turn {
+		t.Error("errors.As must see through KilledError")
+	}
+	var ke *KilledError
+	if !errors.As(fmt.Errorf("outer: %w", k), &ke) || ke.Cause != KillWallTime {
+		t.Error("KilledError must be reachable through further wrapping")
 	}
 }
