@@ -21,6 +21,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/claudeerr"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/plugin"
@@ -992,6 +993,13 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 		level = "high"
 	}
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
+	// The resolved Claude profile (#2293): an explicit override, or a removal
+	// sentinel when nothing resolved, so an overridden ambient value in the
+	// daemon's own environment can never reach a worker. Empty only for engines
+	// built without cmd (tests), which keep inheriting.
+	if entry := claudeprofile.EnvEntry(); entry != "" {
+		env = append(env, entry)
+	}
 	ghToken := claudeGHToken
 	if claudeGHTokenOverrideFn != nil {
 		ghToken = claudeGHTokenOverrideFn()
