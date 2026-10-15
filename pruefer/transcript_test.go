@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -87,6 +88,38 @@ func TestSaveTranscript_SameInstantDoesNotCollide(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(a); string(got) != "a" {
 		t.Errorf("first file clobbered: %q", got)
+	}
+}
+
+// A filesystem without hard-link support must still keep the transcript, with
+// the same exclusive-create guarantee and mode.
+func TestSaveTranscript_FallsBackWhenLinkUnsupported(t *testing.T) {
+	prev := linkFile
+	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.ENOTSUP} }
+	t.Cleanup(func() { linkFile = prev })
+
+	dir := t.TempDir()
+	a, err := saveTranscript(dir, "o", "r", 1, "sha", []byte("a"), transcriptT0, 50)
+	if err != nil {
+		t.Fatalf("save without link support: %v", err)
+	}
+	b, err := saveTranscript(dir, "o", "r", 1, "sha", []byte("b"), transcriptT0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("fallback overwrote the first file")
+	}
+	if got, _ := os.ReadFile(a); string(got) != "a" {
+		t.Errorf("first file clobbered: %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(a); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("mode = %v, err = %v; want 0600", fi.Mode().Perm(), err)
+		}
+	}
+	if n := len(transcriptFiles(t, dir)); n != 2 {
+		t.Errorf("dir holds %d files, want 2 (no temp leftovers): %v", n, transcriptFiles(t, dir))
 	}
 }
 

@@ -111,9 +111,7 @@ func saveTranscript(dir, owner, repo string, pr int, headSHA string, data []byte
 	base := transcriptFileName(now, owner, repo, pr, headSHA)
 	final := filepath.Join(dir, base)
 	for i := 1; ; i++ {
-		// Link-then-remove gives an exclusive create: it fails if final exists,
-		// so a forced re-review of the same head can never overwrite.
-		err := os.Link(tmpName, final)
+		err := placeTranscript(tmpName, final, data)
 		if err == nil {
 			cleanup()
 			break
@@ -127,6 +125,36 @@ func saveTranscript(dir, owner, repo string, pr int, headSHA string, data []byte
 
 	pruneTranscripts(dir, keep)
 	return final, nil
+}
+
+// linkFile is os.Link, a variable so a test can simulate a filesystem
+// without hard-link support.
+var linkFile = os.Link
+
+// placeTranscript creates final exclusively (it fails with os.ErrExist rather
+// than overwrite, so a forced re-review of the same head never clobbers an
+// earlier transcript). It hard-links the already-written temp file, which is
+// atomic; on a filesystem that cannot hard-link (FAT/exFAT, some SMB/FUSE
+// mounts) it falls back to an O_EXCL create and write of data.
+func placeTranscript(tmpName, final string, data []byte) error {
+	err := linkFile(tmpName, final)
+	if err == nil || errors.Is(err, os.ErrExist) {
+		return err
+	}
+	f, err := os.OpenFile(final, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(final) // best effort: do not leave a truncated file counting toward the cap
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(final) // best effort, as above
+		return err
+	}
+	return nil
 }
 
 // pruneTranscripts deletes the oldest of Pruefer's own transcript files in dir
