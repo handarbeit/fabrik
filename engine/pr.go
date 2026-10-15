@@ -196,7 +196,7 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 		return
 	}
 
-	// no write-through: excluded — issue body is not read from cache for dispatch decisions
+	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d Verification section: %v\n", prNumber, err)
 		return
@@ -224,7 +224,7 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	// Self-heal unclosed code fences that could hide Closes #N from GitHub's parser.
 	balanced := balanceFences(body)
 	if balanced != body {
-		// no write-through: excluded — issue body is not read from cache for dispatch decisions
+		// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
 		if err := e.client.UpdateIssueBody(owner, repo, prNumber, balanced); err != nil {
 			e.logf(item.Number, "warn", "could not update PR #%d body to close fence: %v\n", prNumber, err)
 			return
@@ -241,7 +241,7 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 
 	// Append closing keyword
 	updatedBody := balanced + "\n\n" + closingKeyword
-	// no write-through: excluded — issue body is not read from cache for dispatch decisions
+	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
