@@ -336,7 +336,7 @@ func (wm *WorktreeManager) PushVerified(issueNumber int, baseBranch string) erro
 			return nil
 		}
 		text := strings.TrimSpace(string(out))
-		if !strings.Contains(text, "stale info") && !strings.Contains(text, "rejected") {
+		if !isLeaseRejection(text) {
 			return fmt.Errorf("pushing branch %s: %s: %w", branch, text, pushErr)
 		}
 		lastErr = fmt.Errorf("%w: pushing branch %s: %s", ErrPushLeaseRejected, branch, text)
@@ -389,4 +389,12 @@ func (wm *WorktreeManager) verifyForPush(wtDir, branch, baseBranch string, issue
 		return fetched, false, nil
 	}
 	return "", false, &BranchDivergedError{Branch: branch, LocalHead: local, RemoteHead: fetched}
+}
+
+// isLeaseRejection reports whether git's push output is a lease failure: the remote ref no
+// longer holds the expected value, which git reports as "[rejected] ... (stale info)". A
+// "[remote rejected]" (branch protection, a pre-receive hook) is a policy refusal, not a
+// race, and is not retried or reported as the remote having moved.
+func isLeaseRejection(pushOutput string) bool {
+	return strings.Contains(pushOutput, "stale info")
 }

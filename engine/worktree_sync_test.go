@@ -501,3 +501,21 @@ func TestPushRefusedSentinels(t *testing.T) {
 		t.Error("the two refusals must stay distinct")
 	}
 }
+
+func TestIsLeaseRejection(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"lease failure", " ! [rejected]        fabrik/issue-9 -> fabrik/issue-9 (stale info)", true},
+		{"hook decline", " ! [remote rejected] fabrik/issue-9 -> fabrik/issue-9 (pre-receive hook declined)", false},
+		{"protected branch", " ! [remote rejected] fabrik/issue-9 -> fabrik/issue-9 (protected branch hook declined)", false},
+		{"auth failure", "fatal: Authentication failed", false},
+	}
+	for _, c := range cases {
+		if got := isLeaseRejection(c.out); got != c.want {
+			t.Errorf("%s: isLeaseRejection = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
