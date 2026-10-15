@@ -327,6 +327,17 @@ when seeded. The sim never opens one spontaneously after a commit is pushed to a
 head branch, which is when GitHub actually does. A scenario that pushes and then
 immediately reads will see a resolved answer here and might not on GitHub.
 
+**Clock-driven twin (#2302):** `SeedMergeableUnknownUntil(repo, pr, until)` keeps
+the same unresolved pair (`nil`, `unknown`) for *every* read until an instant on
+the sim clock, however many reads the engine makes. It exists because the read
+counter cannot express "GitHub has not computed mergeability for 40 minutes"
+without tying a scenario to the number of reads per poll (the single-reader
+caveat below). A far-future instant models GitHub never computing the state; a
+near one models it clearing. **Simplified:** like the counter it opens only when
+seeded, and it overrides the read counter and the git-derived answer alike while
+open. Real GitHub's persistent-null cause (a stuck merge-ref computation) is not
+modelled — only its observable effect on the read.
+
 ---
 
 ## Check runs and commit statuses

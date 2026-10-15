@@ -596,3 +596,39 @@ func TestMergePRRefusesRetargetBetweenGateAndMerge(t *testing.T) {
 		t.Fatal("PR reports merged after a refused merge")
 	}
 }
+
+// TestMergeableUnknownUntilWindow covers the clock-driven recompute window
+// (#2302): every read before the seeded instant reports unresolved, however many
+// reads are made, and the real answer surfaces once the clock passes it.
+func TestMergeableUnknownUntilWindow(t *testing.T) {
+	s, clk := seedBasicBoard(t)
+	s.SeedCommit(repoName, "main", map[string]string{"base.txt": "base\n"}, "base").
+		SeedCommit(repoName, headBranch, map[string]string{"feature.txt": "feature\n"}, "feature").
+		SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"}).
+		SeedMergeableUnknownUntil(repoName, 42, clk.Now().Add(40*time.Minute))
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	for i := range 20 { // far more reads than a read-count window would survive
+		mergeable, state, err := s.FetchPRMergeableFields("acme", "widgets", 42)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if mergeable != nil || state != stateUnknown {
+			t.Fatalf("read %d: (%v, %q), want unresolved inside the window", i, mergeable, state)
+		}
+	}
+	clk.Advance(39 * time.Minute)
+	if mergeable, _, _ := s.FetchPRMergeableFields("acme", "widgets", 42); mergeable != nil {
+		t.Fatal("still inside the window one minute before the instant")
+	}
+	clk.Advance(2 * time.Minute)
+	mergeable, state, err := s.FetchPRMergeableFields("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("read after window: %v", err)
+	}
+	if mergeable == nil || !*mergeable || state != stateClean {
+		t.Fatalf("after the window = (%v, %q), want (true, clean)", mergeable, state)
+	}
+}

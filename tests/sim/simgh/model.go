@@ -282,6 +282,15 @@ type prRecord struct {
 	// scenario could cover that path if the *bool were never nil.
 	mergeableRecomputeReads int
 
+	// mergeableUnknownUntil is the clock-driven twin of mergeableRecomputeReads
+	// (#2302): until this instant every mergeable read returns the unresolved
+	// values (mergeable null, state "unknown"), however many reads the engine
+	// makes. A far-future instant models GitHub never computing the state; a near
+	// one models it clearing. Zero = not in effect. Seeded explicitly; the
+	// read-count window cannot express "null for 40 minutes" without tying a
+	// scenario to the number of reads per poll.
+	mergeableUnknownUntil time.Time
+
 	createdAt time.Time
 	updatedAt time.Time
 }

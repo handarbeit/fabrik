@@ -741,6 +741,28 @@ func (s *Sim) SeedMergeableRecomputePending(ownerRepo string, prNumber, reads in
 	return s
 }
 
+// SeedMergeableUnknownUntil keeps a PR's mergeability unresolved until the given
+// instant on the sim clock: every FetchPRMergeableFields read before it reports
+// mergeable null and mergeableState "unknown", regardless of how many reads the
+// engine makes (#2302). Pass a far-future instant for a PR whose mergeability
+// GitHub never computes; pass a near one to model it clearing. The read-count
+// window (SeedMergeableRecomputePending) remains for the short post-push case.
+func (s *Sim) SeedMergeableUnknownUntil(ownerRepo string, prNumber int, until time.Time) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return s
+	}
+	pr.mergeableUnknownUntil = until
+	return s
+}
+
 // SeedReview records a submitted review on a PR.
 //
 // Mirrors real GitHub's own side effect (found auditing this port, #1450):

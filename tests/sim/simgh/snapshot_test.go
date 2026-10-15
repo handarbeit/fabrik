@@ -569,3 +569,28 @@ func TestCopyDirRefusesNonRegularFiles(t *testing.T) {
 		t.Errorf("error %q does not explain what it refused", err)
 	}
 }
+
+// The clock-driven unknown window is wall-state, not read-count state: it must
+// survive a restore at the same instant (#2302).
+func TestRestoreResumesTheUnknownUntilWindow(t *testing.T) {
+	s, clk, _ := seedRichSim(t)
+	s.SeedMergeableUnknownUntil("acme/widgets", 8, clk.Now().Add(time.Hour))
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	snap, err := s.Snapshot(t.TempDir())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	restored, err := Restore(snap, t.TempDir(), WithClock(clk))
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if mergeable, state, err := restored.FetchPRMergeableFields("acme", "widgets", 8); err != nil || mergeable != nil || state != "unknown" {
+		t.Fatalf("restored read = (%v, %q, %v), want the window still open", mergeable, state, err)
+	}
+	clk.Advance(2 * time.Hour)
+	if mergeable, _, err := restored.FetchPRMergeableFields("acme", "widgets", 8); err != nil || mergeable == nil {
+		t.Fatalf("after the window = (%v, %v), want a computed answer", mergeable, err)
+	}
+}
