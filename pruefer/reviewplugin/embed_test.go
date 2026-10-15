@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/handarbeit/fabrik/internal/skillref"
+	"github.com/handarbeit/fabrik/plugin"
 )
 
 func TestWriteProducesResolvablePlugin(t *testing.T) {
@@ -71,5 +73,24 @@ func TestSkillBodyIsTheOriginalDefaultGuidance(t *testing.T) {
 	const want = "a62ec3991b1d58de9f7314449a64dd4d68aff6be4a549ff8b5bc5e74283b086f"
 	if got := hex.EncodeToString(sum[:]); got != want {
 		t.Errorf("skill body digest = %s, want %s (the default guidance text changed)", got, want)
+	}
+}
+
+// The review plugin is loaded with --plugin-dir, where a plugin silently
+// replaces an installed one of the same name (#2140's lesson). Its name must
+// never equal Fabrik's stage plugin or the human-facing PM plugin.
+func TestPluginNameDoesNotCollideWithFabrikPlugins(t *testing.T) {
+	pmName, _, _ := strings.Cut(plugin.PMPluginID, "@")
+	for _, other := range []string{plugin.BasePluginName, plugin.LegacyBasePluginName, pmName} {
+		if PluginName == other {
+			t.Errorf("pruefer plugin name %q collides with %q", PluginName, other)
+		}
+	}
+	data, err := tree.ReadFile(root + "/.claude-plugin/plugin.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"name": "`+PluginName+`"`) {
+		t.Errorf("manifest name does not match PluginName %q", PluginName)
 	}
 }

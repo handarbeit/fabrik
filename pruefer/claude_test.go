@@ -147,7 +147,7 @@ func TestCheckReviewArgsScoped_NonVacuous(t *testing.T) {
 	if checkReviewArgsScoped(legacy) == nil {
 		t.Error("checker accepted the legacy unscoped allowlist")
 	}
-	for _, widen := range []string{"Read", "Bash(sed -n *)", "Bash(find *)", "Bash(go test:*)", "Edit", "WebFetch"} {
+	for _, widen := range []string{"Read", "Bash(sed -n *)", "Bash(find *)", "Bash(go test:*)", "Edit", "WebFetch", "Skill"} {
 		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen)) == nil {
 			t.Errorf("checker accepted widened allowlist with %q", widen)
 		}
