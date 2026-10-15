@@ -114,7 +114,7 @@ The session ID is captured even when the invocation ends by hitting `max_turns` 
 
 #### Retry after a turn-cap kill
 
-When a stage exceeds `max_turns`, the Claude CLI self-terminates with a non-zero exit, so `completed = false` and `err != nil`. The progress-based extension loop requires `err == nil`, so this falls through to the cooldown/retry path. A later poll re-invokes the same stage with `resume = true` (`engine/item.go:682` — `resume := !lastAttempt.IsZero()`).
+When a stage exceeds `max_turns`, the Claude CLI self-terminates with a non-zero exit, so `completed = false` and `err != nil`. The progress-based extension loop requires `err == nil`, so this falls through to the cooldown/retry path. A later poll re-invokes the same stage with `resume = true`: the run left its session open (`closed` is false in the session meta), which is a continuation and always resumes (see "Whether to resume" below; before #2300 this was `resume := !lastAttempt.IsZero()`).
 
 As of #1178, the CLI's own result classification (`subtype: "error_max_turns"`) is captured alongside this exit and threaded into `InvocationRecorded.TurnLimited`, so `history.json`/the TUI can render this case as incomplete-and-resumable rather than as a generic failure. This changes only the classification/rendering surfaced from the invocation — the retry/cooldown mechanics described above are unchanged.
 
@@ -168,6 +168,43 @@ The counter resets to 0 on any evidence the session is healthy — a clean exit,
 Once the count reaches `MaxResumeFailures` (`--max-resume-failures` / `FABRIK_MAX_RESUME_FAILURES`, default 2), the session file is removed — the same `os.Remove` call the dead-session path above already uses — and the sidecar resets to 0. No new "force cold start" signal is threaded anywhere: the removed file is itself the cold-start signal, since `resolveResumeSessionID` already treats an absent file identically for both `InvokeClaude` and `InvokeClaudeForComments`. Because both invocation paths (and, transitively, `merge_train.go`'s conflict-resolution invocation) compute the identical session file path for a given (issue, stage), the counter and the abandonment are shared across all three — a session poisoned by a long stage run is abandoned for the next comment-review invocation too, and vice versa, and an alternating stage/comment-review failure sequence still reaches the threshold.
 
 Unlike the dead-session self-heal (a structural fault with no ambiguity), a resume failure caught by this mechanism is exempted from `max_retries` accounting entirely — `StageAttempted` is still recorded (so the normal dispatch cooldown applies), but `StageRetryIncremented` never fires for it, for every consecutive resume failure up to the threshold, not only the one that triggers abandonment. This mirrors the `fabrik:claude-limit` precedent and exists so the guaranteed cold-start attempt cannot be starved by the very failures it is counting. Nothing is posted to the issue and no label is applied — only a log line (session id, stage, consecutive-failure count, threshold, last error) — since the mechanism is self-healing by construction; if the cold-started attempt also fails, that failure carries no `--resume` session ID and is therefore a genuine, unexempted failure that flows into the normal `max_retries` → `fabrik:paused` path. See `docs/state-machine.md` §2.17 and ADR-1414 for the full per-outcome classification table and design rationale.
+
+#### Whether to resume: `resume_session` (#2300)
+
+Which invocations resume the saved session is one decision, made above the invoker (`decideSessionResume`, `engine/session_resume.go`, ADR 2300) and logged once per governed invocation. The stage dispatch passes the result as `resume`; a comment-review pass (ordinary comment review, `review-reinvoke`, `ci-fix-reinvoke`, `rebase-reinvoke`) passes it as `InvokeOptions.NoResume`. The merge-train conflict-resolution sites keep `NoResume: true` and never reach it. Extension iterations after a comment pass's first call, and extend-turns iterations of a stage run, are continuations of the session that was just saved and always resume without re-deciding or logging.
+
+**The record.** Next to the session pointer, `<stageName>.session.meta` (JSON, mode 0600, like `.resumefails` it survives a restart) holds:
+
+| Field | Meaning |
+|---|---|
+| `session_id`, `context_tokens` | The context size of the session's **last** main-thread API call — input + cache-read + cache-creation tokens of the last `assistant` stream-json line of that session, never the run's cumulative total. Written by `runClaude` after every run, including a timeout kill with no `result` line. Sub-agent lines, other sessions' lines, lines missing a usage field and all-zero lines are skipped, so an unusable stream leaves the size **unknown**, never 0. The size is trusted only while `session_id` equals the pointer's current ID, so it can never be paired with a different session. |
+| `closed` | The last stage-dispatch run ended with `FABRIK_STAGE_COMPLETE`. Written by `processItem` beside `StageAttempted`; comment-family runs never change it. |
+| `reset` | One-shot: the next stage dispatch starts fresh. Set at the four explicit stage resets (`clearFailedStage`, `reenterValidate`, `handleValidateSHAInvalidation`, `unblockAwaitingInput`), consumed when that dispatch is logged. |
+
+The meta is removed wherever the pointer is (resume-failure abandonment, dead-session removal, the session janitor).
+
+**Stage dispatch**, with a saved session: `reset` set → fresh. Otherwise a session whose last run was **not** closed is a **continuation** and resumes whatever `resume_session` says (a time slice, incomplete or errored run, or a block on input — also after a daemon restart, because the signal is the record, not the in-memory `LastAttemptAt`). A closed session is a **re-entry** and is governed by the option. A saved session with no meta (it predates ADR 2300) is a continuation iff the stage has run in this uptime, as before. With no saved session there is nothing to decide.
+
+**Comment review** with a saved session is always governed by the option.
+
+**The option** (`resume_session`, stage YAML): `resume` (default — unchanged behaviour), `fresh` (always start a new session), `auto` (resume while the recorded size is at or below `resume_threshold_tokens`, default 250000; fresh above it; an unknown size resumes).
+
+**Context for a fresh session.** A fresh stage re-entry also gets the stage's own previous output as `.fabrik-context/stage-<Stage>.md` (a stage invocation otherwise sees prior stages only). A fresh comment-review pass already receives every stage's output including the current one and the new comments; the worktree holds the PR's commits.
+
+**Log lines** (tag `session`):
+
+| Line | When |
+|---|---|
+| `resuming session <id> (<N>k tokens, threshold <T>k)` | `auto`, size at or below the threshold |
+| `fresh session (saved session <N>k > threshold <T>k)` | `auto`, size above the threshold |
+| `fresh session (resume_session: fresh)` | `fresh` |
+| `resuming session <id> (size unknown)` | `auto`, no usable size |
+| `resuming session <id> (continuation)` | stage dispatch continuing an open session |
+| `resuming session <id> (resume_session: resume)` | `resume` (default) |
+| `fresh session (stage state was reset)` | a stage reset flag was consumed |
+| `fresh session (no prior run recorded)` | a pre-ADR-2300 session, first dispatch of this uptime |
+
+A fresh comment-review session overwrites the stage's `.session` pointer (and the meta's size is rewritten for it); `closed` is preserved, so a later stage dispatch still treats the stage correctly, but a stage continuation after such a pass resumes the comment session.
 
 ### Model Override
 

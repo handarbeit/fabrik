@@ -931,6 +931,32 @@ The local API socket (`.fabrik/state/fabrik.sock`) is closed and removed when th
 
 See `--drain-deadline`/`FABRIK_DRAIN_DEADLINE` in [§2 Configuration Reference](#2-configuration-reference) to change the drain bound, and [ADR-1393](https://github.com/handarbeit/fabrik/blob/main/adrs/1393-clean-stop-shutdown.md) for the full design record.
 
+### Resume session
+
+Every comment-review run (an ordinary comment, a review/CI-fix/rebase reinvoke) and every re-entry of a stage resumes that stage's saved Claude session. On a long stage the resumed context is most of the cost: in one downstream repo, Implement comment-review runs started at a median of about 450k tokens of context against about 72k for a fresh Implement run, and comment-triggered runs were 40% of a week's spend. `resume_session` lets you say what to do about it, per stage:
+
+| Value | Behaviour |
+|---|---|
+| `resume` (default) | Resume the saved session, as before. Nothing changes for an existing config. |
+| `fresh` | Always start a new session. |
+| `auto` | Resume while the saved session's context size is at or below `resume_threshold_tokens` (default 250000), start fresh above it. An unknown size (a session that predates this feature, or an unreadable record) resumes. **Recommended for long stages, Implement especially.** |
+
+The size is the context of the session's **last** API call (input + cache-read + cache-creation tokens), recorded after every run next to the session file and kept across restarts. A fresh session is not starting blind: a comment-review prompt carries the new comments and the stage's and prior stages' outputs, the worktree already holds the PR's commits, and a fresh stage re-entry also gets the stage's own previous output as `.fabrik-context/stage-<Stage>.md`. What a fresh session lacks is the conversation, so a comment asking about the agent's earlier reasoning cannot be answered from it — which is why the default stays `resume`.
+
+**A continuation always resumes**, whatever the option says: the next run after a turn cap or `max_wall_time` slice, or after an incomplete or errored run, continues the session it left open — also after a Fabrik restart. Only a *re-entry* (the stage starting again after it completed) is governed by `resume_session`. Explicit stage resets (a manual unpause of a failed stage, `fabrik:revalidate`, a new commit after Validate, resuming after `FABRIK_BLOCKED_ON_INPUT`) start the next stage run fresh, as they always have, and now do so regardless of how long Fabrik has been running.
+
+Each governed invocation logs its decision once:
+
+```
+[#42 session] resuming session 3fefda47-… (180k tokens, threshold 250k)
+[#42 session] fresh session (saved session 450k > threshold 250k)
+[#42 session] fresh session (resume_session: fresh)
+[#42 session] resuming session 3fefda47-… (size unknown)
+[#42 session] resuming session 3fefda47-… (continuation)
+```
+
+Use these lines to pick a threshold before changing a stage. A fresh comment-review session replaces the stage's session pointer, so a later continuation of that stage resumes the comment-review session. The failure handling described under "Resume failures" below is unchanged.
+
 ### Worktree Janitor
 
 Fabrik's normal worktree cleanup runs only when the Done stage (`cleanup_worktree: true`) is dispatched for an issue. Several situations strand worktrees outside that path:
@@ -1012,6 +1038,8 @@ Each cycle deletes any `.session` file whose mtime is older than `session_retent
 **A session file for a stage currently in flight is never deleted**, regardless of age: if an issue has a live worker registered, every `.session` file under that issue's session directory is skipped for the cycle — not just the file for the worker's current stage. This is deliberately conservative: it avoids a race where the active stage changes mid-cycle between the age check and the delete.
 
 Pruning is **age-based only**, not liveness-checking against Claude Code's own transcript store — see [ADR 1136](../adrs/1136-session-janitor.md) for the tradeoff. One consequence worth knowing: an issue that sits `fabrik:paused` (e.g. awaiting human input) for longer than `session_retention_days` has no in-flight worker, so its session file can be pruned mid-pause even though the underlying Claude Code conversation may still be resumable for up to 30 days. This is by design — the janitor only protects "in flight," not "paused-but-will-resume" — and the consequence is bounded: the next invocation just starts a fresh Claude session instead of resuming, the same graceful fallback used when a session pointer goes dead for any other reason.
+
+Next to each `.session` file Fabrik keeps a small `<Stage>.session.meta` record (the session's measured context size and whether its last stage run completed — see [Resume session](#resume-session)); the janitor deletes it together with its `.session` file. If you clean `.fabrik/sessions/` by hand, delete both.
 
 At the end of each scan Fabrik logs:
 
@@ -1516,6 +1544,16 @@ max_turns: 50             # Optional. Max conversation turns per main stage invo
 comment_max_turns: 15     # Optional. Max turns when processing user comments. Defaults to
                           #   min(max_turns, 15) when max_turns is set, otherwise 15.
                           #   Keeps comment processing bounded independently of stage budget.
+resume_session: auto      # Optional: resume (default) | fresh | auto. Whether a comment-review
+                          #   pass (ordinary comment review, review/ci-fix/rebase reinvoke) and
+                          #   a re-entry of this stage resume the stage's saved Claude session.
+                          #   auto resumes only while the session's measured context size is at
+                          #   or below resume_threshold_tokens, and starts fresh above it (an
+                          #   unknown size resumes). Recommended for long stages, Implement
+                          #   especially. A continuation always resumes whatever this says.
+                          #   See "Resume session" below.
+resume_threshold_tokens: 250000  # Optional. Context size (tokens) above which resume_session: auto
+                          #   starts a fresh session. 0 or absent = 250000. Negative is refused.
 max_wall_time: "45m"      # Optional. Wall-clock deadline for a single Claude invocation.
                           #   Accepts Go duration strings (e.g. "30m", "1h", "1h30m").
                           #   When the deadline is reached, Fabrik sends SIGINT to the
@@ -2166,7 +2204,8 @@ to resume it.
 > session pointer and cold-starts the next invocation instead of resuming.
 > This is silent and self-healing: only a log line is written (no issue
 > comment, no label), since the whole point is that the *next* attempt
-> succeeds without anyone intervening. Only the resume pointer is discarded —
+> succeeds without anyone intervening (a session started fresh by `resume_session`
+> is a cold start, so its own failure is an ordinary failure, not a resume failure). Only the resume pointer is discarded —
 > committed work on the issue branch is completely unaffected. Consecutive
 > resume failures do not consume a `--max-retries` slot (mirroring the
 > `fabrik:claude-limit` exemption above), so the guaranteed cold-start attempt
