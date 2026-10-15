@@ -105,7 +105,7 @@ func resolveClaudeProfile(flagVal, yamlVal string) claudeprofile.Resolution {
 // account a review bills to should always be visible.
 func formatClaudeProfileLine(res claudeprofile.Resolution) string {
 	if res.Dir == "" {
-		return "Claude profile: none configured — reviews use Claude Code's default profile"
+		return "Claude profile: none configured — reviews use Claude Code's default profile" + emailClause(effectiveClaudeAccount(res))
 	}
 	return fmt.Sprintf("Claude profile %q%s (from %s)", res.Dir, emailClause(res.WinnerEmail()), res.Sources[0].Name)
 }
@@ -119,6 +119,15 @@ func formatClaudeProfileDisagreement(res claudeprofile.Resolution) string {
 	}
 	return fmt.Sprintf("warning: Claude profile sources disagree: %s — %s wins; reviews run under %q",
 		strings.Join(parts, "; "), res.Sources[0].Name, res.Dir)
+}
+
+// effectiveClaudeAccount is the account reviews run under: the resolved
+// directory's, or — when nothing resolved — the default profile's (~/.claude.json),
+// exactly what the TUI footer shows at startup. Every surface that names the
+// account (startup line, footer refresh on reload) goes through it so a reload
+// and a fresh start cannot disagree.
+func effectiveClaudeAccount(res claudeprofile.Resolution) string {
+	return claudeprofile.Account(res.Dir)
 }
 
 func emailClause(email string) string {

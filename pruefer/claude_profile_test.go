@@ -262,3 +262,32 @@ func TestLoadDotenvAndCaptureProfile_ExportsNeitherProfileName(t *testing.T) {
 		t.Errorf("ClaudeConfigDir = %q, want /from/dotenv", cfg.ClaudeConfigDir)
 	}
 }
+
+// A reload that unsets the directory must show the same account a fresh start
+// would: the default profile's (~/.claude.json), not a blank.
+func TestEffectiveClaudeAccount_UnsetFallsBackToDefaultProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"),
+		[]byte(`{"oauthAccount":{"emailAddress":"default@example.com"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profileEnv(t, "", "", nil)
+
+	dir := profileDir(t, "work", "work@example.com")
+	_, set := loadProfileConfig(t, "claude_config_dir: "+dir+"\n")
+	if got := effectiveClaudeAccount(set); got != "work@example.com" {
+		t.Errorf("set: account = %q, want work@example.com", got)
+	}
+
+	_, unset := loadProfileConfig(t, "model: sonnet\n")
+	if unset.WinnerEmail() != "" {
+		t.Fatalf("precondition: WinnerEmail of an unset resolution = %q, want empty", unset.WinnerEmail())
+	}
+	if got := effectiveClaudeAccount(unset); got != "default@example.com" {
+		t.Errorf("unset: account = %q, want default@example.com", got)
+	}
+	if line := formatClaudeProfileLine(unset); !strings.Contains(line, "default profile") || !strings.Contains(line, "default@example.com") {
+		t.Errorf("unset line = %s", line)
+	}
+}

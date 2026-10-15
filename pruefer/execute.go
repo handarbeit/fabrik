@@ -298,7 +298,7 @@ func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	profileChanged := fieldChanged(diff.FieldsChanged, "ClaudeConfigDir")
 	reportClaudeProfile("reload", profile, profileChanged)
 	if profileChanged {
-		daemon.emit(ptui.ClaudeAccountEvent{Account: profile.WinnerEmail()})
+		daemon.emit(ptui.ClaudeAccountEvent{Account: effectiveClaudeAccount(profile)})
 	}
 
 	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 ||
