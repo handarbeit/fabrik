@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/pruefer/reviewplugin"
 )
 
 // reviewTestScope returns a request whose clone and staged diff directory
@@ -441,8 +442,9 @@ func TestRealClaudeInvoker_Review_Success(t *testing.T) {
 // ReviewPR can keep it when coverage is partial.
 func TestRealClaudeInvoker_Review_ReturnsRawTranscript(t *testing.T) {
 	const stream = `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"pruefer-review:review"}}]}}` + "\n" +
 		`{"type":"result","result":"ok","is_error":false,"num_turns":1,"total_cost_usd":0.01}` + "\n"
-	writeFakeClaude(t, "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}' '{\"type\":\"result\",\"result\":\"ok\",\"is_error\":false,\"num_turns\":1,\"total_cost_usd\":0.01}'\n")
+	writeFakeClaude(t, "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}' '{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Skill\",\"input\":{\"skill\":\"pruefer-review:review\"}}]}}' '{\"type\":\"result\",\"result\":\"ok\",\"is_error\":false,\"num_turns\":1,\"total_cost_usd\":0.01}'\n")
 
 	r := &RealClaudeInvoker{}
 	result, err := r.Review(context.Background(), ReviewRequest{
@@ -784,9 +786,13 @@ func TestBuildReviewPrompt_ContainsR2PolicyText(t *testing.T) {
 // TestBuildReviewPrompt_ContainsR5RevisedNitpickInstruction pins R5: the
 // prompt raises the bar for a low-severity finding beyond "skip nitpicks".
 func TestBuildReviewPrompt_ContainsR5RevisedNitpickInstruction(t *testing.T) {
-	prompt := buildReviewPrompt(ReviewRequest{})
-	if !strings.Contains(prompt, "raise the bar for a \"low\"-severity finding") {
-		t.Errorf("expected the R5 raised-bar instruction in the prompt, got:\n%s", prompt)
+	// #2306: the instruction lives in the review skill, not the prompt.
+	body, err := reviewplugin.SkillBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "raise the bar for a \"low\"-severity finding") {
+		t.Errorf("expected the R5 raised-bar instruction in the review skill, got:\n%s", body)
 	}
 }
 
@@ -870,38 +876,57 @@ func TestBuildReviewPrompt_OmittedTrimmedPaths_NamedDistinctlyFromExcluded(t *te
 // the source. A regression that dropped, reordered, or reworded any part
 // of the prompt during the split would fail this comparison.
 func TestBuildReviewPrompt_ZeroConfig_ByteIdenticalToPreSplitOutput(t *testing.T) {
-	const want = "You are Pruefer, an automated code reviewer for pull request /#0: \"\".\n\nThe PR's head commit is already checked out in your working directory. You are a read-only reader and have exactly these tools; anything else is denied:\n\n- Read: read a file by absolute path. Use its offset and limit to page through a large file.\n- Grep and Glob: search file contents and file names.\n- Shell, only these read-only commands, one plain command at a time: `cat`, `head`, `tail`, `ls`. Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\nPath limits: Read, Grep, Glob and the shell commands reach only the working directory. Any other path, including `..` or symlinks that lead outside, is denied.\n\nNot available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\nWrite a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems.\n\n**The diff tells you what changed. It does not tell you what to check.** Reading it is the start of the review, not the whole of it. Before you conclude, follow the change outward:\n\n- For every symbol the diff adds, removes, renames, or changes the meaning of, search the repository for its other uses. A change that is correct in its own file is still a defect if a caller, test, or script depends on the old behavior.\n- Check whether the change falsifies anything written down. Grep the docs, README files, ADRs, and nearby comments for the flags, keys, functions, and behaviors the diff touches. A doc that now describes behavior the code no longer has is a real finding.\n- Read the tests the diff adds or changes. Ask what would still pass if the fix were removed — a test that holds either way is not evidence.\n- When the diff removes or narrows something, ask what depended on it.\n\n**Verify before asserting.** Do not report a defect you have not confirmed by reading the relevant code. If you suspect something but cannot establish it, either check it or say plainly that it is unverified — never state it as fact. Equally, do not claim the absence of a problem (\"no other call sites\", \"nothing else uses this\") from a single narrow search; sweep properly or do not make the claim.\n\n**Finish the review.** If some part of the change is hard to assess, say so explicitly and name what you could not check. Do not silently stop at the first file, and do not treat an early confident impression as a completed review. State what you examined, so a reader can tell a thorough pass from a partial one.\n\n**Make every finding falsifiable.** For each one, state the concrete path to the failure: the input, state, or sequence that produces the wrong result, and what the wrong result is. \"This could be a problem\" is not a finding — if you cannot describe how it goes wrong, either work out whether it does, or leave it out.\n\n**Say which findings you verified.** Begin a finding you have confirmed by reading the relevant code with \"Confirmed:\". Begin one you believe is real but could not establish with \"Plausible:\", and say what you would need to check. A reader must be able to tell the two apart without re-deriving your reasoning.\n\nOn a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\nYou do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\nOutput has two parts, in this exact order:\n\n1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\nPRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\", \"severity\": \"low\"}]\n```\n\n\"severity\" must be exactly one of:\n\n- \"low\": style, minor nit, or a suggestion — not a defect.\n- \"medium\": a real defect, but scoped and low-impact.\n- \"high\": a bug or design issue that will likely cause incorrect behavior.\n- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\nEach entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\nOutput ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n"
+	// wantContract is the pre-#2306 output contract, captured before the default
+	// guidance became a skill (R4): it must stay byte-identical.
+	const wantContract = "You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\nOutput has two parts, in this exact order:\n\n1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\nPRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\", \"severity\": \"low\"}]\n```\n\n\"severity\" must be exactly one of:\n\n- \"low\": style, minor nit, or a suggestion — not a defect.\n- \"medium\": a real defect, but scoped and low-impact.\n- \"high\": a bug or design issue that will likely cause incorrect behavior.\n- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\nEach entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\nOutput ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n"
+	const wantDynamic = "You are Pruefer, an automated code reviewer for pull request /#0: \"\".\n\nThe PR's head commit is already checked out in your working directory. You are a read-only reader and have exactly these tools; anything else is denied:\n\n- Read: read a file by absolute path. Use its offset and limit to page through a large file.\n- Grep and Glob: search file contents and file names.\n- Shell, only these read-only commands, one plain command at a time: `cat`, `head`, `tail`, `ls`. Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n- Skill: invoke the review skill named below. It only loads instructions; it grants no other access.\n- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\nPath limits: Read, Grep, Glob and the shell commands reach only the working directory. Any other path, including `..` or symlinks that lead outside, is denied.\n\nNot available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n"
+	const wantSkill = "Carry out this review by invoking the `pruefer-review:review` skill with the Skill tool, before you read anything else. Its instructions are your review criteria: follow them for what to look for, how to verify and how to weigh findings. It does not define the output format; the output contract below does, and it applies to your final message.\n\n"
 	got := buildReviewPrompt(ReviewRequest{})
-	if got != want {
-		t.Errorf("buildReviewPrompt(ReviewRequest{}) changed from the pre-#1446 golden output:\ngot:  %q\nwant: %q", got, want)
+	if want := wantDynamic + wantSkill + wantContract; got != want {
+		t.Errorf("buildReviewPrompt(ReviewRequest{}) changed from the golden output:\ngot:  %q\nwant: %q", got, want)
+	}
+	// R4 for every guidance combination: the contract is the same tail.
+	for _, req := range []ReviewRequest{
+		{OperatorGuidance: "o"}, {RepoGuidance: "r", RepoGuidanceMode: GuidanceModeReplace},
+		{OperatorGuidance: "o", OperatorGuidanceMode: GuidanceModeReplace, RepoGuidance: "r"},
+	} {
+		if p := buildReviewPrompt(req); !strings.HasSuffix(p, wantContract) {
+			t.Errorf("contract changed for %+v", req)
+		}
 	}
 }
 
-// TestResolveGuidance_OperatorAppend_KeepsDefaultAndAddsOperatorText pins
-// AC3: the default guidance survives in full when an operator layer is
-// present in (the default) append mode, with the operator's text added.
-func TestResolveGuidance_OperatorAppend_KeepsDefaultAndAddsOperatorText(t *testing.T) {
+// TestResolveGuidance_OperatorAppend_KeepsSkillAndAddsOperatorText pins
+// AC3 under #2306: the default is the skill, so append mode keeps invoking it
+// and passes the operator's text as additional guidance.
+func TestResolveGuidance_OperatorAppend_KeepsSkillAndAddsOperatorText(t *testing.T) {
 	req := ReviewRequest{OperatorGuidance: "Always check error wrapping uses %w."}
-	got := resolveGuidance(req)
-	if !strings.Contains(got, defaultReviewGuidance) {
-		t.Errorf("resolveGuidance dropped the default guidance under append mode, got:\n%s", got)
+	got, replaces := resolveGuidance(req)
+	if got != "Always check error wrapping uses %w." || replaces {
+		t.Errorf("resolveGuidance = (%q, %v), want the operator text and replaces=false", got, replaces)
 	}
-	if !strings.Contains(got, "Always check error wrapping uses %w.") {
-		t.Errorf("resolveGuidance did not add the operator's guidance, got:\n%s", got)
+	prompt := buildReviewPrompt(req)
+	for _, want := range []string{"invoking the `pruefer-review:review` skill", "## Additional review guidance", "Always check error wrapping uses %w."} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q, got:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "replaces the skill's") {
+		t.Error("append mode must not say the guidance replaces the skill")
 	}
 }
 
-// TestResolveGuidance_RepoAppend_KeepsDefaultAndAddsRepoText mirrors the
-// above for the repo layer, appended on top of the (here, unmodified)
-// operator layer — proving append composes independently at each layer.
-func TestResolveGuidance_RepoAppend_KeepsDefaultAndAddsRepoText(t *testing.T) {
+// TestResolveGuidance_RepoAppend_KeepsSkillAndAddsRepoText mirrors the above
+// for the repo layer.
+func TestResolveGuidance_RepoAppend_KeepsSkillAndAddsRepoText(t *testing.T) {
 	req := ReviewRequest{RepoGuidance: "Prefer table-driven tests."}
-	got := resolveGuidance(req)
-	if !strings.Contains(got, defaultReviewGuidance) {
-		t.Errorf("resolveGuidance dropped the default guidance under append mode, got:\n%s", got)
+	got, replaces := resolveGuidance(req)
+	if got != "Prefer table-driven tests." || replaces {
+		t.Errorf("resolveGuidance = (%q, %v), want the repo text and replaces=false", got, replaces)
 	}
-	if !strings.Contains(got, "Prefer table-driven tests.") {
-		t.Errorf("resolveGuidance did not add the repo's guidance, got:\n%s", got)
+	prompt := buildReviewPrompt(req)
+	if !strings.Contains(prompt, "invoking the `pruefer-review:review` skill") || !strings.Contains(prompt, "Prefer table-driven tests.") {
+		t.Errorf("prompt lost the skill or the repo guidance, got:\n%s", prompt)
 	}
 }
 
@@ -922,8 +947,16 @@ func TestBuildReviewPrompt_RepoReplace_DropsDefaultGuidanceKeepsContractAndConte
 	}
 	prompt := buildReviewPrompt(req)
 
-	if strings.Contains(prompt, defaultReviewGuidance) {
-		t.Error("expected the default guidance to be absent under mode: replace")
+	// #2306 replace semantics: the skill is still invoked (R6 holds), but the
+	// prompt says the repo text replaces its criteria.
+	if !strings.Contains(prompt, "invoking the `pruefer-review:review` skill") {
+		t.Error("replace mode must still invoke the review skill")
+	}
+	if !strings.Contains(prompt, "## Review guidance that replaces the skill's criteria") || !strings.Contains(prompt, "follow this guidance") {
+		t.Errorf("expected the replace wording, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "## Additional review guidance") {
+		t.Error("replace mode must not use the additive heading")
 	}
 	if !strings.Contains(prompt, "Only check for %w error wrapping.") {
 		t.Errorf("expected the repo's replacement guidance in the prompt, got:\n%s", prompt)
@@ -981,7 +1014,7 @@ func TestBuildReviewArgs_UnaffectedByGuidanceFields(t *testing.T) {
 }
 
 // TestResolveGuidance_PrecedenceMatrix pins AC7/R3: precedence across the
-// three guidance layers (embedded default, operator override, repo skill)
+// three guidance layers (default skill, operator override, repo skill)
 // for every combination of {absent, append, replace} at the operator and
 // repo layers.
 func TestResolveGuidance_PrecedenceMatrix(t *testing.T) {
@@ -1013,10 +1046,13 @@ func TestResolveGuidance_PrecedenceMatrix(t *testing.T) {
 				OperatorGuidance: c.operatorGuidance, OperatorGuidanceMode: c.operatorMode,
 				RepoGuidance: c.repoGuidance, RepoGuidanceMode: c.repoMode,
 			}
-			got := resolveGuidance(req)
+			got, replaces := resolveGuidance(req)
 
-			if hasDefault := strings.Contains(got, defaultReviewGuidance); hasDefault != c.wantDefault {
-				t.Errorf("contains default guidance = %v, want %v; got:\n%s", hasDefault, c.wantDefault, got)
+			if keepsDefault := !replaces; keepsDefault != c.wantDefault {
+				t.Errorf("default skill criteria kept = %v, want %v; got:\n%s", keepsDefault, c.wantDefault, got)
+			}
+			if prompt := buildReviewPrompt(req); !strings.Contains(prompt, "invoking the `pruefer-review:review` skill") {
+				t.Errorf("the skill is invoked in every layer combination, prompt:\n%s", prompt)
 			}
 			if hasOperator := strings.Contains(got, operatorText); hasOperator != c.wantOperator {
 				t.Errorf("contains operator text = %v, want %v; got:\n%s", hasOperator, c.wantOperator, got)
@@ -1068,7 +1104,7 @@ func TestReviewPrompt_OffersOnlyPermittedForms(t *testing.T) {
 	}
 	// No suggestion anywhere outside the contract of a denied git/find/sed form.
 	for _, bad := range []string{"git diff main...HEAD", "':!", "`find", "`sed", "`git ", "`rg"} {
-		if strings.Contains(strings.Split(prompt, "Write a code review")[0], bad) {
+		if strings.Contains(strings.Split(prompt, "Carry out this review")[0], bad) {
 			t.Errorf("dynamic context suggests a denied form %q", bad)
 		}
 	}
