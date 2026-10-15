@@ -66,6 +66,9 @@ const (
 	// didNotRunSkillLoadFailed: the stage's skill failed to load in the worker
 	// (#2138, ADR-2138), so the run did none of the requested work.
 	didNotRunSkillLoadFailed didNotRunKind = "skill-load-failed"
+	// didNotRunBranchDiverged: the issue branch and its remote diverged (#2295), so the
+	// worktree sync refused to set it up and the item was paused before any work.
+	didNotRunBranchDiverged didNotRunKind = "branch-diverged"
 )
 
 // commentRunBlockedOnInput is the sentinel kind processCommentsClassified returns

@@ -778,8 +778,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// GraphQL-populated ProjectItem fields; both are false-by-default (FR-3 no-op on
 	// non-queue repos). EnsureWorktree's existing skipUpdate arg bypasses the rebase.
 	skipUpdate := !lastAttempt.IsZero() || prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
+	wtOpts := e.worktreeAdoptionOptions(item)
+	if prInMergeQueue(item) {
+		// No push can happen for a queued PR (ADR-058), so a divergence pause would be noise (#2295).
+		wtOpts = append(wtOpts, WithoutIssueBranchSync())
+	}
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, wtOpts...)
 	if err != nil {
+		var diverged *BranchDivergedError
+		if errors.As(err, &diverged) {
+			// #2295 R3: the branch and its remote each hold something the other lacks. Pause
+			// before any work; no retry or failure bookkeeping — nothing ran.
+			e.pauseForBranchDivergence(item, diverged)
+			releaseLock()
+			return nil
+		}
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
@@ -1786,8 +1799,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.logf(item.Number, "push", "post-stage push skipped: %v\n", pushErr)
 		} else if pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
-			// The zero-ahead guard (#2089) has already paused the item.
-			pushRefused = errors.Is(pushErr, ErrPushRefusedZeroAhead)
+			// The zero-ahead guard (#2089) or the divergence check (#2295) has already paused the item.
+			pushRefused = errors.Is(pushErr, ErrPushRefused)
 		}
 	}
 

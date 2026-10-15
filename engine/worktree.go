@@ -25,6 +25,11 @@ type WorktreeManager struct {
 
 	landedCheckDisabled atomic.Bool                                          // test seam: neutralises the landed-branch checks R1/R2 (#1917)
 	isAncestorFn        func(dir, ancestor, descendant string) (bool, error) // test seam: replaces gitIsAncestor (#1917)
+
+	branchSyncDisabled atomic.Bool    // test seam: neutralises the R1 issue-branch sync (#2295)
+	bareLeasePush      atomic.Bool    // test seam: restores the pre-#2295 bare --force-with-lease push (#2295)
+	prePushHook        func()         // test seam: runs between PushVerified's verification and its push (#2295)
+	reconciled         map[int]string // issue number -> remote head last reconciled with the local branch (#2295); guarded by mu
 }
 
 // EnsureWorktreeOption carries caller-known facts into EnsureWorktree. The
@@ -37,6 +42,8 @@ type EnsureWorktreeOption func(*ensureOpts)
 type ensureOpts struct {
 	landedPRHeads func() []string
 	prBaseProbe   func() (string, bool)
+	syncReport    *SyncReport // WithSyncReport (#2295)
+	noSync        bool        // WithoutIssueBranchSync (#2295)
 }
 
 // WithLandedPRHeads supplies the head SHAs of merged PRs known for the item
@@ -451,6 +458,20 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		cmd.Dir = wtDir
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr == nil {
 			if strings.TrimSpace(string(out)) == branch {
+				// #2295 R1: look at origin/<branch> before anything rebases the local one.
+				if !eo.noSync {
+					rep, syncErr := wm.syncIssueBranch(wtDir, baseBranch, issueNumber)
+					if eo.syncReport != nil {
+						*eo.syncReport = rep
+					}
+					if syncErr != nil {
+						return "", syncErr
+					}
+				}
+				if eo.syncReport != nil {
+					// R6: the head the engine rebase starts from, after the sync.
+					eo.syncReport.PreRebaseHead, _ = gitHeadSHA(wtDir)
+				}
 				if !skipUpdate {
 					wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
 				}
@@ -472,7 +493,9 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 
 	// Create the branch if it doesn't exist: from the issue branch already on
 	// origin when there is one, otherwise forking from origin/<base>.
-	if !wm.branchExists(branch) {
+	branchPreexisted := wm.branchExists(branch)
+	adoptedHead := ""
+	if !branchPreexisted {
 		// Use the fully-qualified ref to avoid ambiguity when a local branch
 		// or tag happens to share the "origin/<base>" name.
 		baseRef := "refs/remotes/origin/" + baseBranch
@@ -481,6 +504,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		}
 		if remoteRef, ok := wm.adoptRemoteIssueBranch(branch, issueNumber, baseRef, baseBranch, eo); ok {
 			baseRef = remoteRef
+			adoptedHead = wm.revParse(remoteRef)
 		}
 		cmd := exec.Command("git", "branch", branch, baseRef)
 		cmd.Dir = wm.baseDir
@@ -498,6 +522,19 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 
 	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
 	wm.writeGitExclude(wtDir, issueNumber)
+	if adoptedHead != "" {
+		wm.setReconciled(issueNumber, adoptedHead) // the local branch starts at the remote head
+	}
+	if branchPreexisted && !eo.noSync {
+		// A stale local branch reused for a fresh worktree (#2295): the same sync, on a clean tree.
+		rep, syncErr := wm.syncIssueBranch(wtDir, baseBranch, issueNumber)
+		if eo.syncReport != nil {
+			*eo.syncReport = rep
+		}
+		if syncErr != nil {
+			return "", syncErr
+		}
+	}
 	return wtDir, nil
 }
 
@@ -620,6 +657,13 @@ func (wm *WorktreeManager) CommitsAheadOfRef(issueNumber int, baseBranch string)
 func (wm *WorktreeManager) PushBranch(issueNumber int) error {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
+	return wm.pushBareLocked(issueNumber)
+}
+
+// pushBareLocked is the pre-#2295 bare --force-with-lease push. Engine pushes use
+// PushVerified (explicit lease on a verified head); this remains for the non-vacuity seam
+// and direct callers. Called with wm.mu held.
+func (wm *WorktreeManager) pushBareLocked(issueNumber int) error {
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
 	cmd := exec.Command("git", "push", "--force-with-lease", "-u", "origin", branch)
@@ -660,6 +704,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 		}
 	}
 
+	wm.setReconciled(issueNumber, "")
 	wm.logf(issueNumber, "worktree", "cleaned up\n")
 	return nil
 }

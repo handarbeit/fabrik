@@ -410,12 +410,28 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// in the queue (FR-1) or the repo is queue-enabled (FR-2). Both ProjectItem-sourced
 	// signals are false-by-default, preserving legacy behavior on non-queue repos (FR-3).
 	skipUpdate := prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
-	// #2150: the head before EnsureWorktree's rebase, so a pass that commits nothing
-	// can put the branch back instead of leaving an unpushed rebase behind. Empty when
-	// the worktree does not exist yet (nothing to restore to).
-	preRebaseSHA, _ := gitHeadSHA(wm.worktreeDir(item.Number))
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
+	// #2150: the head before EnsureWorktree's rebase (taken after its sync, #2295), so a
+	// pass that commits nothing can put the branch back instead of leaving an unpushed
+	// rebase behind. Empty when the worktree does not exist yet (nothing to restore to).
+	// #2295 R6: EnsureWorktree reports the head after its issue-branch sync and before its
+	// rebase, so the restore below never undoes a sync.
+	var syncReport SyncReport
+	wtOpts := append(e.worktreeAdoptionOptions(item), WithSyncReport(&syncReport))
+	if prInMergeQueue(item) {
+		wtOpts = append(wtOpts, WithoutIssueBranchSync())
+	}
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, wtOpts...)
+	preRebaseSHA := syncReport.PreRebaseHead
 	if err != nil {
+		var diverged *BranchDivergedError
+		if errors.As(err, &diverged) {
+			// #2295 R3: pause, refund, and bypass both comment breakers — nothing ran.
+			// The comment stays unprocessed so a human comment after the pause resumes.
+			e.endStageRework(item, stage, wasReworking, false)
+			e.removeEditingLabel(owner, repo, item.Number)
+			e.pauseForBranchDivergence(item, diverged)
+			return didNotRunBranchDiverged, nil
+		}
 		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
