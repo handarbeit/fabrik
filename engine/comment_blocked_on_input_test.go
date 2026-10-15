@@ -116,8 +116,10 @@ func TestDispatchReinvoke_BlockedOnInputRefundsAndSkipsAfter(t *testing.T) {
 
 	refunds, afterCalls := 0, 0
 	eng.dispatchReinvoke(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, reinvokeOpts{
-		tag:   "test",
-		build: func(string) []gh.Comment { return []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "human", Body: "fix"}} },
+		tag: "test",
+		build: func(string) []gh.Comment {
+			return []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "human", Body: "fix"}}
+		},
 		after: func(string, error) { afterCalls++ },
 		cycle: cycleCharge{label: "review", refund: func(repo string, number int, stageName string) []itemstate.Mutation {
 			refunds++
