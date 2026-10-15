@@ -44,8 +44,6 @@ import (
 
 // toolsDeniedCausalityDisabled neutralizes the causal gate (the pre-#1556
 // behavior: any denial is causal). Test-only; see
-// toolsDeniedCausalityDisabled neutralizes the causal gate (the pre-#1556
-// behavior: any denial is causal). Test-only; see
 // SetToolsDeniedCausalityDisabledForTest.
 var toolsDeniedCausalityDisabled atomic.Bool
 
@@ -58,11 +56,10 @@ func SetToolsDeniedCausalityDisabledForTest() (restore func()) {
 
 // Reasons returned by denialCausal for a non-causal verdict.
 const (
-	denialReasonProgress   = "progress"
-	denialReasonNoJoin     = "no-joinable-denial"
-	denialReasonNoWrite    = "no-write-denial"
-	denialReasonRecovered  = "recovered"
-	denialReasonCausalFull = ""
+	denialReasonProgress  = "progress"
+	denialReasonNoJoin    = "no-joinable-denial"
+	denialReasonNoWrite   = "no-write-denial"
+	denialReasonRecovered = "recovered"
 )
 
 // writeCapableTools are the tools whose denial can plausibly block a stage.
@@ -136,7 +133,7 @@ func scanMainThreadToolCalls(rawOutput []byte) (calls []streamToolCall, isError 
 // denialReason* values. Pure: callers log the verdict.
 func denialCausal(resp claudeResponse, rawOutput []byte, commitsPushed int) (causal bool, reason string) {
 	if toolsDeniedCausalityDisabled.Load() {
-		return true, denialReasonCausalFull
+		return true, ""
 	}
 	if commitsPushed > 0 {
 		return false, denialReasonProgress
@@ -176,5 +173,5 @@ func denialCausal(resp claudeResponse, rawOutput []byte, commitsPushed int) (cau
 			return false, denialReasonRecovered
 		}
 	}
-	return true, denialReasonCausalFull
+	return true, ""
 }
