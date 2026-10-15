@@ -2402,6 +2402,8 @@ FABRIK_SPAWN_CHILD_END
 
 Once children are spawned, the parent is done for this dispatch — it does not run Implement against the full, undecomposed issue. The parent's dependency on its own children is recorded deterministically at spawn time (not discovered on some later poll), so the very next time Fabrik looks at the parent it already sees `fabrik:blocked` with the new children listed, and it waits there until all of them close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
+**Children start from the base branch.** A spawned child is specified and worked from the base branch (the repository default, or the parent's `base:` branch), not from the parent's branch or open PR. Spawning stages (Plan, Review and Validate alike) are told not to describe the parent's unmerged files as existing or make them acceptance criteria. Since every child blocks its parent, a child cannot wait on the parent's own unmerged work; it is written to stand on the base branch alone. `DEPENDS_ON:` orders siblings only.
+
 #### What You Observe
 
 - During Plan: no sub-issues exist. Plan can be revised freely. A decomposing Plan comment carries a receipt note stating how many sub-issues were declared and that they'll be created when the issue advances to Implement — so you don't have to know this section exists to know where they went.
