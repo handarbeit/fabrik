@@ -2148,6 +2148,11 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
 		return
 	}
+	// Pause guard (#2341): item.Labels is live as of refreshAutonomyLabels above. Ahead
+	// of the feedback gate so a refusal records no feedback-pending cooldown.
+	if e.refuseIfPaused(item, "advancing") {
+		return
+	}
 	// Feedback gate (#1953 R2, superseding the comments-only #1862 guard here):
 	// unprocessed comments, review threads and review bodies all hold the
 	// advance, read live rather than from this poll's deep-fetched snapshot.

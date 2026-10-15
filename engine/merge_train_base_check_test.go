@@ -300,8 +300,11 @@ func TestLandMergeTrainBatch_AgreeingNonDefaultBase_ProceedsNormally(t *testing.
 			return 100, nil
 		},
 		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
-			t.Fatalf("FetchLabels must not be called for a non-default-base partition (R5)")
-			return nil, nil
+			// The pause guard (#2341) now reads labels live for every partition, so
+			// FetchLabels is called. R5 stays pinned differently: the labels declare a
+			// contradicting base, which would refuse the landing if the #1773 base
+			// check wrongly fired on a non-default partition.
+			return []string{"base:contradicting"}, nil
 		},
 		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
 			tr := true
