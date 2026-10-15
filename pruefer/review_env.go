@@ -31,6 +31,10 @@ const ReviewEnvPassthroughVar = "PRUEFER_REVIEW_ENV_PASSTHROUGH"
 // documented deployment is subscription-backed (credentials live in the
 // CLAUDE_CONFIG_DIR profile; adrs/1113). A host that authenticates through a
 // variable names it with ReviewEnvPassthroughVar.
+//
+// CLAUDE_CONFIG_DIR is listed only so checkReviewEnvScrubbed accepts the value
+// buildReviewEnv emits (#2294): reviewProcessEnv never copies it from the
+// daemon environment, and listing it in ReviewEnvPassthroughVar has no effect.
 var reviewEnvAllowExact = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
 	"SHELL": true, "TERM": true, "TMPDIR": true, "TEMP": true, "TMP": true,
