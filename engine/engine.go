@@ -312,6 +312,7 @@ type Engine struct {
 	sessionForcedResumeOff                atomic.Bool                   // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                   // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
 	sessionRootForTest                    atomic.Pointer[string]        // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
+	ungrantableDenialOff                  atomic.Bool                   // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	commentBlockedOnInputOff              atomic.Bool                   // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too

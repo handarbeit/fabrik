@@ -215,6 +215,23 @@ type ToolsDeniedError struct {
 type ToolDenial struct {
 	ToolName string
 	Command  string
+
+	// Path is the raw target path of a denied file-tool call (file_path for
+	// Edit/Write/MultiEdit, notebook_path for NotebookEdit; #2301). "" when
+	// the tool is not a file tool or the tool_input could not be decoded —
+	// never a value worth displaying as empty.
+	Path string
+
+	// Ungrantable marks a file-tool denial no allowed_tools rule can change
+	// (#2301): the path is inside the invocation's worktree and the allow
+	// list Fabrik passed already covers the tool and path, so the CLI's own
+	// safety check (e.g. a protected path) must have denied it. It is set by
+	// the engine from the structured denial plus Fabrik's own arguments,
+	// never from prose. RelPath is the worktree-relative path and CoveredBy
+	// the covering allow rule; both are only meaningful when Ungrantable.
+	Ungrantable bool
+	RelPath     string
+	CoveredBy   string
 }
 
 func (e *ToolsDeniedError) Error() string {
