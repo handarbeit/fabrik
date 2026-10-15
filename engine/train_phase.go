@@ -27,6 +27,12 @@ func phaseAdmitted(batchSize int) trainPhase {
 // phaseAssembling: building a trial branch. No board line (none existed).
 func phaseAssembling() trainPhase { return trainPhase{label: "assembling"} }
 
+// phaseRebuilding: a stale trial (the base moved under it mid-CI) was abandoned and is
+// being rebuilt on the new base; cycle n of at most max (#2298). No board line.
+func phaseRebuilding(n, max int) trainPhase {
+	return trainPhase{label: fmt.Sprintf("rebuilding on moved base (%d/%d)", n, max)}
+}
+
 // phaseWaitingForSlot: the train is queued for a worker slot for conflict
 // resolution. No board line.
 func phaseWaitingForSlot() trainPhase { return trainPhase{label: "waiting for slot"} }

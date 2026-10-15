@@ -1,0 +1,31 @@
+# ADR 2298: A trial that goes `dirty` because the base moved mid-CI is stale, not red
+
+## Status
+
+Accepted (#2298). Narrows ADR-1153 ("`dirty` is unambiguous and returns `TrainCIRed`"); extends ADR-059 D5 (main-moved recovery) from the landing gate to mid-trial CI; amends the ADR-2051 run record; builds on the ADR-2052/ADR-2296 "distinct uncharged verdict" pattern.
+
+## Context
+
+Every trial is assembled off a base SHA pinned at batch start, while its draft CI PR targets the live base branch. If the base advances conflictingly while the trial's CI runs, GitHub reports the trial PR `mergeable_state = "dirty"`. `evalTrialCI` checked `mergeable_state` before any check run and returned `TrainCIRed`. That red was then attributed to the members: a singleton was rerouted to Validate (auto-repair, #2045) or paused with "own combined Validate is failing"; a batch was bisected, every half-trial (built off the same pinned base) going `dirty` too, until a "poisoner" was ejected and counted; and the trial was charged to the runaway guard. Nothing was wrong with the members.
+
+The train already had the right primitive for a moved base, `landGreenBatch`'s re-pin / re-assemble / re-validate cycle bounded by `max_train_rebase_cycles`, but only for an already-green trial at landing.
+
+## Decision
+
+1. **A distinct verdict.** `evalTrialCI` classifies `dirty` with one live `FetchCommitsBehind(base, trialBranch)` read (`dirtyTrialVerdict`): base moved → `TrainCIStale`; read failed → `TrainCIStale` (an unreadable base fails toward stale, never red); base demonstrably unmoved → `TrainCIRed` with a diagnostic saying the trial PR reported `dirty` on an unmoved base. `FetchCommitsBehind` rather than a ref/SHA comparison: the trial is the pinned base plus member merges, so "behind > 0" is exactly "the live base has commits the pinned base lacks", it needs no git call on the poll goroutine, and it fails toward stale on error as required. `TrainCIStale` is appended last to the enum, is produced only by `evalTrialCI`, and is not produced by `assembleAndValidate`'s blocking path (landing rebases keep today's behaviour).
+2. **Routed before the outcome functions.** `stepMainVerdict`, `stepHalfVerdict` and `stepSingleVerdict` hand a stale verdict to `handleStaleTrial` before `mainOutcome`/`halfOutcome`/`singleOutcome`. Uncharged is therefore true by routing, not by a flag a later caller could forget: it never reaches `recordTrialIfCounts` (also exempted), `Bisect.spent/apply`, `newBisectState`, `ejectRedSingleton` and thus auto-repair, `ejectMember`, `markInfraAbandon` or the channel `merge-train-failed` event. Members stay Queued.
+3. **Rebuild within the one shared budget.** `trainRunRecord.RebaseCycles` (persisted, `omitempty`, record version stays 1) counts stale rebuilds and `landGreenBatchRun`'s main-moved landing cycles together, bounded by `effectiveMaxTrainRebaseCycles()`. `landGreenBatch` stays as a wrapper with a throwaway counter for callers without a run. The cycle is spent when a trial is abandoned, not when the next one succeeds (as `landGreenBatch` increments before re-assembling). Re-forming goes through `stepForm`/`openAndRecord`, not a blocking loop, so it works under the asynchronous driver and is restart-safe.
+4. **What is re-formed.** Main trial: the trial's survivors. Bisection half: the bisection's `Origin` batch; the bisection ends, nobody is isolated, and the cost cap is not charged (R4). One-at-a-time trial: the same cursor member is retried on the new base, because `stepOATNext` already re-pins per member and re-forming `Original` would undo the degrade and re-touch landed or ejected members; a dissolve there covers only the members not yet processed.
+5. **A rebuild skips the singleton shortcuts.** `Rebuild` makes the next `stepForm` skip `trySingletonFastPath` and `trySingletonCatchUp` for that formation: the requirement is a new trial on the new base, and a catch-up would merge the base into the member's own PR and cause review churn.
+6. **Exhaustion** dissolves the batch back to Queued, uncharged (`dissolveBatch`), the comment naming the old and new base SHAs. It claims the base "kept moving" only when a move was actually observed; with a persistently unreadable base it says the base could not be read. No partition cooldown is applied (as `landGreenBatch`'s dissolve).
+7. **Restart safety.** The cycle count, re-pinned base and re-form set are written before the old trial is closed, keyed by `StaleTrial` (the stale trial's name). Replaying the verdict for the same open trial skips the count and re-pin and finishes the rebuild once. Adoption recognises a closed trial PR whose name equals `StaleTrial` as "cleanup done" and resumes at the re-form step instead of dropping the record (which would forget the count).
+8. **Diagnostics.** One log line per stale trial (trial, PR, pinned and live base SHA7, `cycle n/max`), a `rebuilding on moved base (n/max)` phase through the single `noteTrainPhase` hook, `trainEpisode.noteRebuilt` (History detail only). No member comment within budget.
+9. **Fidelity.** `simgh` read a conflicting draft PR as `draft`; merge-train trial PRs are drafts and the incident was real GitHub reporting `dirty` for one. The precedence is now `dirty > draft` (FIDELITY.md); without it the sim twins would pass vacuously. `SetTrainStaleAsRedForTest` (per-Engine) restores the old reading for the non-vacuity runs.
+
+## Consequences
+
+- A base that moves under a trial costs a rebuild (a conflict resolution and a CI wait), not a member's eligibility, pause or ejection count.
+- A hot base can now consume the budget before landing, so a batch may dissolve at landing where it previously would not. Dissolves can repeat every poll (no cooldown). Accepted, as for the existing landing dissolve.
+- A `dirty` trial on an unmoved base (an assembly bug) is still red, bisected and ejected as before, now with a diagnostic that says so.
+- A persistently failing compare read spends the budget and dissolves.
+- Out of scope: a deterministic resolver for numbered-record/ADR-index clashes (still resolved at assembly by the agent), `pollForMergeable`'s `dirty` handling at landing, #2297, #2296 and the #2047 invalidation scan.

@@ -19,6 +19,18 @@ type trialCIState struct {
 	actionsRefused bool
 	lastPending    []gh.CheckRun
 	lastFailed     []gh.CheckRun
+	// probe names the trial's base and trial branch so a "dirty" reading can be told
+	// apart: base moved (stale) vs. base unmoved (red). Set by the caller before each
+	// evaluation, never persisted; the zero value disables the stale classification
+	// (a "dirty" trial is then red, as before #2298).
+	probe trialBaseProbe
+}
+
+// trialBaseProbe identifies the branches evalTrialCI compares to decide whether a
+// "dirty" trial is stale (#2298 R1).
+type trialBaseProbe struct {
+	baseBranch  string
+	trialBranch string
 }
 
 // evalTrialCI performs ONE evaluation of a trial PR's CI: the body of what used to be
@@ -37,11 +49,7 @@ func (e *Engine) evalTrialCI(ctx context.Context, owner, repo string, prNum int,
 	if err != nil {
 		e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchPRMergeableFields failed for PR #%d: %v\n", prNum, err)
 	} else if mergeableState == "dirty" {
-		return TrainCIRed, &trainCIDiagnostic{
-			Note:     "The trial branch stopped merging cleanly onto its base (mergeable_state \"dirty\") — the base moved again after the trial was assembled.",
-			PRNum:    prNum,
-			TrialSHA: trialSHA,
-		}, true
+		return e.dirtyTrialVerdict(logRepo, owner, repo, prNum, trialSHA, st.probe)
 	} else if gh.MergeableStateAccepted(mergeableState) {
 		mergeableAccepted = true
 	}
@@ -236,6 +244,41 @@ func (e *Engine) evalTrialCI(ctx context.Context, owner, repo string, prNum int,
 	return TrainCIPending, nil, false
 }
 
+// dirtyTrialVerdict classifies a trial PR that reads mergeable_state "dirty" (#2298 R1).
+// The trial is assembled off a base SHA pinned at batch start while its draft PR targets
+// the live base, so "dirty" usually means the base advanced conflictingly mid-CI — a
+// stale trial, not the members' red. One live FetchCommitsBehind read decides:
+//
+//   - behind > 0: the base moved → TrainCIStale (uncharged; rebuilt on the new base);
+//   - the read failed: moved cannot be ruled out → TrainCIStale, never red;
+//   - behind == 0: the base demonstrably has not moved → TrainCIRed with a diagnostic
+//     that says so (today's handling).
+//
+// With no probe (zero trialBaseProbe) or the SetTrainStaleAsRedForTest seam on, "dirty"
+// is red unconditionally — the pre-#2298 reading.
+func (e *Engine) dirtyTrialVerdict(logRepo, owner, repo string, prNum int, trialSHA string, probe trialBaseProbe) (TrainCIResult, *trainCIDiagnostic, bool) {
+	if probe.baseBranch == "" || probe.trialBranch == "" || e.trainStaleAsRed.Load() {
+		return TrainCIRed, &trainCIDiagnostic{
+			Note:     "The trial branch stopped merging cleanly onto its base (mergeable_state \"dirty\") — the base moved again after the trial was assembled.",
+			PRNum:    prNum,
+			TrialSHA: trialSHA,
+		}, true
+	}
+	behind, err := e.client.FetchCommitsBehind(owner, repo, probe.baseBranch, probe.trialBranch)
+	switch {
+	case err != nil:
+		note := fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" and the base branch %s could not be read to tell whether it moved (%v) — treating the trial as stale.", probe.baseBranch, err)
+		e.logfRepo(logRepo, "merge-train", "trial %s (PR #%d): %s\n", trialSHA, prNum, note)
+		return TrainCIStale, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}, true
+	case behind > 0:
+		note := fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" and %s has %d commit(s) the trial lacks — the base moved under the trial.", probe.baseBranch, behind)
+		return TrainCIStale, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA, BaseMoveObserved: true}, true
+	}
+	note := fmt.Sprintf("The trial PR reported mergeable_state \"dirty\" although %s has not moved since the trial was assembled.", probe.baseBranch)
+	e.logfRepo(logRepo, "merge-train", "trial %s (PR #%d) red: %s\n", trialSHA, prNum, note)
+	return TrainCIRed, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}, true
+}
+
 // logTrialCITimeout logs the CI-wait timeout line for a trial PR, naming the last
 // observed pending and failed runs when there were any.
 func (e *Engine) logTrialCITimeout(owner, repo string, prNum int, st *trialCIState) {
@@ -266,3 +309,17 @@ func (e *Engine) trialNonPassingVerdict(logRepo, trialSHA string, prNum int, np 
 // test can show the uncharged infrastructure disposition is what it asserts.
 // Test-only: production never calls it.
 func (e *Engine) SetTrainNotPassedAsRedForTest(v bool) { e.trainNotPassedAsRed.Store(v) }
+
+// SetTrainStaleAsRedForTest makes a "dirty" trial read as red unconditionally (the
+// pre-#2298 disposition), so a test can show the stale rebuild is what it asserts.
+// Per-Engine so sim tests stay parallel. Test-only: production never calls it.
+func (e *Engine) SetTrainStaleAsRedForTest(v bool) { e.trainStaleAsRed.Store(v) }
+
+// staleSeamVerdict applies the SetTrainStaleAsRedForTest neutralisation to a verdict
+// delivered by the trainValidateFn seam, which bypasses evalTrialCI's own classification.
+func (e *Engine) staleSeamVerdict(res TrainCIResult) TrainCIResult {
+	if res == TrainCIStale && e.trainStaleAsRed.Load() {
+		return TrainCIRed
+	}
+	return res
+}

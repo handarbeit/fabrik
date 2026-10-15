@@ -38,6 +38,7 @@ type trainEpisode struct {
 	oneAtATime   bool
 	abandonCause string
 	dissolved    bool // the train ran to completion with nothing left to land
+	rebuilds     int  // stale trials rebuilt on a moved base (#2298); detail only, never the headline
 }
 
 // trainEpisodeNote is one member that left the train, with a short reason.
@@ -229,6 +230,18 @@ func (ep *trainEpisode) noteAbandoned(cause string) {
 	ep.mu.Unlock()
 }
 
+// noteRebuilt records that a stale trial was abandoned and rebuilt on the moved base (the
+// n-th rebuild of the run). It adds to the History detail; the outcome still follows the
+// episode's real result.
+func (ep *trainEpisode) noteRebuilt(n int) {
+	if ep == nil {
+		return
+	}
+	ep.mu.Lock()
+	ep.rebuilds = n
+	ep.mu.Unlock()
+}
+
 func (ep *trainEpisode) noteDissolved() {
 	if ep == nil {
 		return
@@ -340,6 +353,9 @@ func (ep *trainEpisode) resolve() trainOutcome {
 	}
 	if len(df) > 0 {
 		parts = append(parts, "deferred "+strings.Join(df, ", "))
+	}
+	if ep.rebuilds > 0 {
+		parts = append(parts, fmt.Sprintf("trial rebuilt %d× on a moved base", ep.rebuilds))
 	}
 	out.Detail = strings.Join(parts, "; ")
 	return out

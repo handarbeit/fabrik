@@ -307,6 +307,7 @@ type Engine struct {
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	trainNotPassedAsRed                   atomic.Bool                   // test seam: SetTrainNotPassedAsRedForTest (#2296)
+	trainStaleAsRed                       atomic.Bool                   // test seam: SetTrainStaleAsRedForTest (#2298)
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
 	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                   // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
