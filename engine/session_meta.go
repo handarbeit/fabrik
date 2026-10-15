@@ -21,6 +21,10 @@ import (
 //     FABRIK_STAGE_COMPLETE. A session that is not closed is a continuation
 //     (time slice, incomplete or errored run, blocked on input); a closed one
 //     is a re-entry. Comment-family runs never change it.
+//   - StageRun: a stage dispatch has recorded its outcome in Closed. A record
+//     created only by the comment path (a pre-ADR-2300 session that went through
+//     a comment-review pass) has StageRun false, so Closed carries no
+//     information and the continuation decision falls back to the legacy rule.
 //   - Reset: a one-shot "the next stage dispatch starts fresh" flag, set where
 //     the engine explicitly resets a stage (clearFailedStage, reenterValidate,
 //     handleValidateSHAInvalidation, unblockAwaitingInput).
@@ -28,6 +32,7 @@ type sessionMeta struct {
 	SessionID     string `json:"session_id,omitempty"`
 	ContextTokens *int   `json:"context_tokens,omitempty"`
 	Closed        bool   `json:"closed,omitempty"`
+	StageRun      bool   `json:"stage_run,omitempty"`
 	Reset         bool   `json:"reset,omitempty"`
 }
 

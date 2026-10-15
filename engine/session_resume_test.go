@@ -160,6 +160,37 @@ func TestDecideSessionResume_LegacySessionWithoutMeta(t *testing.T) {
 	}
 }
 
+// A comment-review pass over a pre-ADR-2300 session creates a meta record with
+// a size but no stage-dispatch outcome. That record must not read as "last run
+// not closed" (a continuation): the legacy rule still applies until a stage
+// dispatch records its outcome.
+func TestDecideSessionResume_CommentCreatedMetaKeepsLegacyRule(t *testing.T) {
+	e, _ := sessionTestEngine(t)
+	path := e.SessionFileForTest(sessionTestItem, "Implement")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("S1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// What runClaude's recordSessionContextSize leaves after a comment pass.
+	updateSessionMeta(7, path, func(m *sessionMeta) { m.SessionID = "S1" })
+
+	// After a restart (no LastAttemptAt): legacy says fresh, not a continuation.
+	if d := e.decideSessionResume(sessionTestItem, sessionTestStage("fresh", 0), sessionStageDispatch, false); d.Resume || strings.Contains(d.Reason, "continuation") {
+		t.Fatalf("comment-created meta read as a continuation: %+v", d)
+	}
+	// Once a stage dispatch records its outcome, the real signal governs.
+	e.markSessionClosed(sessionTestItem, "Implement", false)
+	if d := e.decideSessionResume(sessionTestItem, sessionTestStage("fresh", 0), sessionStageDispatch, false); !d.Resume || !strings.Contains(d.Reason, "continuation") {
+		t.Fatalf("recorded open run must be a continuation: %+v", d)
+	}
+	e.markSessionClosed(sessionTestItem, "Implement", true)
+	if d := e.decideSessionResume(sessionTestItem, sessionTestStage("fresh", 0), sessionStageDispatch, false); d.Resume {
+		t.Fatalf("recorded closed run under fresh must start fresh: %+v", d)
+	}
+}
+
 // R7: an explicit reset makes the next stage dispatch fresh, once, regardless of
 // option, continuation state or uptime — and leaves comment review alone.
 func TestDecideSessionResume_ResetIsOneShot(t *testing.T) {

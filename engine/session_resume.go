@@ -64,6 +64,7 @@ func (e *Engine) RecordSessionForTest(item gh.ProjectItem, stageName, sessionID 
 			m.ContextTokens = &tokens
 		}
 		m.Closed = closed
+		m.StageRun = true
 	})
 }
 
@@ -117,7 +118,7 @@ func formatTokensK(tokens int) string {
 //
 // Stage dispatch, saved session present:
 //  1. reset flag set            → fresh (explicit state reset, one-shot)
-//  2. no meta record            → legacy: continuation iff legacyContinuation
+//  2. no stage-run outcome      → legacy: continuation iff legacyContinuation
 //  3. last run not closed       → continuation: resume, whatever the option says
 //  4. last run closed (re-entry) → governed by resume_session
 //
@@ -141,7 +142,9 @@ func (e *Engine) decideSessionResume(item gh.ProjectItem, stage *stages.Stage, k
 			d.Reason = "fresh session (stage state was reset)"
 			d.consumeReset = true
 			return d
-		case !found:
+		case !found || !meta.StageRun:
+			// No stage-dispatch outcome on record: no meta at all, or one created
+			// only by a comment-review pass over a pre-ADR-2300 session.
 			if legacyContinuation && !e.continuationExemptionOff.Load() {
 				d.Resume, d.Reason = true, fmt.Sprintf("resuming session %s (continuation)", id)
 			} else if legacyContinuation {
@@ -206,7 +209,7 @@ func (d sessionDecision) freshOverSaved() bool {
 // markSessionClosed records whether the stage dispatch that just ran ended with
 // the stage-complete marker (the continuation-vs-re-entry signal).
 func (e *Engine) markSessionClosed(item gh.ProjectItem, stageName string, closed bool) {
-	updateSessionMeta(item.Number, e.sessionFilePathFor(item, stageName), func(m *sessionMeta) { m.Closed = closed })
+	updateSessionMeta(item.Number, e.sessionFilePathFor(item, stageName), func(m *sessionMeta) { m.Closed, m.StageRun = closed, true })
 }
 
 // markSessionReset sets the one-shot "next stage dispatch starts fresh" flag
