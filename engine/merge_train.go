@@ -1838,7 +1838,8 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 // closes the member's linked PR, and resets its ejection counter.
 func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
 	trialBranch := "fabrik/merge-train/" + trialName
-	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+	keepTrial := false // set when the landing ends without a merge on a still-green, unchanged-base trial (#2297)
+	defer func() { e.releaseLandingTrial(p.repoKey(), p.wm, trialName, keepTrial, false) }()
 	defer func() {
 		if p.episode.landedNothing() {
 			p.episode.noteAbandoned(fmt.Sprintf("singleton landing of #%d did not complete (left in Queued)", m.item.Number))
@@ -1902,12 +1903,15 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	}
 
 	if !alreadyMerged {
-		if !e.pollForMergeable(ctx, p.owner, p.repo, prNum, []trainMember{m}) {
-			return // timeout / dirty — leave in Queued
+		expectedHead := ""
+		if existing != nil {
+			expectedHead = existing.HeadSHA
 		}
-		if err := e.client.MergePR(p.owner, p.repo, prNum); err != nil {
-			e.logf(m.item.Number, "merge-train", "merge of singleton PR #%d failed: %v\n", prNum, err)
-			return
+		res := e.settleAndMerge(ctx, p.owner, p.repo, prNum, expectedHead)
+		if res.outcome != outcomeMerged {
+			keepTrial = e.keepGreenTrial(p.owner, p.repo, p.baseBranch, trialBranch, res)
+			e.postLandingFailure(p.owner, p.repo, prNum, []trainMember{m}, res, keepTrial)
+			return // leave in Queued
 		}
 		e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
 	}
@@ -2017,7 +2021,7 @@ func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.
 	}
 	// classifyLandingCI's zero-check-runs branch falls back to mergeable_state
 	// alone (ADR-933's "Actions disabled" case) — correct for its usual caller
-	// (pollForMergeable, judging a landing PR whose tree was already validated
+	// (settleAndMerge, judging a landing PR whose tree was already validated
 	// by a just-polled trial CI run) but wrong here: R1.2 requires positive
 	// evidence that the member's OWN CI already ran and passed, and this fast
 	// path never builds a trial, so zero check runs on the member's own PR
@@ -4271,7 +4275,7 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 	return behind > 0
 }
 
-// classifyLandingCI classifies a landing PR's CI state for pollForMergeable
+// classifyLandingCI classifies a landing PR's CI state for settleAndMerge
 // (R6, ADR-1441) — the merge-train *landing* counterpart to
 // settlePRMergeState/checkCIGate's (engine/pr_settle.go, engine/ci.go)
 // per-check classification, and structurally mirroring pollTrainCI's own
@@ -4294,6 +4298,13 @@ func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 // check runs falls back to mergeable_state + required-context — the one case
 // where mergeable_state is genuinely load-bearing for green, exactly as in
 // pollTrainCI and settlePRMergeState's ADR-933 zero-check-runs branch.
+//
+// Since #1822 both green returns are additionally gated on ciSuiteHold: an
+// all-green (or zero-run) check-run set is a complete pass only when no check
+// suite still has outstanding work, since a job queued for a runner has no
+// check run yet. A hold or a suite-read error is TrainCIPending — never green.
+// singletonFastPathEligible inherits this through its own call here, so the
+// fast path, the landing wait and the advance gate agree on one SHA.
 func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, checkRuns []gh.CheckRun) (result TrainCIResult, detail string) {
 	if len(checkRuns) > 0 {
 		status, _, failed := gh.ClassifyCheckRuns(checkRuns)
@@ -4343,127 +4354,6 @@ func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, 
 		return TrainCIGreen, fmt.Sprintf("mergeable_state %q accepted, zero check runs, required contexts satisfied", mergeableState)
 	}
 	return TrainCIPending, fmt.Sprintf("mergeable_state=%q, zero check runs", mergeableState)
-}
-
-// Since #1822 both green returns are additionally gated on ciSuiteHold: an
-// all-green (or zero-run) check-run set is a complete pass only when no check
-// suite still has outstanding work, since a job queued for a runner has no
-// check run yet. A hold or a suite-read error is TrainCIPending — never green.
-// singletonFastPathEligible inherits this through its own call here, so the
-// fast path, the landing poll and the advance gate agree on one SHA.
-//
-// pollForMergeable polls the integration PR until CI is confirmed green —
-// per classifyLandingCI (R6, ADR-1441) — blocking up to CIBackstopTimeout.
-// Returns true when the PR is ready to merge.
-// On timeout, posts a warning comment on the first batch member issue and returns false.
-//
-// Prior to ADR-1441 this only read mergeable_state and treated
-// gh.MergeableStateAccepted (clean/unstable) as an unconditional green light
-// — the same defect ADR-1153 already fixed for pollTrainCI, left unfixed here
-// and explicitly flagged as a "candidate fast-follow" that never got its own
-// issue. It now also fetches and classifies check runs, so a confirmed
-// failure on a non-required check (mergeable_state=unstable) blocks landing
-// exactly as it now blocks the advance gate — required or not (R5's strict
-// policy, mirroring ADR-1153 §4).
-//
-// ADR-1410 (R6): bounded by CIBackstopTimeout, not the liveness-dwell
-// CIWaitTimeout — this is a synchronous blocking poll inside a single
-// goroutine, not re-entrant poll-driven state, so "wait indefinitely while
-// progressing" would hold the goroutine open for the suite's full duration, a
-// cost the async CI gate doesn't pay. It already degrades gracefully on
-// timeout (the batch retries next merge-train cycle, no pause), so #342's
-// destructive spurious-pause doesn't reproduce here; using the shorter,
-// repurposed CIWaitTimeout instead would force a wasted trial-branch rebuild
-// every ~30 minutes for a healthy-but-slow suite.
-func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum int, survivors []trainMember) bool {
-	deadline := time.Now().Add(e.ciBackstopTimeout())
-
-	for {
-		select {
-		case <-ctx.Done():
-			e.logfRepo(owner+"/"+repo, "merge-train", "context cancelled while polling integration PR #%d for mergeability\n", prNum)
-			return false
-		default:
-		}
-
-		if time.Now().After(deadline) {
-			break
-		}
-
-		pr, err := e.client.FetchPRDetails(owner, repo, prNum)
-		if err != nil {
-			e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchPRDetails failed for integration PR #%d: %v\n", prNum, err)
-		} else if pr.MergeableState == "dirty" {
-			e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d has merge conflict (dirty) — cannot land\n", prNum)
-			return false
-		} else {
-			var checkRuns []gh.CheckRun
-			var checkRunsErr error
-			if pr.HeadSHA != "" {
-				checkRuns, checkRunsErr = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
-			}
-			if checkRunsErr != nil {
-				// A fetch failure is "unknown," not "confirmed zero check
-				// runs" — passing checkRuns=nil into classifyLandingCI here
-				// would hit its zero-check-runs fallback and could let an
-				// accepted mergeable_state (unstable) through as green while
-				// a real, unobserved check-run failure sits on the head SHA.
-				// Skip classification for this iteration instead (mirrors
-				// pollTrainCI's identical if/else-if/else shape) and retry
-				// next poll.
-				e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchCheckRuns failed for integration PR #%d: %v\n", prNum, checkRunsErr)
-			} else {
-				switch verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns); verdict {
-				case TrainCIGreen:
-					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d ready to land — %s\n", prNum, detail)
-					return true
-				case TrainCIRed:
-					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
-					return false
-				case TrainCINotPassed:
-					// #2296: a cancelled run will not finish on its own, so polling to
-					// CIBackstopTimeout would only stall. Not landable now; members stay
-					// Queued and nothing is charged.
-					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not landable — %s\n", prNum, detail)
-					return false
-				default: // TrainCIPending — keep polling
-					e.logfRepo(owner+"/"+repo, "merge-train", "integration PR #%d not yet ready — %s\n", prNum, detail)
-				}
-			}
-		}
-
-		if time.Now().After(deadline) {
-			break
-		}
-
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(e.trainCIPollIntervalOrDefault()):
-		}
-	}
-
-	// Note (#1615, deliberately out of scope): if the PR was open when found by
-	// findIntegrationPR but closes (unmerged) mid-poll, this loop never observes
-	// pr.State and just times out here like any other non-green result — it does
-	// not route to the R5 escalation path, since #1615's R5 is anchored on a PR
-	// already closed-unmerged when findIntegrationPR returns it, not one that
-	// transitions during this poll. A narrower, related gap for a future issue if
-	// ever observed in production; unlike the fixed bug, it can't misattribute a
-	// landing — it only leaves members in Queued for a fresh retry.
-	e.logfRepo(owner+"/"+repo, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
-	if len(survivors) > 0 {
-		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
-			"Timed out waiting for integration PR #%d to reach a mergeable state (`clean` or `unstable`). "+
-			"Batch members remain in the Queued column and will be retried in the next train cycle.\n\n"+
-			"Possible causes: branch protection checks are slow, or the base branch has advanced "+
-			"and the integration PR needs rebasing.",
-			prNum)
-		if _, commentErr := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); commentErr != nil {
-			e.logfRepo(owner+"/"+repo, "merge-train", "warn: could not post timeout comment: %v\n", commentErr)
-		}
-	}
-	return false
 }
 
 // escalateStrandedTrainMember reroutes a single merge-train member off Queued back to
@@ -4552,16 +4442,16 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		}
 	}()
 
-	defer func() {
-		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome.
-		// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
-		// defer, not here — see ADR-067.
-		if cleanErr := wm.CleanupTrainWorktree(trialName, true); cleanErr != nil {
-			e.logfRepo(repoKey, "merge-train", "warn: cleanup trial worktree for %s failed: %v\n", repoKey, cleanErr)
-		}
-	}()
-
 	trialBranch := "fabrik/merge-train/" + trialName
+	// keepTrial is set only when the landing attempt ends without a merge while the trial is
+	// still green on an unchanged base (#2297 R5): the PR and branch then survive for reuse.
+	keepTrial := false
+	defer func() {
+		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome,
+		// except a kept green trial (see keepGreenTrial). The in-flight marker itself is
+		// cleared by runMergeTrainWorker's top-level defer, not here — see ADR-067.
+		e.releaseLandingTrial(repoKey, wm, trialName, keepTrial, true)
+	}()
 
 	// FR-1 / FR-5: find or create the landing integration PR. findIntegrationPR now
 	// gates on trialBranch identity (R1) — the returned PR, if any, is guaranteed to
@@ -4628,24 +4518,18 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		e.logfRepo(repoKey, "merge-train", "opened integration PR #%d for %s (%d survivors)\n", integrationPRNum, repoKey, len(survivors))
 	}
 
-	// FR-2: poll until mergeable, then merge (skip if already merged).
+	// FR-2: wait until green and mergeable, then merge (skip if already merged). The wait
+	// and any merge retry happen on this same PR (#2297).
 	if !alreadyMerged {
-		if !e.pollForMergeable(ctx, owner, repo, integrationPRNum, survivors) {
-			// Timeout or dirty — leave members in Queued.
-			return
+		expectedHead := ""
+		if integrationPR != nil {
+			expectedHead = integrationPR.HeadSHA
 		}
-
-		if err := e.client.MergePR(owner, repo, integrationPRNum); err != nil {
-			e.logfRepo(repoKey, "merge-train", "merge of integration PR #%d failed: %v\n", integrationPRNum, err)
-			msg := fmt.Sprintf("🏭 **Fabrik merge-train — merge failure**\n\n"+
-				"Failed to merge integration PR #%d: %v\n\n"+
-				"Batch members remain in the Queued column. Manual intervention may be required.",
-				integrationPRNum, err)
-			if len(survivors) > 0 {
-				if _, commentErr := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); commentErr != nil {
-					e.logfRepo(repoKey, "merge-train", "warn: could not post merge-failure comment: %v\n", commentErr)
-				}
-			}
+		res := e.settleAndMerge(ctx, owner, repo, integrationPRNum, expectedHead)
+		if res.outcome != outcomeMerged {
+			keepTrial = e.keepGreenTrial(owner, repo, baseBranch, trialBranch, res)
+			e.postLandingFailure(owner, repo, integrationPRNum, survivors, res, keepTrial)
+			// Leave members in Queued.
 			return
 		}
 		e.logfRepo(repoKey, "merge-train", "merged integration PR #%d for %s\n", integrationPRNum, repoKey)
@@ -5257,7 +5141,7 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // pollTrainCI polls the integration PR's CI signals, returning the typed result and,
 // for a red result, the diagnostic that observed it (R1/#1420) — nil for green/pending.
 // Blocks until the result is known or the CIBackstopTimeout elapses (ADR-1410, R6 —
-// see pollForMergeable's doc comment for why this synchronous blocking loop keeps an
+// same bound as settleAndMerge (engine/merge_train_landing_settle.go), which explains why this synchronous blocking loop keeps an
 // elapsed-time bound, pointed at the backstop rather than the liveness-dwell
 // CIWaitTimeout, instead of adopting liveness semantics itself). A confirmed CI
 // failure (check-run or required-context) already returns TrainCIRed immediately

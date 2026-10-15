@@ -428,6 +428,25 @@ or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
   scenarios in `ci_cancelled_gate_test.go` and `mergetrain_ci_cancelled_test.go`
   script the re-run's outcome either way. A real no-op re-run (201, nothing
   runs) is not modelled.
+- **Ready-for-review is scripted, not derived (#2297).** `MarkPRReady` on a *draft*
+  PR consumes the next `ReadyForReviewStep` queued with `SeedReadyForReviewSteps` for
+  that PR (an already-ready PR consumes none; a draft→ready transition with no step
+  queued starts nothing, which is also how a workflow whose `on.pull_request.types`
+  omits `ready_for_review` is modelled). A step does two independent things:
+  `BlockedReads` makes the next N reads of the PR's mergeable fields report
+  `mergeable=true`, `mergeable_state="blocked"` before the git-derived answer shows —
+  the "check not yet visible / not yet counted" window, count-driven so it needs no
+  clock advance (the PR's own `MergePR` check is such a read, so a landing that merges
+  into the window is refused with `ErrNotMergeableCI` exactly as GitHub refuses); and a
+  non-empty `CheckName` adds a pending check run of that name on `SHA` at once that
+  completes with `Conclusion` (`success` by default, `skipped` for a workflow that does
+  nothing) `Delay` later on the sim clock. A conflicting PR still reads `dirty`: the
+  window never masks a conflict. The sim does **not** read workflow files or filter
+  `types:`, and does not cancel the new run when the PR is closed (a cancel-on-close
+  workflow); the engine-visible effect of that cancellation is #2296's `cancelled`
+  conclusion, which is seeded explicitly. A scenario that scripts only `BlockedReads`
+  exercises the engine's `mergeable_state` gate with every check already green — the
+  shape that bypassed the pre-#2297 landing poll.
 - **Runs and check runs are not linked.** Nothing derives a check run's
   `DetailsURL` from a workflow run, so a scenario that expects the engine to
   find the run to re-run must seed `DetailsURL` of the form

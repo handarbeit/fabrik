@@ -788,7 +788,7 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 // what this function reports. Its remaining callers are all on the *merge*
 // side of ADR-1441's R3 split, which deliberately keeps deferring to branch
 // protection alone (ADR-072's operator note): MergePR's own ADR-072
-// self-gate, pollForMergeable's zero-check-runs fallback and pollTrainCI's
+// self-gate, settleAndMerge's zero-check-runs fallback and pollTrainCI's
 // dirty pre-check + zero-check-runs green arm (engine/merge_train.go) — the
 // same "no per-check signal to fall back on" case in all three.
 func MergeableStateAccepted(mergeableState string) bool {

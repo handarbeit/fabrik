@@ -162,7 +162,7 @@ func acquireMergeTrainSlot(t *testing.T) {
 // millisecond-scale CI poll interval (via SetTrainCIPollIntervalForTest —
 // see adrs/1452-mergetrain-sim-harness-seams.md) so a red-batch bisection
 // matrix's dozen-plus real trials complete in a test-suite-appropriate time
-// instead of pollTrainCI/pollForMergeable's real 30s literal, and a small
+// instead of pollTrainCI/settleAndMerge's real 30s literal, and a small
 // MaxBatchSize matching production's own default (5) so scenario batches
 // stay small without a scenario having to say so itself. Also acquires a
 // mergeTrainSlots slot (released on test cleanup) — see its own doc comment.
@@ -227,7 +227,7 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 // engine.Config, so RestartEnv's freshly-constructed Engine (env.cfg carries
 // forward, but the Engine's own in-memory fields do not — see restart.go's
 // own doc comment on what is and isn't carried across) reverts silently to
-// pollTrainCI/pollForMergeable's real 30s literal unless this is reapplied
+// pollTrainCI/settleAndMerge's real 30s literal unless this is reapplied
 // immediately. A restart scenario that forgot this would still pass — just
 // after minutes-long real sleeps instead of milliseconds — which is exactly
 // the kind of silent regression worth a named helper to prevent.
@@ -459,7 +459,7 @@ func parseClosesNumbers(body string) []int {
 // Races against the engine's own first FetchCheckRuns read on a fresh trial
 // PR are possible (this runs in a separate goroutine, polling every 2ms) —
 // accepted deliberately, not a flaw: a lost race reads zero check runs on a
-// draft PR, which pollTrainCI/pollForMergeable classify as TrainCIPending
+// draft PR, which pollTrainCI/settleAndMerge classify as TrainCIPending
 // (never green — the draft mergeable_state fallback is unreachable), so the
 // worst case is one extra SetTrainCIPollIntervalForTest-scaled retry before
 // the seeder catches up on the next iteration, never a wrong verdict. See
@@ -470,6 +470,15 @@ func parseClosesNumbers(body string) []int {
 // replace this one before the test ends (e.g. after RestartEnv, which
 // constructs a new *Env with its own Sim).
 func startTrialVerdictSeeder(t *testing.T, env *Env, verdictFor func(members []int) []gh.CheckRun) (stop func()) {
+	t.Helper()
+	return startTrialSeeder(t, env, verdictFor, nil)
+}
+
+// startTrialSeeder is startTrialVerdictSeeder that can also script what marking each trial
+// PR ready does (#2297): when ready is non-nil, the step is queued for every new trial PR
+// (SHA filled in from the PR's head) BEFORE its verdict is seeded, so the script is always
+// armed by the time the trial can go green and be landed.
+func startTrialSeeder(t *testing.T, env *Env, verdictFor func(members []int) []gh.CheckRun, ready *simgh.ReadyForReviewStep) (stop func()) {
 	t.Helper()
 	done := make(chan struct{})
 	var stopOnce sync.Once
@@ -491,6 +500,11 @@ func startTrialVerdictSeeder(t *testing.T, env *Env, verdictFor func(members []i
 						continue
 					}
 					seen[pr.Number] = true
+					if ready != nil {
+						step := *ready
+						step.SHA = pr.HeadSHA
+						env.Sim.Sim().SeedReadyForReviewSteps(env.OwnerRepo, pr.Number, step)
+					}
 					members := parseClosesNumbers(pr.Body)
 					verdict := verdictFor(members)
 					for _, cr := range verdict {
