@@ -115,3 +115,29 @@ func TestBuildProjectInfo_ClaudeAccountFromResolution(t *testing.T) {
 		t.Errorf("ClaudeAccount = %q", info.ClaudeAccount)
 	}
 }
+
+// `fabrik watch` records the same resolution as the daemon, so its inline
+// resume cannot open claude under a stray exported account (#1807): ambient =
+// /a, .env = /b resolves to /b, and the launch environment carries it.
+func TestLoadWatchConfig_ResolvesClaudeProfile(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("CLAUDE_CONFIG_DIR=/b\n"), 0600)
+	t.Cleanup(claudeprofile.Reset)
+	t.Setenv(claudeprofile.BareEnv, "/a")
+	t.Setenv(claudeprofile.DeliberateEnv, "")
+
+	loadWatchConfig()
+
+	r := claudeprofile.Current()
+	if r.Dir != "/b" || r.Winner != claudeprofile.LayerDotenv {
+		t.Fatalf("got %+v", r)
+	}
+	env := claudeprofile.ApplyToEnv([]string{"CLAUDE_CONFIG_DIR=/a"})
+	if len(env) != 1 || env[0] != "CLAUDE_CONFIG_DIR=/b" {
+		t.Fatalf("launch env = %v", env)
+	}
+	if got := os.Getenv(claudeprofile.BareEnv); got != "/a" {
+		t.Errorf(".env value leaked into the process environment: %q", got)
+	}
+}

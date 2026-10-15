@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/watch"
 )
 
@@ -42,8 +43,7 @@ func runWatch(args []string) error {
 	}
 
 	// Load .env and project config (best-effort; non-fatal if absent).
-	_ = config.LoadDotenv()
-	pc, _ := config.LoadProjectConfig()
+	pc := loadWatchConfig()
 
 	// Resolve owner from: flag > env > config.yaml
 	if *owner == "" {
@@ -121,4 +121,23 @@ func runWatch(args []string) error {
 		return fmt.Errorf("running watch: %w", err)
 	}
 	return nil
+}
+
+// loadWatchConfig loads .env and the project config for `fabrik watch` and
+// records the Claude profile resolution (#2293). It resolves exactly as the
+// daemon does, so the inline resume opens claude under the same account the
+// workers use: the two variables are snapshotted before .env is read, and .env
+// is loaded without exporting them (the winner is never os.Setenv'd).
+func loadWatchConfig() config.ProjectConfig {
+	shellFabrikConfigDir := os.Getenv(claudeprofile.DeliberateEnv)
+	ambientConfigDir := os.Getenv(claudeprofile.BareEnv)
+	dotenv, _ := config.LoadDotenvWithholding(claudeprofile.DeliberateEnv, claudeprofile.BareEnv)
+	pc, _ := config.LoadProjectConfig()
+	claudeprofile.Set(resolveClaudeProfile(claudeprofile.Inputs{
+		ShellFabrik: shellFabrikConfigDir,
+		Dotenv:      dotenv,
+		YAML:        pc.ClaudeConfigDir,
+		Ambient:     ambientConfigDir,
+	}))
+	return pc
 }

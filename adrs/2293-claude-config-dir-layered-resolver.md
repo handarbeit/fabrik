@@ -35,7 +35,7 @@ inherited value in the next one.
    then carry only true ambient and shell values and each start re-reads `.env` and YAML as
    data. The alternative — a scrubbed `GroupReexec` snapshot variable — needs edits at three
    exec sites plus a new classification, and adds state that can go stale. `LoadDotenv` is
-   unchanged for `upgrade`, `repair-board`, `watch` and Pruefer (Pruefer relies on `.env`
+   unchanged for `upgrade`, `repair-board` and Pruefer (Pruefer relies on `.env`
    exporting `CLAUDE_CONFIG_DIR` through its review-env allowlist until #2294).
 3. **Result held process-wide** (`claudeprofile.Set`/`Current`), following the `claudeGHHost`
    precedent: `buildClaudeEnv` is a free function and `tui`/`watch` cannot import `engine`.
@@ -47,7 +47,7 @@ inherited value in the next one.
    `watch`). With `.env` values no longer exported they would otherwise silently switch to
    the ambient account — the #1807 failure in a new place.
 6. **Visibility:** one `[startup] notice: Claude profile "<dir>" (<email>) from <source>`
-   line, and on disagreement a `warnings.Report`ed `claude_config_dir:sources` panel entry
+   line, and on disagreement a `claude_config_dir:sources` panel entry recorded through `warnings.Reconcile`
    naming every source and the winner. Its fingerprint is the sorted source/directory pairs,
    never the account emails.
 
@@ -60,8 +60,9 @@ inherited value in the next one.
 - **Invariant for maintainers:** nothing may export the two names into the process
   environment or `os.Setenv` the winner; `internal/claudeprofile/scan_test.go` and the
   provenance test in `cmd` guard it.
-- `fabrik resume` never loaded `.env` and stays ambient-only; `upgrade`, `repair-board` and
-  `watch` keep `LoadDotenv` (they start no engine workers). `pruefer/tui_run.go` keeps one
+- `fabrik resume` never loaded `.env` and stays ambient-only; `upgrade` and `repair-board`
+  keep `LoadDotenv` (they start no engine workers and no `claude`). `fabrik watch` resolves and records the
+  profile like the daemon (`loadWatchConfig`), since it launches interactive `claude`. `pruefer/tui_run.go` keeps one
   audited raw read until #2294.
 - Same-directory comparison is `~` expansion plus `filepath.Clean`; symlinks are not
   resolved. Low-impact and reversible.
