@@ -434,9 +434,11 @@ func (in *Instrumented) MergePRAtHeadSHA(owner, repo string, prNumber int, expec
 		func() error { return in.sim.MergePRAtHeadSHA(owner, repo, prNumber, expectedHeadSHA) })
 }
 
-func (in *Instrumented) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
-	return do0(in, "EnablePullRequestAutoMerge", true, Args{Owner: owner, Repo: repo, Number: prNumber, Values: []string{strategy}},
-		func() error { return in.sim.EnablePullRequestAutoMerge(owner, repo, prNumber, strategy) })
+func (in *Instrumented) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error {
+	return do0(in, "EnablePullRequestAutoMerge", true, Args{Owner: owner, Repo: repo, Number: prNumber, SHA: expectedHeadOID, Values: []string{strategy}},
+		func() error {
+			return in.sim.EnablePullRequestAutoMerge(owner, repo, prNumber, strategy, expectedHeadOID)
+		})
 }
 
 func (in *Instrumented) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {

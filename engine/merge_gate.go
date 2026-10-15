@@ -193,12 +193,21 @@ func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
 		e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
 		return
 	}
+	// #2342: no gate judged this post-rebase head, so the pin only narrows the
+	// window — both writes below name the one head read just above, and a moved
+	// head is logged and left for the next poll's settle/convergence pass.
+	if pr.HeadSHA == "" {
+		e.logf(item.Number, "warn", "rebase reinvoke: linked PR #%d has no head SHA — not re-enabling auto-merge unpinned\n", pr.Number)
+		return
+	}
 	strategy := e.cfg.AutoMergeStrategy
 	if strategy == "" {
 		strategy = "MERGE"
 	}
-	if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
-		if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
+	if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy, pr.HeadSHA); rerr != nil {
+		if errors.Is(rerr, gh.ErrHeadMoved) {
+			e.logf(item.Number, "info", "PR #%d head moved during auto-merge re-enable after rebase — deferring to the next poll\n", pr.Number)
+		} else if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
 			// PR is already CLEAN after the rebase push — merge directly.
 			// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
 			// and incorrectly pauses the issue as "user disabled auto-merge".
@@ -209,8 +218,12 @@ func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
 			// like any other MergePR failure at this call site — it is a CI-readiness
 			// refusal, not a conflict, so it must not apply fabrik:rebase-needed or
 			// consume a rebase cycle; the next poll's settle/convergence pass retries.
-			if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
-				e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
+			if mergeErr := e.client.MergePRAtHeadSHA(owner, repo, pr.Number, pr.HeadSHA); mergeErr != nil {
+				if errors.Is(mergeErr, gh.ErrHeadMoved) {
+					e.logf(item.Number, "info", "PR #%d head moved before the post-rebase direct merge — deferring to the next poll\n", pr.Number)
+				} else {
+					e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
+				}
 			} else {
 				e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
 				e.emitLanded(item, pr.Number) // #2123

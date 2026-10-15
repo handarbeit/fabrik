@@ -199,7 +199,7 @@ func (m *testGitHubUpgradeClient) DeleteForwardingHooks(owner, repo string) erro
 func (m *testGitHubUpgradeClient) HasForwardingHook(owner, repo string) (bool, error) {
 	return false, nil
 }
-func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error {
 	return nil
 }
 func (m *testGitHubUpgradeClient) DisablePullRequestAutoMerge(owner, repo string, prNumber int) error {

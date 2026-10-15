@@ -721,6 +721,26 @@ func (s *Sim) SeedRequiredApprovals(ownerRepo, branch string, n int) *Sim {
 	return s
 }
 
+// SeedAutoMergeRefusedClean makes EnablePullRequestAutoMerge on the PR refuse
+// with gh.ErrAutoMergeAlreadyClean, the way GitHub refuses auto-merge on a PR
+// that is already immediately mergeable (a repo with no required checks). The
+// engine's response is a direct merge (#2342).
+func (s *Sim) SeedAutoMergeRefusedClean(ownerRepo string, prNumber int) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return s
+	}
+	pr.autoMergeRefusedClean = true
+	return s
+}
+
 // SeedMergeableRecomputePending puts a PR into GitHub's recompute window for
 // the next reads reads: mergeable reports null and mergeableState "unknown"
 // until the counter drains. Also settable at construction via

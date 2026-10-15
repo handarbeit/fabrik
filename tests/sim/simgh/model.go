@@ -264,6 +264,11 @@ type prRecord struct {
 	autoMergeEnabled  bool
 	autoMergeStrategy string
 
+	// autoMergeRefusedClean makes EnablePullRequestAutoMerge refuse with
+	// gh.ErrAutoMergeAlreadyClean, as GitHub does for a PR that is already
+	// immediately mergeable (#2342). Armed by SeedAutoMergeRefusedClean.
+	autoMergeRefusedClean bool
+
 	inMergeQueue bool
 	queueEntry   *gh.MergeQueueEntry
 

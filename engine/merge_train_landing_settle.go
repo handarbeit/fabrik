@@ -211,7 +211,23 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 				return landingResult{outcome: outcomeNotPassed, state: pr.MergeableState, reason: detail}
 			case TrainCIGreen:
 				if settleOff || gh.MergeableStateAccepted(pr.MergeableState) {
-					mergeErr := e.client.MergePR(owner, repo, prNum)
+					// #2342: the merge names the exact head classifyLandingCI just judged,
+					// closing the window between this read and the merge call. A head that
+					// is not known is never merged unpinned.
+					pin := pr.HeadSHA
+					if pin == "" {
+						pin = head
+					}
+					if pin == "" {
+						e.logfRepo(repoKey, "merge-train", "warn: integration PR #%d has no readable head SHA — not merging unpinned\n", prNum)
+						break
+					}
+					mergeErr := e.client.MergePRAtHeadSHA(owner, repo, prNum, pin)
+					if errors.Is(mergeErr, gh.ErrHeadMoved) {
+						e.logfRepo(repoKey, "merge-train", "integration PR #%d head moved from %s before the merge — not landing a commit that was not validated\n", prNum, shortSHA(pin))
+						return landingResult{outcome: outcomeHeadMoved, state: pr.MergeableState,
+							reason: fmt.Sprintf("the PR head moved off %s between the readiness check and the merge", shortSHA(pin))}
+					}
 					if mergeErr == nil {
 						e.logfRepo(repoKey, "merge-train", "integration PR #%d ready to land — %s\n", prNum, detail)
 						return landingResult{outcome: outcomeMerged, state: pr.MergeableState}

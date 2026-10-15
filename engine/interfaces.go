@@ -80,9 +80,11 @@ type GitHubClient interface {
 	CreatePR(owner, repo, title, head, base, body string) (int, error)
 	ListPRs(owner, repo string) ([]gh.PRDetails, error)
 	MarkPRReady(owner, repo string, prNumber int) error
-	MergePR(owner, repo string, prNumber int) error
+	// There is deliberately no unpinned MergePR here (#2342): every engine
+	// merge names the head it judged, so a new unpinned caller cannot compile.
+	// A refusal because the head moved wraps gh.ErrHeadMoved.
 	MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error
-	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error
+	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error
 	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	// FetchPRFiles lists the paths a PR changes (GitHub's paginated /pulls/{n}/files; #2047).
