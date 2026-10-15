@@ -127,7 +127,7 @@ func (f FooterComponent) dropBreakdownSegment() string {
 	return dimStyle.Render(plain)
 }
 
-// skipSegment renders the "saved: patch N · trial M · catch-up K" footer
+// skipSegment renders the "skipped: patch N · trial M · catch-up K" footer
 // segment (#2230 R4) — the reviews not run because the change was already
 // reviewed — or "" until the first saving skip.
 func (f FooterComponent) skipSegment() string {
