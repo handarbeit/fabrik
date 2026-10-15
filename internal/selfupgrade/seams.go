@@ -18,3 +18,19 @@ var execFn = syscall.Exec
 // resolution still happens separately via filepath.EvalSymlinks after the
 // call.
 var executableFn = os.Executable
+
+// originURLFn reads a checkout's origin remote URL. A seam over
+// `git remote get-url origin` so tests that need a real local clone (whose
+// origin is a filesystem path and can never satisfy the github.com host check)
+// can present a github.com URL instead. Production code leaves this as
+// gitOriginURL.
+var originURLFn = gitOriginURL
+
+// SetOriginURLFnForTest replaces the origin-URL reader and returns a function
+// that restores the previous one. It exists for tests in other packages that
+// run the real CompareDevBuild against a local clone.
+func SetOriginURLFnForTest(fn func(dir string) (string, error)) (restore func()) {
+	prev := originURLFn
+	originURLFn = fn
+	return func() { originURLFn = prev }
+}

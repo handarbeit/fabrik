@@ -13,6 +13,9 @@
 // Pruefer. Callers supply their own identity (binary name, release-asset
 // owner/repo, version string, log function) and optional hooks
 // (PostBuildHook, StatusFn/StatusClearFn); nothing here hardcodes "fabrik".
+// The one fixed value is the source-checkout host: IsSourceCheckout requires
+// the origin remote to be on github.com (owner/repo is caller-supplied and
+// matched exactly, not by substring).
 //
 // See adrs/1196-extract-self-upgrade-package.md for the extraction rationale,
 // including why this case was extracted rather than duplicated (the opposite
