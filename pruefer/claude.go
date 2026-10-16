@@ -896,6 +896,9 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	for _, n := range set.Notes {
 		logf(req.PRNumber, "warn", "%s\n", n)
 	}
+	for _, d := range set.Details {
+		logf(req.PRNumber, "warn", "%s\n", d)
+	}
 	req.PluginDirs = set.Dirs()
 
 	requested := req.ReviewSkill

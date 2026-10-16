@@ -174,6 +174,41 @@ func TestBuildPluginSet_OrderReservedNameAndDuplicates(t *testing.T) {
 	}
 }
 
+// A tree that cannot be written is noted without the underlying error: that
+// error names the per-review temp directory and notes reach the posted review.
+func TestBuildPluginSet_WriteFailureNoteCarriesNoLocalPath(t *testing.T) {
+	rp, err := setupReviewPlugin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rp.Close()
+	if err := os.MkdirAll(rp.RepoRoot(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the plugin directory must go makes MkdirAll fail with a
+	// *PathError that names the full path.
+	if err := os.WriteFile(filepath.Join(rp.RepoRoot(), "mine"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	set := buildPluginSet(rp, nil, []repoPluginTree{{Dir: "mine", Files: []repoPluginFile{
+		{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"mine"}`)},
+	}}})
+	if _, ok := set.byName("mine"); ok {
+		t.Fatal("unwritable tree was loaded")
+	}
+	if len(set.Notes) != 1 || !strings.Contains(set.Notes[0], "repo plugin mine skipped: could not be written") {
+		t.Fatalf("notes = %v", set.Notes)
+	}
+	for _, n := range set.Notes {
+		if strings.Contains(n, rp.Root) || strings.Contains(n, os.TempDir()) {
+			t.Errorf("note leaks a local path: %s", n)
+		}
+	}
+	if len(set.Details) != 1 || !strings.Contains(set.Details[0], rp.Root) {
+		t.Errorf("details should keep the full error for the log: %v", set.Details)
+	}
+}
+
 func TestBuildPluginSet_WritesRepoTreeUnderTheReviewRoot(t *testing.T) {
 	rp, err := setupReviewPlugin()
 	if err != nil {

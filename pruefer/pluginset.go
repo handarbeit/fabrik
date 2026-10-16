@@ -178,6 +178,10 @@ type pluginSet struct {
 	// name, the reserved name, a tree that could not be written — for the log and
 	// any fallback notice.
 	Notes []string
+	// Details carries the full error behind a note whose text must not reach a
+	// posted review (it can name the per-review temp directory). It is logged
+	// only, never appended to a fallback reason.
+	Details []string
 }
 
 // Dirs returns the plugin directories in load order.
@@ -228,7 +232,11 @@ func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoTrees []repoPlu
 	for _, t := range repoTrees {
 		dir, err := writeRepoPluginTree(rp.RepoRoot(), t)
 		if err != nil {
-			set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: %v", t.Dir, err))
+			// The error is usually an *os.PathError naming the per-review temp
+			// directory; notes reach the posted fallback notice, so they carry a
+			// fixed phrase and the detail is only logged.
+			set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: could not be written", t.Dir))
+			set.Details = append(set.Details, fmt.Sprintf("repo plugin %s could not be written: %v", t.Dir, err))
 			continue
 		}
 		add(dir, sourceRepo, t.Dir)
