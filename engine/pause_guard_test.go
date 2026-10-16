@@ -141,7 +141,7 @@ func TestPauseGuard_LandValidated_DirectMergeFallback(t *testing.T) {
 			// Call landValidated directly so the gates ahead of it are not under test.
 			item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: unpausedYolo}
 
-			enabled, deferred, err := eng.landValidated(context.Background(), &gh.ProjectBoard{}, item, "owner", "repo")
+			enabled, deferred, err := eng.landValidated(context.Background(), &gh.ProjectBoard{}, item, "owner", "repo", "sha1")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -170,7 +170,7 @@ func TestPauseGuard_LandValidated_EntryAndQueued(t *testing.T) {
 			eng.cfg.MergeTrain = "on"
 			item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Labels: labels}
 
-			_, deferred, err := eng.landValidated(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, "owner", "repo")
+			_, deferred, err := eng.landValidated(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, "owner", "repo", "sha1")
 			if paused {
 				if err != nil || !deferred {
 					t.Fatalf("paused: want deferred, nil error; got deferred=%v err=%v", deferred, err)

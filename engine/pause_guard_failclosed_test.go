@@ -223,7 +223,7 @@ func TestPauseGuard_MergeGate_NonVacuity(t *testing.T) {
 
 	client2 := &mockGitHubClient{
 		fetchLabelsFn:                paused,
-		fetchLinkedPRFn:              func(owner, repo string, n int) (*gh.PRDetails, error) { return &gh.PRDetails{Number: 42}, nil },
+		fetchLinkedPRFn:              func(owner, repo string, n int) (*gh.PRDetails, error) { return &gh.PRDetails{Number: 42, HeadSHA: "abc12345"}, nil },
 		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error { return nil },
 	}
 	eng2 := failClosedEngine(t, client2)
