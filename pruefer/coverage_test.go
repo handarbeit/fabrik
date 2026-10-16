@@ -816,7 +816,8 @@ func TestLogCoverage_TruncatedCount(t *testing.T) {
 	logCoverage(7, base, true, "")
 	withTrunc := base
 	withTrunc.TruncatedUnread = 2
-	logCoverage(7, withTrunc, true, "/tmp/t.jsonl")
+	saved := filepath.Join(t.TempDir(), "t.jsonl")
+	logCoverage(7, withTrunc, true, saved)
 	got := logs()
 	if len(got) != 2 {
 		t.Fatalf("logs = %q", got)
@@ -824,7 +825,7 @@ func TestLogCoverage_TruncatedCount(t *testing.T) {
 	if strings.Contains(got[0], "preview") {
 		t.Errorf("zero count must not change the line: %q", got[0])
 	}
-	want := "(2 unread path(s); 2 of the unread entries were in shell results cut to a preview; transcript authoritative=true); transcript saved: /tmp/t.jsonl"
+	want := "(2 unread path(s); 2 of the unread entries were in shell results cut to a preview; transcript authoritative=true); transcript saved: " + saved
 	if !strings.Contains(got[1], want) {
 		t.Errorf("line = %q, want it to contain %q", got[1], want)
 	}
