@@ -16,7 +16,7 @@ Content on the PR's **base ref** has been merged by the repo's maintainers. It i
 ## Requirements
 
 - **R1 (operator plugins):** `.pruefer/config.yaml` gains `plugins:`, a list of local plugin directories, for example a checkout of `claude-plugins-official/plugins/pr-review-toolkit` at a pinned commit. They are loaded for every review after `pruefer-review`. Each review logs each plugin's manifest name and version. A directory that is missing or unreadable is reported once and skipped; the review does not fail.
-- **R2 (repo plugins):** a repo may commit plugins under `.pruefer/plugins/<name>/`. Pruefer copies that tree from the clone **at the PR's base SHA** (`git archive <base> .pruefer/plugins` or equivalent, never the working tree), writes it to the per-review directory and passes each plugin with `--plugin-dir`. All plugin components load: skills, agents, hooks, MCP servers and scripts. A plugin that exists only at the head never loads.
+- **R2 (repo plugins) — DEFERRED to #2366, not implemented here:** the original request had Pruefer copy a repo's `.pruefer/plugins/<name>/` tree at the PR's base SHA and load it with `--plugin-dir`. That is removed (see "Scope change" below): no code from the reviewed repo is read or loaded, and see FR-004.
 - **R3 (selection):** the review skill is chosen with a `plugin:skill` reference, as in Fabrik. The operator sets `review_skill:` (default `pruefer-review:review`). A repo can override it with `review_skill:` in its base-ref `.pruefer/config.yaml`, unless the operator sets `repo_review_skill: false`. Resolution uses `internal/skillref` against the plugins actually passed.
 - **R4 (visible fallback):** if the chosen skill does not resolve, or resolves but fails to load (the detector from the first issue), Pruefer runs `pruefer-review:review` instead. It says so in the posted review body, naming the reference, the base SHA and the reason, and in the log. The review is never failed and never silently substituted.
 - **R5 (output contract):** whatever skill runs, the Go-owned prompt still requires the summary, findings and coverage blocks, and a review that does not produce them is handled exactly as today. A plugin that posts to GitHub itself (e.g. the `code-review` command) cannot, because the review environment has no GitHub token (#2192 R4).
@@ -30,7 +30,7 @@ Content on the PR's **base ref** has been merged by the repo's maintainers. It i
 ## Acceptance
 
 - An operator-configured `pr-review-toolkit` checkout is loaded, and a review can use its agents through `Task`. The log names the plugin and version.
-- A repo plugin at the base ref is invoked when `review_skill` names it. The same plugin present only at the head is not loaded. The test fails if loading moves to the working tree.
+- Replaced by the scope change (repo plugins are deferred to #2366): no plugin tree of the reviewed repo is read or loaded, on the base or the head, and a test fails if production code gains a reader for one. A repo's `review_skill` can select only a skill of the embedded or an operator plugin; any other reference falls back visibly.
 - An unresolved or unloadable `review_skill` produces a default review whose body names the fallback and its reason.
 - With `repo_review_skill: false`, a repo's `review_skill` is ignored and the log says so.
 - A plugin hook's environment contains no GitHub token or App key.
