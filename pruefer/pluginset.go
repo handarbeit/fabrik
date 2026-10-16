@@ -22,7 +22,7 @@ var DefaultReviewSkill = reviewplugin.DefaultRef
 // reference would let plugin order decide which skill reviews the PR. The
 // reference is spliced into the reviewer's Skill(<ref>) allow rule, so a
 // character that is a pattern or rule delimiter there (a skill directory named
-// "foo*" in a repo plugin) must never pass.
+// "foo*" in an operator plugin) must never pass.
 func wellFormedSkillRef(ref string) bool {
 	pn, skill, ok := plugin.Split(ref)
 	return ok && pn != "" && skill != "" && !strings.ContainsAny(ref, " \t\r\n`*()")
@@ -36,7 +36,7 @@ func sanitizeNoticeText(s string) string { return sanitizeNoticeTextN(s, 120) }
 
 // maxNoticeReasonLen caps the reason in a posted fallback notice. It is larger
 // than the reference's cap because the reason carries the plugin notes that
-// explain why a repo plugin was skipped, which a 120-character cut would drop.
+// explain why a plugin was skipped, which a 120-character cut would drop.
 const maxNoticeReasonLen = 480
 
 // sanitizeNoticeTextN is sanitizeNoticeText with an explicit character cap.
@@ -148,7 +148,6 @@ func resolveOperatorPluginDir(p string) (string, error) {
 const (
 	sourceEmbedded = "embedded"
 	sourceOperator = "operator"
-	sourceRepo     = "repo"
 )
 
 // loadedPlugin is one plugin a review passes with --plugin-dir.
@@ -175,13 +174,9 @@ func (p loadedPlugin) logLine() string {
 type pluginSet struct {
 	Plugins []loadedPlugin
 	// Notes records every plugin that was not loaded after all — a duplicate
-	// name, the reserved name, a tree that could not be written — for the log and
-	// any fallback notice.
+	// name or the reserved name — for the log and any fallback notice. They
+	// name no local path, because they can reach a posted review.
 	Notes []string
-	// Details carries the full error behind a note whose text must not reach a
-	// posted review (it can name the per-review temp directory). It is logged
-	// only, never appended to a fallback reason.
-	Details []string
 }
 
 // Dirs returns the plugin directories in load order.
@@ -205,12 +200,11 @@ func (s *pluginSet) byName(name string) (loadedPlugin, bool) {
 
 // buildPluginSet assembles the plugins a review passes, in the fixed order of
 // #2307 FR-019: the embedded pruefer-review, then operator plugins in listed
-// order, then repo plugins in directory-name order. Names are manifest names.
-// The embedded plugin is never replaced: any other plugin declaring its name is
-// skipped and reported, and for every other duplicate the earlier plugin wins.
-// Repo plugin trees are written under rp.RepoRoot(), part of the per-review
-// directory removed on every exit path.
-func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoTrees []repoPluginTree) *pluginSet {
+// order. Names are manifest names. The embedded plugin is never replaced: any
+// other plugin declaring its name is skipped and reported, and for every other
+// duplicate the earlier plugin wins. No plugin from the reviewed repo is ever
+// part of the set (repo-supplied plugins are deferred to #2366).
+func buildPluginSet(rp *reviewPlugin, operatorDirs []string) *pluginSet {
 	set := &pluginSet{}
 	seen := map[string]string{} // manifest name -> source that holds it
 	add := func(dir, source, what string) {
@@ -229,51 +223,5 @@ func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoTrees []repoPlu
 	for _, d := range operatorDirs {
 		add(d, sourceOperator, filepath.Base(d))
 	}
-	for _, t := range repoTrees {
-		dir, err := writeRepoPluginTree(rp.RepoRoot(), t)
-		if err != nil {
-			// The error is usually an *os.PathError naming the per-review temp
-			// directory; notes reach the posted fallback notice, so they carry a
-			// fixed phrase and the detail is only logged.
-			set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: could not be written", t.Dir))
-			set.Details = append(set.Details, fmt.Sprintf("repo plugin %s could not be written: %v", t.Dir, err))
-			continue
-		}
-		add(dir, sourceRepo, t.Dir)
-	}
 	return set
-}
-
-// writeRepoPluginTree writes one validated tree below root and returns its
-// directory. The paths were validated when the tree was read, and are checked
-// again here: nothing may land outside root/<name>. Files are written 0644, or
-// 0755 where the base commit marked them executable.
-func writeRepoPluginTree(root string, t repoPluginTree) (string, error) {
-	dest := filepath.Join(root, t.Dir)
-	if !repoPluginNameRE.MatchString(t.Dir) {
-		return "", fmt.Errorf("directory name %q is not allowed", t.Dir)
-	}
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return "", err
-	}
-	for _, f := range t.Files {
-		if !cleanRelativePath(f.Path) || !filepath.IsLocal(filepath.FromSlash(f.Path)) {
-			return "", fmt.Errorf("path %q is not a clean relative path", f.Path)
-		}
-		target := filepath.Join(dest, filepath.FromSlash(f.Path))
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return "", err
-		}
-		mode := os.FileMode(0o644)
-		if f.Exec {
-			mode = 0o755
-		}
-		if err := os.WriteFile(target, f.Data, mode); err != nil {
-			return "", err
-		}
-		if err := os.Chmod(target, mode); err != nil {
-			return "", err
-		}
-	}
-	return dest, nil
 }

@@ -469,11 +469,6 @@ type PRDetails struct {
 	// BaseRef is the PR's base branch name (e.g. "main"). Populated by
 	// ListOpenPRs; other constructors may leave it empty.
 	BaseRef string
-	// BaseDefaultBranch is the default branch of the repository the PR targets
-	// (base.repo.default_branch). Populated by FetchPRDetails and ListOpenPRs;
-	// other constructors leave it empty, which callers must treat as "unknown",
-	// never as "the base is the default" (#2307).
-	BaseDefaultBranch string
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
@@ -573,30 +568,26 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 			Ref string `json:"ref"`
 		} `json:"head"`
 		Base struct {
-			Ref  string `json:"ref"`
-			Repo struct {
-				DefaultBranch string `json:"default_branch"`
-			} `json:"repo"`
+			Ref string `json:"ref"`
 		} `json:"base"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
 		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
 	}
 	return &PRDetails{
-		Number:            raw.Number,
-		Title:             raw.Title,
-		State:             raw.State,
-		Merged:            raw.Merged,
-		Draft:             raw.Draft,
-		Body:              raw.Body,
-		HeadSHA:           raw.Head.SHA,
-		HeadRefName:       raw.Head.Ref,
-		BaseRef:           raw.Base.Ref,
-		BaseDefaultBranch: raw.Base.Repo.DefaultBranch,
-		MergeableState:    raw.MergeableState,
-		AutoMergeEnabled:  raw.AutoMerge != nil,
-		Author:            raw.User.Login,
-		Labels:            labelNames(raw.Labels),
+		Number:           raw.Number,
+		Title:            raw.Title,
+		State:            raw.State,
+		Merged:           raw.Merged,
+		Draft:            raw.Draft,
+		Body:             raw.Body,
+		HeadSHA:          raw.Head.SHA,
+		HeadRefName:      raw.Head.Ref,
+		BaseRef:          raw.Base.Ref,
+		MergeableState:   raw.MergeableState,
+		AutoMergeEnabled: raw.AutoMerge != nil,
+		Author:           raw.User.Login,
+		Labels:           labelNames(raw.Labels),
 	}, nil
 }
 
@@ -944,10 +935,7 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			Ref string `json:"ref"`
 		} `json:"head"`
 		Base struct {
-			Ref  string `json:"ref"`
-			Repo struct {
-				DefaultBranch string `json:"default_branch"`
-			} `json:"repo"`
+			Ref string `json:"ref"`
 		} `json:"base"`
 	}
 	raw, err := paginateREST[rawPR](c, fmt.Sprintf("open PRs for %s/%s", owner, repo), func(page int) string {
@@ -971,8 +959,6 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			Author:      pr.User.Login,
 			Labels:      labelNames(pr.Labels),
 			BaseRef:     pr.Base.Ref,
-
-			BaseDefaultBranch: pr.Base.Repo.DefaultBranch,
 		}
 	}
 	return out, nil

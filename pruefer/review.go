@@ -23,15 +23,11 @@ type GitHubReviewer interface {
 	// widen its own review) is structural for every GitHubReviewer, not
 	// opt-in.
 	FetchFileAtRef(owner, repo, path, ref string) ([]byte, error)
-	// ResolveRefSHA, FetchTreeAtRef and FetchBlob back the base-SHA pin and the
-	// repo review plugins (#2307): the base branch resolved once per review to a
-	// commit SHA that every base-ref read then uses, and a tree and its blobs
-	// read at that SHA — never from the clone, which holds the untrusted head.
-	// Required unconditionally, not type-asserted, for the same structural
-	// reason as FetchFileAtRef.
+	// ResolveRefSHA backs the base-SHA pin (#2307): the base branch resolved
+	// once per review to a commit SHA that every base-ref read (config,
+	// guidance) then uses. Required unconditionally, not type-asserted, for the
+	// same structural reason as FetchFileAtRef.
 	ResolveRefSHA(owner, repo, branch string) (string, error)
-	FetchTreeAtRef(owner, repo, commitSHA, dir string) (entries []gh.TreeEntry, truncated bool, err error)
-	FetchBlob(owner, repo, sha string, maxBytes int64) ([]byte, error)
 	// FetchCommit and FetchCommitsBehind back the pure merge-train
 	// catch-up skip (#2066): the head's parent shape, and whether a commit is
 	// on the PR's base branch. Required unconditionally, not type-asserted,
@@ -197,15 +193,15 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	// before this issue.
 	//
 	// #2307: the base branch is resolved to one commit SHA here, and every
-	// base-ref read of this review — config, guidance, plugin tree — uses it, so
-	// they can never come from different base commits and the SHA a fallback
-	// notice names is the one actually read. If the branch cannot be resolved the
-	// reads fall back to the branch name (the pre-#2307 behaviour), no repo plugin
-	// loads, and the outcome is not conclusive.
+	// base-ref read of this review — config, guidance — uses it, so they can
+	// never come from different base commits and the SHA a fallback notice names
+	// is the one actually read. If the branch cannot be resolved the reads fall
+	// back to the branch name (the pre-#2307 behaviour) and the outcome is not
+	// conclusive.
 	baseRead := pr.BaseRef
 	baseSHA, shaErr := client.ResolveRefSHA(owner, repo, pr.BaseRef)
 	if shaErr != nil {
-		logf(pr.Number, "warn", "resolving base branch %s of %s/%s#%d to a commit: %v — repo review plugins will not load\n", pr.BaseRef, owner, repo, pr.Number, shaErr)
+		logf(pr.Number, "warn", "resolving base branch %s of %s/%s#%d to a commit: %v\n", pr.BaseRef, owner, repo, pr.Number, shaErr)
 		baseSHA = ""
 		degraded = true
 	} else {
@@ -462,33 +458,15 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	logReviewGuidanceResolution(pr.Number, owner, repo, guidanceProv)
 
 	// #2307: the skill that performs the review, and the plugins it may come
-	// from. Operator plugins are used in place; repo plugins are read from the
-	// base SHA through the Trees API (never the clone) and validated before
-	// Review writes them into its per-review directory.
+	// from: the embedded pruefer-review plugin and the operator's own plugins,
+	// used in place. No code from the reviewed repo is ever loaded — a repo's
+	// review_skill can only name a skill of those plugins (repo-supplied
+	// plugins are deferred to #2366).
 	reviewSkill, skillNote := selectReviewSkill(cfg, repoYAML)
 	if skillNote != "" {
 		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, skillNote)
 	}
 	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
-	var repoPlugins repoPluginResult
-	var pluginNotes []string
-	loadRepoPlugins, skipWhy := repoPluginsLoadDecision(cfg.RepoReviewSkill, pr.BaseRef, pr.BaseDefaultBranch)
-	switch {
-	case !loadRepoPlugins:
-		pluginNotes = []string{skipWhy}
-		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, skipWhy)
-	case baseSHA == "":
-		pluginNotes = []string{"repo plugins not loaded: the base commit could not be resolved"}
-	default:
-		repoPlugins = fetchRepoPlugins(client, owner, repo, baseSHA)
-		if repoPlugins.Degraded {
-			degraded = true
-		}
-		pluginNotes = repoPlugins.Notes()
-		for _, n := range pluginNotes {
-			logf(pr.Number, "warn", "%s/%s base %s: %s\n", owner, repo, baseSHA, n)
-		}
-	}
 
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
 	if err != nil {
@@ -531,7 +509,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 		Staged:      staged,
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
-		RepoPlugins: repoPlugins.Plugins, BaseSHA: baseSHA, PluginNotes: pluginNotes,
+		BaseSHA: baseSHA,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)

@@ -14,9 +14,9 @@ import (
 )
 
 // reviewPlugin is the per-review plugin directory (#2306, R1): a fresh root
-// holding the embedded pruefer-review plugin and, below RepoRoot, any repo
-// plugin trees (#2307), never shared between reviews, plus the resolution of
-// the default review skill against exactly the embedded plugin (R2).
+// holding the embedded pruefer-review plugin, never shared between reviews,
+// plus the resolution of the default review skill against exactly the embedded
+// plugin (R2).
 type reviewPlugin struct {
 	Root    string // the per-review directory, removed by Close
 	Dir     string // the embedded plugin, symlink-resolved; the same path --plugin-dir and the resolver see
@@ -25,9 +25,6 @@ type reviewPlugin struct {
 	Version string
 	cleanup func()
 }
-
-// RepoRoot is where repo plugin trees are written, inside Root.
-func (p *reviewPlugin) RepoRoot() string { return filepath.Join(p.Root, "repo") }
 
 // Close removes the directory. Safe to call more than once.
 func (p *reviewPlugin) Close() {

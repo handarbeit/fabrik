@@ -31,17 +31,35 @@ func setDaemonSecrets(t *testing.T) {
 	}
 }
 
-// envPluginTree is a repo plugin whose hook and MCP server each record the
-// environment they start with.
-func envPluginTree() repoPluginTree {
+// writeEnvPlugin writes an operator plugin whose hook and MCP server each
+// record the environment they start with, and returns its directory.
+func writeEnvPlugin(t *testing.T) string {
+	t.Helper()
 	script := "#!/bin/sh\nenv > \"$1\"\n"
-	return repoPluginTree{Dir: "envplug", Files: []repoPluginFile{
-		{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"envplug","version":"1"}`)},
-		{Path: "hooks/hooks.json", Data: []byte(`{"hooks":{}}`)},
-		{Path: "hooks/record.sh", Data: []byte(script), Exec: true},
-		{Path: ".mcp.json", Data: []byte(`{"mcpServers":{"rec":{"command":"${CLAUDE_PLUGIN_ROOT}/mcp/server.sh"}}}`)},
-		{Path: "mcp/server.sh", Data: []byte(script), Exec: true},
-	}}
+	dir := filepath.Join(t.TempDir(), "envplug")
+	files := []struct {
+		path, data string
+		mode       os.FileMode
+	}{
+		{".claude-plugin/plugin.json", `{"name":"envplug","version":"1"}`, 0o644},
+		{"hooks/hooks.json", `{"hooks":{}}`, 0o644},
+		{"hooks/record.sh", script, 0o755},
+		{".mcp.json", `{"mcpServers":{"rec":{"command":"${CLAUDE_PLUGIN_ROOT}/mcp/server.sh"}}}`, 0o644},
+		{"mcp/server.sh", script, 0o755},
+	}
+	for _, f := range files {
+		target := filepath.Join(dir, filepath.FromSlash(f.path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(f.data), f.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, f.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 // pluginChildrenScript is a fake claude that does what the real CLI does with a
@@ -78,15 +96,15 @@ func envHas(env []string, name string) bool {
 	return false
 }
 
-// R6 (#2307): everything a plugin starts — a hook, an MCP server — runs in the
-// scrubbed review environment: no GitHub token, App key or .env secret.
+// R6 (#2307): everything an operator plugin starts — a hook, an MCP server —
+// runs in the scrubbed review environment: no GitHub token, App key or .env secret.
 func TestPluginHooksAndMCPServersRunInTheScrubbedReviewEnvironment(t *testing.T) {
 	setDaemonSecrets(t)
 	rec := filepath.Join(t.TempDir(), "rec")
 	writeFakeClaude(t, pluginChildrenScript(rec))
 
 	res, err := (&RealClaudeInvoker{}).Review(context.Background(), ReviewRequest{
-		PRNumber: 1, WorkDir: t.TempDir(), RepoPlugins: []repoPluginTree{envPluginTree()},
+		PRNumber: 1, WorkDir: t.TempDir(), OperatorPluginDirs: []string{writeEnvPlugin(t)},
 	})
 	if err != nil || res.Text == "" {
 		t.Fatalf("review failed: %v", err)
@@ -115,12 +133,9 @@ func TestPluginHooksAndMCPServersRunInTheScrubbedReviewEnvironment(t *testing.T)
 // do see the secrets, and the scrub assertions do flag them.
 func TestPluginEnvironmentTest_FailsAgainstAnUnscrubbedEnvironment(t *testing.T) {
 	setDaemonSecrets(t)
-	dir := t.TempDir()
-	if _, err := writeRepoPluginTree(dir, envPluginTree()); err != nil {
-		t.Fatal(err)
-	}
+	dir := writeEnvPlugin(t)
 	rec := filepath.Join(t.TempDir(), "rec")
-	cmd := exec.Command(filepath.Join(dir, "envplug", "hooks", "record.sh"), rec+".hook")
+	cmd := exec.Command(filepath.Join(dir, "hooks", "record.sh"), rec+".hook")
 	cmd.Env = os.Environ() // what the daemon holds: not scrubbed
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)

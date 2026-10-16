@@ -223,7 +223,7 @@ type ReviewRequest struct {
 	WorkDir         string // ephemeral clone directory; claude's cwd
 	// PluginDirs are the plugin directories this invocation passes with
 	// --plugin-dir, in order: the embedded pruefer-review plugin first, then the
-	// operator's, then the repo's (#2307). SkillRef is the qualified skill this
+	// operator's (#2307). SkillRef is the qualified skill this
 	// invocation runs, resolved against exactly those directories; empty means
 	// the default, pruefer-review:review. Review fills both; tests building args
 	// or prompts directly may leave them empty.
@@ -238,15 +238,9 @@ type ReviewRequest struct {
 	// OperatorPluginDirs are the operator's plugins: directories, already
 	// resolved by resolveOperatorPluginDirs; used in place.
 	OperatorPluginDirs []string
-	// RepoPlugins are the plugin trees read from the PR's base SHA by ReviewPR;
-	// Review writes them into its per-review directory. Never read from WorkDir.
-	RepoPlugins []repoPluginTree
 	// BaseSHA is the commit every base-ref read of this review was pinned to; it
 	// is named in a fallback's log line (ReviewPR names it in the posted notice).
-	BaseSHA string
-	// PluginNotes are reasons a repo plugin did not load (an unreadable tree, a
-	// refused plugin); they are appended to the reason of any fallback.
-	PluginNotes []string
+	BaseSHA     string
 	MaxWallTime time.Duration // 0 = no wall-time cap
 	// ReviewThreads carries existing review threads (resolved and
 	// unresolved) on the PR, fetched by ReviewPR via
@@ -851,7 +845,7 @@ func chooseReviewSkill(set *pluginSet, requested, defaultRef string) (ref, reaso
 
 // Review runs the review. It selects the skill (req.ReviewSkill, default
 // pruefer-review:review) against the plugins it passes with --plugin-dir — the
-// embedded pruefer-review, the operator's, then the repo's base-ref plugins —
+// embedded pruefer-review, then the operator's plugins —
 // and invokes the claude CLI in req.WorkDir. If the selected skill does not
 // resolve, or resolves but does not run, and it is not the default, Review runs
 // the default skill instead and reports FallbackFrom/FallbackReason; it never
@@ -881,23 +875,19 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		resolvedStaged.IndexPath = filepath.Join(staged, stagedIndexName)
 		req.Staged = &resolvedStaged
 	}
-	// R1/R2: a fresh plugin root for this review alone, removed on every return
-	// path (the fallback re-run reuses it), holding the embedded plugin and the
-	// repo's base-ref plugin trees.
+	// R1: a fresh plugin root for this review alone, removed on every return
+	// path (the fallback re-run reuses it), holding the embedded plugin.
 	rp, err := setupReviewPlugin()
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("preparing review plugin: %w", err)
 	}
 	defer rp.Close()
-	set := buildPluginSet(rp, req.OperatorPluginDirs, req.RepoPlugins)
+	set := buildPluginSet(rp, req.OperatorPluginDirs)
 	for _, p := range set.Plugins {
 		logf(req.PRNumber, "claude", "%s\n", p.logLine())
 	}
 	for _, n := range set.Notes {
 		logf(req.PRNumber, "warn", "%s\n", n)
-	}
-	for _, d := range set.Details {
-		logf(req.PRNumber, "warn", "%s\n", d)
 	}
 	req.PluginDirs = set.Dirs()
 
@@ -928,7 +918,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 			why = "the reviewer never invoked it"
 		}
 	} else {
-		why = appendNotes(why, append(append([]string(nil), req.PluginNotes...), set.Notes...))
+		why = appendNotes(why, set.Notes)
 	}
 	logf(req.PRNumber, "warn", "review skill %q at base %s not used (%s); running %s instead\n", sanitizeNoticeText(requested), req.BaseSHA, why, rp.Ref)
 	res, err := r.runReview(ctx, req, set, rp.Ref)

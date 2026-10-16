@@ -126,41 +126,33 @@ func TestBuildPluginSet_OrderReservedNameAndDuplicates(t *testing.T) {
 	defer rp.Close()
 	opA := writeTestPlugin(t, filepath.Join(t.TempDir(), "a"), "opa", "2.0", "x")
 	opReserved := writeTestPlugin(t, filepath.Join(t.TempDir(), "res"), reviewplugin.PluginName, "9", "review")
-	opDupOfRepo := writeTestPlugin(t, filepath.Join(t.TempDir(), "d"), "shared", "1", "x")
+	opShared := writeTestPlugin(t, filepath.Join(t.TempDir(), "s1"), "shared", "1", "x")
+	opSharedAgain := writeTestPlugin(t, filepath.Join(t.TempDir(), "s2"), "shared", "2", "x")
 	opNoManifest := filepath.Join(t.TempDir(), "plain")
 	if err := os.MkdirAll(opNoManifest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	manifest := func(name string) repoPluginFile {
-		return repoPluginFile{Path: ".claude-plugin/plugin.json", Data: []byte(fmt.Sprintf(`{"name":%q,"version":"3"}`, name))}
-	}
-	trees := []repoPluginTree{
-		{Dir: "r1", Files: []repoPluginFile{manifest("shared")}},         // same manifest name as an operator plugin
-		{Dir: "r2", Files: []repoPluginFile{manifest("repo-two")}},       // fine
-		{Dir: "r3", Files: []repoPluginFile{manifest("pruefer-review")}}, // reserved
-	}
-	set := buildPluginSet(rp, []string{opA, opReserved, opDupOfRepo, opNoManifest}, trees)
+	set := buildPluginSet(rp, []string{opA, opReserved, opShared, opSharedAgain, opNoManifest})
 
 	var names []string
 	for _, p := range set.Plugins {
 		names = append(names, p.Name+":"+p.Source)
 	}
-	want := []string{"pruefer-review:embedded", "opa:operator", "shared:operator", "plain:operator", "repo-two:repo"}
+	want := []string{"pruefer-review:embedded", "opa:operator", "shared:operator", "plain:operator"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Errorf("load order = %v, want %v", names, want)
 	}
 	if p, _ := set.byName("opa"); p.Version != "2.0" {
 		t.Errorf("version = %q", p.Version)
 	}
+	if p, _ := set.byName("shared"); p.Version != "1" {
+		t.Errorf("the earlier duplicate must win, got version %q", p.Version)
+	}
 	joined := strings.Join(set.Notes, "\n")
 	for _, w := range []string{"reserved for the embedded plugin", `"shared" is already loaded from a operator plugin`} {
 		if !strings.Contains(joined, w) {
 			t.Errorf("notes lack %q:\n%s", w, joined)
 		}
-	}
-	if got := countContaining(set.Notes, "reserved"); got != 2 {
-		t.Errorf("reserved name reported %d times, want 2 (operator and repo)", got)
 	}
 	// Notes are posted in fallback text: no local directory leaks into them.
 	for _, n := range set.Notes {
@@ -171,90 +163,6 @@ func TestBuildPluginSet_OrderReservedNameAndDuplicates(t *testing.T) {
 	// The embedded plugin is still the one passed first and was not replaced.
 	if set.Plugins[0].Dir != rp.Dir {
 		t.Errorf("embedded plugin not first: %v", set.Dirs())
-	}
-}
-
-// A tree that cannot be written is noted without the underlying error: that
-// error names the per-review temp directory and notes reach the posted review.
-func TestBuildPluginSet_WriteFailureNoteCarriesNoLocalPath(t *testing.T) {
-	rp, err := setupReviewPlugin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rp.Close()
-	if err := os.MkdirAll(rp.RepoRoot(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// A file where the plugin directory must go makes MkdirAll fail with a
-	// *PathError that names the full path.
-	if err := os.WriteFile(filepath.Join(rp.RepoRoot(), "mine"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	set := buildPluginSet(rp, nil, []repoPluginTree{{Dir: "mine", Files: []repoPluginFile{
-		{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"mine"}`)},
-	}}})
-	if _, ok := set.byName("mine"); ok {
-		t.Fatal("unwritable tree was loaded")
-	}
-	if len(set.Notes) != 1 || !strings.Contains(set.Notes[0], "repo plugin mine skipped: could not be written") {
-		t.Fatalf("notes = %v", set.Notes)
-	}
-	for _, n := range set.Notes {
-		if strings.Contains(n, rp.Root) || strings.Contains(n, os.TempDir()) {
-			t.Errorf("note leaks a local path: %s", n)
-		}
-	}
-	if len(set.Details) != 1 || !strings.Contains(set.Details[0], rp.Root) {
-		t.Errorf("details should keep the full error for the log: %v", set.Details)
-	}
-}
-
-func TestBuildPluginSet_WritesRepoTreeUnderTheReviewRoot(t *testing.T) {
-	rp, err := setupReviewPlugin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	tree := repoPluginTree{Dir: "mine", Files: []repoPluginFile{
-		{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"mine"}`)},
-		{Path: "hooks/run.sh", Data: []byte("#!/bin/sh\n"), Exec: true},
-		{Path: "skills/review/SKILL.md", Data: []byte("---\n---\nx")},
-	}}
-	set := buildPluginSet(rp, nil, []repoPluginTree{tree})
-	p, ok := set.byName("mine")
-	if !ok {
-		t.Fatalf("repo plugin not loaded: %+v", set.Notes)
-	}
-	if !strings.HasPrefix(p.Dir, rp.Root+string(filepath.Separator)) {
-		t.Errorf("repo plugin dir %s is outside the per-review root %s", p.Dir, rp.Root)
-	}
-	if fi, err := os.Stat(filepath.Join(p.Dir, "hooks", "run.sh")); err != nil || fi.Mode().Perm() != 0o755 {
-		t.Errorf("executable bit not preserved: %v %v", fi, err)
-	}
-	if fi, err := os.Stat(filepath.Join(p.Dir, ".claude-plugin", "plugin.json")); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Errorf("regular file mode wrong: %v %v", fi, err)
-	}
-	rp.Close()
-	if _, err := os.Stat(p.Dir); !os.IsNotExist(err) {
-		t.Errorf("repo plugin dir leaked after Close: %v", err)
-	}
-}
-
-func TestWriteRepoPluginTree_RefusesEscapes(t *testing.T) {
-	root := t.TempDir()
-	for _, bad := range []string{"../escape", "/abs", "a/../../b", "a//b", ""} {
-		_, err := writeRepoPluginTree(root, repoPluginTree{Dir: "p", Files: []repoPluginFile{{Path: bad, Data: []byte("x")}}})
-		if err == nil {
-			t.Errorf("path %q was written", bad)
-		}
-	}
-	if _, err := writeRepoPluginTree(root, repoPluginTree{Dir: "../up"}); err == nil {
-		t.Error("a traversing directory name was accepted")
-	}
-	if entries, _ := os.ReadDir(filepath.Dir(root)); len(entries) == 0 {
-		t.Fatal("sanity")
-	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "escape")); err == nil {
-		t.Error("a file escaped the root")
 	}
 }
 
@@ -285,7 +193,7 @@ func TestWellFormedSkillRef(t *testing.T) {
 	}
 }
 
-// A repo-controlled skill directory name must not widen or break the
+// A skill directory name in a loaded plugin must not widen or break the
 // Skill(<ref>) allow rule: a name carrying "*", "(" or ")" falls back to the
 // default skill instead of being spliced into the rule.
 func TestChooseReviewSkill_RejectsRuleDelimitersInSkillName(t *testing.T) {

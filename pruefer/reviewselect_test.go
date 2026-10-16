@@ -56,22 +56,25 @@ func recordedCalls(t *testing.T, rec string) []string {
 	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
 
-func minePluginTree() repoPluginTree {
-	return repoPluginTree{Dir: "mine-dir", Files: []repoPluginFile{
-		{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"mine","version":"1.0.0"}`)},
-		{Path: "skills/deep/SKILL.md", Data: []byte("---\ndescription: deep\n---\nGo deep.\n")},
-	}}
+// selReqOp builds a request selecting skill, with an operator plugin "mine"
+// (skill "deep") on disk; it returns that plugin's directory too.
+func selReqOp(t *testing.T, skill string) (ReviewRequest, string) {
+	t.Helper()
+	op := writeTestPlugin(t, filepath.Join(t.TempDir(), "mine-dir"), "mine", "1.0.0", "deep")
+	return ReviewRequest{PRNumber: 1, WorkDir: t.TempDir(), ReviewSkill: skill, BaseSHA: "basesha", OperatorPluginDirs: []string{op}}, op
 }
 
 func selReq(t *testing.T, skill string) ReviewRequest {
-	return ReviewRequest{PRNumber: 1, WorkDir: t.TempDir(), ReviewSkill: skill, BaseSHA: "basesha", RepoPlugins: []repoPluginTree{minePluginTree()}}
+	req, _ := selReqOp(t, skill)
+	return req
 }
 
-func TestReview_RepoPluginSkillRuns_NoFallback(t *testing.T) {
+func TestReview_OperatorPluginSkillRuns_NoFallback(t *testing.T) {
 	logs := capturePluginLogs(t)
 	rec := filepath.Join(t.TempDir(), "rec")
 	fakeClaudeBySkill(t, rec, selStream, defStream)
-	res, err := (&RealClaudeInvoker{}).Review(context.Background(), selReq(t, "mine:deep"))
+	req, op := selReqOp(t, "mine:deep")
+	res, err := (&RealClaudeInvoker{}).Review(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,30 +88,14 @@ func TestReview_RepoPluginSkillRuns_NoFallback(t *testing.T) {
 	if !strings.Contains(calls[0], "Skill(mine:deep)") || strings.Contains(calls[0], "Skill(pruefer-review:review)") {
 		t.Errorf("the grant must name the selected skill only: %s", calls[0])
 	}
-	if strings.Count(calls[0], "--plugin-dir") != 2 || strings.Index(calls[0], "pruefer-review") > strings.Index(calls[0], "mine-dir") {
-		t.Errorf("want the embedded plugin then the repo plugin as --plugin-dir: %s", calls[0])
+	if strings.Count(calls[0], "--plugin-dir") != 2 || strings.Index(calls[0], "pruefer-review") > strings.Index(calls[0], op) {
+		t.Errorf("want the embedded plugin then the operator plugin as --plugin-dir: %s", calls[0])
 	}
-	if countContaining(logs(), "review plugin: mine v1.0.0 (repo,") != 1 || countContaining(logs(), "review plugin: pruefer-review v") != 1 {
+	if countContaining(logs(), "review plugin: mine v1.0.0 (operator,") != 1 || countContaining(logs(), "review plugin: pruefer-review v") != 1 {
 		t.Errorf("plugin name/version log lines missing: %q", logs())
 	}
-	if countContaining(logs(), "review skill: mine:deep (plugin mine v1.0.0, repo,") != 1 {
+	if countContaining(logs(), "review skill: mine:deep (plugin mine v1.0.0, operator,") != 1 {
 		t.Errorf("skill log line missing: %q", logs())
-	}
-}
-
-func TestReview_OperatorPluginSkillRuns(t *testing.T) {
-	rec := filepath.Join(t.TempDir(), "rec")
-	fakeClaudeBySkill(t, rec, selStream, defStream)
-	op := writeTestPlugin(t, filepath.Join(t.TempDir(), "op"), "mine", "7.1", "deep")
-	req := selReq(t, "mine:deep")
-	req.RepoPlugins = nil
-	req.OperatorPluginDirs = []string{op}
-	res, err := (&RealClaudeInvoker{}).Review(context.Background(), req)
-	if err != nil || res.FallbackFrom != "" || res.Text != "selected review" {
-		t.Fatalf("res = %+v, err = %v", res, err)
-	}
-	if c := recordedCalls(t, rec)[0]; !strings.Contains(c, op) {
-		t.Errorf("operator plugin dir not passed: %s", c)
 	}
 }
 
@@ -193,17 +180,18 @@ func TestReview_NoFallbackForNonSkillFailuresOrAFailingDefault(t *testing.T) {
 	}
 }
 
-func TestReview_FallbackReasonCarriesRepoPluginNotes(t *testing.T) {
+func TestReview_FallbackReasonCarriesOperatorPluginNotes(t *testing.T) {
 	rec := filepath.Join(t.TempDir(), "rec")
 	fakeClaudeBySkill(t, rec, selStream, defStream)
-	req := selReq(t, "mine:deep")
-	req.RepoPlugins = nil
-	req.PluginNotes = []string{"repo plugin mine-dir skipped: the plugin exceeds 500 files"}
+	req := selReq(t, "gone:deep")
+	// An operator plugin declaring the embedded plugin's name is skipped and
+	// reported, and the report reaches the fallback reason.
+	req.OperatorPluginDirs = append(req.OperatorPluginDirs, writeTestPlugin(t, filepath.Join(t.TempDir(), "res"), "pruefer-review", "9", "review"))
 	res, err := (&RealClaudeInvoker{}).Review(context.Background(), req)
 	if err != nil || res.FallbackFrom == "" {
 		t.Fatalf("res = %+v err = %v", res, err)
 	}
-	if !strings.Contains(res.FallbackReason, "exceeds 500 files") {
+	if !strings.Contains(res.FallbackReason, "reserved for the embedded plugin") {
 		t.Errorf("reason = %q lacks the plugin note", res.FallbackReason)
 	}
 }
@@ -211,13 +199,14 @@ func TestReview_FallbackReasonCarriesRepoPluginNotes(t *testing.T) {
 func TestReview_PerReviewDirectoryRemovedAfterFallback(t *testing.T) {
 	rec := filepath.Join(t.TempDir(), "rec")
 	fakeClaudeBySkill(t, rec, selLoadFail, defStream)
-	if _, err := (&RealClaudeInvoker{}).Review(context.Background(), selReq(t, "mine:deep")); err != nil {
+	req, op := selReqOp(t, "mine:deep")
+	if _, err := (&RealClaudeInvoker{}).Review(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range recordedCalls(t, rec) {
 		fields := strings.Fields(call)
 		for i, f := range fields {
-			if f == "--plugin-dir" {
+			if f == "--plugin-dir" && fields[i+1] != op { // an operator directory is used in place, never removed
 				if _, err := os.Stat(fields[i+1]); !os.IsNotExist(err) {
 					t.Errorf("plugin dir %s leaked after the review: %v", fields[i+1], err)
 				}

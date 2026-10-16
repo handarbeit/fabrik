@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -139,7 +140,7 @@ func TestFetchRepoConfig_ReviewSkillRecognisedOperatorKeysStillNot(t *testing.T)
 
 func reviewWith(t *testing.T, client *fakeReviewer, cfg Config) (ReviewRequest, ReviewOutcome) {
 	t.Helper()
-	return reviewWithPR(t, client, cfg, gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main", BaseDefaultBranch: "main"})
+	return reviewWithPR(t, client, cfg, gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main"})
 }
 
 func reviewWithPR(t *testing.T, client *fakeReviewer, cfg Config, pr gh.PRDetails) (ReviewRequest, ReviewOutcome) {
@@ -155,164 +156,119 @@ func reviewWithPR(t *testing.T, client *fakeReviewer, cfg Config, pr gh.PRDetail
 	return claude.callsSnapshot()[0], out
 }
 
-func TestReviewPR_PassesBaseRefPluginsAndSelectionToTheInvoker(t *testing.T) {
+func TestReviewPR_PassesPinnedBaseSHAAndSelectionToTheInvoker(t *testing.T) {
 	client := newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
-	req, _ := reviewWith(t, client, Config{RepoReviewSkill: true})
+	op := writeTestPlugin(t, filepath.Join(t.TempDir(), "mine"), "mine", "1", "deep")
+	req, _ := reviewWith(t, client, Config{RepoReviewSkill: true, Plugins: []string{op}})
 	if req.BaseSHA != "basesha" || req.ReviewSkill != "mine:deep" {
 		t.Errorf("BaseSHA/ReviewSkill = %q/%q", req.BaseSHA, req.ReviewSkill)
 	}
-	if len(req.RepoPlugins) != 1 || req.RepoPlugins[0].Dir != "mine" {
-		t.Errorf("RepoPlugins = %+v", req.RepoPlugins)
+	if len(req.OperatorPluginDirs) != 1 {
+		t.Errorf("OperatorPluginDirs = %v, want the operator's one plugin", req.OperatorPluginDirs)
 	}
-	if !slices.Equal(client.treeCalls, []string{"basesha"}) {
-		t.Errorf("plugin tree read at %v, want only the pinned base SHA (never the head)", client.treeCalls)
+	if client.resolveCalls != 1 {
+		t.Errorf("the base was resolved %d times, want once per review", client.resolveCalls)
 	}
 }
 
-// The operator veto is the kill switch for repo-supplied code: the repo's
-// review_skill is ignored AND its plugins are neither fetched (no tree read, no
-// blob read) nor passed to the reviewer.
-func TestReviewPR_RepoReviewSkillFalseIsTheKillSwitchForRepoPlugins(t *testing.T) {
+// The operator veto: the repo's review_skill is ignored and the log says so.
+func TestReviewPR_RepoReviewSkillFalseIgnoresTheRepoSelection(t *testing.T) {
 	logs := capturePluginLogs(t)
 	client := newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
 	req, _ := reviewWith(t, client, Config{ReviewSkill: "op:skill", RepoReviewSkill: false})
 	if req.ReviewSkill != "op:skill" {
 		t.Errorf("ReviewSkill = %q, want the operator's", req.ReviewSkill)
 	}
-	if len(req.RepoPlugins) != 0 {
-		t.Errorf("repo plugins must not reach the invoker (so never --plugin-dir) under the veto: %+v", req.RepoPlugins)
-	}
-	if len(client.treeCalls) != 0 || client.blobCalls != 0 {
-		t.Errorf("under the veto nothing may be fetched: tree reads %v, blob reads %d", client.treeCalls, client.blobCalls)
-	}
-	if !strings.Contains(strings.Join(req.PluginNotes, ";"), "repo_review_skill is false") {
-		t.Errorf("notes = %v", req.PluginNotes)
-	}
 	if countContaining(logs(), `repo review_skill "mine:deep" ignored: repo_review_skill is false`) != 1 {
 		t.Errorf("the log must say the repo's value was ignored: %q", logs())
 	}
-	// Non-vacuity: with the veto off the same fixture loads the plugin.
+	// Non-vacuity: with the veto off the same fixture selects the repo's skill.
 	client = newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
-	req, _ = reviewWith(t, client, Config{RepoReviewSkill: true})
-	if len(req.RepoPlugins) != 1 || client.blobCalls == 0 {
-		t.Errorf("fixture loads nothing even without the veto: %+v blobs=%d", req.RepoPlugins, client.blobCalls)
+	client.repoConfigData = []byte("review_skill: mine:deep\n")
+	req, _ = reviewWith(t, client, Config{ReviewSkill: "op:skill", RepoReviewSkill: true})
+	if req.ReviewSkill != "mine:deep" {
+		t.Errorf("fixture selects nothing even without the veto: %q", req.ReviewSkill)
 	}
 }
 
-// Repo plugins load only when the PR's base is the repository's default branch.
-// A stacked PR's base is another contributor's branch, which no maintainer gate
-// has seen; an unknown default branch fails closed. Config and guidance reads
-// keep reading the PR's base.
-func TestReviewPR_RepoPluginsOnlyLoadWhenBaseIsTheDefaultBranch(t *testing.T) {
-	for name, pr := range map[string]gh.PRDetails{
-		"stacked base":           {Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "feature/x", BaseDefaultBranch: "main"},
-		"unknown default branch": {Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			client := newFakeReviewer()
-			client.setRepoPlugins(goodPluginFiles())
-			client.repoConfigData = []byte("review_skill: mine:deep\n")
-			req, _ := reviewWithPR(t, client, Config{RepoReviewSkill: true}, pr)
-			if len(req.RepoPlugins) != 0 || len(client.treeCalls) != 0 || client.blobCalls != 0 {
-				t.Errorf("repo plugins were read for a base that is not the default: %+v tree=%v blobs=%d", req.RepoPlugins, client.treeCalls, client.blobCalls)
+// No code from the reviewed repo is loaded (#2307; repo-supplied plugins are
+// deferred to #2366): a repo's review_skill can only name a skill of the
+// embedded plugin or an operator plugin, so with none configured the invoker
+// is handed no plugin directory at all, whatever the repo's base holds.
+func TestReviewPR_NoRepoSuppliedPluginReachesTheInvoker(t *testing.T) {
+	client := newFakeReviewer()
+	client.repoConfigData = []byte("review_skill: mine:deep\n")
+	req, _ := reviewWith(t, client, Config{RepoReviewSkill: true})
+	if len(req.OperatorPluginDirs) != 0 {
+		t.Errorf("plugin directories reached the invoker with none configured: %v", req.OperatorPluginDirs)
+	}
+	if req.ReviewSkill != "mine:deep" {
+		t.Errorf("selection must be unchanged: %q", req.ReviewSkill)
+	}
+}
+
+// A static scan: nothing in the pruefer or github packages reads a plugin tree
+// from the reviewed repo, by any route. Adding such a reader is #2366's work and
+// must change this test deliberately.
+func TestNoRepoPluginReaderExists(t *testing.T) {
+	for _, dir := range []string{".", "../github"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
 			}
-			// The repo still selected its skill (selection is unchanged); with
-			// no plugin loaded it cannot resolve, and the note that reaches the
-			// fallback notice says why.
-			if req.ReviewSkill != "mine:deep" {
-				t.Errorf("ReviewSkill = %q, selection must be unchanged", req.ReviewSkill)
+			src, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !strings.Contains(strings.Join(req.PluginNotes, ";"), "repo plugins not loaded") {
-				t.Errorf("notes = %v", req.PluginNotes)
-			}
-			sawConfigRead := false
-			for _, c := range client.fileAtRefCallArgs() {
-				if c.path == DefaultConfigPath {
-					sawConfigRead = true
+			for _, banned := range []string{"FetchTreeAtRef", "FetchBlob", `".pruefer/plugins`, "git/trees/", "git/blobs/"} {
+				if strings.Contains(string(src), banned) {
+					t.Errorf("%s/%s mentions %q: no code path may load a plugin from the reviewed repo", dir, name, banned)
 				}
 			}
-			if !sawConfigRead {
-				t.Error("the repo config must still be read")
-			}
-		})
-	}
-}
-
-func TestRepoPluginsLoadDecision(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		veto           bool
-		base, def      string
-		wantLoad       bool
-		wantWhyContain string
-	}{
-		{"default base", true, "main", "main", true, ""},
-		{"veto", false, "main", "main", false, "repo_review_skill is false"},
-		{"stacked", true, "feat", "main", false, "not the repository's default branch"},
-		{"unknown default", true, "main", "", false, "default branch is unknown"},
-	} {
-		load, why := repoPluginsLoadDecision(tc.veto, tc.base, tc.def)
-		if load != tc.wantLoad || !strings.Contains(why, tc.wantWhyContain) || (load && why != "") {
-			t.Errorf("%s: got %v %q", tc.name, load, why)
 		}
 	}
 }
 
-// A repo config present only on the PR head cannot alter selection, and a plugin
-// present only on the head never reaches the invoker.
-func TestReviewPR_HeadOnlyConfigAndPluginsHaveNoEffect(t *testing.T) {
+// A repo config present only on the PR head cannot alter selection.
+func TestReviewPR_HeadOnlyConfigHasNoEffect(t *testing.T) {
 	client := newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
-	client.pluginsOnlyAtSHA = "head-sha"
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
 	client.repoConfigOnlyAtRef = "head-sha"
 	req, _ := reviewWith(t, client, Config{RepoReviewSkill: true})
-	if req.ReviewSkill != DefaultReviewSkill || len(req.RepoPlugins) != 0 {
-		t.Errorf("head-only content reached the review: skill=%q plugins=%+v", req.ReviewSkill, req.RepoPlugins)
+	if req.ReviewSkill != DefaultReviewSkill {
+		t.Errorf("head-only config reached the review: skill=%q", req.ReviewSkill)
 	}
-	// Non-vacuity: with the same content at the base SHA both take effect.
+	// Non-vacuity: with the same content at the base SHA it takes effect.
 	client = newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
-	client.pluginsOnlyAtSHA, client.repoConfigOnlyAtRef = "basesha", "basesha"
+	client.repoConfigOnlyAtRef = "basesha"
 	req, _ = reviewWith(t, client, Config{RepoReviewSkill: true})
-	if req.ReviewSkill != "mine:deep" || len(req.RepoPlugins) != 1 {
-		t.Errorf("fixture has no effect even at the base: skill=%q plugins=%+v", req.ReviewSkill, req.RepoPlugins)
+	if req.ReviewSkill != "mine:deep" {
+		t.Errorf("fixture has no effect even at the base: skill=%q", req.ReviewSkill)
 	}
 }
 
-func TestReviewPR_UnresolvableBaseLoadsNoRepoPluginsAndIsNotConclusive(t *testing.T) {
+func TestReviewPR_UnresolvableBaseFallsBackToTheBranchAndIsNotConclusive(t *testing.T) {
 	client := newFakeReviewer()
-	client.setRepoPlugins(goodPluginFiles())
 	client.baseSHAErr = context.DeadlineExceeded
 	req, out := reviewWith(t, client, Config{RepoReviewSkill: true})
-	if req.BaseSHA != "" || len(req.RepoPlugins) != 0 || len(client.treeCalls) != 0 {
-		t.Errorf("no base SHA must mean no repo plugin read: %+v / %v", req, client.treeCalls)
+	if req.BaseSHA != "" {
+		t.Errorf("no base SHA expected: %+v", req)
 	}
 	if out.Conclusive {
 		t.Error("an outcome shaped by a failed base read must not be memoised")
-	}
-	if !strings.Contains(strings.Join(req.PluginNotes, ";"), "base commit could not be resolved") {
-		t.Errorf("notes = %v", req.PluginNotes)
 	}
 	for _, c := range client.fileAtRefCallArgs() {
 		if c.ref != "main" {
 			t.Errorf("without a pin the reads fall back to the branch name, got %q", c.ref)
 		}
-	}
-}
-
-func TestReviewPR_UnavailableRepoPluginTreeIsNotConclusive(t *testing.T) {
-	client := newFakeReviewer()
-	client.pluginTreeErr = context.DeadlineExceeded
-	_, out := reviewWith(t, client, Config{RepoReviewSkill: true})
-	if out.Conclusive {
-		t.Error("a failed plugin-tree read must make the outcome non-conclusive")
 	}
 }
 
@@ -388,7 +344,7 @@ func TestCheckReviewArgsScoped_AcceptsOnlyTheNamedSkills(t *testing.T) {
 // The reason keeps its quotes, parentheses, commas and semicolons, sits in a code
 // span, and still cannot carry a backtick, mention or issue reference.
 func TestFallbackNotice_ReasonStaysReadableAndSafe(t *testing.T) {
-	reason := "it did not resolve: plugin \"mine\" is not loaded (repo plugin a skipped: x; repo plugin b skipped: y, z)"
+	reason := "it did not resolve: plugin \"mine\" is not loaded (operator plugin a skipped: x; operator plugin b skipped: y, z)"
 	n := fallbackNotice("mine:deep", "abc", reason)
 	if !strings.Contains(n, "(`"+reason+"`)") {
 		t.Errorf("reason not kept verbatim in a code span: %s", n)
@@ -402,9 +358,9 @@ func TestFallbackNotice_ReasonStaysReadableAndSafe(t *testing.T) {
 }
 
 func TestFallbackNotice_KeepsPluginNotesBeyondTheReferenceCap(t *testing.T) {
-	reason := "it did not resolve: plugin \"mine\" is not loaded (repo plugin mine-dir skipped: the plugin exceeds 4194304 bytes; repo plugin other skipped: \"hooks/run.sh\" is a symlink, which is not followed)"
+	reason := "it did not resolve: plugin \"mine\" is not loaded (operator plugin mine-dir skipped: its manifest name \"x\" is reserved; operator plugin other skipped: \"shared\" is already loaded from a operator plugin, which is not replaced)"
 	n := fallbackNotice("mine:deep", "abc", reason)
-	for _, want := range []string{"mine-dir skipped", "other skipped", "is a symlink"} {
+	for _, want := range []string{"mine-dir skipped", "other skipped", "is not replaced"} {
 		if !strings.Contains(n, want) {
 			t.Errorf("notice lost %q: %s", want, n)
 		}
