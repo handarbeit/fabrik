@@ -2,6 +2,7 @@ package pruefer
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -333,5 +334,26 @@ func TestFallbackNotice_KeepsPluginNotesBeyondTheReferenceCap(t *testing.T) {
 	}
 	if long := fallbackNotice("x:y", "abc", strings.Repeat("a", 2000)); len(long) > 900 {
 		t.Errorf("reason not capped: %d", len(long))
+	}
+}
+
+// The repo_review_skill env var is the operator's veto, so a value that does
+// not parse must close the veto (and say so) rather than leave it open.
+func TestLoadConfig_UnparseableRepoReviewSkillEnvFailsClosed(t *testing.T) {
+	var logged strings.Builder
+	prev := Logf
+	Logf = func(_ int, tag, format string, args ...any) { fmt.Fprintf(&logged, "["+tag+"] "+format, args...) }
+	t.Cleanup(func() { Logf = prev })
+
+	t.Setenv("PRUEFER_REPO_REVIEW_SKILL", "flase")
+	cfg, err := LoadConfig([]string{"-config", writeYAMLConfig(t, t.TempDir(), "review_skill: ours:deep\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RepoReviewSkill {
+		t.Error("an unparseable PRUEFER_REPO_REVIEW_SKILL left the repo override enabled")
+	}
+	if !strings.Contains(logged.String(), "PRUEFER_REPO_REVIEW_SKILL") {
+		t.Errorf("no warning logged: %q", logged.String())
 	}
 }

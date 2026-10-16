@@ -1040,8 +1040,14 @@ func applyEnv(cfg *Config) {
 		cfg.ReviewSkill = v
 	}
 	if v := os.Getenv("PRUEFER_REPO_REVIEW_SKILL"); v != "" {
+		// This is the operator's veto over repo-chosen review code, so an
+		// unparseable value (a typo such as "flase") fails closed rather than
+		// leaving repos free to pick their own skill unnoticed.
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.RepoReviewSkill = b
+		} else {
+			cfg.RepoReviewSkill = false
+			logf(0, "config", "PRUEFER_REPO_REVIEW_SKILL=%q is not a boolean; treating it as false (a repo's review_skill is ignored)\n", v)
 		}
 	}
 	if v := os.Getenv("PRUEFER_KEEP_TRANSCRIPTS"); v != "" {
