@@ -22,6 +22,16 @@ const (
 	// line count is not the binding limit. Conservative against the cap; the
 	// liveprobe test measures it against the real CLI.
 	stagedChunkMaxBytes = 16 * 1024
+	// stagedBatchMaxBytes is the most the reviewer is told to open in one `cat`:
+	// the combined `bytes` of the entries named, as INDEX.txt lists them (#2362,
+	// ADR 2362). The Claude CLI returns a Bash result whole only below about
+	// 30 KB; above that it saves the output to a file and hands the model a
+	// 2 KB `<persisted-output>` preview, so the rest of the batch is never seen.
+	// 20 KiB leaves a margin of roughly 10 KB for the unmeasured threshold and
+	// for any difference between bytes and characters. This is the one place
+	// the number lives: renderDynamicContext formats it and a test asserts the
+	// review skill's text states the same value.
+	stagedBatchMaxBytes = 20 * 1024
 	// stagedChunkMaxLines bounds one staged entry file by line count.
 	stagedChunkMaxLines = 600
 	// stagedIndexName is the index file inside the staging directory.
@@ -359,4 +369,10 @@ func stageDiff(blocks []diffFileBlock, preamble string, prNumber int) (*StagedDi
 		return nil, noop, fmt.Errorf("writing staged index: %w", err)
 	}
 	return &StagedDiff{Dir: resolved, IndexPath: indexPath, Entries: entries}, cleanup, nil
+}
+
+// stagedBatchLimitText renders stagedBatchMaxBytes the way the prompt and the
+// review skill state it.
+func stagedBatchLimitText() string {
+	return fmt.Sprintf("%d bytes", stagedBatchMaxBytes)
 }

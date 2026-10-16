@@ -329,6 +329,9 @@ type ReviewResult struct {
 	// visible in the transcript (see deriveOpened): coverage then refuses to
 	// credit what only an invisible subagent could have read.
 	UnobservedSubagents bool
+	// Truncated is the set of staged entry IDs named by a shell command whose
+	// result the CLI replaced with a `<persisted-output>` preview (#2362).
+	Truncated map[string]bool
 	// Transcript is the invocation's raw stream-json stdout, unmodified. It is
 	// empty for an invoker that has no transcript. ReviewPR keeps it only when
 	// coverage is partial (see maybeKeepTranscript, #2303).
@@ -576,6 +579,7 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is staged as %d entries in %s. Read %s first: it lists every entry with its ID, file, original path, chunk and size. Each entry is one small file holding one changed path's diff (a large path is cut into numbered chunks that each repeat the file header, and hunk headers carry the true line numbers). Together they are the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", len(req.Staged.Entries), req.Staged.Dir, req.Staged.IndexPath)
 		fmt.Fprintf(b, "Entry files are named <ID>.diff, IDs 0001 through %04d, so if INDEX.txt itself is cut off you can still open the rest by name.\n\n", len(req.Staged.Entries))
 		b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
+		fmt.Fprintf(b, "Open entries in amounts the tool returns whole: one entry per Read, or one plain `cat` command naming entries by the absolute paths INDEX.txt lists, whose `bytes` values add up to at most %s (do not prefix it with `cd`). A longer shell result is not returned to you: it is saved to a file and you receive only a `<persisted-output>` notice with a 2 KB preview. A `<persisted-output>` result means you did not see the content of any entry in that command: open those entries again in smaller pieces. Do not try to read the file the notice names; it is outside the paths you may read.\n\n", stagedBatchLimitText())
 		if req.BaseBranch != "" {
 			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the staged diff above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
 		}
@@ -1060,7 +1064,7 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 	if err := checkSkillRan(stdout.Bytes(), ref); err != nil {
 		return ReviewResult{}, &skillNotRunError{Ref: ref, Err: err, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 	}
-	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
-		UnobservedSubagents: req.Staged != nil && !authoritative, Transcript: stdout.Bytes()}, nil
+	facts := analyzeTranscript(stdout.Bytes(), req.Staged)
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: facts.opened, OpenedAuthoritative: facts.authoritative,
+		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: stdout.Bytes()}, nil
 }

@@ -84,6 +84,10 @@ type Coverage struct {
 	Unread       []string // original paths, sorted and unique
 	UnreadCount  int      // entries not opened
 	TotalEntries int
+	// TruncatedUnread is how many of the unread entries were named by a shell
+	// command whose result the CLI cut to a `<persisted-output>` preview (#2362).
+	// Diagnostic only: it appears in the log line and never changes Complete.
+	TruncatedUnread int
 }
 
 // coverageInput is everything computeCoverage needs.
@@ -103,6 +107,9 @@ type coverageInput struct {
 	// then intersected with the transcript anyway: entries only an invisible
 	// subagent could have read count as unread.
 	UnobservedSubagents bool
+	// Truncated is the set of entry IDs named by a shell command whose result
+	// came back as a preview (see analyzeTranscript).
+	Truncated map[string]bool
 }
 
 func sortedUnique(in []string) []string {
@@ -150,6 +157,9 @@ func computeCoverage(in coverageInput) Coverage {
 	for _, e := range entries {
 		if !opened[e.ID] {
 			cov.UnreadCount++
+			if in.Truncated[e.ID] {
+				cov.TruncatedUnread++
+			}
 			unread = append(unread, e.Path)
 		}
 	}
@@ -214,7 +224,11 @@ func logCoverage(prNumber int, cov Coverage, authoritative bool, transcriptPath 
 	if transcriptPath != "" {
 		saved = "; transcript saved: " + transcriptPath
 	}
-	logf(prNumber, "warn", "coverage: partial — %s (%d unread path(s); transcript authoritative=%t)%s\n", cov.Reason, len(cov.Unread), authoritative, saved)
+	truncated := ""
+	if cov.TruncatedUnread > 0 {
+		truncated = fmt.Sprintf("; %d of the unread entries were in shell results cut to a preview", cov.TruncatedUnread)
+	}
+	logf(prNumber, "warn", "coverage: partial — %s (%d unread path(s)%s; transcript authoritative=%t)%s\n", cov.Reason, len(cov.Unread), truncated, authoritative, saved)
 }
 
 // streamEvent is the subset of a stream-json line deriveOpened reads.
@@ -284,9 +298,39 @@ const shellMeta = "|;&<>$`\"'\\(){}*?!#~\n"
 // Task/Agent call at all, or every such call has events tagged with its
 // parent_tool_use_id. Otherwise a subagent could have read files Go cannot see.
 func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authoritative bool) {
-	opened = map[string]bool{}
+	f := analyzeTranscript(stream, s)
+	return f.opened, f.authoritative
+}
+
+// transcriptFacts is what analyzeTranscript reads from a stream-json transcript.
+type transcriptFacts struct {
+	opened        map[string]bool
+	authoritative bool
+	// truncated is the set of staged entry IDs named by a Bash command whose
+	// result the CLI replaced with a `<persisted-output>` preview (#2362). It is
+	// diagnostic only: it never credits and never un-credits an entry.
+	truncated map[string]bool
+}
+
+// persistedOutputPrefix starts a Bash result the CLI replaced with a preview
+// because the output was too large to return whole.
+const persistedOutputPrefix = "<persisted-output>"
+
+// isPersistedOutput reports whether a tool_result's text is a preview notice. It
+// is structural: the text must start with the marker, so a result that merely
+// quotes it (a diff of this very code, say) is not one.
+func isPersistedOutput(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), persistedOutputPrefix)
+}
+
+// analyzeTranscript is deriveOpened plus the truncation attribution. See
+// deriveOpened for the crediting rules, which it keeps; a preview result never
+// credits an entry.
+func analyzeTranscript(stream []byte, s *StagedDiff) transcriptFacts {
+	opened := map[string]bool{}
+	truncated := map[string]bool{}
 	if s == nil {
-		return opened, false
+		return transcriptFacts{opened: opened, truncated: truncated}
 	}
 	byPath := make(map[string]StagedEntry, len(s.Entries))
 	for _, e := range s.Entries {
@@ -297,6 +341,7 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 		ids  []string
 	}
 	calls := map[string]pending{}
+	named := map[string][]string{} // Bash tool_use ID -> staged entries its command names
 	lineSeen := map[string]map[int]bool{}
 	taskIDs := map[string]bool{}
 	taggedParents := map[string]bool{}
@@ -324,16 +369,25 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 						calls[c.ID] = pending{read: true, ids: []string{e.ID}}
 					}
 				case "Bash":
+					if ids := stagedEntryIDsNamed(c.Input.Command, s); len(ids) > 0 {
+						named[c.ID] = ids
+					}
 					if ids := catEntryIDs(c.Input.Command, byPath); len(ids) > 0 {
 						calls[c.ID] = pending{ids: ids}
 					}
 				}
 			case ev.Type == "user" && c.Type == "tool_result":
+				text := toolResultText(c.Content)
+				preview := !c.IsError && isPersistedOutput(text)
+				if preview {
+					for _, id := range named[c.ToolUseID] {
+						truncated[id] = true
+					}
+				}
 				p, ok := calls[c.ToolUseID]
-				if !ok || c.IsError {
+				if !ok || c.IsError || preview {
 					continue
 				}
-				text := toolResultText(c.Content)
 				if p.read {
 					id := p.ids[0]
 					if lineSeen[id] == nil {
@@ -373,13 +427,44 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 			opened[e.ID] = true
 		}
 	}
-	authoritative = true
+	authoritative := true
 	for id := range taskIDs {
 		if !taggedParents[id] {
 			authoritative = false
 		}
 	}
-	return opened, authoritative
+	return transcriptFacts{opened: opened, authoritative: authoritative, truncated: truncated}
+}
+
+// stagedEntryIDsNamed returns the staged entries a shell command names, however
+// the command is shaped: an absolute entry path, or a bare <ID>.diff name (the
+// `cd <dir>; cat 0001.diff ...` form catEntryIDs rejects). It only attributes a
+// truncated result to entries; it never credits an open, so the strictness of
+// catEntryIDs is untouched (#2362, R4).
+func stagedEntryIDsNamed(command string, s *StagedDiff) []string {
+	byPath := make(map[string]string, len(s.Entries))
+	byFile := make(map[string]string, len(s.Entries))
+	for _, e := range s.Entries {
+		byPath[filepath.Clean(s.EntryPath(e))] = e.ID
+		byFile[e.File] = e.ID
+	}
+	tokens := strings.FieldsFunc(command, func(r rune) bool {
+		return strings.ContainsRune(" \t\r\n;&|()<>", r)
+	})
+	seen := map[string]bool{}
+	var ids []string
+	for _, tok := range tokens {
+		tok = strings.Trim(tok, "\"'`")
+		id, ok := byPath[filepath.Clean(tok)]
+		if !ok {
+			id, ok = byFile[tok]
+		}
+		if ok && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // catEntryIDs returns the entries a plain `cat <path>...` command opens, or nil

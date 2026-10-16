@@ -526,6 +526,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		Reported: reported, ReportOK: reportOK,
 		Transcript: result.Opened, TranscriptAuthoritative: result.OpenedAuthoritative,
 		UnobservedSubagents: result.UnobservedSubagents,
+		Truncated:           result.Truncated,
 	})
 	// #2303: keep the raw transcript while the temp dirs still exist (their
 	// removal is deferred above) and before the review is submitted.

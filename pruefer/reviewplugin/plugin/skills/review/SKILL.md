@@ -5,6 +5,8 @@ description: Pruefer's default pull-request review criteria. Invoke this skill t
 
 Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems.
 
+**Read the staged diff in amounts the tool returns whole.** When the prompt stages the diff as numbered entries, open one entry per Read, or one plain `cat` of entries by absolute path whose `bytes` in INDEX.txt add up to at most 20480 bytes. A longer shell result is saved to a file and you get only a `<persisted-output>` notice with a 2 KB preview. A `<persisted-output>` result means you did not see that content: open those entries again in smaller pieces, and do not try to read the file the notice names.
+
 **The diff tells you what changed. It does not tell you what to check.** Reading it is the start of the review, not the whole of it. Before you conclude, follow the change outward:
 
 - For every symbol the diff adds, removes, renames, or changes the meaning of, search the repository for its other uses. A change that is correct in its own file is still a defect if a caller, test, or script depends on the old behavior.

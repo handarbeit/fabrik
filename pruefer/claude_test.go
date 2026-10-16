@@ -796,6 +796,26 @@ func TestBuildReviewPrompt_ContainsR5RevisedNitpickInstruction(t *testing.T) {
 	}
 }
 
+// TestReviewSkill_StatesStagedReadingRule pins #2362 FR-002/FR-004/FR-010: the
+// skill gives the same batch limit as the Go-owned prompt (one constant,
+// stagedBatchMaxBytes) and says a preview result means the content was unseen.
+func TestReviewSkill_StatesStagedReadingRule(t *testing.T) {
+	body, err := reviewplugin.SkillBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"one entry per Read",
+		"at most " + stagedBatchLimitText(),
+		"`<persisted-output>` result means you did not see that content",
+		"open those entries again in smaller pieces",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review skill missing %q", want)
+		}
+	}
+}
+
 // TestBuildReviewPrompt_ContainsSummaryDelimiterMarkers pins #1456's R1: the
 // output contract must instruct Claude to wrap its prose summary in the
 // literal PRUEFER_SUMMARY_BEGIN/END marker strings, so a future edit to the
