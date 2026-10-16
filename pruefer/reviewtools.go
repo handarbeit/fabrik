@@ -181,6 +181,13 @@ func validateReviewToolRule(raw string) (string, error) {
 	if strings.HasPrefix(words[0], "-") {
 		return bad("the command must start with an executable name")
 	}
+	// A bare name (resolved on the daemon's PATH) or an absolute path only: a
+	// relative path such as ./scripts/lint.sh, ../x or tools/lint names a file in
+	// the reviewed tree, and the validator's executable checks below look at the
+	// base name alone.
+	if strings.HasPrefix(words[0], ".") || (strings.Contains(words[0], "/") && !strings.HasPrefix(words[0], "/")) {
+		return bad("the command %q is a relative path and could run a file from the reviewed tree; use a bare command name on the daemon's PATH or an absolute path", words[0])
+	}
 	exe := path.Base(words[0])
 	bare := versionlessExe(exe)
 	if slices.Contains(reviewToolsInterpreters, exe) || slices.Contains(reviewToolsInterpreters, bare) {

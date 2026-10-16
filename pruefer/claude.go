@@ -381,6 +381,11 @@ type ReviewResult struct {
 	// trusted author's review loads them normally, so ReviewPR names them in the
 	// posted notice.
 	PluginsSkipped []string
+	// PluginsPartial names the operator plugins that kept their hooks-free
+	// content but were loaded without other files the read-only copy does not
+	// include (scripts, other directories, symlinks); a skill that depends on
+	// them may degrade.
+	PluginsPartial []string
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -939,13 +944,13 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	}
 	defer rp.Close()
 	operatorDirs := req.OperatorPluginDirs
-	var stripped, skipped []string
+	var copied pluginCopyReport
 	if req.Grant.StripPluginHooks && len(operatorDirs) > 0 {
 		// An outside author's review loads operator plugins from copies with
 		// their hooks and MCP servers removed. The copies live under the
 		// per-review plugin root, so they go away with it, and the fallback
 		// re-run below reuses them.
-		operatorDirs, stripped, skipped = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
+		operatorDirs, copied = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
 	}
 	set := buildPluginSet(rp, operatorDirs)
 	for _, p := range set.Plugins {
@@ -967,7 +972,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		res, err := r.runReview(ctx, req, set, ref)
 		var notRun *skillNotRunError
 		if err == nil {
-			res.PluginsStripped, res.PluginsSkipped = stripped, skipped
+			res.PluginsStripped, res.PluginsSkipped, res.PluginsPartial = copied.Stripped, copied.Skipped, copied.Partial
 			return res, nil
 		}
 		if !errors.As(err, &notRun) || ref == rp.Ref {
@@ -992,7 +997,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, err
 	}
 	res.FallbackFrom, res.FallbackReason = requested, why
-	res.PluginsStripped, res.PluginsSkipped = stripped, skipped
+	res.PluginsStripped, res.PluginsSkipped, res.PluginsPartial = copied.Stripped, copied.Skipped, copied.Partial
 	res.NumTurns += spentTurns
 	res.CostUSD += spentCost
 	return res, nil

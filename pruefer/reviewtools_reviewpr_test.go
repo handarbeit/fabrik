@@ -2,6 +2,7 @@ package pruefer
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -213,15 +214,44 @@ func TestReviewPR_ReadOnlyNotice(t *testing.T) {
 // plugin lost hooks, and a trusted author's review (which loads it) gets none.
 func TestReadOnlyNotice_NamesSkippedOperatorPlugins(t *testing.T) {
 	outside := reviewGrant{Trust: authorTrust{Association: "NONE"}}
-	n := readOnlyNotice(outside, nil, []string{"broken`x"})
+	n := readOnlyNotice(outside, nil, []string{"broken`x"}, nil)
 	if !strings.Contains(n, "Read-only review") || !strings.Contains(n, "`broken?x`") || !strings.Contains(n, "not loaded") {
 		t.Errorf("notice does not name the skipped plugin: %q", n)
 	}
-	if got := readOnlyNotice(outside, nil, nil); got != "" {
+	if got := readOnlyNotice(outside, nil, nil, nil); got != "" {
 		t.Errorf("notice with nothing removed = %q, want empty", got)
 	}
 	trusted := reviewGrant{Trust: authorTrust{Trusted: true, Association: "MEMBER"}}
-	if got := readOnlyNotice(trusted, nil, []string{"broken"}); got != "" {
+	if got := readOnlyNotice(trusted, nil, []string{"broken"}, nil); got != "" {
 		t.Errorf("trusted author got a read-only notice: %q", got)
+	}
+}
+
+// A plugin whose copy lost no hooks or MCP servers but did lose other files
+// (scripts, other directories) still behaves differently from the trusted
+// author's review, so the notice names it.
+func TestReadOnlyNotice_NamesPartialOperatorPlugins(t *testing.T) {
+	outside := reviewGrant{Trust: authorTrust{Association: "NONE"}}
+	n := readOnlyNotice(outside, nil, nil, []string{"scripted"})
+	if !strings.Contains(n, "`scripted`") || !strings.Contains(n, "omits") {
+		t.Errorf("notice does not name the partially loaded plugin: %q", n)
+	}
+	trusted := reviewGrant{Trust: authorTrust{Trusted: true, Association: "MEMBER"}}
+	if got := readOnlyNotice(trusted, nil, nil, []string{"scripted"}); got != "" {
+		t.Errorf("trusted author got a read-only notice: %q", got)
+	}
+}
+
+func TestStripOperatorPlugins_ReportsPluginsThatLostOnlyScripts(t *testing.T) {
+	scripted := filepath.Join(t.TempDir(), "scripted")
+	writeTree(t, scripted, map[string]string{
+		"skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\nrun ${CLAUDE_PLUGIN_ROOT}/scripts/check.sh\n",
+		"scripts/check.sh":  "#!/bin/sh\n",
+	})
+	clean := filepath.Join(t.TempDir(), "clean")
+	writeTree(t, clean, map[string]string{"skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\nx\n"})
+	_, rep := stripOperatorPlugins(t.TempDir(), []string{scripted, clean}, 1)
+	if len(rep.Partial) != 1 || rep.Partial[0] != "scripted" || len(rep.Stripped) != 0 || len(rep.Skipped) != 0 {
+		t.Errorf("report = %+v, want only scripted partial", rep)
 	}
 }

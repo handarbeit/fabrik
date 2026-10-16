@@ -113,17 +113,45 @@ func stripPluginHooks(src, dst string) (strippedPlugin, error) {
 		return rep, err
 	}
 	seen := map[string]bool{}
+	copiedTop := map[string]bool{"SKILL.md": true}
 	for _, rel := range copyRels {
 		rel = cleanPluginRel(rel)
 		if rel == "" || seen[rel] {
 			continue
 		}
 		seen[rel] = true
+		copiedTop[strings.SplitN(rel, "/", 2)[0]] = true
 		if err := copyPluginTree(src, dst, rel, &rep); err != nil {
 			return rep, err
 		}
 	}
+	// Top-level content the allowlist does not copy (scripts/, other
+	// directories, helper files) is reported so the posted notice can say a
+	// skill relying on it may be limited. Hooks and MCP files are already in
+	// Removed, and plain documentation files change nothing.
+	if entries, err := os.ReadDir(src); err == nil {
+		for _, e := range entries {
+			n := e.Name()
+			switch {
+			case copiedTop[n], n == ".claude-plugin", n == "hooks", n == ".mcp.json", ignorablePluginTopLevel(n):
+				continue
+			}
+			rep.Omitted = append(rep.Omitted, n)
+		}
+	}
 	return rep, nil
+}
+
+// ignorablePluginTopLevel reports whether a top-level plugin entry is
+// documentation or VCS/OS metadata whose absence changes nothing for a skill.
+func ignorablePluginTopLevel(name string) bool {
+	up := strings.ToUpper(name)
+	for _, p := range []string{"README", "LICENSE", "LICENCE", "CHANGELOG", "NOTICE", "CONTRIBUTING", "CODE_OF_CONDUCT", "SECURITY", ".GIT", ".DS_STORE"} {
+		if strings.HasPrefix(up, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // manifestPaths decodes a manifest skills/agents/commands value: one path or a
@@ -300,6 +328,21 @@ func stripFrontmatter(data []byte) (out []byte, removed []string, ok bool) {
 	return b.Bytes(), removed, true
 }
 
+// pluginCopyReport names, per outcome, the operator plugins whose read-only
+// copy differs from what a trusted author's review loads. A plugin appears in
+// at most one list.
+type pluginCopyReport struct {
+	// Stripped lost hooks or MCP servers.
+	Stripped []string
+	// Skipped could not be copied and were not loaded at all.
+	Skipped []string
+	// Partial lost no hooks or MCP servers but were loaded without other
+	// content the allowlist does not copy (scripts, other directories,
+	// symlinks, a file with unparseable frontmatter), so a skill that relies on
+	// it may degrade.
+	Partial []string
+}
+
 // stripOperatorPlugins builds the read-only copies of dirs under root (a
 // directory the caller removes at the end of the review) and returns the
 // directories to pass with --plugin-dir plus the manifest names of the plugins
@@ -307,27 +350,30 @@ func stripFrontmatter(data []byte) (out []byte, removed []string, ok bool) {
 // left out and logged — failing closed — rather than loaded unstripped, and its
 // directory name is returned in skipped so the posted notice can say it was not
 // loaded.
-func stripOperatorPlugins(root string, dirs []string, prNumber int) (out, stripped, skipped []string) {
+func stripOperatorPlugins(root string, dirs []string, prNumber int) (out []string, rep pluginCopyReport) {
 	for i, src := range dirs {
 		// The copy keeps the original base name: a plugin without a manifest
 		// is named after its directory.
 		dst := filepath.Join(root, fmt.Sprintf("operator-readonly-%d", i), filepath.Base(src))
-		rep, err := stripPluginHooks(src, dst)
+		cp, err := stripPluginHooks(src, dst)
 		if err != nil {
 			logf(prNumber, "warn", "operator review plugin %q skipped for a read-only review: %v\n", filepath.Base(src), err)
 			_ = os.RemoveAll(filepath.Dir(dst))
-			skipped = append(skipped, filepath.Base(src))
+			rep.Skipped = append(rep.Skipped, filepath.Base(src))
 			continue
 		}
-		if len(rep.Omitted) > 0 {
-			logf(prNumber, "claude", "read-only copy of review plugin %q omitted: %s\n", filepath.Base(src), strings.Join(rep.Omitted, "; "))
+		if len(cp.Omitted) > 0 {
+			logf(prNumber, "claude", "read-only copy of review plugin %q omitted: %s\n", filepath.Base(src), strings.Join(cp.Omitted, "; "))
 		}
-		if len(rep.Removed) > 0 {
+		switch {
+		case len(cp.Removed) > 0:
 			name := skillref.Discover(dst).Name
-			logf(prNumber, "claude", "read-only copy of review plugin %q removed hooks/MCP: %s\n", name, strings.Join(rep.Removed, "; "))
-			stripped = append(stripped, name)
+			logf(prNumber, "claude", "read-only copy of review plugin %q removed hooks/MCP: %s\n", name, strings.Join(cp.Removed, "; "))
+			rep.Stripped = append(rep.Stripped, name)
+		case len(cp.Omitted) > 0:
+			rep.Partial = append(rep.Partial, skillref.Discover(dst).Name)
 		}
 		out = append(out, dst)
 	}
-	return out, stripped, skipped
+	return out, rep
 }
