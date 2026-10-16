@@ -1,0 +1,11 @@
+{
+  "name": "pruefer-review",
+  "version": "0.1.0",
+  "description": "Pruefer's default pull-request review skill. Embedded in the pruefer binary and written to a per-review directory.",
+  "author": {
+    "name": "handarbeit.io",
+    "url": "https://handarbeit.io"
+  },
+  "homepage": "https://github.com/handarbeit/fabrik",
+  "repository": "https://github.com/handarbeit/fabrik"
+}
