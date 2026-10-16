@@ -13,13 +13,14 @@ import (
 	"github.com/handarbeit/fabrik/pruefer/reviewplugin"
 )
 
-// reviewPlugin is the per-review plugin directory (#2306, R1): a fresh
-// directory holding the embedded pruefer-review plugin, never shared between
-// reviews, plus the resolution of the default review skill against exactly
-// that directory (R2).
+// reviewPlugin is the per-review plugin directory (#2306, R1): a fresh root
+// holding the embedded pruefer-review plugin, never shared between reviews,
+// plus the resolution of the default review skill against exactly the embedded
+// plugin (R2).
 type reviewPlugin struct {
-	Dir     string // symlink-resolved; the same path --plugin-dir and the resolver see
-	Ref     string // fully-qualified skill reference the prompt carries
+	Root    string // the per-review directory, removed by Close
+	Dir     string // the embedded plugin, symlink-resolved; the same path --plugin-dir and the resolver see
+	Ref     string // fully-qualified default skill reference
 	Plugin  string // plugin the skill came from
 	Version string
 	cleanup func()
@@ -44,10 +45,15 @@ func setupReviewPlugin() (*reviewPlugin, error) {
 		return nil, fmt.Errorf("creating review plugin directory: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(tmp) }
-	dir, err := filepath.EvalSymlinks(tmp)
+	root, err := filepath.EvalSymlinks(tmp)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("resolving review plugin directory: %w", err)
+	}
+	dir := filepath.Join(root, reviewplugin.PluginName)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("creating review plugin directory: %w", err)
 	}
 	if err := reviewplugin.Write(dir); err != nil {
 		cleanup()
@@ -62,7 +68,7 @@ func setupReviewPlugin() (*reviewPlugin, error) {
 	if pn, found := pluginOf(cat, res.Name); found {
 		pluginName = pn
 	}
-	return &reviewPlugin{Dir: dir, Ref: res.Name, Plugin: pluginName, Version: reviewplugin.Version(), cleanup: cleanup}, nil
+	return &reviewPlugin{Root: root, Dir: dir, Ref: res.Name, Plugin: pluginName, Version: reviewplugin.Version(), cleanup: cleanup}, nil
 }
 
 func pluginOf(cat *skillref.Catalogue, ref string) (string, bool) {
@@ -74,9 +80,10 @@ func pluginOf(cat *skillref.Catalogue, ref string) (string, bool) {
 	return "", false
 }
 
-// logLine is the R6 line: the skill the review ran and the plugin it came from.
-func (p *reviewPlugin) logLine(replacesDefault bool) string {
-	s := fmt.Sprintf("review skill: %s (plugin %s v%s, embedded, dir %s)", p.Ref, p.Plugin, p.Version, p.Dir)
+// skillLogLine is the line a review logs for the skill it ran and the plugin it
+// came from (#2306 R6, generalised by #2307).
+func skillLogLine(ref string, p loadedPlugin, replacesDefault bool) string {
+	s := fmt.Sprintf("review skill: %s (plugin %s v%s, %s, dir %s)", ref, p.Name, p.version(), p.Source, p.Dir)
 	if replacesDefault {
 		s += "; operator/repo guidance replaces the skill's criteria"
 	}

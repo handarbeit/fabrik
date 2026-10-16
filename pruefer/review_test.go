@@ -92,6 +92,12 @@ type fakeReviewer struct {
 	findErr           error
 	findCalls         int
 
+	// Base-SHA pin (#2307). baseSHAValue is what ResolveRefSHA returns (default
+	// "basesha"); baseSHAErr makes it fail.
+	baseSHAValue string
+	baseSHAErr   error
+	resolveCalls int
+
 	mu             sync.Mutex
 	submitCalls    []submitCall
 	diffCalls      int
@@ -143,6 +149,19 @@ func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, er
 	default:
 		return nil, gh.ErrNotFound
 	}
+}
+
+func (f *fakeReviewer) ResolveRefSHA(owner, repo, branch string) (string, error) {
+	f.mu.Lock()
+	f.resolveCalls++
+	f.mu.Unlock()
+	if f.baseSHAErr != nil {
+		return "", f.baseSHAErr
+	}
+	if f.baseSHAValue != "" {
+		return f.baseSHAValue, nil
+	}
+	return "basesha", nil
 }
 
 func (f *fakeReviewer) fileAtRefCallArgs() []fileAtRefCall {
@@ -1273,8 +1292,8 @@ func TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead(t *testing.T) {
 	}
 	seenPaths := map[string]bool{}
 	for _, c := range calls {
-		if c.ref != "main" {
-			t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", c.path, c.ref, "main")
+		if c.ref != "basesha" { // the base branch pinned to a commit (#2307), never the head
+			t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the pinned base SHA %q (never HeadSHA)", c.path, c.ref, "basesha")
 		}
 		seenPaths[c.path] = true
 	}
@@ -1373,8 +1392,8 @@ func TestReviewPR_ResolvesReviewSkillAtBaseRef_NotHead(t *testing.T) {
 	if skillCall == nil {
 		t.Fatalf("FetchFileAtRef was never called with path %q", DefaultReviewSkillPath)
 	}
-	if skillCall.ref != "main" {
-		t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", DefaultReviewSkillPath, skillCall.ref, "main")
+	if skillCall.ref != "basesha" {
+		t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the pinned base SHA %q (never HeadSHA)", DefaultReviewSkillPath, skillCall.ref, "basesha")
 	}
 }
 

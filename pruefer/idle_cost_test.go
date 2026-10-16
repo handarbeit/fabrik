@@ -57,6 +57,8 @@ func (s *synthGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404) // the common case: no repo config; a 404 carries no ETag
 		fmt.Fprint(w, `{"message":"Not Found"}`)
 		return
+	case strings.Contains(path, "/git/ref/heads/"):
+		body = map[string]any{"object": map[string]any{"type": "commit", "sha": "base-" + strings.Split(path, "/")[3]}}
 	case strings.HasSuffix(path, "/pulls"):
 		repo := strings.Split(path, "/")[3]
 		var list []map[string]any
@@ -196,10 +198,10 @@ func TestIdlePollCost_ScalesWithChangesNotOpenPRs(t *testing.T) {
 		}
 	}
 
-	// Baseline: idle cost is one list per repo plus three reads per PR
-	// (repo config, comments, reviews).
+	// Baseline: idle cost is one list per repo plus four reads per PR (the base
+	// SHA pin of #2307, repo config, comments, reviews).
 	for _, prs := range []int{5, 20} {
-		want := repos + repos*prs*3
+		want := repos + repos*prs*4
 		if got := results["baseline"][prs].idle.requests; got != want {
 			t.Errorf("baseline idle requests (%d PRs/repo) = %d, want %d", prs, got, want)
 		}
