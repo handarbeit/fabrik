@@ -1227,7 +1227,7 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		_, existed := s.items[key]
 		item := s.getOrCreate(key)
 		before := newSnapshot(*item).state
-		flags := applyProjectItem(item, pi)
+		flags := applyProjectItemAuthoritative(item, pi)
 		if existed {
 			s.stampEligibility(item, before)
 		}
