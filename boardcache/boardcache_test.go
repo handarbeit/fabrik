@@ -286,7 +286,8 @@ func seedCache(t *testing.T) *CacheImpl {
 		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
 		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Plan"},
 	}
-	c.BootstrapFromProbe(probeItems, "PID")
+	c.BootstrapFromProbe(probeItems, testProjectID)
+	c.SetStatusFieldID(testStatusFieldID)
 	return c
 }
 
@@ -930,9 +931,19 @@ func TestDeltaCheckRunUpsertById(t *testing.T) {
 // Delta: projects_v2_item.edited — updates Status via ItemID
 // ---------------------------------------------------------------------------
 
+// Identifiers the test cache is seeded with (seedCache): the board's own
+// project node ID and Status field node ID. Payload builders carry them the way
+// a real delivery does (#2345); an event without them is not applied.
+const (
+	testProjectID     = "PID"
+	testStatusFieldID = "SFID"
+)
+
 func projectsV2ItemPayloadJSON(action, itemID, statusName string) []byte {
 	p := projectsV2ItemPayload{Action: action}
 	p.ProjectsV2Item.ID = itemID
+	p.ProjectsV2Item.ProjectNodeID = testProjectID
+	p.Changes.FieldValue.FieldNodeID = testStatusFieldID
 	p.Changes.FieldValue.FieldType = "single_select"
 	p.Changes.FieldValue.To, _ = json.Marshal(map[string]string{"name": statusName})
 	b, _ := json.Marshal(p)
@@ -2391,6 +2402,7 @@ func issuesAssignedPayloadJSON(action, repo string, issNum int, assignees []stri
 func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType, boardItemID string) []byte {
 	p := projectsV2ItemPayload{Action: "created"}
 	p.ProjectsV2Item.ID = boardItemID
+	p.ProjectsV2Item.ProjectNodeID = testProjectID
 	p.ProjectsV2Item.ContentNodeID = contentNodeID
 	p.ProjectsV2Item.ContentType = contentType
 	b, _ := json.Marshal(p)
@@ -2401,6 +2413,7 @@ func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType, boardItemID st
 func projectsV2ItemRemovedPayloadJSON(action, itemID string) []byte {
 	p := projectsV2ItemPayload{Action: action}
 	p.ProjectsV2Item.ID = itemID
+	p.ProjectsV2Item.ProjectNodeID = testProjectID
 	b, _ := json.Marshal(p)
 	return b
 }

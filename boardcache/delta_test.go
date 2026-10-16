@@ -866,7 +866,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: testProjectID})
 
 	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue", "PVTI_088")
 	c.ApplyDelta("projects_v2_item", payload)
@@ -1224,6 +1224,8 @@ func TestStatusEditWebhookCarriesSenderTimeAndEcho(t *testing.T) {
 	p := projectsV2ItemPayload{Action: "edited"}
 	p.Sender.Login = "alice"
 	p.ProjectsV2Item.ID = "PVTI_001"
+	p.ProjectsV2Item.ProjectNodeID = testProjectID
+	p.Changes.FieldValue.FieldNodeID = testStatusFieldID
 	p.ProjectsV2Item.UpdatedAt = "2026-10-11T12:00:00Z"
 	p.Changes.FieldValue.FieldType = "single_select"
 	p.Changes.FieldValue.To, _ = json.Marshal(map[string]string{"name": "Plan"})

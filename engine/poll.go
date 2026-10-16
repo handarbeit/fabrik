@@ -1558,6 +1558,10 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 			e.logf(0, "warn", "could not fetch status field: %v\n", err)
 		} else {
 			e.statusField = sf
+			// The cache filters projects_v2_item edits by this ID (#2345).
+			if ci, ok := e.readClient.(*boardcache.CacheImpl); ok && sf != nil {
+				ci.SetStatusFieldID(sf.FieldID)
+			}
 		}
 	}
 	e.mu.Unlock()

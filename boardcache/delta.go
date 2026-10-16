@@ -217,10 +217,19 @@ func editedStatusName(to json.RawMessage) string {
 }
 
 type projectsV2ItemPayload struct {
-	Action  string `json:"action"`
-	Changes struct {
+	Action string `json:"action"`
+	// ProjectNodeID is accepted at the top level as well as under
+	// projects_v2_item: the delivery shape was not confirmed from GitHub's
+	// docs, and a wrong nesting would make every event look ID-less and drop
+	// every Status webhook (#2345). effectiveProjectNodeID reads both.
+	ProjectNodeID string `json:"project_node_id"`
+	Changes       struct {
 		FieldValue struct {
-			FieldType string `json:"field_type"`
+			// FieldNodeID names the project field the edit changed; compared
+			// with the board's Status field ID so that edits to Priority, Size
+			// and other single-select fields are not read as Status (#2345).
+			FieldNodeID string `json:"field_node_id"`
+			FieldType   string `json:"field_type"`
 			// To is raw because its JSON type depends on field_type: an object
 			// ({id, name}) for single_select, but a plain string or null for a
 			// text field (#2048). Decoding it as an object up front would turn
@@ -234,10 +243,21 @@ type projectsV2ItemPayload struct {
 	} `json:"sender"`
 	ProjectsV2Item struct {
 		ID            string `json:"id"`
+		ProjectNodeID string `json:"project_node_id"`
 		ContentNodeID string `json:"content_node_id"`
 		ContentType   string `json:"content_type"`
 		UpdatedAt     string `json:"updated_at"`
 	} `json:"projects_v2_item"`
+}
+
+// effectiveProjectNodeID returns the project the event belongs to: the first
+// non-empty of projects_v2_item.project_node_id and the top-level
+// project_node_id. "" means the payload carries no project identity.
+func (p *projectsV2ItemPayload) effectiveProjectNodeID() string {
+	if p.ProjectsV2Item.ProjectNodeID != "" {
+		return p.ProjectsV2Item.ProjectNodeID
+	}
+	return p.ProjectNodeID
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,6 +1144,30 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		return
 	}
 
+	filtered := !c.projectFieldFilterDisabledForTest.Load()
+	if filtered {
+		// Project filter (#2345, R1/R3): org-level delivery carries events for
+		// every project in the org. It runs before any side effect — the
+		// FetchItemDetails call, the echo match (whose registry key has no
+		// project discriminator, so a foreign event must not consume an entry)
+		// and the removal. An event without a project ID, or arriving before
+		// this instance knows its own project, is never trusted: reconcile
+		// corrects the cache.
+		own := c.ProjectID()
+		ev := p.effectiveProjectNodeID()
+		switch {
+		case ev == "":
+			c.logFn("[cache] projects_v2_item %s ignored: payload has no project_node_id\n", p.Action)
+			return
+		case own == "":
+			c.logFn("[cache] projects_v2_item %s ignored: own project ID not yet known\n", p.Action)
+			return
+		case ev != own:
+			c.logFn("[cache] projects_v2_item %s ignored: foreign project %s\n", p.Action, ev)
+			return
+		}
+	}
+
 	switch p.Action {
 	case "created":
 		// An existing issue was added to the project board. The payload provides only
@@ -1151,6 +1195,24 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		c.bumpLocalDeltaAt(itemKey(pi.Repo, pi.Number))
 
 	case "edited":
+		// Field filter (#2345, R2/R3): only an edit of this board's Status field
+		// is a Status change. Like the project filter it precedes matchEcho.
+		if filtered {
+			evField := p.Changes.FieldValue.FieldNodeID
+			if evField == "" {
+				c.logFn("[cache] projects_v2_item edited ignored: payload has no field_node_id\n")
+				return
+			}
+			statusID := c.resolveStatusFieldID()
+			if statusID == "" {
+				c.logFn("[cache] projects_v2_item edited ignored: Status field ID not yet known\n")
+				return
+			}
+			if evField != statusID {
+				c.logFn("[cache] projects_v2_item edited ignored: field %s is not the Status field\n", evField)
+				return
+			}
+		}
 		echoed, via := c.matchEcho("projects_v2_item", "edited", p.ProjectsV2Item.ID)
 		// Only a Status (single_select) edit changes anything the cache holds.
 		// A text-field edit — in particular the engine's own display-only
@@ -1203,4 +1265,28 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// restored: item is back on the board; the next poll reconcile will re-add it.
 		// reordered: no position state in the engine.
 	}
+}
+
+// resolveStatusFieldID returns this board's Status field node ID. When it is
+// not yet recorded it asks the fallback client once per call and records a
+// successful answer (#2345), so Status webhooks work before the engine's first
+// full-board poll has resolved it. A failed lookup returns "" and is retried on
+// the next Status edit. mu is never held across the fallback call.
+func (c *CacheImpl) resolveStatusFieldID() string {
+	if id := c.StatusFieldID(); id != "" {
+		return id
+	}
+	projectID := c.ProjectID()
+	if projectID == "" || c.fallback == nil {
+		return ""
+	}
+	sf, err := c.fallback.FetchStatusField(projectID)
+	if err != nil || sf == nil {
+		if err != nil {
+			c.logFn("[cache] projects_v2_item: resolving Status field ID: %v\n", err)
+		}
+		return ""
+	}
+	c.SetStatusFieldID(sf.FieldID)
+	return sf.FieldID
 }

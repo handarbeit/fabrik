@@ -1,0 +1,23 @@
+{
+  "_note": "Shape follows GitHub's projects_v2_item webhook schema (project_node_id under projects_v2_item; changes.field_value.field_node_id on edited). Node IDs are placeholders; no real tokens or logins. Not a verbatim capture - replace with a real delivery when one is available (#2345).",
+  "action": "edited",
+  "projects_v2_item": {
+    "id": "PVTI_own1",
+    "node_id": "PVTI_own1",
+    "content_node_id": "I_issue1",
+    "content_type": "Issue",
+    "updated_at": "2026-10-15T12:00:00Z"
+  },
+  "sender": {
+    "login": "octocat"
+  },
+  "changes": {
+    "field_value": {
+      "field_type": "single_select",
+      "to": {
+        "id": "opt2",
+        "name": "Implement"
+      }
+    }
+  }
+}

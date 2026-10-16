@@ -279,6 +279,17 @@ type CacheImpl struct {
 	// paused is a stream-health control flag. When true, ApplyDelta is a no-op.
 	paused bool
 
+	// statusFieldID is this board's Status field node ID, used to tell a Status
+	// edit from an edit to any other single-select field (#2345). Guarded by mu.
+	// Set by the engine once resolved; resolved lazily from the fallback client
+	// by the first Status edit that finds it unknown.
+	statusFieldID string
+
+	// projectFieldFilterDisabledForTest is the neutralisation seam for the
+	// projects_v2_item project and field filters (#2345): when set,
+	// applyProjectsV2ItemDelta applies every event as it did before the filters.
+	projectFieldFilterDisabledForTest atomic.Bool
+
 	// textEditSuppressionDisabledForTest is the neutralisation seam for the
 	// display-field echo suppression (#2048): when set, applyProjectsV2ItemDelta
 	// stops ignoring non-single-select edits, so the test that pins the
@@ -1426,6 +1437,31 @@ func (c *CacheImpl) ProjectID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.projectID
+}
+
+// SetStatusFieldID records this board's Status field node ID (#2345). An empty
+// id is ignored so a failed resolution never clears a known value.
+func (c *CacheImpl) SetStatusFieldID(id string) {
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	c.statusFieldID = id
+	c.mu.Unlock()
+}
+
+// StatusFieldID returns the recorded Status field node ID, or "" when unknown.
+func (c *CacheImpl) StatusFieldID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.statusFieldID
+}
+
+// SetProjectFieldFilterDisabledForTest turns the projects_v2_item project and
+// field filters off (#2345). Test-only: it exists so the tests pinning the
+// filters can be shown to fail when they are neutralised.
+func (c *CacheImpl) SetProjectFieldFilterDisabledForTest(disabled bool) {
+	c.projectFieldFilterDisabledForTest.Store(disabled)
 }
 
 // SetTextEditSuppressionDisabledForTest turns the display-field echo

@@ -4915,6 +4915,8 @@ Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an is
 
 **Per-repo webhooks never deliver `projects_v2_item` events.** This is a GitHub platform constraint, not a Fabrik limitation. GitHub only sends board-column events to org-level webhook subscriptions. If Fabrik is in per-repo mode (either because org-level subscription failed, or because the board spans multiple owners — see [Multi-Repo Boards](#multi-repo-boards)), `projects_v2_item` events will never arrive regardless of configuration. Board-column changes in per-repo mode are caught by the Layer 2 status gate each poll cycle.
 
+**Other boards are ignored.** Org-level delivery carries `projects_v2_item` events for every project in the organisation. Fabrik applies one only when it belongs to the project it serves, and only treats an edit as a column change when the edited field is that board's Status field. So adding your engine issues to a second board (for example a public triage board), or editing Priority or Size on the engine's own board, never changes what Fabrik believes about an item's column or identity. An event that does not carry these identifiers is not applied either; the periodic reconcile corrects the cache within a few minutes.
+
 ### Security
 
 - The HTTP listener binds exclusively to `127.0.0.1` and is never reachable from outside your machine.

@@ -7,16 +7,42 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
-// applyProjectItem copies all fields from a gh.ProjectItem into item and returns ChangeFlags.
+// adoptItemID is the one rule for taking a project-item node ID (PVTI_...)
+// from an incoming value (#2345, R4). An empty incoming ID is never taken. A
+// known ID is replaced only when authoritative, which is true for the live board
+// listing (a genuine re-add of the issue to its board gets a new ID, and the
+// listing is how that is recovered) and false for every incremental path, which
+// can be fed another project's item identity by an org-level webhook.
+func adoptItemID(item *ItemState, incoming string, authoritative bool) {
+	if incoming == "" || item.ItemID == incoming {
+		return
+	}
+	if item.ItemID != "" && !authoritative {
+		return
+	}
+	item.ItemID = incoming
+}
+
+// applyProjectItem copies all fields from a gh.ProjectItem into item and returns
+// ChangeFlags. It never replaces a known item ID (R4, #2345); the authoritative
+// board-listing path uses applyProjectItemAuthoritative.
 func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+	return applyProjectItemMode(item, pi, false)
+}
+
+// applyProjectItemAuthoritative is applyProjectItem for the live board listing,
+// which may replace a known item ID with a different non-empty one.
+func applyProjectItemAuthoritative(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+	return applyProjectItemMode(item, pi, true)
+}
+
+func applyProjectItemMode(item *ItemState, pi gh.ProjectItem, authoritativeItemID bool) ChangeFlags {
 	var flags ChangeFlags
 
 	if item.ID != pi.ID && pi.ID != "" {
 		item.ID = pi.ID
 	}
-	if item.ItemID != pi.ItemID {
-		item.ItemID = pi.ItemID
-	}
+	adoptItemID(item, pi.ItemID, authoritativeItemID)
 
 	if item.Title != pi.Title || item.Body != pi.Body || item.URL != pi.URL || item.Author != pi.Author {
 		item.Title = pi.Title
@@ -121,9 +147,7 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 	if item.ID != pi.ID && pi.ID != "" {
 		item.ID = pi.ID
 	}
-	if item.ItemID != pi.ItemID {
-		item.ItemID = pi.ItemID
-	}
+	adoptItemID(item, pi.ItemID, false)
 
 	if item.Title != pi.Title || item.Body != pi.Body || item.URL != pi.URL || item.Author != pi.Author {
 		item.Title = pi.Title
@@ -308,9 +332,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 	if item.ID != pi.ID && pi.ID != "" {
 		item.ID = pi.ID
 	}
-	if item.ItemID != pi.ItemID && pi.ItemID != "" {
-		item.ItemID = pi.ItemID
-	}
+	adoptItemID(item, pi.ItemID, true)
 
 	if item.Title != pi.Title {
 		item.Title = pi.Title
@@ -411,9 +433,7 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem, fetchedAt time.Time, 
 	if item.ID != pi.ContentID && pi.ContentID != "" {
 		item.ID = pi.ContentID
 	}
-	if item.ItemID != pi.ItemID && pi.ItemID != "" {
-		item.ItemID = pi.ItemID
-	}
+	adoptItemID(item, pi.ItemID, true)
 
 	isClosed := pi.IsClosed
 	if view.KeepClosed {

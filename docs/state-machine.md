@@ -6144,11 +6144,21 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `check_run` | `completed` | Upsert in `checkRuns[sha]`; index via `shaToKey`; auto-heal if SHA unknown | `CheckRunCompleted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | CI gate evaluates conclusion; `LinkedPRCheckRuns` updated |
 | `check_run` | `created`, `rerequested`, `requested_action` | No-op | — | Only terminal state (`completed`) matters for CI gate |
 | `check_suite` | `completed`, `requested`, `rerequested` | No-op | — | Check suites are coarse aggregates; individual runs tracked via `check_run.completed`. The store holds no suite state, so the suite-aware CI gate (#1822, §6.4) reads suites live via `FetchCheckSuites` instead of relying on this webhook |
-| `projects_v2_item` | `created` | Call `FetchItemDetails` by `content_node_id`; apply as new item | `IssueOpened` | Item appears in board; triggers dispatch on next poll |
-| `projects_v2_item` | `edited` | Update `Status` via `itemIDToKey` reverse lookup | `ProjectV2ItemEdited` | `Status` updated; stage selection uses new column |
-| `projects_v2_item` | `deleted`, `archived` | Remove item | `store.RemoveByItemID` (cleans `prToKey` index automatically) | Item gone from next board fetch |
+| `projects_v2_item` | `created` | Project filter (below), then call `FetchItemDetails` by `content_node_id`; apply as new item | `IssueOpened` | Item appears in board; triggers dispatch on next poll |
+| `projects_v2_item` | `edited` | Project and field filters (below), then update `Status` via `itemIDToKey` reverse lookup | `ProjectV2ItemEdited` | `Status` updated; stage selection uses new column |
+| `projects_v2_item` | `deleted`, `archived` | Project filter (below), then remove item | `store.RemoveByItemID` (cleans `prToKey` index automatically) | Item gone from next board fetch |
 | `projects_v2_item` | `restored` | No-op | — | Next Reconcile re-adds the item from the full board snapshot |
 | `projects_v2_item` | `reordered` | No-op | — | Column order not modeled in Fabrik's cache or engine |
+
+**`projects_v2_item` project and field filters (#2345, ADR 2345).** Org-level delivery (org-mode `gh webhook forward`, Hookdeck App hooks) carries `projects_v2_item` events for every project in the organisation, not just this instance's board, so `applyProjectsV2ItemDelta` filters before any side effect:
+
+1. **Project filter, every action.** The event's project node ID (`projects_v2_item.project_node_id`, else a top-level `project_node_id`) must equal the cache's project ID. A foreign, missing or not-yet-known project ID ignores the event: no cache change, no `FetchItemDetails` call, no removal, and exactly one `[cache] projects_v2_item <action> ignored: …` log line.
+2. **Field filter, `edited` only.** `changes.field_value.field_node_id` must equal this board's Status field ID (`CacheImpl.SetStatusFieldID`, set by the engine where it first resolves `e.statusField`; when still unknown the first `edited` resolves it once from the fallback client, and a failed lookup drops that event). Edits to Priority, Size or any other field are ignored, as is an `edited` event without a field ID.
+3. **Fail closed.** An event without the IDs (older payload shapes) is never applied as a Status change; the drift reconcile (§9) corrects the cache.
+4. **Filters precede the echo match.** The echo registry key (`projects_v2_item:edited:<ItemID>`) has no project or field discriminator, so a foreign or non-Status event carrying our item ID must not consume an entry.
+5. **R4, item ID immutability.** `applyProjectItem` never replaces a known `ItemID` with an empty or different one (`adoptItemID`); only the live board-listing paths (`BoardReconciled`, the shallow and probe applies) may re-identify an item, which is how a genuine re-add is recovered.
+
+`applyLayer1StatusRefresh`'s `created` handling (the off-board negative-cache clear) is deliberately unfiltered: clearing is the safe direction.
 
 ### D.3 Cache Read Semantics
 
