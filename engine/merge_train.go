@@ -1890,6 +1890,15 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		return
 	}
 
+	// Pause guard (#2341 R3): a member paused after its batch formed is not landed.
+	// Strictly before the merge, and skipped for an already-merged trial PR — that is
+	// a resumed landing whose Done move must finish (restart-safety).
+	if !(existing != nil && existing.Merged) {
+		if e.refuseIfMembersPaused(p.owner, p.repo, []trainMember{m}) {
+			return
+		}
+	}
+
 	var prNum int
 	alreadyMerged := false
 	switch {
@@ -2327,6 +2336,14 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path taken for #%d: %s — landing PR #%d directly, no trial branch, no draft CI PR\n", m.item.Number, reason, m.prNum)
 	e.noteTrainPhase(p.episode, p.repoKey(), []trainMember{m}, phaseLanding())
+
+	// Pause guard (#2341 R3): live per-member check strictly before the merge. Returns
+	// true (no trial is built for a paused member); the member stays in Queued. The
+	// pr.Merged resume branch above is exempt.
+	if e.refuseIfMembersPaused(p.owner, p.repo, []trainMember{m}) {
+		p.episode.noteAbandoned(fmt.Sprintf("member #%d paused (left in Queued)", m.item.Number))
+		return true
+	}
 
 	// MergePRAtHeadSHA, not MergePR: singletonFastPathEligible's CI/mergeability
 	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
@@ -4599,6 +4616,14 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	// logic run), which is a worse outcome than the check exists to prevent.
 	if !(integrationPR != nil && integrationPR.Merged) {
 		if e.refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey, survivors) {
+			return
+		}
+		// Pause guard (#2341 R3): the batch lands as one integration PR holding every
+		// survivor's changes, so a member paused after formation cannot be left out of
+		// it. Refuse the whole landing, leaving all members in Queued; the paused
+		// member is already excluded from the next formation. Same already-merged
+		// exemption as above.
+		if e.refuseIfMembersPaused(owner, repo, survivors) {
 			return
 		}
 	}

@@ -44,6 +44,10 @@ func testEngineWithStages(t *testing.T, client *mockGitHubClient, stgs []*stages
 		opts[s.Name] = "OPT_" + s.Name
 	}
 	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+	// These tests are not about the pause guard, and their mock leaves FetchLabels
+	// unconfigured (an error, by design — see mocks_test.go). The guard's fail-closed
+	// stance on an unreadable label set (#2341) is exercised by pause_guard_test.go.
+	eng.SetPauseGuardUnreadFailOpenForTest(true)
 	return eng
 }
 

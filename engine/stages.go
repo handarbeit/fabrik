@@ -76,14 +76,20 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 // covers every downstream hasYoloLabel/hasCruiseLabel read, including the
 // one inside attemptMergeOnValidate — satisfying R5's "must not fetch
 // twice."
-func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) {
+//
+// It reports whether the labels are now live. The yolo/cruise reads keep their
+// historical fall-back-to-snapshot behaviour on a failure, but the pause guard
+// (#2341) must not: a stale snapshot can predate a human's fabrik:paused, so
+// callers pass the result to pausedOrUnread and fail closed.
+func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) (live bool) {
 	owner, repo := itemOwnerRepo(*item, e.defaultRepo())
 	freshLabels, err := e.client.FetchLabels(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "refreshAutonomyLabels: could not re-fetch labels for %s/%s#%d: %v\n", owner, repo, item.Number, err)
-		return
+		return false
 	}
 	item.Labels = freshLabels
+	return true
 }
 
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
@@ -109,7 +115,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// (e.g., fabrik:yolo/fabrik:cruise added or removed mid-run) before any
 	// autonomy-label read below (#1769). See refreshAutonomyLabels' own doc
 	// comment for the full rationale.
-	e.refreshAutonomyLabels(&item)
+	labelsLive := e.refreshAutonomyLabels(&item)
 
 	// Clear any orphaned fabrik:awaiting-input label. It is added by blockOnInput
 	// when Claude emits FABRIK_BLOCKED_ON_INPUT; if the user manually removes
@@ -150,13 +156,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// monitor (checkAutoMergeConvergence in the catch-up loop) in that case.
 	autoMergeEnabled := false
 
-	// reviewThreadDeferred is true when attemptMergeOnValidate declined to
+	// landingDeferred is true when attemptMergeOnValidate declined to
 	// advance because an unresolved review thread exists on the current head
 	// (#1207 guard 1). Advancement must be suppressed the same way it is for
 	// autoMergeEnabled — the catch-up loop's Phase 2 Validate branch retries
 	// attemptMergeOnValidate on every poll and will proceed once the thread
 	// is resolved by the review-reinvoke loop (§2.9).
-	reviewThreadDeferred := false
+	landingDeferred := false
 
 	// Enable GitHub native auto-merge after Validate when yolo is active and
 	// wait_for_ci is false. When wait_for_ci: true the merge path is handled by
@@ -164,12 +170,23 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// completion label so that on failure the engine retries Validate (itemNeedsWork
 	// skips stages with a complete label).
 	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
+	// Pause guard (#2341): item.Labels is live as of refreshAutonomyLabels above, so a
+	// fabrik:paused applied while this stage ran is visible here. A paused item is not
+	// merged or advanced; it keeps its completion label and lands once the pause lifts.
+	// Fail closed: when that refresh failed, item.Labels is the pre-run snapshot, which
+	// may predate the pause, so the decision waits for a later poll too.
+	paused := e.pausedOrUnread(item.Labels, labelsLive)
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
-		var mergeErr error
-		autoMergeEnabled, reviewThreadDeferred, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
-		if mergeErr != nil {
-			e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
-			return
+		if paused {
+			e.refuseIfPausedOrUnread(item, labelsLive, "landing")
+			landingDeferred = true
+		} else {
+			var mergeErr error
+			autoMergeEnabled, landingDeferred, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
+			if mergeErr != nil {
+				e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
+				return
+			}
 		}
 	}
 
@@ -259,11 +276,17 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// The same "landing deferred" return carries the #1862 comment gate: an
 	// unmerged item with a pending comment must never fall through to
 	// advanceToNextStage (Done) here.
-	if reviewThreadDeferred {
+	if landingDeferred {
 		shouldAdvance = false
 	}
 
 	if shouldAdvance {
+		// Pause guard (#2341): refuse before any gate that writes a label or records a
+		// cooldown, so the refusal leaves every label as it was.
+		if paused {
+			e.refuseIfPausedOrUnread(item, labelsLive, "advancing")
+			return
+		}
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
 		}
@@ -363,6 +386,15 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return true, false, nil
 	}
 
+	// Pause guard (#2341): a fabrik:paused applied while the stage ran (or before the
+	// listing showed it) wins over the landing. Checked here, ahead of the re-read
+	// below, against the REST-fresh labels refreshAutonomyLabels produced — the
+	// re-read replaces them with GraphQL ones that can lag a REST write. Returns the
+	// deferred shape so handleStageComplete never falls through to an advance.
+	if e.refuseIfPaused(item, "landing") {
+		return false, true, nil
+	}
+
 	// Dependency guard (ADR-1419): re-verify BlockedBy live, immediately
 	// before any landing decision. A Review/Validate mid-flight spawn
 	// (finalizeStageOutcome, engine/item.go) can create a brand-new
@@ -390,6 +422,10 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		liveRead = false
 	} else {
 		item = fresh
+		// Second pause check (#2341), against the labels the re-read just returned.
+		if e.refuseIfPaused(item, "landing") {
+			return false, true, nil
+		}
 	}
 	if e.checkDependencies(board, item, stage) {
 		e.logf(item.Number, "yolo-merge-guard", "not merging: dependencies are open (live re-check)\n")
@@ -466,8 +502,15 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
 	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
 	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.
+	// Pause guard (#2341): entry check so this site is safe on its own.
+	if e.refuseIfPaused(item, "landing") {
+		return false, true, nil
+	}
 	if e.cfg.MergeTrain == "on" {
 		advanceErr := e.advanceToQueued(ctx, board, item, owner, repo)
+		if errors.Is(advanceErr, errLandingPaused) {
+			return false, true, nil
+		}
 		return false, false, advanceErr
 	}
 
@@ -524,6 +567,10 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		fresh := item
 		if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
 			return false, false, fmt.Errorf("direct-merge fallback: live re-read of review threads for PR #%d: %w", pr.Number, ferr)
+		}
+		// Pause guard (#2341): the last live read before the irreversible merge.
+		if e.refuseIfPaused(fresh, "merging (direct-merge fallback)") {
+			return false, true, nil
 		}
 		if blocking := e.currentHeadReviewThreadComments(fresh); len(blocking) > 0 {
 			e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s (direct-merge fallback)\n",
@@ -696,6 +743,10 @@ func cleanupStage(cfg Config) *stages.Stage {
 // when merge_train: on. It sets the board status and adds stage:Validate:complete
 // so the Phase 2 catch-up loop does not re-dispatch Validate on the next poll.
 func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) error {
+	// Pause guard (#2341): a paused item is not moved to Queued and gets no label.
+	if e.refuseIfPaused(item, "moving to the holding stage") {
+		return errLandingPaused
+	}
 	hs := holdingStage(e.cfg)
 	if hs == nil {
 		return fmt.Errorf("merge_train: on but no holding stage (HoldingStage: true) configured in stages")
