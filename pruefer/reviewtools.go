@@ -27,7 +27,7 @@ var reviewToolsTestRunners = [][]string{
 	{"npm", "test"}, {"npm", "run", "test"}, {"npm", "run-script", "test"}, {"npm", "t"}, {"npm", "tst"}, {"npm", "it"},
 	{"yarn", "test"}, {"pnpm", "test"}, {"bun", "test"}, {"deno", "test"},
 	{"pytest"}, {"py.test"}, {"python", "-m", "pytest"}, {"python3", "-m", "pytest"},
-	{"cargo", "test"}, {"cargo", "nextest"},
+	{"cargo", "test"}, {"cargo", "t"}, {"cargo", "nextest"},
 	{"make", "test"}, {"make", "check"},
 	{"jest"}, {"vitest"}, {"mocha"}, {"rspec"}, {"phpunit"},
 	{"tox"}, {"nox"}, {"ctest"},
@@ -59,7 +59,7 @@ var reviewToolsInterpreters = []string{
 // the author gate exists to contain, and "npm run test" would also slip past
 // the test-runner list. Any later word equal to one of these refuses the rule.
 var reviewToolsRunSubcommands = []string{
-	"run", "run-script", "exec", "x", "dlx", "generate", "install", "i", "ci", "add",
+	"run", "r", "run-script", "exec", "x", "dlx", "generate", "install", "i", "ci", "add",
 	"start", "stop", "restart", "task", "create", "init", "rebuild", "link", "pack", "publish",
 }
 
