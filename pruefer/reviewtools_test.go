@@ -61,6 +61,8 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		"Bash(a `b`)", "Bash(a $(b))", "Bash(a, b)", "Bash(a \"b\")", "Bash(a\nb)", "Bash(a\x00b)",
 		"Bash(-x)", "Bash(go:*)", "Bash(make:*)", "Bash(npm *)", "Bash(cargo)",
 		"Bash(bash -c *)", "Bash(sh:*)", "Bash(env *)", "Bash(xargs *)", "Bash(python3 -m foo)", "Bash(node *)",
+		// Package-runner wrappers and container runners fetch and execute arbitrary code.
+		"Bash(uvx ruff:*)", "Bash(bunx eslint *)", "Bash(pnpx foo)", "Bash(pipx run foo)", "Bash(pipx ruff)", "Bash(docker run *)", "Bash(podman:*)", "Bash(/usr/bin/uvx ruff)",
 		"Bash(git *)", "Bash(curl *)", "Bash(" + strings.Repeat("a", 300) + ")",
 		// Launchers with a generic run subcommand execute repo-controlled code.
 		"Bash(npm run:*)", "Bash(yarn run:*)", "Bash(pnpm run:*)", "Bash(npm exec:*)", "Bash(npm run-script lint)",

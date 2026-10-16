@@ -48,7 +48,7 @@ var reviewToolsLaunchers = []string{
 var reviewToolsInterpreters = []string{
 	"sh", "bash", "zsh", "dash", "ksh", "fish", "env", "xargs", "sudo", "doas", "nice",
 	"time", "timeout", "nohup", "exec", "eval",
-	"node", "npx", "python", "python3", "ruby", "perl", "php", "lua", "awk", "sed",
+	"node", "npx", "pnpx", "bunx", "uvx", "pipx", "docker", "podman", "nerdctl", "python", "python3", "ruby", "perl", "php", "lua", "awk", "sed",
 	"find", "rm", "cp", "mv", "tee", "dd", "chmod", "chown", "ssh", "scp", "nc",
 }
 
