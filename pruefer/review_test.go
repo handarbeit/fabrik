@@ -92,6 +92,22 @@ type fakeReviewer struct {
 	findErr           error
 	findCalls         int
 
+	// Base-SHA pin and repo plugins (#2307). baseSHAValue is what ResolveRefSHA
+	// returns (default "basesha"); baseSHAErr makes it fail. pluginEntries/blobs
+	// describe the tree FetchTreeAtRef returns, only for commit pluginsOnlyAtSHA
+	// when that is set (every other commit sees gh.ErrNotFound — a plugin "present
+	// only on the head"), else for every commit.
+	baseSHAValue     string
+	baseSHAErr       error
+	pluginEntries    []gh.TreeEntry
+	pluginTruncated  bool
+	pluginTreeErr    error
+	pluginsOnlyAtSHA string
+	blobs            map[string][]byte
+	blobErr          error
+	resolveCalls     int
+	treeCalls        []string // commit SHAs FetchTreeAtRef was asked about
+
 	mu             sync.Mutex
 	submitCalls    []submitCall
 	diffCalls      int
@@ -142,6 +158,58 @@ func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, er
 		return f.repoSkillData, nil
 	default:
 		return nil, gh.ErrNotFound
+	}
+}
+
+func (f *fakeReviewer) ResolveRefSHA(owner, repo, branch string) (string, error) {
+	f.mu.Lock()
+	f.resolveCalls++
+	f.mu.Unlock()
+	if f.baseSHAErr != nil {
+		return "", f.baseSHAErr
+	}
+	if f.baseSHAValue != "" {
+		return f.baseSHAValue, nil
+	}
+	return "basesha", nil
+}
+
+func (f *fakeReviewer) FetchTreeAtRef(owner, repo, commitSHA, dir string) ([]gh.TreeEntry, bool, error) {
+	f.mu.Lock()
+	f.treeCalls = append(f.treeCalls, commitSHA)
+	f.mu.Unlock()
+	if f.pluginTreeErr != nil {
+		return nil, false, f.pluginTreeErr
+	}
+	if f.pluginsOnlyAtSHA != "" && commitSHA != f.pluginsOnlyAtSHA {
+		return nil, false, gh.ErrNotFound
+	}
+	if f.pluginEntries == nil {
+		return nil, false, gh.ErrNotFound
+	}
+	return f.pluginEntries, f.pluginTruncated, nil
+}
+
+func (f *fakeReviewer) FetchBlob(owner, repo, sha string, maxBytes int64) ([]byte, error) {
+	if f.blobErr != nil {
+		return nil, f.blobErr
+	}
+	b, ok := f.blobs[sha]
+	if !ok {
+		return nil, gh.ErrNotFound
+	}
+	return b, nil
+}
+
+// setRepoPlugins gives the fake a .pruefer/plugins tree built from files keyed by
+// path relative to that directory ("p/.claude-plugin/plugin.json" -> content).
+func (f *fakeReviewer) setRepoPlugins(files map[string]string) {
+	f.pluginEntries = nil
+	f.blobs = map[string][]byte{}
+	for _, path := range sortedKeys(files) {
+		sha := "blob-" + path
+		f.pluginEntries = append(f.pluginEntries, gh.TreeEntry{Path: path, Mode: "100644", Type: "blob", SHA: sha, Size: int64(len(files[path]))})
+		f.blobs[sha] = []byte(files[path])
 	}
 }
 
@@ -1273,8 +1341,8 @@ func TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead(t *testing.T) {
 	}
 	seenPaths := map[string]bool{}
 	for _, c := range calls {
-		if c.ref != "main" {
-			t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", c.path, c.ref, "main")
+		if c.ref != "basesha" { // the base branch pinned to a commit (#2307), never the head
+			t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the pinned base SHA %q (never HeadSHA)", c.path, c.ref, "basesha")
 		}
 		seenPaths[c.path] = true
 	}
@@ -1373,8 +1441,8 @@ func TestReviewPR_ResolvesReviewSkillAtBaseRef_NotHead(t *testing.T) {
 	if skillCall == nil {
 		t.Fatalf("FetchFileAtRef was never called with path %q", DefaultReviewSkillPath)
 	}
-	if skillCall.ref != "main" {
-		t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", DefaultReviewSkillPath, skillCall.ref, "main")
+	if skillCall.ref != "basesha" {
+		t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the pinned base SHA %q (never HeadSHA)", DefaultReviewSkillPath, skillCall.ref, "basesha")
 	}
 }
 

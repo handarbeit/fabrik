@@ -17,7 +17,10 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
+	"github.com/handarbeit/fabrik/internal/skillref"
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/pruefer/reviewplugin"
 )
 
@@ -139,7 +142,7 @@ func buildReviewToolRules(clone, stagedDir, skillRef string) (allow, deny []stri
 // a write/execute/network tool, or a missing --disallowedTools for find. The
 // tests apply it to the built args and, for non-vacuity, to the legacy
 // unscoped list, where it must report a violation.
-func checkReviewArgsScoped(args []string) error {
+func checkReviewArgsScoped(args []string, allowedSkills ...string) error {
 	var allows, denies []string
 	for i, a := range args {
 		if i+1 >= len(args) {
@@ -155,6 +158,14 @@ func checkReviewArgsScoped(args []string) error {
 	shell := map[string]bool{}
 	for _, c := range reviewShellAllow {
 		shell["Bash("+c+" *)"] = true
+	}
+	// Only the exact Skill(<plugin>:<skill>) rules for the refs the caller
+	// names. A bare Skill, a wildcard or any other ref is a violation.
+	var allowedSkillRules []string
+	for _, ref := range allowedSkills {
+		if wellFormedSkillRef(ref) && !strings.Contains(ref, "*") && !strings.Contains(ref, "(") && !strings.Contains(ref, ")") {
+			allowedSkillRules = append(allowedSkillRules, "Skill("+ref+")")
+		}
 	}
 	for _, r := range allows {
 		switch {
@@ -210,13 +221,32 @@ type ReviewRequest struct {
 	// resolved: the review process then carries no CLAUDE_CONFIG_DIR at all.
 	ClaudeConfigDir string
 	WorkDir         string // ephemeral clone directory; claude's cwd
-	// PluginDir is the per-review directory holding the embedded pruefer-review
-	// plugin, passed as the only --plugin-dir (#2306). SkillRef is the
-	// qualified review skill resolved against it; empty means the default,
-	// pruefer-review:review. Review fills both; tests building args or prompts
-	// directly may leave them empty.
-	PluginDir   string
-	SkillRef    string
+	// PluginDirs are the plugin directories this invocation passes with
+	// --plugin-dir, in order: the embedded pruefer-review plugin first, then the
+	// operator's, then the repo's (#2307). SkillRef is the qualified skill this
+	// invocation runs, resolved against exactly those directories; empty means
+	// the default, pruefer-review:review. Review fills both; tests building args
+	// or prompts directly may leave them empty.
+	PluginDirs []string
+	SkillRef   string
+	// ReviewSkill is the plugin:skill reference selected for the review (the
+	// operator's review_skill, or the repo's when allowed); empty means the
+	// default. Review resolves it against the plugins it passes and falls back
+	// visibly to the default skill if it does not resolve or does not run
+	// (#2307, R4).
+	ReviewSkill string
+	// OperatorPluginDirs are the operator's plugins: directories, already
+	// resolved by resolveOperatorPluginDirs; used in place.
+	OperatorPluginDirs []string
+	// RepoPlugins are the plugin trees read from the PR's base SHA by ReviewPR;
+	// Review writes them into its per-review directory. Never read from WorkDir.
+	RepoPlugins []repoPluginTree
+	// BaseSHA is the commit every base-ref read of this review was pinned to; it
+	// is named in a fallback's log line (ReviewPR names it in the posted notice).
+	BaseSHA string
+	// PluginNotes are reasons a repo plugin did not load (an unreadable tree, a
+	// refused plugin); they are appended to the reason of any fallback.
+	PluginNotes []string
 	MaxWallTime time.Duration // 0 = no wall-time cap
 	// ReviewThreads carries existing review threads (resolved and
 	// unresolved) on the PR, fetched by ReviewPR via
@@ -309,6 +339,13 @@ type ReviewResult struct {
 	// empty for an invoker that has no transcript. ReviewPR keeps it only when
 	// coverage is partial (see maybeKeepTranscript, #2303).
 	Transcript []byte
+	// FallbackFrom is the review_skill reference that was selected but not used
+	// because it did not resolve or did not run; the default skill ran instead
+	// (#2307, R4). FallbackReason says why. Both are empty when the selected
+	// skill ran. NumTurns and CostUSD cover every invocation the review took,
+	// including a first one whose skill did not run.
+	FallbackFrom   string
+	FallbackReason string
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -658,8 +695,8 @@ func buildReviewArgs(req ReviewRequest) ([]string, error) {
 		"--permission-mode", "dontAsk",
 		"--setting-sources", "",
 	}
-	if req.PluginDir != "" {
-		args = append(args, "--plugin-dir", req.PluginDir)
+	for _, dir := range req.PluginDirs {
+		args = append(args, "--plugin-dir", dir)
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -773,26 +810,53 @@ func parseClaudeReviewJSON(output []byte) (claudeReviewResponse, bool) {
 	return claudeReviewResponse{}, false
 }
 
-// Review invokes the claude CLI once, in req.WorkDir, and returns its review
-// text plus turn/cost instrumentation. On any failure — process error,
-// timeout, unparseable output, or an is_error response — it returns a
-// non-nil error and a zero-value ReviewResult. Per the issue's "on
-// invocation failure, post nothing" requirement, callers must not submit a
-// review when err != nil.
+// skillNotRunError is a review invocation that produced output but whose
+// selected skill demonstrably did not run: the Skill call errored on load, or
+// the reviewer never invoked it (checkSkillRan). It carries the turns and cost
+// the invocation used. For a non-default skill it triggers the visible fallback
+// to the default skill; for the default skill it fails the review as before.
+type skillNotRunError struct {
+	Ref      string
+	Err      error
+	NumTurns int
+	CostUSD  float64
+}
+
+func (e *skillNotRunError) Error() string { return e.Err.Error() }
+func (e *skillNotRunError) Unwrap() error { return e.Err }
+
+// chooseReviewSkill decides which skill a review runs before any process is
+// started (#2307, R3/R4). A requested reference that is the default, or that is
+// a well-formed plugin:skill pair resolving against exactly the plugins passed,
+// is used as is. Anything else — malformed, an unloaded plugin, a missing skill
+// — yields the default skill and the reason it was not used.
+func chooseReviewSkill(set *pluginSet, requested, defaultRef string) (ref, reason string) {
+	if requested == "" || requested == defaultRef {
+		return defaultRef, ""
+	}
+	if !wellFormedSkillRef(requested) {
+		return defaultRef, "it is not a plugin:skill reference"
+	}
+	res, why, _, ok := skillref.NewResolver(set.Dirs(), skillref.Options{}).Resolve(requested)
+	if !ok {
+		return defaultRef, fmt.Sprintf("it did not resolve: %s", why)
+	}
+	return res.Name, ""
+}
+
+// Review runs the review. It selects the skill (req.ReviewSkill, default
+// pruefer-review:review) against the plugins it passes with --plugin-dir — the
+// embedded pruefer-review, the operator's, then the repo's base-ref plugins —
+// and invokes the claude CLI in req.WorkDir. If the selected skill does not
+// resolve, or resolves but does not run, and it is not the default, Review runs
+// the default skill instead and reports FallbackFrom/FallbackReason; it never
+// fails the review for a bad selection (#2307, R4). On any other failure —
+// process error, timeout, unparseable output, an is_error response, or the
+// default skill not running — it returns a non-nil error and a zero-value
+// ReviewResult. Per the issue's "on invocation failure, post nothing"
+// requirement, callers must not submit a review when err != nil.
 func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (ReviewResult, error) {
 	logf(req.PRNumber, "claude", "reviewing %s/%s#%d (head %s) in %s\n", req.Owner, req.Repo, req.PRNumber, req.HeadSHA, req.WorkDir)
-
-	stageCtx := ctx
-	cancel := context.CancelFunc(func() {})
-	if req.MaxWallTime > 0 {
-		stageCtx, cancel = context.WithTimeout(ctx, req.MaxWallTime)
-	}
-	defer cancel()
-
-	var stdout bytes.Buffer
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
-	var stdoutWriter io.Writer = &activityWriter{inner: &stdout, lastActivity: &lastActivity}
 
 	// Fail closed: never run a review without its path scope. The resolved
 	// paths replace the request's so the prompt, the cwd and the rules all
@@ -812,20 +876,99 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		resolvedStaged.IndexPath = filepath.Join(staged, stagedIndexName)
 		req.Staged = &resolvedStaged
 	}
-	// R1/R2: a fresh plugin directory for this review alone, removed on every
-	// return path, with the default skill resolved against exactly it.
+	// R1/R2: a fresh plugin root for this review alone, removed on every return
+	// path (the fallback re-run reuses it), holding the embedded plugin and the
+	// repo's base-ref plugin trees.
 	rp, err := setupReviewPlugin()
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("preparing review plugin: %w", err)
 	}
 	defer rp.Close()
-	req.PluginDir, req.SkillRef = rp.Dir, rp.Ref
+	set := buildPluginSet(rp, req.OperatorPluginDirs, req.RepoPlugins)
+	for _, p := range set.Plugins {
+		logf(req.PRNumber, "claude", "%s\n", p.logLine())
+	}
+	for _, n := range set.Notes {
+		logf(req.PRNumber, "warn", "%s\n", n)
+	}
+	req.PluginDirs = set.Dirs()
+
+	requested := req.ReviewSkill
+	if requested == "" {
+		requested = rp.Ref
+	}
+	ref, why := chooseReviewSkill(set, requested, rp.Ref)
+	var spentTurns int
+	var spentCost float64
+	if why == "" {
+		res, err := r.runReview(ctx, req, set, ref)
+		var notRun *skillNotRunError
+		if err == nil {
+			return res, nil
+		}
+		if !errors.As(err, &notRun) || ref == rp.Ref {
+			return ReviewResult{}, err
+		}
+		spentTurns, spentCost = notRun.NumTurns, notRun.CostUSD
+		// The posted reason stays free of local paths and skill output; the
+		// detail goes to the log only.
+		logf(req.PRNumber, "warn", "selected review skill did not run: %v\n", notRun.Err)
+		var loadErr *claudeerr.SkillLoadError
+		if errors.As(notRun.Err, &loadErr) {
+			why = "it failed to load"
+		} else {
+			why = "the reviewer never invoked it"
+		}
+	} else {
+		why = appendNotes(why, append(append([]string(nil), req.PluginNotes...), set.Notes...))
+	}
+	logf(req.PRNumber, "warn", "review skill %q at base %s not used (%s); running %s instead\n", sanitizeNoticeText(requested), req.BaseSHA, why, rp.Ref)
+	res, err := r.runReview(ctx, req, set, rp.Ref)
+	if err != nil {
+		return ReviewResult{}, err
+	}
+	res.FallbackFrom, res.FallbackReason = requested, why
+	res.NumTurns += spentTurns
+	res.CostUSD += spentCost
+	return res, nil
+}
+
+func appendNotes(why string, notes []string) string {
+	if len(notes) == 0 {
+		return why
+	}
+	return why + " (" + strings.Join(notes, "; ") + ")"
+}
+
+// runReview runs one claude invocation of skill ref over the plugins in set. A
+// zero-value ReviewResult accompanies every error; a skill that demonstrably did
+// not run is a *skillNotRunError.
+func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, set *pluginSet, ref string) (ReviewResult, error) {
+	stageCtx := ctx
+	cancel := context.CancelFunc(func() {})
+	if req.MaxWallTime > 0 {
+		stageCtx, cancel = context.WithTimeout(ctx, req.MaxWallTime)
+	}
+	defer cancel()
+
+	var stdout bytes.Buffer
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+	var stdoutWriter io.Writer = &activityWriter{inner: &stdout, lastActivity: &lastActivity}
+
+	req.SkillRef = ref
 	args, err := buildReviewArgs(req)
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
 	}
 	_, replaces := resolveGuidance(req)
-	logf(req.PRNumber, "claude", "%s\n", rp.logLine(replaces))
+	skillPlugin := loadedPlugin{Name: reviewplugin.PluginName, Source: sourceEmbedded}
+	if pn, _, ok := plugin.Split(ref); ok {
+		if lp, found := set.byName(pn); found {
+			skillPlugin = lp
+		}
+	}
+	logf(req.PRNumber, "claude", "%s\n", skillLogLine(ref, skillPlugin, replaces))
 	logf(req.PRNumber, "claude", "review tool rules: %s\n", strings.Join(args, " "))
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = req.WorkDir
@@ -916,8 +1059,8 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	if strings.TrimSpace(resp.Result) == "" {
 		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
 	}
-	if err := checkSkillRan(stdout.Bytes(), rp.Ref); err != nil {
-		return ReviewResult{}, err
+	if err := checkSkillRan(stdout.Bytes(), ref); err != nil {
+		return ReviewResult{}, &skillNotRunError{Ref: ref, Err: err, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 	}
 	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
 	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,

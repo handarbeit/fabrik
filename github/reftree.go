@@ -20,6 +20,13 @@ type TreeEntry struct {
 	Size int64
 }
 
+type refResponse struct {
+	Object struct {
+		SHA  string `json:"sha"`
+		Type string `json:"type"`
+	} `json:"object"`
+}
+
 // ResolveRefSHA resolves a branch name to the commit SHA it points at right
 // now, via the lightweight Git refs endpoint. Pruefer pins every base-ref read
 // of one review to this SHA, so the config, the guidance and the plugin tree
@@ -27,13 +34,10 @@ type TreeEntry struct {
 func (c *Client) ResolveRefSHA(owner, repo, branch string) (string, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/git/ref/heads/%s",
 		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), escapeRepoPath(branch))
-	var raw struct {
-		Object struct {
-			SHA  string `json:"sha"`
-			Type string `json:"type"`
-		} `json:"object"`
-	}
-	if err := c.restGetJSON(apiURL, &raw); err != nil {
+	var raw refResponse
+	// Conditional: an unchanged base answers 304, which GitHub does not bill
+	// against the rate limit (#1952), and a moved base returns the new SHA.
+	if err := condGetJSON(c, apiURL, &raw); err != nil {
 		return "", fmt.Errorf("resolving branch %s in %s/%s: %w", branch, owner, repo, err)
 	}
 	if raw.Object.Type != "commit" || raw.Object.SHA == "" {

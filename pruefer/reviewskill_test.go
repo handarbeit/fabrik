@@ -67,7 +67,7 @@ func TestBuildReviewArgs_OnlyPrueferPluginUnderAnyProfile(t *testing.T) {
 			defer rp.Close()
 			req := reviewTestScope(t)
 			req.ClaudeConfigDir = profile
-			req.PluginDir, req.SkillRef = rp.Dir, rp.Ref
+			req.PluginDirs, req.SkillRef = []string{rp.Dir}, rp.Ref
 			args := mustReviewArgs(t, req)
 			if err := checkIsolated(args, rp.Dir); err != nil {
 				t.Fatal(err)
@@ -107,11 +107,11 @@ func TestBuildReviewToolRules_GrantsOnlyTheScopedSkill(t *testing.T) {
 
 func TestCheckReviewArgsScoped_RejectsWiderSkillGrants(t *testing.T) {
 	good := mustReviewArgs(t, reviewTestScope(t))
-	if err := checkReviewArgsScoped(good); err != nil {
+	if err := checkReviewArgsScoped(good, reviewplugin.DefaultRef); err != nil {
 		t.Fatal(err)
 	}
 	for _, widen := range []string{"Skill", "Skill(*)", "Skill(pruefer-review:*)", "Skill(other-plugin:review)", "Skill()"} {
-		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen)) == nil {
+		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen), reviewplugin.DefaultRef) == nil {
 			t.Errorf("checker accepted %q", widen)
 		}
 	}
