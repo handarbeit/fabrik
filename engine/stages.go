@@ -76,14 +76,20 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 // covers every downstream hasYoloLabel/hasCruiseLabel read, including the
 // one inside attemptMergeOnValidate — satisfying R5's "must not fetch
 // twice."
-func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) {
+//
+// It reports whether the labels are now live. The yolo/cruise reads keep their
+// historical fall-back-to-snapshot behaviour on a failure, but the pause guard
+// (#2341) must not: a stale snapshot can predate a human's fabrik:paused, so
+// callers pass the result to pausedOrUnread and fail closed.
+func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) (live bool) {
 	owner, repo := itemOwnerRepo(*item, e.defaultRepo())
 	freshLabels, err := e.client.FetchLabels(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "refreshAutonomyLabels: could not re-fetch labels for %s/%s#%d: %v\n", owner, repo, item.Number, err)
-		return
+		return false
 	}
 	item.Labels = freshLabels
+	return true
 }
 
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
@@ -109,7 +115,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// (e.g., fabrik:yolo/fabrik:cruise added or removed mid-run) before any
 	// autonomy-label read below (#1769). See refreshAutonomyLabels' own doc
 	// comment for the full rationale.
-	e.refreshAutonomyLabels(&item)
+	labelsLive := e.refreshAutonomyLabels(&item)
 
 	// Clear any orphaned fabrik:awaiting-input label. It is added by blockOnInput
 	// when Claude emits FABRIK_BLOCKED_ON_INPUT; if the user manually removes
@@ -167,10 +173,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// Pause guard (#2341): item.Labels is live as of refreshAutonomyLabels above, so a
 	// fabrik:paused applied while this stage ran is visible here. A paused item is not
 	// merged or advanced; it keeps its completion label and lands once the pause lifts.
-	paused := e.isPaused(item.Labels)
+	// Fail closed: when that refresh failed, item.Labels is the pre-run snapshot, which
+	// may predate the pause, so the decision waits for a later poll too.
+	paused := e.pausedOrUnread(item.Labels, labelsLive)
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
 		if paused {
-			e.refuseIfPaused(item, "landing")
+			e.refuseIfPausedOrUnread(item, labelsLive, "landing")
 			landingDeferred = true
 		} else {
 			var mergeErr error
@@ -276,7 +284,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		// Pause guard (#2341): refuse before any gate that writes a label or records a
 		// cooldown, so the refusal leaves every label as it was.
 		if paused {
-			e.refuseIfPaused(item, "advancing")
+			e.refuseIfPausedOrUnread(item, labelsLive, "advancing")
 			return
 		}
 		if e.checkDependencies(board, item, stage) {

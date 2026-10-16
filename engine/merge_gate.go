@@ -180,6 +180,13 @@ func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
 		return
 	}
 
+	// Pause guard (#2341): the worker just ran, so a fabrik:paused applied meanwhile is
+	// not in item.Labels (a dispatch-time snapshot). Re-enabling auto-merge, or the
+	// direct merge below, would land against the operator's stop; fail closed.
+	if e.refuseIfPausedLive(item, "re-enabling auto-merge after the rebase") {
+		return
+	}
+
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if prErr != nil || pr == nil || pr.Number == 0 {
@@ -763,6 +770,14 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 	}
 	if merged {
 		e.advanceConvergedPRToDone(board, item, stage, pr.Number, true)
+		return
+	}
+
+	// Pause guard (#2341): a pause wins over a fresh enqueue (and over the
+	// cycle-limit pause that would follow). Read live at the mutation point; a failed
+	// read fails closed. Placed after the merged-first check so a PR that already
+	// landed still advances to Done.
+	if e.refuseIfPausedLive(item, "re-enqueueing") {
 		return
 	}
 

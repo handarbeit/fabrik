@@ -32,6 +32,11 @@ import (
 // Done in landing tests.
 func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker, wm *WorktreeManager) *Engine {
 	t.Helper()
+	// The pause guard (#2341) fails closed on an unreadable label set, so a train test
+	// that does not model labels needs a live read that confirms "no labels".
+	if client.fetchLabelsFn == nil {
+		client.fetchLabelsFn = func(owner, repo string, n int) ([]string, error) { return nil, nil }
+	}
 	holdingStageConfig := &stages.Stage{
 		Name:         "Queued",
 		Order:        10,
@@ -2152,11 +2157,11 @@ func TestMergeTrainWorker_TUIJobRow(t *testing.T) {
 			if ev.IssueNumber == 0 && ev.Repo == "owner/repo" && ev.StageName == "Merge Train" {
 				sawCompleted = true
 				// #2050: the completion carries the episode's real outcome and reaches
-				// History (Skipped=false). This fixture's landing guard refuses (no
-				// fetchLabelsFn), so the honest outcome is abandoned; the per-outcome
+				// History (Skipped=false). The batch lands here (trainTestEngine confirms
+				// "no labels" on the live reads the landing guards make); the per-outcome
 				// scripted trains live in merge_train_tui_test.go.
-				if ev.Skipped || ev.Outcome != "abandoned" || ev.Success {
-					t.Errorf("JobCompletedEvent = %+v, want Skipped=false Outcome=abandoned Success=false", ev)
+				if ev.Skipped || ev.Outcome != "landed" || !ev.Success {
+					t.Errorf("JobCompletedEvent = %+v, want Skipped=false Outcome=landed Success=true", ev)
 				}
 			}
 		case tui.LogEvent:

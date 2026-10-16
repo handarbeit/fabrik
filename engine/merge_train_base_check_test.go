@@ -300,8 +300,9 @@ func TestLandMergeTrainBatch_AgreeingNonDefaultBase_ProceedsNormally(t *testing.
 			return 100, nil
 		},
 		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
-			// The pause guard (#2341) now reads labels live for every partition, so
-			// FetchLabels is called. R5 stays pinned differently: the labels declare a
+			// The pause guard (#2341) reads labels live for every partition, so this
+			// test can no longer assert that FetchLabels is never called. The weaker
+			// assertion that replaces it still pins R5: the labels declare a
 			// contradicting base, which would refuse the landing if the #1773 base
 			// check wrongly fired on a non-default partition.
 			return []string{"base:contradicting"}, nil

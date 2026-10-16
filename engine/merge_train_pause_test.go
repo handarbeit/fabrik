@@ -30,24 +30,73 @@ func TestPausedTrainMembers_LiveReadNotSnapshot(t *testing.T) {
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	members := []trainMember{makeQueuedMember(1, 10, "One"), makeQueuedMember(2, 11, "Two")}
 	// The batch-formation snapshots carry no pause; only the live read does.
-	got := eng.pausedTrainMembers("owner", "repo", members)
-	if len(got) != 1 || got[0] != 2 {
-		t.Fatalf("paused = %v, want [2]", got)
+	got, unread := eng.pausedTrainMembers("owner", "repo", members)
+	if len(got) != 1 || got[0] != 2 || len(unread) != 0 {
+		t.Fatalf("paused = %v unread = %v, want [2] and none", got, unread)
 	}
 }
 
-func TestPausedTrainMembers_ReadErrorFallsBackToSnapshot(t *testing.T) {
+// A failed live read is "unknown", never "not paused": the batch-formation snapshot
+// cannot carry fabrik:paused (paused members are excluded at formation), so it must
+// not be consulted as a fallback.
+func TestPausedTrainMembers_ReadErrorIsUnread(t *testing.T) {
 	client := &mockGitHubClient{fetchLabelsFn: func(owner, repo string, n int) ([]string, error) {
-		return nil, errors.New("rate limited")
+		if n == 2 {
+			return nil, errors.New("rate limited")
+		}
+		return nil, nil
 	}}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
-	snapPaused := makeQueuedMember(2, 11, "Two")
-	snapPaused.item.Labels = []string{"fabrik:paused"}
-	members := []trainMember{makeQueuedMember(1, 10, "One"), snapPaused}
+	members := []trainMember{makeQueuedMember(1, 10, "One"), makeQueuedMember(2, 11, "Two")}
 
-	got := eng.pausedTrainMembers("owner", "repo", members)
-	if len(got) != 1 || got[0] != 2 {
-		t.Fatalf("paused = %v, want [2] from the snapshot", got)
+	paused, unread := eng.pausedTrainMembers("owner", "repo", members)
+	if len(paused) != 0 || len(unread) != 1 || unread[0] != 2 {
+		t.Fatalf("paused = %v unread = %v, want none and [2]", paused, unread)
+	}
+	if !eng.refuseIfMembersPaused("owner", "repo", members) {
+		t.Fatal("an unreadable member must refuse the landing")
+	}
+}
+
+// A FetchLabels error for one member refuses the whole batch landing: nothing is
+// opened, merged, moved, closed or labelled, and every member stays in Queued.
+func TestLandMergeTrainBatch_UnreadableMember_RefusesWholeBatch(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(1, 10, "One"), makeQueuedMember(2, 11, "Two")}
+	eng, client, createPR, mergePR := batchPauseFixture(t)
+	client.fetchLabelsFn = func(owner, repo string, n int) ([]string, error) {
+		if n == 2 {
+			return nil, errors.New("rate limited")
+		}
+		return nil, nil
+	}
+	wm := eng.worktreesFor("owner/repo")
+	trainKey := defaultTrainKey("owner", "repo")
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(trainKey, state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", trainKey, survivors, wm)
+
+	if *createPR || *mergePR {
+		t.Errorf("a batch with an unreadable member must not open or merge a PR (create=%v merge=%v)", *createPR, *mergePR)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.updateStatusCalls) != 0 || len(client.closeIssueCalls) != 0 ||
+		len(client.addCommentCalls) != 0 || len(client.addLabelCalls) != 0 {
+		t.Error("a refusal must leave every member untouched")
+	}
+}
+
+func TestTrySingletonFastPath_UnreadableLabels_NoMerge(t *testing.T) {
+	eng, client, state, p, m, merges := fastPathPauseFixture(t, false)
+	client.fetchLabelsFn = func(owner, repo string, n int) ([]string, error) {
+		return nil, errors.New("rate limited")
+	}
+	if !eng.trySingletonFastPath(context.Background(), state, p, m) {
+		t.Fatal("an unreadable member must decide the disposition (true) so no trial is built")
+	}
+	if *merges != 0 {
+		t.Errorf("a member whose labels cannot be read must not be merged, got %d", *merges)
 	}
 }
 
