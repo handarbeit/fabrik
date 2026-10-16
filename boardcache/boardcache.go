@@ -1552,6 +1552,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 // fails when a LinkedPR* field is added to gh.ProjectItem without being carried here.
 func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
 	dst.DeepFetchLive = false
+	dst.DeepFetchStartedAt = time.Time{}
 	dst.Body = s.Body
 	dst.URL = s.URL
 	dst.Author = s.Author

@@ -405,6 +405,7 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 // projects_v2_item.created webhook (node ID only) and calls this to fill in
 // the rest, so Number and Repo must be populated when they are zero-valued.
 func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
+	startedAt := time.Now() // before the read, like the real client (#2344)
 	if item == nil {
 		return fmt.Errorf("simgh: FetchItemDetails called with nil item")
 	}
@@ -478,6 +479,7 @@ func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
 		item.Status = listingStatus
 	}
 	item.DeepFetchLive = true
+	item.DeepFetchStartedAt = startedAt
 	return nil
 }
 

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
@@ -19,11 +21,18 @@ import (
 // Status and labels, so it is applied here through the listing mutation first
 // (unprotected, exactly what the old write-back did). Production always has the
 // cache (New), so this branch serves the bare-adapter engines NewWithDeps builds.
-func (e *Engine) applyDeepFetched(repo string, item gh.ProjectItem) {
+//
+// The live-read markers (DeepFetchLive, DeepFetchStartedAt) describe the fetch
+// that just filled item, so they are cleared once the result is applied: the
+// caller's copy lives on for the rest of the poll, and applying it again later
+// must not present its labels and closed state as freshly read.
+func (e *Engine) applyDeepFetched(repo string, item *gh.ProjectItem) {
 	if e.cache() == nil {
-		e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: repo, Number: item.Number, Item: item})
+		e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: repo, Number: item.Number, Item: *item})
 	}
-	e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: *item})
+	item.DeepFetchLive = false
+	item.DeepFetchStartedAt = time.Time{}
 }
 
 // SetLegacyDeepFetchApplyForTest restores the pre-#2344 ItemDeepFetched apply on

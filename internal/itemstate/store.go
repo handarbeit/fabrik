@@ -593,16 +593,19 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		fresh := v.FreshState
 		fresh.LabelsAbsent = false
 		var flags ChangeFlags
-		if s.legacyDeepFetchApply.Load() {
+		legacy := s.legacyDeepFetchApply.Load()
+		if legacy {
 			flags = applyProjectItem(item, fresh)
 		} else {
-			flags = applyDeepFetched(item, fresh)
+			flags = applyDeepFetched(item, fresh, s.graceLocked(), time.Now())
 		}
 		item.LastDeepFetchAt = time.Now()
-		// A live refetch re-anchors the freshness baselines to GitHub's values
-		// (ADR 2180: that cures masking and clock skew). A cache hit carries the
-		// poll-start listing's values, so it may only raise them (#2344, R4).
-		if v.FreshState.DeepFetchLive || s.legacyDeepFetchApply.Load() {
+		// The freshness baselines only ever move forward: a deep-fetch apply
+		// must not lower one that SelfWriteObserved raised while the fetch was in
+		// flight, and a cache hit carries the poll-start listing's values (#2344,
+		// R4; amends ADR 2180, whose unconditional re-anchor after a live refetch
+		// is gone).
+		if legacy {
 			item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
 			item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
 		} else {

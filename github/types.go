@@ -193,13 +193,20 @@ type ProjectItem struct {
 	LabelsAbsent bool
 	// DeepFetchLive is true when this item's deep fields were just read from
 	// GitHub (FetchItemDetails), false when they were copied from the board
-	// cache or the item is a plain listing entry. The Store assigns its
-	// LastSeen* freshness baselines from a live fetch but never lets a cache
-	// hit move them backwards (#2344, amends ADR 2180). The flag describes the
-	// fetch that just filled the item and is never cleared on the caller's copy,
-	// so a result must be applied right after its own FetchItemDetails; applying
-	// an older copy again would present its labels and closed state as live.
+	// cache or the item is a plain listing entry. The Store assigns labels and
+	// closed state from a live fetch (through the engine-write protection, using
+	// DeepFetchStartedAt) but never from a cache hit, and never lets either move
+	// the LastSeen* freshness baselines backwards (#2344, amends ADR 2180). The
+	// flag describes the fetch that just filled the item: the engine clears it
+	// once the result has been applied (Engine.applyDeepFetched), so re-applying
+	// an older copy cannot present its labels and closed state as live.
 	DeepFetchLive bool
+	// DeepFetchStartedAt is the instant just before the live deep fetch was
+	// requested, the observation time the Store's engine-write protection
+	// compares against (the deep-fetch analogue of ProjectBoard.FetchedAt).
+	// Zero when the item was not read live or the producer did not stamp it, in
+	// which case nothing is protected.
+	DeepFetchStartedAt time.Time
 
 	// IssueLayerUpdatedAt is the issue-and-project-item part of UpdatedAt: the
 	// later of content.updatedAt and the project item's updatedAt (display-field

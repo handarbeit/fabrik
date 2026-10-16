@@ -1001,6 +1001,9 @@ type fetchItemDetailsNode struct {
 // projects_v2_item.created with only a node_id), it is populated from the
 // GraphQL response.
 func (c *Client) FetchItemDetails(item *ProjectItem) error {
+	// Stamped before the request, like ProjectBoard.FetchedAt: an engine write
+	// that lands after this instant may not be in the response (#2344).
+	startedAt := time.Now()
 	vars := map[string]interface{}{
 		"id": item.ID,
 	}
@@ -1010,6 +1013,7 @@ func (c *Client) FetchItemDetails(item *ProjectItem) error {
 		return fmt.Errorf("fetching details for item #%d: %w", item.Number, err)
 	}
 	item.DeepFetchLive = true
+	item.DeepFetchStartedAt = startedAt
 	if result.Data.Node == nil {
 		return fmt.Errorf("fetching details for item #%d: node not found", item.Number)
 	}

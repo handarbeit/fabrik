@@ -182,16 +182,121 @@ func TestDeepFetchApply_BaselinesNeverMovedBackByCacheHit(t *testing.T) {
 	}
 }
 
-func TestDeepFetchApply_LiveRefetchReanchorsBaselines(t *testing.T) {
+// A live refetch is held to the same rule as a cache hit: a baseline that
+// SelfWriteObserved raised while the fetch was in flight must not be lowered by
+// the response (#2344, R4 as written).
+func TestDeepFetchApply_LiveRefetchNeverLowersBaselines(t *testing.T) {
 	early := time.Unix(1000, 0)
+	for _, legacy := range []bool{false, true} {
+		s := newStoreWithItem(t, testRepo, 1)
+		s.SetLegacyDeepFetchApplyForTest(legacy)
+		s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+		late := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt
+		pi := staleListing()
+		pi.UpdatedAt = early
+		pi.LinkedPRUpdatedAt = early
+		pi.DeepFetchLive = true
+		s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi})
+		got := getItem(t, s, testRepo, 1)
+		lowered := !got.LastSeenSourceUpdatedAt.Equal(late)
+		if lowered != legacy {
+			t.Errorf("legacy=%v: baseline = %v, was %v", legacy, got.LastSeenSourceUpdatedAt, late)
+		}
+	}
+}
+
+func TestDeepFetchApply_LiveRefetchRaisesBaselines(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	future := time.Now().Add(time.Hour)
 	pi := staleListing()
-	pi.UpdatedAt = early
+	pi.UpdatedAt = future
+	pi.LinkedPRUpdatedAt = future
 	pi.DeepFetchLive = true
 	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi})
-	if got := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt; !got.Equal(early) {
-		t.Errorf("a live refetch must assign the baseline (ADR 2180): got %v want %v", got, early)
+	got := getItem(t, s, testRepo, 1)
+	if !got.LastSeenSourceUpdatedAt.Equal(future) || !got.LastSeenPRUpdatedAt.Equal(future) {
+		t.Errorf("a live refetch must raise the baselines: got %v / %v want %v", got.LastSeenSourceUpdatedAt, got.LastSeenPRUpdatedAt, future)
+	}
+}
+
+// liveFetch is a live deep-fetch result whose request started at startedAt.
+func liveFetch(startedAt time.Time, labels []string, closed bool) gh.ProjectItem {
+	pi := staleListing()
+	pi.Labels = labels
+	pi.IsClosed = closed
+	pi.DeepFetchLive = true
+	pi.DeepFetchStartedAt = startedAt
+	return pi
+}
+
+// A live fetch is held to the engine-write protection every listing path has
+// (ADR 2159/2178): an engine write recorded inside the grace window of the
+// request's start may not be in the response, so the local value is kept. The
+// legacy apply has no such rule and reverts it.
+func TestDeepFetchApply_LiveFetchKeepsEngineWritesInsideGrace(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		s := newStoreWithItem(t, testRepo, 1)
+		s.SetLegacyDeepFetchApplyForTest(legacy)
+		startedAt := time.Now()
+		s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "stage:Implement:complete"})
+		s.Apply(LocalLabelRemoved{Repo: testRepo, Number: 1, Label: "bug"})
+		s.Apply(LocalIssueClosed{Repo: testRepo, Number: 1})
+		seen := collectChanges(s)
+
+		s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: liveFetch(startedAt, []string{"bug"}, false)})
+
+		got := getItem(t, s, testRepo, 1)
+		kept := hasLabel(got.Labels, "stage:Implement:complete") && !hasLabel(got.Labels, "bug") && got.IsClosed
+		if kept == legacy {
+			t.Errorf("legacy=%v: labels=%v closed=%v (kept=%v)", legacy, got.Labels, got.IsClosed, kept)
+		}
+		if !legacy {
+			for _, c := range seen() {
+				if c.Fields&(LabelsChanged|StateChanged) != 0 || len(c.LabelDeltas) != 0 {
+					t.Errorf("kept engine writes produced a reverting event: %+v", c)
+				}
+			}
+		}
+	}
+}
+
+// Outside the window the response is trusted and wins, as for the listings.
+func TestDeepFetchApply_LiveFetchAppliesOutsideGrace(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "stage:Implement:complete"})
+	s.Apply(LocalLabelRemoved{Repo: testRepo, Number: 1, Label: "bug"})
+	s.Apply(LocalIssueClosed{Repo: testRepo, Number: 1})
+	startedAt := time.Now().Add(DefaultEngineWriteGrace + time.Second)
+
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: liveFetch(startedAt, []string{"bug"}, false)})
+
+	got := getItem(t, s, testRepo, 1)
+	if hasLabel(got.Labels, "stage:Implement:complete") || !hasLabel(got.Labels, "bug") || got.IsClosed {
+		t.Errorf("a fetch started after the grace window must win: labels=%v closed=%v", got.Labels, got.IsClosed)
+	}
+}
+
+// A live read with no start stamp (a producer that does not set it) protects
+// nothing, like a zero FetchedAt on the listings.
+func TestDeepFetchApply_LiveFetchWithoutStartStampIsUnprotected(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "stage:Implement:complete"})
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: liveFetch(time.Time{}, []string{"bug"}, false)})
+	if hasLabel(getItem(t, s, testRepo, 1).Labels, "stage:Implement:complete") {
+		t.Errorf("a zero DeepFetchStartedAt must not protect")
+	}
+}
+
+// A live fetch does not read Status, so it neither keeps nor confirms Status.
+func TestDeepFetchApply_LiveFetchDoesNotConsumeStatusRecord(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	startedAt := time.Now()
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Review"})
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: liveFetch(startedAt.Add(time.Minute), []string{"bug"}, false)})
+	got := getItem(t, s, testRepo, 1)
+	if _, ok := got.EngineWriteAt[engineWriteStatusKey]; !ok {
+		t.Errorf("a deep fetch must not drop the Status engine-write record: %v", got.EngineWriteAt)
 	}
 }
 

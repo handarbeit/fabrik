@@ -197,7 +197,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
 		} else {
 			blockedByList = fresh.BlockedBy
-			e.applyDeepFetched(itemRepo, fresh)
+			e.applyDeepFetched(itemRepo, &fresh)
 		}
 	}
 

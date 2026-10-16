@@ -72,9 +72,11 @@ func runMidPollWrite(t *testing.T, legacy bool) (status string, statusChanges, h
 	})
 
 	// An external change makes the cached copy stale, so the next poll refetches.
-	if err := env.Sim.Sim().AddLabelToIssue(env.Owner, env.Repo, num, "operator-note"); err != nil {
-		t.Fatal(err)
-	}
+	// A bot comment is used because the #2180 comment-total rule detects it
+	// regardless of the freshness baselines, which raise-only deep-fetch applies
+	// leave at the engine's own self-write time (a label add right after settling
+	// can fall inside that window and not look stale).
+	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "ci-notes[bot]", "fyi: external note")
 	_ = item
 	RunPoll(t, env)
 

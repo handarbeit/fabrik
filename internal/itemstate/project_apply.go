@@ -102,9 +102,18 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 // their engine-write protection. Labels and closed state are the exception when
 // pi.DeepFetchLive: a live fetch read them from GitHub just now, and they are
 // how a change that arrived without a webhook reaches the Store (the probe
-// carries no labels), so they are written. (#2344, ADR 2344)
-func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+// carries no labels), so they are written — through the engine-write protection
+// (protectStatusClosed/protectLabels, the rule every listing path shares), with
+// pi.DeepFetchStartedAt as the observation time: an engine write recorded inside
+// the grace window of the fetch's start keeps its local value, because the
+// response may predate it (or GitHub may still be serving the old read).
+// (#2344, ADR 2344)
+func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, now time.Time) ChangeFlags {
 	var flags ChangeFlags
+	view := deepFetchLiveView(item, pi, grace, now)
+	if dropEngineWrites(item, view.Drop) {
+		flags |= EngineWriteRecordedChanged
+	}
 	// State is empty only until the first population: getOrCreate pre-sets
 	// Repo/Number, so they cannot tell a new record from a known one.
 	closedUnheld := item.State == ""
@@ -129,16 +138,28 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= AssigneesChanged
 	}
 
-	if (closedUnheld || pi.DeepFetchLive) && (item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR) {
-		item.State = stateFrom(pi)
-		item.IsClosed = pi.IsClosed
-		item.IsPR = pi.IsPR
-		flags |= StateChanged
+	if closedUnheld || pi.DeepFetchLive {
+		state, isClosed := stateFrom(pi), pi.IsClosed
+		if view.KeepClosed {
+			state, isClosed = item.State, item.IsClosed
+		}
+		if item.State != state || item.IsClosed != isClosed || item.IsPR != pi.IsPR {
+			item.State = state
+			item.IsClosed = isClosed
+			item.IsPR = pi.IsPR
+			flags |= StateChanged
+		}
 	}
 
 	if !pi.LabelsAbsent && (!item.LabelsKnown || pi.DeepFetchLive) {
-		if !reflect.DeepEqual(item.Labels, pi.Labels) {
-			item.Labels = copyStrings(pi.Labels)
+		labels := pi.Labels
+		if view.Labels != nil {
+			labels = view.Labels
+		}
+		if view.Labels != nil && sameStringSet(item.Labels, labels) {
+			// Only the order differs from the kept local set: leave it untouched.
+		} else if !reflect.DeepEqual(item.Labels, labels) {
+			item.Labels = copyStrings(labels)
 			flags |= LabelsChanged
 		}
 		item.LabelsKnown = true
@@ -181,6 +202,30 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	item.Repo = pi.Repo
 	item.Number = pi.Number
 	return flags
+}
+
+// deepFetchLiveView is the engine-write protection for the labels and closed
+// state of a live deep fetch: the same protectStatusClosed/protectLabels rule the
+// reconcile and probe applies use, observed at pi.DeepFetchStartedAt. A cache hit
+// (not live) or a fetch with no start stamp protects nothing. Status is not part
+// of a deep fetch, so its record is never confirmed or dropped here, and only the
+// closed and label records a live read can confirm are returned for dropping.
+func deepFetchLiveView(item *ItemState, pi gh.ProjectItem, grace time.Duration, now time.Time) shallowView {
+	var v shallowView
+	if !pi.DeepFetchLive || pi.DeepFetchStartedAt.IsZero() || len(item.EngineWriteAt) == 0 {
+		return v
+	}
+	sv := protectStatusClosed(item, item.Status, pi.IsClosed, pi.DeepFetchStartedAt, grace, now)
+	v.KeepClosed = sv.KeepClosed
+	if !pi.LabelsAbsent {
+		protectLabels(item, pi, pi.DeepFetchStartedAt, grace, &v)
+	}
+	for _, k := range sv.Drop {
+		if k != engineWriteStatusKey {
+			v.Drop = append(v.Drop, k)
+		}
+	}
+	return v
 }
 
 // applyLinkedPRFields syncs the LinkedPR fields from pi into item and returns

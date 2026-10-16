@@ -50,7 +50,7 @@ func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard) {
 				e.recordNoWorkNeededRetry(item)
 				continue
 			}
-			e.applyDeepFetched(repo, item)
+			e.applyDeepFetched(repo, &item)
 		}
 		e.settleNoWorkNeeded(board, item, stage)
 	}

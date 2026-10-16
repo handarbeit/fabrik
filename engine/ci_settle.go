@@ -180,7 +180,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// just-overwritten current value and silently lose the edge.
 		priorSnap, priorErr := e.store.Get(repo, item.Number)
 		priorInQueue := priorErr == nil && priorSnap.LinkedPR() != nil && priorSnap.LinkedPR().IsInMergeQueue
-		e.applyDeepFetched(repo, item)
+		e.applyDeepFetched(repo, &item)
 
 		// A concurrent clear/close/pause between the shallow board read above and
 		// this deep-fetch must not run stale state through the handler chain.

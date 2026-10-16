@@ -132,8 +132,8 @@ func TestFetchItemDetails_CacheHitKeepsMergeQueueMembership(t *testing.T) {
 	if !listing.LinkedPRIsInMergeQueue || !listing.LinkedPRIsMergeQueueEnabled || listing.LinkedPRMergeQueueEntry == nil {
 		t.Fatalf("working item lost merge-queue state on a cache hit: %+v", listing)
 	}
-	if listing.DeepFetchLive {
-		t.Error("a cache hit must not be marked DeepFetchLive")
+	if listing.DeepFetchLive || !listing.DeepFetchStartedAt.IsZero() {
+		t.Error("a cache hit must not be marked as a live read (DeepFetchLive / DeepFetchStartedAt)")
 	}
 	// The engine then applies the item as ItemDeepFetched.
 	st.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: listing})
