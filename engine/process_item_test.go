@@ -499,6 +499,7 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 		claude,
 		wm,
 	)
+	eng.SetPauseGuardUnreadFailOpenForTest(true) // unconfigured FetchLabels errors by design; see pause_guard_failclosed_test.go
 	eng.statusField = &gh.StatusField{
 		FieldID: "F1",
 		Options: map[string]string{
@@ -623,6 +624,7 @@ func TestProcessItem_StageAutoAdvanceOverride(t *testing.T) {
 		claude,
 		wm,
 	)
+	eng.SetPauseGuardUnreadFailOpenForTest(true) // unconfigured FetchLabels errors by design; see pause_guard_failclosed_test.go
 	eng.statusField = &gh.StatusField{
 		FieldID: "F1",
 		Options: map[string]string{"Plan": "OPT_2"},

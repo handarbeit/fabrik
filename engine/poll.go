@@ -2109,7 +2109,7 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 	// (copyDeepFieldsFromState). Without this, an operator removing
 	// fabrik:yolo/fabrik:cruise mid-run would not be observed until the next
 	// full board refresh. See refreshAutonomyLabels' own doc comment.
-	e.refreshAutonomyLabels(&item)
+	labelsLive := e.refreshAutonomyLabels(&item)
 
 	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
 	if !stageAutoAdvances(e.cfg.Yolo, item.Labels, stage) {
@@ -2140,12 +2140,22 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		if e.mergeDeferredForWorker(item) {
 			return
 		}
+		// Pause guard (#2341): the landing decision is taken only on labels that are
+		// live as of refreshAutonomyLabels; a failed refresh fails closed.
+		if e.refuseIfPausedOrUnread(item, labelsLive, "landing") {
+			return
+		}
 		_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
 		if mergeErr != nil {
 			e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
 		}
 		// Auto-merge enabled (or failed); Done advancement is handled by
 		// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
+		return
+	}
+	// Pause guard (#2341): item.Labels is live as of refreshAutonomyLabels above. Ahead
+	// of the feedback gate so a refusal records no feedback-pending cooldown.
+	if e.refuseIfPausedOrUnread(item, labelsLive, "advancing") {
 		return
 	}
 	// Feedback gate (#1953 R2, superseding the comments-only #1862 guard here):

@@ -114,7 +114,7 @@ func testEngineWithRepo(t *testing.T, client *mockGitHubClient, claude *mockClau
 	t.Helper()
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
-	return NewWithDeps(
+	eng := NewWithDeps(
 		Config{
 			Owner:         "owner",
 			Repo:          "repo",
@@ -127,6 +127,10 @@ func testEngineWithRepo(t *testing.T, client *mockGitHubClient, claude *mockClau
 		claude,
 		wm,
 	)
+	// Unconfigured FetchLabels errors by design (mocks_test.go); the pause guard's
+	// fail-closed rule (#2341) is covered by pause_guard_failclosed_test.go.
+	eng.SetPauseGuardUnreadFailOpenForTest(true)
+	return eng
 }
 
 func TestProcessComments_CreatesNewStageComment(t *testing.T) {

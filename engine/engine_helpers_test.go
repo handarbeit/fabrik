@@ -32,7 +32,7 @@ func testStages() []*stages.Stage {
 }
 func testEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 	t.Helper()
-	return NewWithDeps(
+	eng := NewWithDeps(
 		Config{
 			Owner:         "owner",
 			Repo:          "repo",
@@ -46,6 +46,11 @@ func testEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoke
 		claude,
 		NewWorktreeManager(t.TempDir()),
 	)
+	// Most tests leave FetchLabels unconfigured (an error, by design — mocks_test.go),
+	// which the pause guard (#2341) would read as "pause cannot be ruled out". Its
+	// fail-closed stance is covered by pause_guard_test.go with a fail-closed engine.
+	eng.SetPauseGuardUnreadFailOpenForTest(true)
+	return eng
 }
 
 // testEngineWithCache creates an Engine with a live CacheImpl wired as readClient.
