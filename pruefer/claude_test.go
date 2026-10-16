@@ -57,7 +57,7 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 			}
 		}
 	}
-	if err := checkReviewArgsScoped(args); err != nil {
+	if err := checkReviewArgsScoped(args, reviewplugin.DefaultRef); err != nil {
 		t.Errorf("built args are not scoped: %v", err)
 	}
 	clone, diff, err := resolveScopePaths(req.WorkDir, req.Staged.Dir)
@@ -137,18 +137,18 @@ func TestBuildReviewArgs_NoBareReadGrepGlob(t *testing.T) {
 // single widening of the real args.
 func TestCheckReviewArgsScoped_NonVacuous(t *testing.T) {
 	good := mustReviewArgs(t, reviewTestScope(t))
-	if err := checkReviewArgsScoped(good); err != nil {
+	if err := checkReviewArgsScoped(good, reviewplugin.DefaultRef); err != nil {
 		t.Fatalf("good args rejected: %v", err)
 	}
 	legacy := []string{"--permission-mode", "dontAsk"}
 	for _, r := range []string{"Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git blame:*)", "Bash(git grep:*)", "Bash(git status:*)"} {
 		legacy = append(legacy, "--allowedTools", r)
 	}
-	if checkReviewArgsScoped(legacy) == nil {
+	if checkReviewArgsScoped(legacy, reviewplugin.DefaultRef) == nil {
 		t.Error("checker accepted the legacy unscoped allowlist")
 	}
 	for _, widen := range []string{"Read", "Bash(sed -n *)", "Bash(find *)", "Bash(go test:*)", "Edit", "WebFetch", "Skill"} {
-		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen)) == nil {
+		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen), reviewplugin.DefaultRef) == nil {
 			t.Errorf("checker accepted widened allowlist with %q", widen)
 		}
 	}
@@ -160,7 +160,7 @@ func TestCheckReviewArgsScoped_NonVacuous(t *testing.T) {
 		}
 		noDeny = append(noDeny, good[i])
 	}
-	if checkReviewArgsScoped(noDeny) == nil {
+	if checkReviewArgsScoped(noDeny, reviewplugin.DefaultRef) == nil {
 		t.Error("checker accepted args without the find deny rule")
 	}
 }

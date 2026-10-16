@@ -23,6 +23,11 @@ type GitHubReviewer interface {
 	// widen its own review) is structural for every GitHubReviewer, not
 	// opt-in.
 	FetchFileAtRef(owner, repo, path, ref string) ([]byte, error)
+	// ResolveRefSHA backs the base-SHA pin (#2307): the base branch resolved
+	// once per review to a commit SHA that every base-ref read (config,
+	// guidance) then uses. Required unconditionally, not type-asserted, for the
+	// same structural reason as FetchFileAtRef.
+	ResolveRefSHA(owner, repo, branch string) (string, error)
 	// FetchCommit and FetchCommitsBehind back the pure merge-train
 	// catch-up skip (#2066): the head's parent shape, and whether a commit is
 	// on the PR's base branch. Required unconditionally, not type-asserted,
@@ -71,6 +76,9 @@ type ReviewOutcome struct {
 	Err      error      // non-nil on a genuine failure (clone, claude invocation, API call)
 	NumTurns int        // set iff Reviewed; turns used by the claude invocation
 	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
+	// FallbackFrom is the review_skill reference that was selected but replaced
+	// by the default skill (#2307); empty when the selected skill ran.
+	FallbackFrom string
 
 	// Conclusive is true iff this outcome is a settled verdict about the PR at
 	// its current head and inputs: it was reviewed, or skipped for a reason,
@@ -183,7 +191,23 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	// comment and adrs/1642-*.md); every field below this point reads the
 	// resulting effective cfg exactly where it read the operator's cfg
 	// before this issue.
-	repoYAML, prov := fetchRepoConfig(client, owner, repo, pr.BaseRef)
+	//
+	// #2307: the base branch is resolved to one commit SHA here, and every
+	// base-ref read of this review — config, guidance — uses it, so they can
+	// never come from different base commits and the SHA a fallback notice names
+	// is the one actually read. If the branch cannot be resolved the reads fall
+	// back to the branch name (the pre-#2307 behaviour) and the outcome is not
+	// conclusive.
+	baseRead := pr.BaseRef
+	baseSHA, shaErr := client.ResolveRefSHA(owner, repo, pr.BaseRef)
+	if shaErr != nil {
+		logf(pr.Number, "warn", "resolving base branch %s of %s/%s#%d to a commit: %v\n", pr.BaseRef, owner, repo, pr.Number, shaErr)
+		baseSHA = ""
+		degraded = true
+	} else {
+		baseRead = baseSHA
+	}
+	repoYAML, prov := fetchRepoConfig(client, owner, repo, baseRead)
 	cfg, warnings := applyRepoNarrowing(cfg, repoYAML)
 	logRepoConfigResolution(pr.Number, owner, repo, prov, warnings)
 	if prov.FetchFailed {
@@ -430,8 +454,19 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	// (never the head — C1), advisory prompt content exactly like the
 	// thread fetch above — a fetch failure or malformed file degrades to no
 	// repo guidance rather than failing the review (R4).
-	repoGuidance, repoGuidanceMode, guidanceProv := fetchRepoGuidance(client, owner, repo, pr.BaseRef)
+	repoGuidance, repoGuidanceMode, guidanceProv := fetchRepoGuidance(client, owner, repo, baseRead)
 	logReviewGuidanceResolution(pr.Number, owner, repo, guidanceProv)
+
+	// #2307: the skill that performs the review, and the plugins it may come
+	// from: the embedded pruefer-review plugin and the operator's own plugins,
+	// used in place. No code from the reviewed repo is ever loaded — a repo's
+	// review_skill can only name a skill of those plugins (repo-supplied
+	// plugins are deferred to #2366).
+	reviewSkill, skillNote := selectReviewSkill(cfg, repoYAML)
+	if skillNote != "" {
+		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, skillNote)
+	}
+	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
 
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
 	if err != nil {
@@ -472,7 +507,9 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		OmittedReviewedPaths: omittedReviewedPaths,
 		OperatorGuidance:     cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
-		Staged: staged,
+		Staged:      staged,
+		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
+		BaseSHA: baseSHA,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -499,6 +536,9 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
 	body := appendCoverage(buildReviewBody(summary, demoted), cov)
+	if result.FallbackFrom != "" {
+		body = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason) + "\n\n" + body
+	}
 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
@@ -513,7 +553,23 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
-	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD}
+	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD, FallbackFrom: result.FallbackFrom}
+}
+
+// fallbackNotice is the line a posted review carries when the selected review
+// skill was replaced by the default (#2307, R4): the requested reference, the
+// base SHA it was looked up at and the reason. The reference and reason can
+// come from a repo's files, so both are sanitised and rendered in code spans;
+// nothing in them can form markdown or a mention. The reason keeps quotes,
+// parentheses, commas and semicolons so the resolver's message and the plugin
+// notes read as written.
+func fallbackNotice(ref, baseSHA, reason string) string {
+	sha := sanitizeNoticeText(baseSHA)
+	if sha == "" {
+		sha = "unknown"
+	}
+	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (`%s`); this review ran `%s`.",
+		sanitizeNoticeText(ref), sha, sanitizeNoticeReason(reason), DefaultReviewSkill)
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary

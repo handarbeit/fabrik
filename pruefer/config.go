@@ -238,6 +238,23 @@ type Config struct {
 	// resolveGuidance in claude.go and adrs/1446-pruefer-review-guidance-skill.md.
 	ReviewGuidanceMode string `reload:"live"`
 
+	// Plugins (#2307, R1) lists local review-plugin directories, loaded for every
+	// review after the embedded pruefer-review plugin, in listed order. They are
+	// operator-supplied trusted paths used in place; a missing or unreadable one
+	// is reported once and skipped. A relative path resolves against the process
+	// working directory, as DefaultConfigPath does; a leading "~/" is expanded.
+	Plugins []string `reload:"live"`
+	// ReviewSkill (#2307, R3) is the qualified plugin:skill reference that
+	// performs the review. Empty means DefaultReviewSkill, pruefer-review:review.
+	// LoadConfig refuses a value that is not a plugin:skill pair.
+	ReviewSkill string `reload:"live"`
+	// RepoReviewSkill (#2307, R3) lets a repo's base-ref .pruefer/config.yaml
+	// override ReviewSkill with its own review_skill. False is the operator's
+	// veto: the repo's value is ignored and the log says so. The default
+	// LoadConfig applies is true; a hand-built Config (tests) is the zero value,
+	// false, which fails safe — the same convention as PatchSkip.
+	RepoReviewSkill bool `reload:"live"`
+
 	// KeepTranscripts is #2303's retention policy for a review invocation's
 	// raw stream-json transcript: KeepTranscriptsPartial (the default when
 	// empty) keeps it only when coverage is partial, KeepTranscriptsAll keeps
@@ -437,6 +454,11 @@ type yamlConfig struct {
 	// guidance override — see Config.ReviewGuidance's doc comment.
 	ReviewGuidance     string `yaml:"review_guidance"`
 	ReviewGuidanceMode string `yaml:"review_guidance_mode"`
+	// Plugins/ReviewSkill/RepoReviewSkill are #2307's review-plugin settings —
+	// see the Config fields of the same names.
+	Plugins         []string `yaml:"plugins"`
+	ReviewSkill     string   `yaml:"review_skill"`
+	RepoReviewSkill *bool    `yaml:"repo_review_skill"`
 	// KeepTranscripts/TranscriptDir are #2303's operator-only transcript
 	// retention settings — see Config.KeepTranscripts.
 	KeepTranscripts string `yaml:"keep_transcripts"`
@@ -518,6 +540,9 @@ type flagValues struct {
 	requestChangesThreshold string
 	reviewGuidance          string
 	reviewGuidanceMode      string
+	plugins                 string
+	reviewSkill             string
+	repoReviewSkill         bool
 	keepTranscripts         string
 	cadence                 string
 	appID                   int64
@@ -574,6 +599,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.StringVar(&fv.reviewGuidance, "review-guidance", "", "Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own .pruefer/skills/review/SKILL.md) per -review-guidance-mode")
+	fs.StringVar(&fv.plugins, "plugins", "", "Comma-separated local review-plugin directories, loaded for every review after pruefer-review (#2307)")
+	fs.StringVar(&fv.reviewSkill, "review-skill", "", "plugin:skill reference that performs the review (default pruefer-review:review)")
+	fs.BoolVar(&fv.repoReviewSkill, "repo-review-skill", true, "Let a repo's base-ref .pruefer/config.yaml override -review-skill with its own review_skill; false ignores the repo's value")
 	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
@@ -630,6 +658,8 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		ExcludedLabels:       yc.ExcludedLabels,
 		CatchUpMarkerAuthors: yc.CatchUpMarkerAuthors,
 		PatchSkip:            true,
+		Plugins:              yc.Plugins,
+		RepoReviewSkill:      true,
 		Cadence:              DefaultCadence,
 		RepoCadence:          yc.RepoCadence,
 		AppPrivateKeyPath:    DefaultPrivateKeyPath,
@@ -657,6 +687,12 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if yc.ReviewGuidanceMode != "" {
 		cfg.ReviewGuidanceMode = yc.ReviewGuidanceMode
+	}
+	if yc.ReviewSkill != "" {
+		cfg.ReviewSkill = yc.ReviewSkill
+	}
+	if yc.RepoReviewSkill != nil {
+		cfg.RepoReviewSkill = *yc.RepoReviewSkill
 	}
 	if yc.KeepTranscripts != "" {
 		cfg.KeepTranscripts = yc.KeepTranscripts
@@ -813,6 +849,15 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	if explicit["review-guidance-mode"] {
 		cfg.ReviewGuidanceMode = fv.reviewGuidanceMode
 	}
+	if explicit["plugins"] {
+		cfg.Plugins = splitCSV(fv.plugins)
+	}
+	if explicit["review-skill"] {
+		cfg.ReviewSkill = fv.reviewSkill
+	}
+	if explicit["repo-review-skill"] {
+		cfg.RepoReviewSkill = fv.repoReviewSkill
+	}
 	if explicit["keep-transcripts"] {
 		cfg.KeepTranscripts = fv.keepTranscripts
 	}
@@ -893,6 +938,13 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	// reviewguidance.go's normalizeGuidanceMode).
 	if cfg.ReviewGuidanceMode != "" && cfg.ReviewGuidanceMode != GuidanceModeAppend && cfg.ReviewGuidanceMode != GuidanceModeReplace {
 		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
+	}
+
+	// ReviewSkill is operator-authored config, so a malformed reference fails
+	// loud at startup. (A repo's review_skill never does: it falls back
+	// visibly at review time.)
+	if cfg.ReviewSkill != "" && !wellFormedSkillRef(cfg.ReviewSkill) {
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("review_skill: %q is not a plugin:skill reference (for example %q)", cfg.ReviewSkill, DefaultReviewSkill)
 	}
 
 	switch cfg.KeepTranscripts {
@@ -980,6 +1032,23 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_REVIEW_GUIDANCE_MODE"); v != "" {
 		cfg.ReviewGuidanceMode = v
+	}
+	if v := os.Getenv("PRUEFER_PLUGINS"); v != "" {
+		cfg.Plugins = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_REVIEW_SKILL"); v != "" {
+		cfg.ReviewSkill = v
+	}
+	if v := os.Getenv("PRUEFER_REPO_REVIEW_SKILL"); v != "" {
+		// This is the operator's veto over repo-chosen review code, so an
+		// unparseable value (a typo such as "flase") fails closed rather than
+		// leaving repos free to pick their own skill unnoticed.
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.RepoReviewSkill = b
+		} else {
+			cfg.RepoReviewSkill = false
+			logf(0, "config", "PRUEFER_REPO_REVIEW_SKILL=%q is not a boolean; treating it as false (a repo's review_skill is ignored)\n", v)
+		}
 	}
 	if v := os.Getenv("PRUEFER_KEEP_TRANSCRIPTS"); v != "" {
 		cfg.KeepTranscripts = v

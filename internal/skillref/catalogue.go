@@ -15,9 +15,10 @@ const ManifestRel = ".claude-plugin/plugin.json"
 // Plugin is one plugin directory handed to workers via --plugin-dir, with the
 // skills Claude Code would register for it (ADR 2137).
 type Plugin struct {
-	Name   string            // manifest name, else the directory basename
-	Dir    string            // absolute plugin directory
-	Skills map[string]string // skill name -> SKILL.md path
+	Name    string            // manifest name, else the directory basename
+	Version string            // manifest version; empty when the manifest has none
+	Dir     string            // absolute plugin directory
+	Skills  map[string]string // skill name -> SKILL.md path
 }
 
 // Catalogue is an immutable snapshot of the loaded plugins, in load order
@@ -78,8 +79,9 @@ func (c *Catalogue) Describe() string {
 func Discover(dir string) Plugin {
 	p := Plugin{Name: filepath.Base(dir), Dir: dir, Skills: map[string]string{}}
 	var manifest struct {
-		Name   string          `json:"name"`
-		Skills json.RawMessage `json:"skills"`
+		Name    string          `json:"name"`
+		Version string          `json:"version"`
+		Skills  json.RawMessage `json:"skills"`
 	}
 	hasSkillsKey := false
 	if data, err := os.ReadFile(filepath.Join(dir, ManifestRel)); err == nil {
@@ -87,6 +89,7 @@ func Discover(dir string) Plugin {
 			if manifest.Name != "" {
 				p.Name = manifest.Name
 			}
+			p.Version = manifest.Version
 			hasSkillsKey = len(manifest.Skills) > 0 && string(manifest.Skills) != "null"
 		}
 	}

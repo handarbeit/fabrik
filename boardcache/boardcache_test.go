@@ -1449,6 +1449,36 @@ func TestUpdateItemStatusIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestApplyStatusRefreshAppliesReadWithoutBumpOrEngineWrite(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	c.ApplyStatusRefresh(key, "Plan", time.Now())
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("want Status %q, got %q", "Plan", s.Status)
+	}
+	if len(s.EngineWriteAt) != 0 {
+		t.Errorf("a refresh must not record an engine write: %v", s.EngineWriteAt)
+	}
+	c.mu.RLock()
+	_, bumped := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if bumped {
+		t.Error("a refresh is a read and must not bump localDeltaAt")
+	}
+}
+
+func TestApplyStatusRefreshNoopForUnknownAndInvalidKey(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyStatusRefresh("nonexistent/repo#999", "Done", time.Now())
+	c.ApplyStatusRefresh("not-a-key", "Done", time.Now())
+	if _, err := c.store.Get("nonexistent/repo", 999); err == nil {
+		t.Error("a refresh must not create a phantom Store entry")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ApplyStatusBatch tests
 // ---------------------------------------------------------------------------

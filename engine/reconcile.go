@@ -130,6 +130,9 @@ func transitionMgrHealthState(mgr eventIngestionManager, newState WebhookHealthS
 // bypassed once the cache holds an itemID (the fast path is checked first) and
 // cleared on every projects_v2_item "created" event.
 //
+// The Status is applied as a read (applyLayer1Status, #2347), never as an engine
+// write.
+//
 // All errors are best-effort: logged as warnings and never returned.
 func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cache *boardcache.CacheImpl) {
 	if eventType == "projects_v2_item" {
@@ -185,6 +188,7 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 		if e.layer1OffBoardHit(offKey) {
 			return
 		}
+		fetchedAt := time.Now()
 		fetchedItemID, fetchedStatus, err := e.client.LookupIssueProjectItem(projectID, ev.Repository.FullName, ev.Issue.Number)
 		if err != nil {
 			e.logf(ev.Issue.Number, "warn", "layer1 fallback lookup failed for %s#%d: %v\n", ev.Repository.FullName, ev.Issue.Number, err)
@@ -198,15 +202,31 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 		}
 		e.layer1OffBoardClear(offKey)
 		cache.RegisterItemID(key, fetchedItemID)
-		cache.UpdateItemStatus(key, fetchedStatus)
+		e.applyLayer1Status(cache, key, fetchedStatus, fetchedAt)
 		return
 	}
+	fetchedAt := time.Now()
 	status, err := e.client.FetchProjectItemStatus(itemID)
 	if err != nil {
 		e.logf(ev.Issue.Number, "warn", "layer1 status fetch failed for %s: %v\n", itemID, err)
 		return
 	}
-	cache.UpdateItemStatus(key, status)
+	e.applyLayer1Status(cache, key, status, fetchedAt)
+}
+
+// applyLayer1Status applies a Status read by the Layer 1 refresh. The read is a
+// GitHub observation, not an engine move (#2347): it goes in as a read-sourced
+// mutation carrying fetchedAt — the wall-clock instant taken before the GitHub
+// call, since the Store stamps with time.Now() and e.now()/SetClock are not
+// comparable to those stamps (ADR 2178) — so the engine-write protection and
+// the stale-read drop apply, no engine-write record is created and the change is
+// not attributed to Fabrik. See ADR 2347.
+func (e *Engine) applyLayer1Status(cache *boardcache.CacheImpl, key, status string, fetchedAt time.Time) {
+	if e.layer1AsEngineWrite.Load() {
+		cache.UpdateItemStatus(key, status)
+		return
+	}
+	cache.ApplyStatusRefresh(key, status, fetchedAt)
 }
 
 // rawPresent reports whether a JSON value was present and meaningful: false

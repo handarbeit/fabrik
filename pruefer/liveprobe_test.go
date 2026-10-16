@@ -268,3 +268,83 @@ func TestLiveProbeStagedCoverage(t *testing.T) {
 		}
 	})
 }
+
+// TestLiveProbePlugins (#2307) measures, against the installed claude and the
+// production argument and environment builders, the three CLI behaviours the
+// plugin feature rests on and fakes cannot prove: (a) a plugin passed with
+// --plugin-dir loads its hooks and MCP servers even with --setting-sources "",
+// (b) the processes it starts hold none of the daemon's credentials, and (c) a
+// plugin agent is reachable through Task. Record the CLI version and the
+// observed values in adrs/2307.
+func TestLiveProbePlugins(t *testing.T) {
+	if os.Getenv("PRUEFER_LIVE_PROBE") != "1" {
+		t.Skip("set PRUEFER_LIVE_PROBE=1 to run the live probe")
+	}
+	root := t.TempDir()
+	plug := filepath.Join(root, "probeplug")
+	out := filepath.Join(root, "out")
+	for _, d := range []string{filepath.Join(plug, ".claude-plugin"), filepath.Join(plug, "hooks"), filepath.Join(plug, "mcp"), filepath.Join(plug, "agents"), filepath.Join(plug, "skills", "probe"), out} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(p, c string, mode os.FileMode) {
+		if err := os.WriteFile(p, []byte(c), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := "#!/bin/sh\nenv > \"$1\"\n"
+	write(filepath.Join(plug, ".claude-plugin", "plugin.json"), `{"name":"probeplug","version":"0.0.1"}`, 0o644)
+	write(filepath.Join(plug, "hooks", "record.sh"), record, 0o755)
+	write(filepath.Join(plug, "hooks", "hooks.json"),
+		fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/record.sh %s"}]}]}}`, filepath.Join(out, "hook.env")), 0o644)
+	write(filepath.Join(plug, "mcp", "server.sh"), record, 0o755)
+	write(filepath.Join(plug, ".mcp.json"),
+		fmt.Sprintf(`{"mcpServers":{"probe":{"command":"${CLAUDE_PLUGIN_ROOT}/mcp/server.sh","args":["%s"]}}}`, filepath.Join(out, "mcp.env")), 0o644)
+	write(filepath.Join(plug, "agents", "probe-agent.md"), "---\nname: probe-agent\ndescription: Replies with the single word AGENT-RAN.\ntools: Read\n---\nReply with exactly AGENT-RAN.\n", 0o644)
+	write(filepath.Join(plug, "skills", "probe", "SKILL.md"), "---\nname: probe\ndescription: Probe skill\n---\nSay SKILL-RAN.\n", 0o644)
+
+	for k, v := range daemonSecrets {
+		t.Setenv(k, v)
+	}
+	clone := filepath.Join(root, "clone")
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, PluginDirs: []string{plug}, SkillRef: "probeplug:probe"}
+	po := runProbe(t, req, "First invoke the probeplug:probe skill with the Skill tool. Then use the Task tool exactly once with subagent_type probeplug:probe-agent and prompt \"go\". Then reply with only the word DONE.")
+	t.Logf("calls=%v result=%q", po.Calls, po.Result)
+
+	if po.Calls["Skill"] == 0 {
+		t.Errorf("the plugin skill was never invoked")
+	}
+	if po.Calls["Task"] == 0 && po.Calls["Agent"] == 0 {
+		t.Errorf("the plugin agent was never reached through Task")
+	}
+	if !strings.Contains(po.Raw, "AGENT-RAN") {
+		t.Errorf("the plugin agent's reply is not in the transcript")
+	}
+	for _, which := range []string{"hook", "mcp"} {
+		b, err := os.ReadFile(filepath.Join(out, which+".env"))
+		if err != nil {
+			t.Errorf("the plugin's %s never started under --setting-sources \"\": %v", which, err)
+			continue
+		}
+		env := strings.Split(strings.TrimSpace(string(b)), "\n")
+		for name := range daemonSecrets {
+			if envHas(env, name) {
+				t.Errorf("the plugin %s inherited %s", which, name)
+			}
+		}
+		// The CLI adds its own variables (CLAUDE_PLUGIN_ROOT, CLAUDECODE, ...)
+		// for plugin children, so the allowlist cannot be applied as is; what
+		// must hold is that no credential or daemon-configuration name is there.
+		for _, kv := range env {
+			for _, p := range reviewEnvNeverPassthrough {
+				if strings.HasPrefix(strings.ToUpper(kv), p) {
+					t.Errorf("the plugin %s environment holds %s", which, strings.SplitN(kv, "=", 2)[0])
+				}
+			}
+		}
+	}
+}

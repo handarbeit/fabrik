@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -31,6 +32,11 @@ var recognizedRepoConfigKeys = map[string]bool{
 	"excluded_authors":          true,
 	"max_diff_bytes":            true,
 	"request_changes_threshold": true,
+	// review_skill (#2307) is the one key that does not narrow: it selects the
+	// skill that performs the review. It is honoured only while the operator
+	// has not set repo_review_skill: false (selectReviewSkill), and a value
+	// that does not resolve degrades to the default review visibly.
+	"review_skill": true,
 }
 
 // yamlRepoConfig is the schema a repo-resident .pruefer/config.yaml is
@@ -56,6 +62,7 @@ type yamlRepoConfig struct {
 	ExcludedAuthors         []string `yaml:"excluded_authors"`
 	MaxDiffBytes            *int64   `yaml:"max_diff_bytes"`
 	RequestChangesThreshold *string  `yaml:"request_changes_threshold"`
+	ReviewSkill             *string  `yaml:"review_skill"`
 }
 
 // RepoConfigProvenance records what happened when resolving a repo-resident
@@ -302,4 +309,26 @@ func logRepoConfigResolution(prNumber int, owner, repo string, prov RepoConfigPr
 	for _, w := range warnings {
 		logf(prNumber, "warn", "%s/%s repo config at %s: %s: %s\n", owner, repo, prov.Ref, w.Field, w.Detail)
 	}
+}
+
+// selectReviewSkill picks the qualified plugin:skill reference a review runs
+// (#2307, R3): the operator's review_skill (default pruefer-review:review),
+// unless the repo's base-ref config names its own and the operator has not
+// vetoed that with repo_review_skill: false. note is a log line explaining a
+// repo value that was ignored, empty otherwise. A malformed repo value is
+// returned as is: it will not resolve and takes the visible fallback.
+// Nothing else the repo file says reaches the selection.
+func selectReviewSkill(cfg Config, rc yamlRepoConfig) (ref, note string) {
+	ref = cfg.ReviewSkill
+	if ref == "" {
+		ref = DefaultReviewSkill
+	}
+	if rc.ReviewSkill == nil || strings.TrimSpace(*rc.ReviewSkill) == "" {
+		return ref, ""
+	}
+	repoRef := strings.TrimSpace(*rc.ReviewSkill)
+	if !cfg.RepoReviewSkill {
+		return ref, fmt.Sprintf("repo review_skill %q ignored: repo_review_skill is false; using %s", sanitizeNoticeText(repoRef), ref)
+	}
+	return repoRef, ""
 }
