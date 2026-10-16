@@ -74,9 +74,17 @@ func TestLandingHeadPin_AutoMerge_PushAfterGate_DefersThenNewHeadLands(t *testin
 	if first := calls[0]; !errors.Is(first.Err, gh.ErrHeadMoved) || first.Args.SHA != lp.oldHead {
 		t.Errorf("first enable = (err %v, pinned %s), want ErrHeadMoved pinned to the judged head %s", first.Err, first.Args.SHA, lp.oldHead)
 	}
-	last := calls[len(calls)-1]
-	if last.Err != nil || last.Args.SHA != lp.newHead {
-		t.Errorf("last enable = (err %v, pinned %s), want success pinned to the new head %s", last.Err, last.Args.SHA, lp.newHead)
+	// The post-landing SHA-invalidation backstop may re-run Validate on the new
+	// head and enable again later (a further head), so the assertion is that some
+	// enable succeeded pinned to the new head — never that it was the last one.
+	pinnedNew := false
+	for _, c := range calls {
+		if c.Err == nil && c.Args.SHA == lp.newHead {
+			pinnedNew = true
+		}
+	}
+	if !pinnedNew {
+		t.Errorf("no successful enable pinned to the new head %s", lp.newHead)
 	}
 	for _, c := range calls {
 		if c.Err == nil && c.Args.SHA == lp.oldHead {

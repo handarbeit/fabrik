@@ -125,7 +125,7 @@ func TestPauseMidValidate_BlocksLanding_ThenLandsAfterPauseLifted(t *testing.T) 
 	if !linkedPRMerged(env, num) {
 		t.Fatal("the item closed but its PR is not merged")
 	}
-	if n := len(env.Sim.Log().ByMethod("MergePR")); n != 1 {
+	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 1 {
 		t.Errorf("MergePR called %d time(s) after the pause was lifted, want 1", n)
 	}
 }
@@ -160,7 +160,7 @@ func TestPauseMidValidate_NonVacuity(t *testing.T) {
 	if !linkedPRMerged(env, num) {
 		t.Fatal("with the pause guard disabled the paused item should have been merged")
 	}
-	if n := len(env.Sim.Log().ByMethod("MergePR")); n != 1 {
+	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 1 {
 		t.Errorf("MergePR called %d time(s), want 1", n)
 	}
 }

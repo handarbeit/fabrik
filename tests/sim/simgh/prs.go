@@ -85,17 +85,17 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 	}
 
 	return &gh.PRDetails{
-		Number:              snap.number,
-		Title:               snap.title,
-		State:               stateWithHeadGone(snap.state, snap.merged, headGone),
-		Merged:              snap.merged,
-		Draft:               snap.draft,
-		HeadSHA:             headSHA,
-		HeadRefName:         snap.head,
-		BaseRef:             snap.base,
-		Body:                snap.body,
-		MergeableState:      "", // omitted by the list endpoint — see doc comment
-		AutoMergeEnabled:    snap.autoMergeEnabled,
+		Number:           snap.number,
+		Title:            snap.title,
+		State:            stateWithHeadGone(snap.state, snap.merged, headGone),
+		Merged:           snap.merged,
+		Draft:            snap.draft,
+		HeadSHA:          headSHA,
+		HeadRefName:      snap.head,
+		BaseRef:          snap.base,
+		Body:             snap.body,
+		MergeableState:   "", // omitted by the list endpoint — see doc comment
+		AutoMergeEnabled: snap.autoMergeEnabled,
 		// Production reports this only on a boardcache hit (GraphQL-populated); the
 		// engine's landing decision reads it that way (#2342), so the model reports
 		// the repo flag rather than the REST fallback's false.
