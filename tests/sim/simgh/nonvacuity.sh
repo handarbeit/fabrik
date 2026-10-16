@@ -677,6 +677,10 @@ mutate "a fault registered with a nil error is accepted" \
   'TestRegisteringAFaultWithANilErrorPanics' \
   'fault.go::s{\tif r\.err == nil \{}{\tif false \{}'
 
+mutate "a BeforeCall hook never runs" \
+  'TestBeforeCallRunsBeforeTheCallAndTheFault' \
+  'fault.go::s{\tfor _, h := range hooks \{\n\t\th\(args\)\n\t\}\n}{}'
+
 # --- R4: mutation log (#1457) -----------------------------------------------
 
 mutate "the log records a model failure as a success" \

@@ -20,12 +20,14 @@ func statusAtGitHub(t *testing.T, s *Store) time.Time {
 	return getItem(t, s, testRepo, 1).StatusAtGitHub
 }
 
+// A deep fetch writes Status only as a first population (#2344); a move of an
+// existing item arrives through a listing path, so ShallowBoardItemUpdated stands in.
 func TestStatusAtGitHubStampedByProjectItem(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	pi := testProjectItem(testRepo, 1)
 	pi.Status = "Review"
 	pi.StatusAtGitHub = gitHubMoveT
-	if _, _, err := s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi}); err != nil {
+	if _, _, err := s.Apply(ShallowBoardItemUpdated{Repo: testRepo, Number: 1, Item: pi}); err != nil {
 		t.Fatal(err)
 	}
 	if got := statusAtGitHub(t, s); !got.Equal(gitHubMoveT) {
@@ -86,7 +88,7 @@ func TestStatusAtGitHubClearedByLocalStatusUpdated(t *testing.T) {
 	pi := testProjectItem(testRepo, 1)
 	pi.Status = "Review"
 	pi.StatusAtGitHub = gitHubMoveT
-	if _, _, err := s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi}); err != nil {
+	if _, _, err := s.Apply(ShallowBoardItemUpdated{Repo: testRepo, Number: 1, Item: pi}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Queued"}); err != nil {
