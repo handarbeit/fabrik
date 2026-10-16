@@ -35,6 +35,8 @@ func TestValidateReviewToolRule_RefusesTestRunners(t *testing.T) {
 		"Bash(pytest:*)", "Bash(/usr/bin/pytest *)", "Bash(cargo test:*)", "Bash(cargo nextest run)",
 		"Bash(make test)", "Bash(make check:*)", "Bash(jest:*)", "Bash(vitest *)",
 		"Bash(mocha)", "Bash(rspec)", "Bash(npm run-script test)", "Bash(npm it)", "Bash(yarn run test)", "Bash(tox)", "Bash(dotnet test)", "Bash(mvn -q test)",
+		// Versioned launcher binaries are still the launcher.
+		"Bash(go1.22 test:*)", "Bash(/usr/local/go/bin/go1.22 -count=1 test *)", "Bash(npm9 test)", "Bash(cargo1 test)",
 	} {
 		_, err := validateReviewToolRule(in)
 		if err == nil {
@@ -65,7 +67,7 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		"Bash(go run:*)", "Bash(go generate:*)", "Bash(cargo run:*)", "Bash(pnpm dlx foo)", "Bash(bun x foo)",
 		"Bash(npm --prefix web run lint)", "Bash(/usr/bin/npm run lint)",
 		// make and friends run recipes from the reviewed tree, whatever the target.
-		"Bash(make lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
+		"Bash(make lint)", "Bash(make4 lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
 		// Versioned interpreters match their unversioned name.
 		"Bash(python3.12 -m foo)", "Bash(node20 x.js)", "Bash(ruby3.2 x.rb)", "Bash(/usr/bin/perl5 x)",
 	} {

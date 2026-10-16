@@ -166,14 +166,16 @@ func validateReviewToolRule(raw string) (string, error) {
 	}
 	norm := append([]string{exe}, words[1:]...)
 	for _, runner := range reviewToolsTestRunners {
-		if runner[0] != exe {
+		// bare as well as exe: a versioned binary (go1.22, npm9) is still the
+		// launcher, so respelling "go test" with a version must not bypass the list.
+		if runner[0] != exe && runner[0] != bare {
 			continue
 		}
 		if isSubsequence(runner[1:], norm[1:]) {
 			return bad("test runners are not permitted (%q): running tests is the worker's job, not Pruefer's", strings.Join(runner, " "))
 		}
 	}
-	if slices.Contains(reviewToolsRepoCodeRunners, exe) {
+	if slices.Contains(reviewToolsRepoCodeRunners, exe) || slices.Contains(reviewToolsRepoCodeRunners, bare) {
 		return bad("%q runs recipes defined in the reviewed tree and is not permitted", exe)
 	}
 	if slices.Contains(reviewToolsLaunchers, exe) || slices.Contains(reviewToolsLaunchers, bare) {
