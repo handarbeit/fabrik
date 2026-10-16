@@ -61,6 +61,11 @@ func TestBuildReviewPrompt_StagedRequiresOpeningEveryEntry(t *testing.T) {
 		"Read can silently stop before the end of a file",
 		"open those with `cat` only",
 		"if INDEX.txt itself is cut off",
+		"one entry per Read",
+		"add up to at most " + stagedBatchLimitText(),
+		"A `<persisted-output>` result means you did not see the content of any entry in that command",
+		"open those entries again in smaller pieces",
+		"outside the paths you may read",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q:\n%s", want, got)
