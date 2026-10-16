@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -1559,11 +1558,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	if output != "" {
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 			e.logf(item.Number, "edit", "updating issue body from stage output\n")
-			// no write-through: excluded — issue body is not read from cache for dispatch decisions
-			if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
+			// Same shared write as the comment-review path (#2346): Store write-through,
+			// baseline advance and echo in one step.
+			if err := e.updateIssueBody(item, owner, repo, updatedBody); err != nil {
 				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-			} else if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// Persist the same canonical body as specs/<N>-<slug>/spec.md (ADR 2034).
 			// Runs on every round that updates the body — including a blocked one —

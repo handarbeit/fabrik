@@ -384,7 +384,7 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	balanced := balanceFences(currentBody)
 	healedBody := closingLine + "\n\n" + balanced
 
-	// no write-through: excluded — issue body is not read from cache for dispatch decisions
+	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
 	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))

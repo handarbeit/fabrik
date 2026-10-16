@@ -405,6 +405,8 @@ func annotateLifecycleChange(change *Change, m Mutation, before, after ItemState
 		change.Origin, change.Sender = OriginWebhook, v.Sender
 	case LocalIssueClosed:
 		change.Origin = OriginEngine
+	case LocalIssueBodyUpdated:
+		change.Origin = OriginEngine
 	}
 }
 
@@ -472,6 +474,10 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case IssueEdited:
 		item.Title = v.Title
+		item.Body = v.Body
+		return TitleBodyChanged
+
+	case LocalIssueBodyUpdated:
 		item.Body = v.Body
 		return TitleBodyChanged
 

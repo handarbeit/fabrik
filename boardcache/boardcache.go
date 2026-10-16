@@ -1320,6 +1320,17 @@ func (c *CacheImpl) ApplyIssueClosed(key string) {
 	})
 }
 
+// ApplyIssueBodyUpdated sets the cached body of the item identified by key to
+// body (#2346). The body feeds .fabrik-context/issue.md, so an engine body write
+// must reach the Store in the same step that advances the freshness baseline.
+// No-op when the key is not in the cache or the body is unchanged. Safe for
+// concurrent use.
+func (c *CacheImpl) ApplyIssueBodyUpdated(key, body string) {
+	c.applyKeyedMutation(key, "ApplyIssueBodyUpdated", func(repo string, number int) itemstate.Mutation {
+		return itemstate.LocalIssueBodyUpdated{Repo: repo, Number: number, Body: body}
+	})
+}
+
 // ApplyCommentAdded appends comment to the cached comment list for the item
 // identified by key. No-op when the key is not in the cache.
 // Safe for concurrent use.
