@@ -206,8 +206,29 @@ func validateRepoPluginEntries(entries []gh.TreeEntry) (map[string][]pluginEntry
 		groups[dir] = append(groups[dir], e)
 	}
 
+	// Plugin directories that differ only in case would share one directory on a
+	// case-insensitive filesystem and be written into each other, producing a
+	// hybrid plugin that matches neither source. Neither is loaded.
+	byLower := map[string][]string{}
+	for _, dir := range sortedKeys(groups) {
+		byLower[strings.ToLower(dir)] = append(byLower[strings.ToLower(dir)], dir)
+	}
+	collided := map[string]bool{}
+	for _, dirs := range byLower {
+		if len(dirs) < 2 {
+			continue
+		}
+		for _, d := range dirs {
+			collided[d] = true
+			skipped = append(skipped, repoPluginSkip{d, fmt.Sprintf("plugin directories %s differ only in case", strings.Join(dirs, " and "))})
+		}
+	}
+
 	out := map[string][]pluginEntry{}
 	for _, dir := range sortedKeys(groups) {
+		if collided[dir] {
+			continue
+		}
 		reason, files := validateOnePlugin(dir, groups[dir])
 		if reason != "" {
 			skipped = append(skipped, repoPluginSkip{dir, reason})

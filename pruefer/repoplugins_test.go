@@ -238,3 +238,26 @@ func TestValidateRepoPluginEntries_ReportsTopLevelSymlinkAndSubmodule(t *testing
 		t.Errorf("a plain top-level file or tree entry must stay unreported: %+v", skipped)
 	}
 }
+
+// Two plugin directories that differ only in case would be written into one
+// directory on a case-insensitive filesystem; neither may load (FR-018).
+func TestValidateRepoPluginEntries_RefusesCaseCollidingPluginDirs(t *testing.T) {
+	entries := []gh.TreeEntry{
+		blobEntry("Mine/.claude-plugin/plugin.json", 3),
+		blobEntry("mine/.claude-plugin/plugin.json", 3),
+		blobEntry("other/.claude-plugin/plugin.json", 3),
+	}
+	byDir, skipped := validateRepoPluginEntries(entries)
+	if _, ok := byDir["Mine"]; ok {
+		t.Error("Mine loaded despite the case collision")
+	}
+	if _, ok := byDir["mine"]; ok {
+		t.Error("mine loaded despite the case collision")
+	}
+	if len(byDir["other"]) != 1 {
+		t.Errorf("unrelated plugin affected: %v", byDir)
+	}
+	if len(skipped) != 2 || !strings.Contains(skipped[0].Reason, "differ only in case") {
+		t.Errorf("collision not reported for both: %+v", skipped)
+	}
+}
