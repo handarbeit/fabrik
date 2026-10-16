@@ -683,6 +683,21 @@ func TestCacheDivergence_ProbeAndDeepFetchAreNamedAndColumnReverts(t *testing.T)
 	}
 }
 
+// A Layer 1 refresh is a GitHub read, so a refresh that disagrees with a recorded
+// engine column write is a divergence named "status-refresh" (#2347).
+func TestCacheDivergence_StatusRefreshIsNamed(t *testing.T) {
+	e, sink, clk, _ := anomalyEngine(t)
+	e.seedAPIItem(t, 1, "Implement")
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Review"})
+	clk.set(clk.Now().Add(time.Minute))
+	e.store.Apply(itemstate.StatusRefreshed{Repo: "owner/repo", Number: 1, Status: "Implement"})
+	div := ofType(drain(sink, 300*time.Millisecond), channelevents.CacheDivergence)
+	if len(div) != 1 || div[0].Meta["path"] != "status-refresh" || div[0].Meta["what"] != "column" ||
+		div[0].Meta["written"] != "Review" || div[0].Meta["observed"] != "Implement" {
+		t.Fatalf("column divergence by refresh: %+v", div)
+	}
+}
+
 // R3: every event built from the suspect change is unverified, not only the raw
 // label event: the label-derived blocker-cleared and a column-changed too.
 func TestCacheDivergence_MarksDerivedAndColumnEvents(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -460,4 +461,112 @@ func TestLayer1OffBoardConcurrent(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// layer1FastPathCache bootstraps issue #1 with an itemID and status "Plan".
+func layer1FastPathCache(eng *Engine, client *mockGitHubClient) *boardcache.CacheImpl {
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Plan"},
+		},
+	})
+	return cache
+}
+
+// staleReadClient returns a client whose FetchProjectItemStatus blocks inside the
+// read until released, then answers with the pre-move value.
+func staleReadClient(started, release chan struct{}, stale string) *mockGitHubClient {
+	return &mockGitHubClient{
+		fetchProjectItemStatusFn: func(string) (string, error) {
+			close(started)
+			<-release
+			return stale, nil
+		},
+	}
+}
+
+// A refresh read taken before an engine move must not revert the move (#2347).
+func TestLayer1RefreshReadBeforeEngineMoveDoesNotRevert(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		started, release := make(chan struct{}), make(chan struct{})
+		client := staleReadClient(started, release, "Plan")
+		eng := testEngine(t, client, &mockClaudeInvoker{})
+		eng.SetLayer1AsEngineWriteForTest(legacy)
+		cache := layer1FastPathCache(eng, client)
+		key := boardcache.ItemKey("owner/repo", 1)
+
+		done := make(chan struct{})
+		go func() {
+			eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache)
+			close(done)
+		}()
+		<-started
+		time.Sleep(2 * time.Millisecond)
+		cache.UpdateItemStatus(key, "Implement") // the engine's own move, after the read began
+		close(release)
+		<-done
+
+		snap, err := eng.store.Get("owner/repo", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := snap.State().Status
+		if !legacy && got != "Implement" {
+			t.Errorf("read-sourced refresh: Status = %q, want the engine-moved Implement", got)
+		}
+		// Non-vacuity: the pre-#2347 path reverts the move.
+		if legacy && got != "Plan" {
+			t.Errorf("legacy engine-write refresh: Status = %q, want the reverted Plan", got)
+		}
+	}
+}
+
+// A refresh never creates an engine-write record, never passes a zero fetch time
+// and is not attributed to the engine; an unchanged refresh changes nothing.
+func TestLayer1RefreshIsNotAnEngineWrite(t *testing.T) {
+	status := "Implement"
+	client := &mockGitHubClient{
+		fetchProjectItemStatusFn: func(string) (string, error) { return status, nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1FastPathCache(eng, client)
+
+	var mu sync.Mutex
+	var changes []itemstate.Change
+	unsub := eng.store.Subscribe(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) {
+		mu.Lock()
+		changes = append(changes, c)
+		mu.Unlock()
+	}))
+	defer unsub()
+	time.Sleep(2 * time.Millisecond) // let the bootstrap's observation time pass
+
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache) // changed
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache) // unchanged
+
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := snap.State()
+	if st.Status != "Implement" {
+		t.Fatalf("Status = %q, want Implement", st.Status)
+	}
+	if len(st.EngineWriteAt) != 0 {
+		t.Errorf("EngineWriteAt = %v, want none", st.EngineWriteAt)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(changes) != 1 {
+		t.Fatalf("observed %d changes, want exactly 1 (the unchanged refresh applies nothing): %+v", len(changes), changes)
+	}
+	c := changes[0]
+	if c.EngineStatusWrite || c.Origin == itemstate.OriginEngine || c.Path != itemstate.PathRefresh {
+		t.Errorf("change marked as an engine write: %+v", c)
+	}
+	if a := eng.labelAttribute(c); a.Actor == "fabrik" {
+		t.Errorf("refresh-driven change attributed to fabrik: %+v", a)
+	}
 }
