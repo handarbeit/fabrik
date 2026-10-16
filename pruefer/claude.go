@@ -371,6 +371,11 @@ type ReviewResult struct {
 	// including a first one whose skill did not run.
 	FallbackFrom   string
 	FallbackReason string
+	// PluginsStripped names the operator plugins that were loaded without
+	// their hooks and MCP servers because the PR's author has no write access
+	// (#2308, R3). Empty when nothing was removed, including when no operator
+	// plugin declared any. ReviewPR turns it into the posted read-only notice.
+	PluginsStripped []string
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -928,7 +933,16 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, fmt.Errorf("preparing review plugin: %w", err)
 	}
 	defer rp.Close()
-	set := buildPluginSet(rp, req.OperatorPluginDirs)
+	operatorDirs := req.OperatorPluginDirs
+	var stripped []string
+	if req.Grant.StripPluginHooks && len(operatorDirs) > 0 {
+		// An outside author's review loads operator plugins from copies with
+		// their hooks and MCP servers removed. The copies live under the
+		// per-review plugin root, so they go away with it, and the fallback
+		// re-run below reuses them.
+		operatorDirs, stripped = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
+	}
+	set := buildPluginSet(rp, operatorDirs)
 	for _, p := range set.Plugins {
 		logf(req.PRNumber, "claude", "%s\n", p.logLine())
 	}
@@ -948,6 +962,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		res, err := r.runReview(ctx, req, set, ref)
 		var notRun *skillNotRunError
 		if err == nil {
+			res.PluginsStripped = stripped
 			return res, nil
 		}
 		if !errors.As(err, &notRun) || ref == rp.Ref {
@@ -972,6 +987,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, err
 	}
 	res.FallbackFrom, res.FallbackReason = requested, why
+	res.PluginsStripped = stripped
 	res.NumTurns += spentTurns
 	res.CostUSD += spentCost
 	return res, nil
