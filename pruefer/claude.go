@@ -329,6 +329,9 @@ type ReviewResult struct {
 	// visible in the transcript (see deriveOpened): coverage then refuses to
 	// credit what only an invisible subagent could have read.
 	UnobservedSubagents bool
+	// Truncated is the set of staged entry IDs named by a shell command whose
+	// result the CLI replaced with a `<persisted-output>` preview (#2362).
+	Truncated map[string]bool
 	// Transcript is the invocation's raw stream-json stdout, unmodified. It is
 	// empty for an invoker that has no transcript. ReviewPR keeps it only when
 	// coverage is partial (see maybeKeepTranscript, #2303).
@@ -1060,7 +1063,7 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 	if err := checkSkillRan(stdout.Bytes(), ref); err != nil {
 		return ReviewResult{}, &skillNotRunError{Ref: ref, Err: err, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
 	}
-	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
-		UnobservedSubagents: req.Staged != nil && !authoritative, Transcript: stdout.Bytes()}, nil
+	facts := analyzeTranscript(stdout.Bytes(), req.Staged)
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: facts.opened, OpenedAuthoritative: facts.authoritative,
+		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: stdout.Bytes()}, nil
 }
