@@ -319,7 +319,7 @@ func (f *fakeReviewer) diffCallCount() int {
 func fakeClone(t *testing.T, err error) (CloneFunc, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
-	fn := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	fn := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		calls.Add(1)
 		if err != nil {
 			return "", func() {}, err
