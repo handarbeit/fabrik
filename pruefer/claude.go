@@ -170,7 +170,7 @@ func checkReviewArgsScoped(args []string, allowedSkills ...string) error {
 	for _, r := range allows {
 		switch {
 		case r == "Task" || shell[r]:
-		case strings.HasPrefix(r, "Skill("+reviewplugin.PluginName+":") && strings.HasSuffix(r, ")") && !strings.Contains(r, "*"):
+		case slices.Contains(allowedSkillRules, r):
 		case strings.HasPrefix(r, "Read(//") || strings.HasPrefix(r, "Grep(//") || strings.HasPrefix(r, "Glob(//"):
 		default:
 			return fmt.Errorf("allow rule %q is not a scoped read-only rule", r)
