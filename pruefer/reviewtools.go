@@ -60,7 +60,19 @@ var reviewToolsInterpreters = []string{
 // the test-runner list. Any later word equal to one of these refuses the rule.
 var reviewToolsRunSubcommands = []string{
 	"run", "run-script", "exec", "x", "dlx", "generate", "install", "i", "ci", "add",
-	"start", "create", "init", "rebuild", "link", "pack", "publish",
+	"start", "stop", "restart", "task", "create", "init", "rebuild", "link", "pack", "publish",
+}
+
+// reviewToolsImplicitScriptLaunchers run a package.json script when given a bare
+// name ("yarn lint", "pnpm lint", "bun lint"), so there is no run verb for
+// reviewToolsRunSubcommands to match. A rule for one of them is accepted only
+// when its first non-flag word is a built-in subcommand that does not run
+// repo-defined code; anything else, including an unknown word that is really a
+// script name, is refused (fail closed).
+var reviewToolsImplicitScriptLaunchers = map[string][]string{
+	"yarn": {"audit", "list", "ls", "info", "why", "outdated", "licenses"},
+	"pnpm": {"audit", "list", "ls", "why", "outdated", "licenses"},
+	"bun":  {"pm", "outdated", "audit", "info"},
 }
 
 // reviewToolsRepoCodeRunners are executables whose normal operation runs
@@ -184,6 +196,23 @@ func validateReviewToolRule(raw string) (string, error) {
 				return bad("%q with the %q subcommand runs code or scripts from the reviewed tree and is not permitted", exe, w)
 			}
 		}
+	}
+	for _, name := range []string{exe, bare} {
+		builtins, ok := reviewToolsImplicitScriptLaunchers[name]
+		if !ok {
+			continue
+		}
+		sub := ""
+		for _, w := range words[1:] {
+			if !strings.HasPrefix(w, "-") {
+				sub = w
+				break
+			}
+		}
+		if !slices.Contains(builtins, sub) {
+			return bad("%q runs a package.json script from the reviewed tree when given a script name; only built-in subcommands (%s) are permitted", exe, strings.Join(builtins, ", "))
+		}
+		break
 	}
 	return rule, nil
 }

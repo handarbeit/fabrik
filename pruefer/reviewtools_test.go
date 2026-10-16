@@ -16,6 +16,8 @@ func TestValidateReviewToolRule_Accepts(t *testing.T) {
 		"Bash(staticcheck)":                      "Bash(staticcheck)",
 		"Bash(/usr/local/bin/gitleaks detect *)": "Bash(/usr/local/bin/gitleaks detect *)",
 		"Bash(go list -m all)":                   "Bash(go list -m all)",
+		"Bash(yarn audit:*)":                     "Bash(yarn audit:*)",
+		"Bash(pnpm audit --prod)":                "Bash(pnpm audit --prod)",
 		"Bash(sha256sum *)":                      "Bash(sha256sum *)",
 	} {
 		got, err := validateReviewToolRule(in)
@@ -67,7 +69,7 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		// Launchers with a generic run subcommand execute repo-controlled code.
 		"Bash(npm run:*)", "Bash(yarn run:*)", "Bash(pnpm run:*)", "Bash(npm exec:*)", "Bash(npm run-script lint)",
 		"Bash(go run:*)", "Bash(go generate:*)", "Bash(cargo run:*)", "Bash(pnpm dlx foo)", "Bash(bun x foo)",
-		"Bash(npm --prefix web run lint)", "Bash(/usr/bin/npm run lint)",
+		"Bash(npm --prefix web run lint)", "Bash(yarn lint)", "Bash(yarn lint:*)", "Bash(pnpm lint:*)", "Bash(bun lint)", "Bash(yarn --cwd web lint)", "Bash(yarn)", "Bash(pnpm --version)", "Bash(deno task build)", "Bash(npm stop)", "Bash(/usr/bin/npm run lint)",
 		// make and friends run recipes from the reviewed tree, whatever the target.
 		"Bash(make lint)", "Bash(make4 lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
 		// Versioned interpreters match their unversioned name.
