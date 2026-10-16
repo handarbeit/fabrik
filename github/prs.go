@@ -463,6 +463,12 @@ type PRDetails struct {
 	// Author is the GitHub login of the PR's author. Populated by ListPRs and
 	// ListOpenPRs; other constructors may leave it empty.
 	Author string
+	// AuthorAssociation is GitHub's author_association for the PR author
+	// ("OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE", ...), kept
+	// verbatim. Populated by ListOpenPRs and FetchPRDetails (#2308); empty means
+	// unknown (field absent or null), which callers must treat as an outside
+	// author, never as a trusted one.
+	AuthorAssociation string
 	// Labels is the list of label names applied to the PR. Populated by ListPRs
 	// and ListOpenPRs; other constructors may leave it empty.
 	Labels []string
@@ -562,8 +568,9 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		User           struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		Labels []rawLabel `json:"labels"`
-		Head   struct {
+		AuthorAssociation string     `json:"author_association"`
+		Labels            []rawLabel `json:"labels"`
+		Head              struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
@@ -575,19 +582,20 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
 	}
 	return &PRDetails{
-		Number:           raw.Number,
-		Title:            raw.Title,
-		State:            raw.State,
-		Merged:           raw.Merged,
-		Draft:            raw.Draft,
-		Body:             raw.Body,
-		HeadSHA:          raw.Head.SHA,
-		HeadRefName:      raw.Head.Ref,
-		BaseRef:          raw.Base.Ref,
-		MergeableState:   raw.MergeableState,
-		AutoMergeEnabled: raw.AutoMerge != nil,
-		Author:           raw.User.Login,
-		Labels:           labelNames(raw.Labels),
+		Number:            raw.Number,
+		Title:             raw.Title,
+		State:             raw.State,
+		Merged:            raw.Merged,
+		Draft:             raw.Draft,
+		Body:              raw.Body,
+		HeadSHA:           raw.Head.SHA,
+		HeadRefName:       raw.Head.Ref,
+		BaseRef:           raw.Base.Ref,
+		MergeableState:    raw.MergeableState,
+		AutoMergeEnabled:  raw.AutoMerge != nil,
+		Author:            raw.User.Login,
+		AuthorAssociation: raw.AuthorAssociation,
+		Labels:            labelNames(raw.Labels),
 	}, nil
 }
 
@@ -929,8 +937,9 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		Labels []rawLabel `json:"labels"`
-		Head   struct {
+		AuthorAssociation string     `json:"author_association"`
+		Labels            []rawLabel `json:"labels"`
+		Head              struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
@@ -948,17 +957,18 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 	out := make([]PRDetails, len(raw))
 	for i, pr := range raw {
 		out[i] = PRDetails{
-			Number:      pr.Number,
-			Title:       pr.Title,
-			State:       pr.State,
-			Draft:       pr.Draft,
-			Body:        pr.Body,
-			HeadSHA:     pr.Head.SHA,
-			UpdatedAt:   pr.UpdatedAt,
-			HeadRefName: pr.Head.Ref,
-			Author:      pr.User.Login,
-			Labels:      labelNames(pr.Labels),
-			BaseRef:     pr.Base.Ref,
+			Number:            pr.Number,
+			Title:             pr.Title,
+			State:             pr.State,
+			Draft:             pr.Draft,
+			Body:              pr.Body,
+			HeadSHA:           pr.Head.SHA,
+			UpdatedAt:         pr.UpdatedAt,
+			HeadRefName:       pr.Head.Ref,
+			Author:            pr.User.Login,
+			AuthorAssociation: pr.AuthorAssociation,
+			Labels:            labelNames(pr.Labels),
+			BaseRef:           pr.Base.Ref,
 		}
 	}
 	return out, nil
