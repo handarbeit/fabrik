@@ -350,6 +350,7 @@ type Engine struct {
 	lastRun                               displayFieldState                         // display-only "Last run" text field writer state (#2049) — in memory only
 	displayFieldWarn                      displayFieldWarnState                     // last display-field panel aggregate (#2218) — in memory only; a restart recomputes it
 	flakeRerunMu                          sync.Mutex                                // guards flakeReruns and flakeRerunDisabled
+	layer1AsEngineWrite                   atomic.Bool                               // test seam: SetLayer1AsEngineWriteForTest restores the pre-#2347 engine-write apply
 	layer1OffBoardMu                      sync.Mutex                                // guards layer1OffBoard
 	layer1OffBoard                        map[string]time.Time                      // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
 	flakeReruns                           map[string]*prFlakeState                  // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
