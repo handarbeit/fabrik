@@ -184,12 +184,15 @@ func TestStripOperatorPlugins_KeepsBaseNamesAndReportsOnlyStrippedPlugins(t *tes
 	writeTree(t, broken, map[string]string{".claude-plugin/plugin.json": "{not json"})
 
 	root := t.TempDir()
-	dirs, stripped := stripOperatorPlugins(root, []string{hostile, clean, broken}, 1)
+	dirs, stripped, skipped := stripOperatorPlugins(root, []string{hostile, clean, broken}, 1)
 	if len(dirs) != 2 || filepath.Base(dirs[0]) != "ops" || filepath.Base(dirs[1]) != "clean" {
 		t.Fatalf("dirs = %v, want the copies of ops and clean (broken left out, failing closed)", dirs)
 	}
 	if len(stripped) != 1 || stripped[0] != "ops" {
 		t.Errorf("stripped = %v, want [ops]", stripped)
+	}
+	if len(skipped) != 1 || skipped[0] != "broken" {
+		t.Errorf("skipped = %v, want [broken]", skipped)
 	}
 	for _, d := range dirs {
 		if !strings.HasPrefix(d, root) {

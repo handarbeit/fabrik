@@ -63,9 +63,10 @@ var reviewToolsRunSubcommands = []string{
 	"start", "stop", "restart", "task", "create", "init", "rebuild", "link", "pack", "publish",
 }
 
-// reviewToolsImplicitScriptLaunchers run a package.json script when given a bare
-// name ("yarn lint", "pnpm lint", "bun lint"), so there is no run verb for
-// reviewToolsRunSubcommands to match. A rule for one of them is accepted only
+// reviewToolsImplicitScriptLaunchers run code defined in the reviewed tree when
+// given a subcommand they do not know: a package.json script ("yarn lint",
+// "pnpm lint", "bun lint") or a build (cargo check, cargo clippy), so there is
+// no run verb for reviewToolsRunSubcommands to match. A rule for one of them is accepted only
 // when its first non-flag word is a built-in subcommand that does not run
 // repo-defined code; anything else, including an unknown word that is really a
 // script name, is refused (fail closed).
@@ -73,12 +74,24 @@ var reviewToolsImplicitScriptLaunchers = map[string][]string{
 	"yarn": {"audit", "list", "ls", "info", "why", "outdated", "licenses"},
 	"pnpm": {"audit", "list", "ls", "why", "outdated", "licenses"},
 	"bun":  {"pm", "outdated", "audit", "info"},
+	// cargo compiles the head tree's build.rs and proc-macros for check, clippy,
+	// build, doc, bench and the rest, and resolves aliases from the tree's
+	// .cargo/config.toml. Only subcommands that read manifests and lockfiles are
+	// accepted. An external subcommand such as audit or deny can still be
+	// shadowed by an alias in that file, which stays the operator's
+	// responsibility.
+	"cargo": {"audit", "deny", "tree", "metadata", "outdated", "fmt"},
 }
 
 // reviewToolsRepoCodeRunners are executables whose normal operation runs
 // recipes the repo's tree defines (a Makefile). They are refused in every form,
 // not just with a "test" target.
-var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant"}
+//
+// The JVM and .NET build tools belong here too: Maven, Gradle and MSBuild run
+// plugins, build scripts and targets from the reviewed tree (pom.xml,
+// build.gradle, *.csproj) for every goal ("mvn verify", "gradle build",
+// "dotnet build", even "dotnet list package").
+var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant", "mvn", "mvnw", "gradle", "gradlew", "dotnet"}
 
 const maxReviewToolRuleLen = 200
 
@@ -210,7 +223,7 @@ func validateReviewToolRule(raw string) (string, error) {
 			}
 		}
 		if !slices.Contains(builtins, sub) {
-			return bad("%q runs a package.json script from the reviewed tree when given a script name; only built-in subcommands (%s) are permitted", exe, strings.Join(builtins, ", "))
+			return bad("%q runs scripts or builds from the reviewed tree for any other subcommand; only subcommands that run no repo code (%s) are permitted", exe, strings.Join(builtins, ", "))
 		}
 		break
 	}

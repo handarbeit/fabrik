@@ -553,7 +553,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if result.FallbackFrom != "" {
 		body = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason) + "\n\n" + body
 	}
-	if notice := readOnlyNotice(grant, result.PluginsStripped); notice != "" {
+	if notice := readOnlyNotice(grant, result.PluginsStripped, result.PluginsSkipped); notice != "" {
 		body = notice + "\n\n" + body
 	}
 
@@ -596,8 +596,8 @@ func fallbackNotice(ref, baseSHA, reason string) string {
 // no banner. The association comes from GitHub and the plugin names from the
 // operator's manifests; both are sanitised and rendered in code spans, and no
 // text from the repo (such as a requested rule) is ever echoed.
-func readOnlyNotice(g reviewGrant, strippedPlugins []string) string {
-	if g.Trust.Trusted || (!g.DowngradedExtras && len(strippedPlugins) == 0) {
+func readOnlyNotice(g reviewGrant, strippedPlugins, skippedPlugins []string) string {
+	if g.Trust.Trusted || (!g.DowngradedExtras && len(strippedPlugins) == 0 && len(skippedPlugins) == 0) {
 		return ""
 	}
 	var removed []string
@@ -610,6 +610,13 @@ func readOnlyNotice(g reviewGrant, strippedPlugins []string) string {
 			names[i] = "`" + sanitizeNoticeText(n) + "`"
 		}
 		removed = append(removed, "the hooks and MCP servers of operator plugin "+strings.Join(names, ", ")+" were not loaded")
+	}
+	if len(skippedPlugins) > 0 {
+		names := make([]string, len(skippedPlugins))
+		for i, n := range skippedPlugins {
+			names[i] = "`" + sanitizeNoticeText(n) + "`"
+		}
+		removed = append(removed, "operator plugin "+strings.Join(names, ", ")+" could not be prepared for a read-only review and was not loaded")
 	}
 	assoc := "unknown"
 	if g.Trust.Association != "" {

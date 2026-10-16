@@ -207,3 +207,21 @@ func TestReviewPR_ReadOnlyNotice(t *testing.T) {
 		t.Errorf("repo rule text echoed into the posted review:\n%s", body)
 	}
 }
+
+// A plugin that could not be copied for a read-only review is not loaded at all;
+// the posted notice must say so even when no tools were configured and no other
+// plugin lost hooks, and a trusted author's review (which loads it) gets none.
+func TestReadOnlyNotice_NamesSkippedOperatorPlugins(t *testing.T) {
+	outside := reviewGrant{Trust: authorTrust{Association: "NONE"}}
+	n := readOnlyNotice(outside, nil, []string{"broken`x"})
+	if !strings.Contains(n, "Read-only review") || !strings.Contains(n, "`broken?x`") || !strings.Contains(n, "not loaded") {
+		t.Errorf("notice does not name the skipped plugin: %q", n)
+	}
+	if got := readOnlyNotice(outside, nil, nil); got != "" {
+		t.Errorf("notice with nothing removed = %q, want empty", got)
+	}
+	trusted := reviewGrant{Trust: authorTrust{Trusted: true, Association: "MEMBER"}}
+	if got := readOnlyNotice(trusted, nil, []string{"broken"}); got != "" {
+		t.Errorf("trusted author got a read-only notice: %q", got)
+	}
+}

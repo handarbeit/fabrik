@@ -376,6 +376,11 @@ type ReviewResult struct {
 	// (#2308, R3). Empty when nothing was removed, including when no operator
 	// plugin declared any. ReviewPR turns it into the posted read-only notice.
 	PluginsStripped []string
+	// PluginsSkipped names the operator plugins (by directory name) that could
+	// not be copied for a read-only review and so were not loaded at all. A
+	// trusted author's review loads them normally, so ReviewPR names them in the
+	// posted notice.
+	PluginsSkipped []string
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -934,13 +939,13 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	}
 	defer rp.Close()
 	operatorDirs := req.OperatorPluginDirs
-	var stripped []string
+	var stripped, skipped []string
 	if req.Grant.StripPluginHooks && len(operatorDirs) > 0 {
 		// An outside author's review loads operator plugins from copies with
 		// their hooks and MCP servers removed. The copies live under the
 		// per-review plugin root, so they go away with it, and the fallback
 		// re-run below reuses them.
-		operatorDirs, stripped = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
+		operatorDirs, stripped, skipped = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
 	}
 	set := buildPluginSet(rp, operatorDirs)
 	for _, p := range set.Plugins {
@@ -962,7 +967,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		res, err := r.runReview(ctx, req, set, ref)
 		var notRun *skillNotRunError
 		if err == nil {
-			res.PluginsStripped = stripped
+			res.PluginsStripped, res.PluginsSkipped = stripped, skipped
 			return res, nil
 		}
 		if !errors.As(err, &notRun) || ref == rp.Ref {
@@ -987,7 +992,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, err
 	}
 	res.FallbackFrom, res.FallbackReason = requested, why
-	res.PluginsStripped = stripped
+	res.PluginsStripped, res.PluginsSkipped = stripped, skipped
 	res.NumTurns += spentTurns
 	res.CostUSD += spentCost
 	return res, nil

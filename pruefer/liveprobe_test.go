@@ -416,7 +416,7 @@ func TestLiveProbeReviewTools(t *testing.T) {
 	write(filepath.Join(plug, ".mcp.json"),
 		fmt.Sprintf(`{"mcpServers":{"probe":{"command":"${CLAUDE_PLUGIN_ROOT}/mcp/server.sh","args":["%s"]}}}`, filepath.Join(out, "mcp.env")), 0o644)
 	write(filepath.Join(plug, "skills", "probe", "SKILL.md"), "---\nname: probe\ndescription: Probe skill\n---\nSay SKILL-RAN.\n", 0o644)
-	dirs, stripped := stripOperatorPlugins(filepath.Join(root, "copies"), []string{plug}, 1)
+	dirs, stripped, _ := stripOperatorPlugins(filepath.Join(root, "copies"), []string{plug}, 1)
 	if len(dirs) != 1 || len(stripped) != 1 {
 		t.Fatalf("dirs=%v stripped=%v", dirs, stripped)
 	}

@@ -304,8 +304,10 @@ func stripFrontmatter(data []byte) (out []byte, removed []string, ok bool) {
 // directory the caller removes at the end of the review) and returns the
 // directories to pass with --plugin-dir plus the manifest names of the plugins
 // that actually lost hooks or MCP servers. A plugin that cannot be copied is
-// left out and logged — failing closed — rather than loaded unstripped.
-func stripOperatorPlugins(root string, dirs []string, prNumber int) (out, stripped []string) {
+// left out and logged — failing closed — rather than loaded unstripped, and its
+// directory name is returned in skipped so the posted notice can say it was not
+// loaded.
+func stripOperatorPlugins(root string, dirs []string, prNumber int) (out, stripped, skipped []string) {
 	for i, src := range dirs {
 		// The copy keeps the original base name: a plugin without a manifest
 		// is named after its directory.
@@ -314,6 +316,7 @@ func stripOperatorPlugins(root string, dirs []string, prNumber int) (out, stripp
 		if err != nil {
 			logf(prNumber, "warn", "operator review plugin %q skipped for a read-only review: %v\n", filepath.Base(src), err)
 			_ = os.RemoveAll(filepath.Dir(dst))
+			skipped = append(skipped, filepath.Base(src))
 			continue
 		}
 		if len(rep.Omitted) > 0 {
@@ -326,5 +329,5 @@ func stripOperatorPlugins(root string, dirs []string, prNumber int) (out, stripp
 		}
 		out = append(out, dst)
 	}
-	return out, stripped
+	return out, stripped, skipped
 }
