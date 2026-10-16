@@ -139,11 +139,15 @@ func TestFetchRepoConfig_ReviewSkillRecognisedOperatorKeysStillNot(t *testing.T)
 
 func reviewWith(t *testing.T, client *fakeReviewer, cfg Config) (ReviewRequest, ReviewOutcome) {
 	t.Helper()
+	return reviewWithPR(t, client, cfg, gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main", BaseDefaultBranch: "main"})
+}
+
+func reviewWithPR(t *testing.T, client *fakeReviewer, cfg Config, pr gh.PRDetails) (ReviewRequest, ReviewOutcome) {
+	t.Helper()
 	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
 		return ReviewResult{Text: "mock review", NumTurns: 2, CostUSD: 0.01}, nil
 	}}
 	clone, _ := fakeClone(t, nil)
-	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main"}
 	out := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	if !out.Reviewed || out.Err != nil {
 		t.Fatalf("outcome = %+v", out)
@@ -167,9 +171,10 @@ func TestReviewPR_PassesBaseRefPluginsAndSelectionToTheInvoker(t *testing.T) {
 	}
 }
 
-// The operator veto: the repo's review_skill is ignored, but its plugins still
-// load (the veto governs selection, not loading).
-func TestReviewPR_RepoReviewSkillFalseIgnoresTheRepoSelection(t *testing.T) {
+// The operator veto is the kill switch for repo-supplied code: the repo's
+// review_skill is ignored AND its plugins are neither fetched (no tree read, no
+// blob read) nor passed to the reviewer.
+func TestReviewPR_RepoReviewSkillFalseIsTheKillSwitchForRepoPlugins(t *testing.T) {
 	logs := capturePluginLogs(t)
 	client := newFakeReviewer()
 	client.setRepoPlugins(goodPluginFiles())
@@ -178,11 +183,83 @@ func TestReviewPR_RepoReviewSkillFalseIgnoresTheRepoSelection(t *testing.T) {
 	if req.ReviewSkill != "op:skill" {
 		t.Errorf("ReviewSkill = %q, want the operator's", req.ReviewSkill)
 	}
-	if len(req.RepoPlugins) != 1 {
-		t.Errorf("repo plugins must still load under the veto: %+v", req.RepoPlugins)
+	if len(req.RepoPlugins) != 0 {
+		t.Errorf("repo plugins must not reach the invoker (so never --plugin-dir) under the veto: %+v", req.RepoPlugins)
+	}
+	if len(client.treeCalls) != 0 || client.blobCalls != 0 {
+		t.Errorf("under the veto nothing may be fetched: tree reads %v, blob reads %d", client.treeCalls, client.blobCalls)
+	}
+	if !strings.Contains(strings.Join(req.PluginNotes, ";"), "repo_review_skill is false") {
+		t.Errorf("notes = %v", req.PluginNotes)
 	}
 	if countContaining(logs(), `repo review_skill "mine:deep" ignored: repo_review_skill is false`) != 1 {
 		t.Errorf("the log must say the repo's value was ignored: %q", logs())
+	}
+	// Non-vacuity: with the veto off the same fixture loads the plugin.
+	client = newFakeReviewer()
+	client.setRepoPlugins(goodPluginFiles())
+	req, _ = reviewWith(t, client, Config{RepoReviewSkill: true})
+	if len(req.RepoPlugins) != 1 || client.blobCalls == 0 {
+		t.Errorf("fixture loads nothing even without the veto: %+v blobs=%d", req.RepoPlugins, client.blobCalls)
+	}
+}
+
+// Repo plugins load only when the PR's base is the repository's default branch.
+// A stacked PR's base is another contributor's branch, which no maintainer gate
+// has seen; an unknown default branch fails closed. Config and guidance reads
+// keep reading the PR's base.
+func TestReviewPR_RepoPluginsOnlyLoadWhenBaseIsTheDefaultBranch(t *testing.T) {
+	for name, pr := range map[string]gh.PRDetails{
+		"stacked base":           {Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "feature/x", BaseDefaultBranch: "main"},
+		"unknown default branch": {Number: 1, Author: "alice", HeadSHA: "head-sha", BaseRef: "main"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newFakeReviewer()
+			client.setRepoPlugins(goodPluginFiles())
+			client.repoConfigData = []byte("review_skill: mine:deep\n")
+			req, _ := reviewWithPR(t, client, Config{RepoReviewSkill: true}, pr)
+			if len(req.RepoPlugins) != 0 || len(client.treeCalls) != 0 || client.blobCalls != 0 {
+				t.Errorf("repo plugins were read for a base that is not the default: %+v tree=%v blobs=%d", req.RepoPlugins, client.treeCalls, client.blobCalls)
+			}
+			// The repo still selected its skill (selection is unchanged); with
+			// no plugin loaded it cannot resolve, and the note that reaches the
+			// fallback notice says why.
+			if req.ReviewSkill != "mine:deep" {
+				t.Errorf("ReviewSkill = %q, selection must be unchanged", req.ReviewSkill)
+			}
+			if !strings.Contains(strings.Join(req.PluginNotes, ";"), "repo plugins not loaded") {
+				t.Errorf("notes = %v", req.PluginNotes)
+			}
+			sawConfigRead := false
+			for _, c := range client.fileAtRefCallArgs() {
+				if c.path == DefaultConfigPath {
+					sawConfigRead = true
+				}
+			}
+			if !sawConfigRead {
+				t.Error("the repo config must still be read")
+			}
+		})
+	}
+}
+
+func TestRepoPluginsLoadDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		veto           bool
+		base, def      string
+		wantLoad       bool
+		wantWhyContain string
+	}{
+		{"default base", true, "main", "main", true, ""},
+		{"veto", false, "main", "main", false, "repo_review_skill is false"},
+		{"stacked", true, "feat", "main", false, "not the repository's default branch"},
+		{"unknown default", true, "main", "", false, "default branch is unknown"},
+	} {
+		load, why := repoPluginsLoadDecision(tc.veto, tc.base, tc.def)
+		if load != tc.wantLoad || !strings.Contains(why, tc.wantWhyContain) || (load && why != "") {
+			t.Errorf("%s: got %v %q", tc.name, load, why)
+		}
 	}
 }
 
@@ -233,7 +310,7 @@ func TestReviewPR_UnresolvableBaseLoadsNoRepoPluginsAndIsNotConclusive(t *testin
 func TestReviewPR_UnavailableRepoPluginTreeIsNotConclusive(t *testing.T) {
 	client := newFakeReviewer()
 	client.pluginTreeErr = context.DeadlineExceeded
-	_, out := reviewWith(t, client, Config{})
+	_, out := reviewWith(t, client, Config{RepoReviewSkill: true})
 	if out.Conclusive {
 		t.Error("a failed plugin-tree read must make the outcome non-conclusive")
 	}

@@ -192,27 +192,6 @@ func TestRepoPluginsNeverReadTheClone(t *testing.T) {
 	}
 }
 
-func TestRepoPluginCodeWarnings(t *testing.T) {
-	trees := []repoPluginTree{
-		{Dir: "plain", Files: []repoPluginFile{{Path: "skills/review/SKILL.md", Data: []byte("x")}}},
-		{Dir: "hooked", Files: []repoPluginFile{{Path: "hooks/hooks.json", Data: []byte("{}")}}},
-		{Dir: "mcp", Files: []repoPluginFile{{Path: ".mcp.json", Data: []byte("{}")}}},
-		{Dir: "manifest", Files: []repoPluginFile{{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"m","hooks":{},"mcpServers":{}}`)}}},
-	}
-	got := repoPluginCodeWarnings(trees)
-	if len(got) != 3 {
-		t.Fatalf("want 3 warnings (plain plugin excluded), got %d: %v", len(got), got)
-	}
-	for i, want := range []string{"hooked", "mcp", "manifest"} {
-		if !strings.Contains(got[i], want) {
-			t.Errorf("warning %d lacks %q: %s", i, want, got[i])
-		}
-	}
-	if !strings.Contains(got[2], "an MCP server and hooks") {
-		t.Errorf("manifest warning should name both kinds: %s", got[2])
-	}
-}
-
 // A plugin directory committed as a symlink or a submodule has no "/" in its
 // path; it must be reported as a refused plugin, not silently dropped (FR-018).
 func TestValidateRepoPluginEntries_ReportsTopLevelSymlinkAndSubmodule(t *testing.T) {

@@ -107,6 +107,7 @@ type fakeReviewer struct {
 	blobErr          error
 	resolveCalls     int
 	treeCalls        []string // commit SHAs FetchTreeAtRef was asked about
+	blobCalls        int      // FetchBlob calls
 
 	mu             sync.Mutex
 	submitCalls    []submitCall
@@ -191,6 +192,9 @@ func (f *fakeReviewer) FetchTreeAtRef(owner, repo, commitSHA, dir string) ([]gh.
 }
 
 func (f *fakeReviewer) FetchBlob(owner, repo, sha string, maxBytes int64) ([]byte, error) {
+	f.mu.Lock()
+	f.blobCalls++
+	f.mu.Unlock()
 	if f.blobErr != nil {
 		return nil, f.blobErr
 	}

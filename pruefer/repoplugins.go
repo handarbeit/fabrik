@@ -1,7 +1,6 @@
 package pruefer
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"regexp"
@@ -137,43 +136,29 @@ func fetchRepoPlugins(client GitHubReviewer, owner, repo, baseSHA string) repoPl
 	return res
 }
 
-// repoPluginCodeWarnings names every loaded repo plugin that carries hooks or an
-// MCP server — components that start processes as the daemon's OS user, outside
-// the reviewer's path-scoped tool rules. Detection is by plugin layout
-// (hooks/, .mcp.json) and by the manifest naming hooks or mcpServers.
-func repoPluginCodeWarnings(trees []repoPluginTree) []string {
-	var out []string
-	for _, t := range trees {
-		var kinds []string
-		for _, f := range t.Files {
-			switch {
-			case f.Path == ".mcp.json":
-				kinds = appendOnce(kinds, "an MCP server")
-			case strings.HasPrefix(f.Path, "hooks/"):
-				kinds = appendOnce(kinds, "hooks")
-			case f.Path == ".claude-plugin/plugin.json":
-				if bytes.Contains(f.Data, []byte(`"mcpServers"`)) {
-					kinds = appendOnce(kinds, "an MCP server")
-				}
-				if bytes.Contains(f.Data, []byte(`"hooks"`)) {
-					kinds = appendOnce(kinds, "hooks")
-				}
-			}
-		}
-		if len(kinds) > 0 {
-			out = append(out, fmt.Sprintf("repo plugin %s still loads and carries %s that will run", t.Dir, strings.Join(kinds, " and ")))
-		}
+// repoPluginsLoadDecision says whether this review may read and load the repo's
+// base-ref plugins at all, and if not why (#2307). Repo plugins carry code that
+// runs as the daemon's OS user, outside the reviewer's path-scoped tool rules,
+// so two conditions gate even fetching them:
+//
+//   - repo_review_skill must not be false: the operator's veto over
+//     repo-supplied review behaviour is the kill switch for repo-supplied code;
+//   - the PR's base must be the repository's default branch: only there is
+//     "merged by the maintainers" true. A stacked PR's base is another
+//     contributor's branch, which no maintainer gate has seen. An unknown
+//     default branch is treated as not the default (fail closed).
+//
+// Config and guidance reads are advisory text and keep reading the PR's base.
+func repoPluginsLoadDecision(repoReviewSkill bool, baseRef, defaultBranch string) (load bool, why string) {
+	switch {
+	case !repoReviewSkill:
+		return false, "repo plugins not loaded: repo_review_skill is false, so no repo-supplied code is fetched or run"
+	case defaultBranch == "":
+		return false, "repo plugins not loaded: the repository's default branch is unknown, so the PR's base cannot be shown to be maintainer-gated"
+	case baseRef != defaultBranch:
+		return false, fmt.Sprintf("repo plugins not loaded: the PR's base %s is not the repository's default branch %s, so its content is not maintainer-gated", baseRef, defaultBranch)
 	}
-	return out
-}
-
-func appendOnce(list []string, v string) []string {
-	for _, e := range list {
-		if e == v {
-			return list
-		}
-	}
-	return append(list, v)
+	return true, ""
 }
 
 // pluginEntry is a validated regular-file entry of one plugin, path relative to

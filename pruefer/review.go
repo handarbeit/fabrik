@@ -472,7 +472,14 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
 	var repoPlugins repoPluginResult
 	var pluginNotes []string
-	if baseSHA != "" {
+	loadRepoPlugins, skipWhy := repoPluginsLoadDecision(cfg.RepoReviewSkill, pr.BaseRef, pr.BaseDefaultBranch)
+	switch {
+	case !loadRepoPlugins:
+		pluginNotes = []string{skipWhy}
+		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, skipWhy)
+	case baseSHA == "":
+		pluginNotes = []string{"repo plugins not loaded: the base commit could not be resolved"}
+	default:
 		repoPlugins = fetchRepoPlugins(client, owner, repo, baseSHA)
 		if repoPlugins.Degraded {
 			degraded = true
@@ -481,15 +488,6 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		for _, n := range pluginNotes {
 			logf(pr.Number, "warn", "%s/%s base %s: %s\n", owner, repo, baseSHA, n)
 		}
-		// repo_review_skill: false stops the repo choosing the skill, not its
-		// plugins loading; say so when that means base-ref code will start.
-		if !cfg.RepoReviewSkill {
-			for _, w := range repoPluginCodeWarnings(repoPlugins.Plugins) {
-				logf(pr.Number, "warn", "%s/%s base %s: repo_review_skill is false but %s\n", owner, repo, baseSHA, w)
-			}
-		}
-	} else {
-		pluginNotes = []string{"repo plugins not loaded: the base commit could not be resolved"}
 	}
 
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)

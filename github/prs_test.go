@@ -441,7 +441,7 @@ func TestFetchPRDetails_Success(t *testing.T) {
 			"user":   map[string]string{"login": "alice"},
 			"labels": []map[string]string{{"name": "bug"}, {"name": "needs-review"}},
 			"head":   map[string]string{"sha": "abc123def", "ref": "feature-branch"},
-			"base":   map[string]string{"ref": "main"},
+			"base":   map[string]interface{}{"ref": "main", "repo": map[string]string{"default_branch": "trunk"}},
 		})
 	}))
 	defer srv.Close()
@@ -474,6 +474,9 @@ func TestFetchPRDetails_Success(t *testing.T) {
 	}
 	if pr.BaseRef != "main" {
 		t.Errorf("BaseRef = %q, want 'main'", pr.BaseRef)
+	}
+	if pr.BaseDefaultBranch != "trunk" {
+		t.Errorf("BaseDefaultBranch = %q, want 'trunk'", pr.BaseDefaultBranch)
 	}
 	if pr.Author != "alice" {
 		t.Errorf("Author = %q, want 'alice'", pr.Author)
