@@ -196,7 +196,7 @@ func yoloMidValidatePositiveControl(t *testing.T, waitForCI bool) {
 		t.Fatal("issue closed but the PR is not merged — the setup cannot land, so the negative case proves nothing")
 	}
 	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 1 {
-		t.Errorf("MergePR called %d time(s), want 1", n)
+		t.Errorf("MergePRAtHeadSHA called %d time(s), want 1", n)
 	}
 }
 
