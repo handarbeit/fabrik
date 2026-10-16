@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Partially supersedes ADR 1446 decision C2 (the default guidance is embedded *text*); the rest of ADR 1446 stands.
+Accepted. Partially supersedes ADR 1446 decision C2 (the default guidance is embedded *text*); the rest of ADR 1446 stands. ADR 2307 extends decision 4 (the grant names the selected skill, not only the default) and partially supersedes decision 8 (a non-default selected skill that does not run falls back visibly to the default; the default skill not running still fails the review).
 
 ## Context
 
