@@ -194,11 +194,9 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 
 	flags |= applyLinkedPRFields(item, pi)
 
-	if flags == 0 && item.Repo == "" {
-		item.Repo = pi.Repo
-		item.Number = pi.Number
-		return TitleBodyChanged | StatusChanged | LabelsChanged
-	}
+	// No first-population shortcut as in applyProjectItem: getOrCreate pre-sets
+	// Repo/Number, so an empty Repo cannot be seen here, and a first population
+	// already raises StateChanged/LabelsChanged/StatusChanged above.
 	item.Repo = pi.Repo
 	item.Number = pi.Number
 	return flags

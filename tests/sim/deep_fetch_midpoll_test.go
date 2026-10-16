@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tests/sim/simgh"
@@ -46,7 +45,6 @@ func runMidPollWrite(t *testing.T, legacy bool) (status string, statusChanges, h
 	if legacy {
 		env.Engine.SetLegacyDeepFetchApplyForTest(true)
 	}
-	item := projectItem(t, env, num)
 	if got, _ := env.Engine.StoreItemForTest(env.OwnerRepo, num); got.Status != "Specify" {
 		t.Fatalf("setup: store holds Status %q, want Specify", got.Status)
 	}
@@ -77,7 +75,6 @@ func runMidPollWrite(t *testing.T, legacy bool) (status string, statusChanges, h
 	// leave at the engine's own self-write time (a label add right after settling
 	// can fall inside that window and not look stale).
 	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "ci-notes[bot]", "fyi: external note")
-	_ = item
 	RunPoll(t, env)
 
 	got, ok := env.Engine.StoreItemForTest(env.OwnerRepo, num)
@@ -114,5 +111,3 @@ func TestDeepFetch_WriteBetweenSnapshotAndApply_LegacyApplyReverts(t *testing.T)
 		t.Errorf("legacy apply did not revert the mid-poll write (Status %q, %d changes): the twin cannot tell the fix from the old behaviour", status, changes)
 	}
 }
-
-var _ = gh.ProjectItem{}
