@@ -261,3 +261,22 @@ func TestValidateRepoPluginEntries_RefusesCaseCollidingPluginDirs(t *testing.T) 
 		t.Errorf("collision not reported for both: %+v", skipped)
 	}
 }
+
+// Many tiny files cost one blob request each and almost nothing against the byte
+// cap, so the repo's plugins together are also capped by file count; the plugin
+// that would cross it is skipped whole and reported, and its blobs are never read.
+func TestFetchRepoPlugins_AggregateFileCap(t *testing.T) {
+	f := newFakeReviewer()
+	f.setRepoPlugins(map[string]string{})
+	for _, name := range []string{"a", "b", "c"} { // 3 x 400 files > 1000; the first two fit
+		for i := 0; i < 400; i++ {
+			sha := "b-" + name + strconv.Itoa(i)
+			f.pluginEntries = append(f.pluginEntries, gh.TreeEntry{Path: name + "/f" + strconv.Itoa(i), Mode: "100644", Type: "blob", SHA: sha, Size: 1})
+			f.blobs[sha] = []byte("x")
+		}
+	}
+	res := fetchRepoPlugins(f, "o", "r", "basesha")
+	if len(res.Plugins) != 2 || len(res.Skipped) != 1 || res.Skipped[0].Dir != "c" || !strings.Contains(res.Skipped[0].Reason, "files") {
+		t.Errorf("plugins=%d skipped=%+v", len(res.Plugins), res.Skipped)
+	}
+}

@@ -24,6 +24,7 @@ const (
 	maxRepoPluginBytes      = 4 << 20 // one plugin, all files
 	maxRepoPluginFileBytes  = 1 << 20 // one file
 	maxRepoPluginsAllBytes  = 8 << 20 // every accepted plugin together
+	maxRepoPluginsAllFiles  = 1000    // every accepted plugin together: one blob request per file, every review
 	repoPluginMaxNameLength = 64
 )
 
@@ -98,6 +99,7 @@ func fetchRepoPlugins(client GitHubReviewer, owner, repo, baseSHA string) repoPl
 	res.Skipped = skipped
 
 	var total int64
+	var totalFiles int
 	for _, dir := range sortedKeys(byDir) {
 		files := byDir[dir]
 		var size int64
@@ -106,6 +108,10 @@ func fetchRepoPlugins(client GitHubReviewer, owner, repo, baseSHA string) repoPl
 		}
 		if total+size > maxRepoPluginsAllBytes {
 			res.Skipped = append(res.Skipped, repoPluginSkip{dir, fmt.Sprintf("the repo's plugins together exceed %d bytes", maxRepoPluginsAllBytes)})
+			continue
+		}
+		if totalFiles+len(files) > maxRepoPluginsAllFiles {
+			res.Skipped = append(res.Skipped, repoPluginSkip{dir, fmt.Sprintf("the repo's plugins together exceed %d files", maxRepoPluginsAllFiles)})
 			continue
 		}
 		tree := repoPluginTree{Dir: dir}
@@ -124,6 +130,7 @@ func fetchRepoPlugins(client GitHubReviewer, owner, repo, baseSHA string) repoPl
 			continue
 		}
 		total += size
+		totalFiles += len(files)
 		res.Plugins = append(res.Plugins, tree)
 	}
 	sort.Slice(res.Skipped, func(i, j int) bool { return res.Skipped[i].Dir < res.Skipped[j].Dir })
