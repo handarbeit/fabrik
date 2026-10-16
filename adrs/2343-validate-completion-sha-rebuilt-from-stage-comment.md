@@ -47,7 +47,7 @@ a yolo item land on the first post-restart poll.
    engine-recorded head is still empty right after a restart.
 5. **R3: no recoverable SHA means re-run Validate.** If the item has `stage:Validate:complete`, a head is
    known and no SHA can be recovered (no own Validate comment, not authored by Fabrik, malformed or `unknown`
-   commit, or the comment list is at the 100-comment first-page cap and so may be truncated), the engine calls
+   commit), the engine calls
    `handleValidateSHAInvalidation` with one `[validate-sha]` log line. Holding the landing was rejected: it
    adds a stuck state only `fabrik:revalidate` could clear. Re-running reuses a tested path and heals itself,
    because the re-run records a fresh SHA. The cost is one extra Validate for an item whose evidence is gone.

@@ -88,11 +88,12 @@ func TestRebuildValidateSHA(t *testing.T) {
 			t.Fatal("accepted with empty self")
 		}
 	})
-	t.Run("list at the first-page cap is unreliable", func(t *testing.T) {
-		cs := make([]gh.Comment, 100)
+	t.Run("a long thread still yields the own Validate comment", func(t *testing.T) {
+		// FetchItemDetails pages through every comment, so 100+ is not truncation.
+		cs := make([]gh.Comment, 150)
 		cs[0] = own
-		if _, ok := rebuildValidateSHA(cs, "testuser", rebuildFullHead); ok {
-			t.Fatal("capped list accepted")
+		if _, ok := rebuildValidateSHA(cs, "testuser", rebuildFullHead); !ok {
+			t.Fatal("long thread rejected")
 		}
 	})
 }

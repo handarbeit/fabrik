@@ -21,10 +21,6 @@ import (
 // decision) runs ahead of settleSHAInvalidationScan, so rebuilding inside the scan would
 // still let a yolo item land on the first post-restart poll.
 
-// validateCommentsFirstPageCap is GitHub's first-page comment limit. A list at the cap
-// may have lost the Validate comment, so it is not reliable evidence.
-const validateCommentsFirstPageCap = 100
-
 // minStageCommitLen is the shortest hex prefix accepted as a recorded commit.
 const minStageCommitLen = 7
 
@@ -63,10 +59,13 @@ func parseStageCommit(commentBody string) string {
 // the recorded (abbreviated) commit the head is unchanged since Validate ran and the full
 // live head is returned; otherwise the abbreviated commit is returned as-is, which
 // differs from the live head and so reads as "head moved" under every != comparison.
-// ok is false when no SHA can be recovered: an empty self, a comment list at the
-// first-page cap, no own Validate comment, or a malformed commit.
+// ok is false when no SHA can be recovered: an empty self, no own Validate comment, or a
+// malformed commit. The comment list is complete however long the thread: FetchItemDetails
+// follows hasNextPage (applyComments), so there is no first-page cap to distrust. Were a
+// list ever truncated, the failure is still safe: a missing comment is the R3 re-run and
+// an older Validate comment names an older commit, which reads as "head moved".
 func rebuildValidateSHA(comments []gh.Comment, self, liveHead string) (sha string, ok bool) {
-	if self == "" || len(comments) >= validateCommentsFirstPageCap {
+	if self == "" {
 		return "", false
 	}
 	const prefix = "🏭 **Fabrik — stage: Validate**"
