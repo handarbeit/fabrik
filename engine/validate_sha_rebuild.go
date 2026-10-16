@@ -134,11 +134,17 @@ func (e *Engine) hydrateValidateCompletionSHAs(candidates []gh.ProjectItem) map[
 			// would otherwise re-run Validate every cycle. A second empty SHA on the same
 			// head means Validate already re-ran on exactly this head, so nothing
 			// unvalidated can land; a new head is a new key and re-runs again.
-			if _, seen := e.validateSHARerun.LoadOrStore(repoStr+"#"+strconv.Itoa(item.Number)+"@"+liveHead, struct{}{}); seen {
+			key := repoStr + "#" + strconv.Itoa(item.Number) + "@" + liveHead
+			if _, seen := e.validateSHARerun.LoadOrStore(key, struct{}{}); seen {
 				continue
 			}
 			e.logf(item.Number, "validate-sha", "no Validate completion SHA recoverable (empty in the Store; no usable Validate stage comment) — re-running Validate instead of trusting head %s\n", liveHead)
-			e.handleValidateSHAInvalidation(item, owner, repo)
+			if !e.handleValidateSHAInvalidation(item, owner, repo) {
+				// A failed label removal leaves stage:Validate:complete on GitHub: spend
+				// no budget so the next poll retries, and still hold the item out of this
+				// poll's catch-up loop so it cannot land on the unverified head meanwhile.
+				e.validateSHARerun.Delete(key)
+			}
 			if invalidated == nil {
 				invalidated = map[string]bool{}
 			}

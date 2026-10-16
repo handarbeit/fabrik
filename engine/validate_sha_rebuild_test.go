@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -264,5 +265,28 @@ func TestHydrate_NoRecoverableSHARerunsOncePerHead(t *testing.T) {
 	client.mu.Unlock()
 	if second != first {
 		t.Fatalf("second poll on the same head re-ran Validate again (%d -> %d label removals)", first, second)
+	}
+}
+
+// A failed label removal must not spend the once-per-head R3 budget: the label is still
+// on GitHub, so the next poll has to retry instead of skipping under FR-5 (#2343 review).
+func TestHydrate_RerunBudgetNotSpentByFailedRemoval(t *testing.T) {
+	eng, client := rebuildItemFixture(t, rebuildLabels, nil, rebuildFullHead)
+	fail := true
+	client.removeLabelFromIssueFn = func(_, _ string, _ int, _ string) error {
+		if fail {
+			return errors.New("transient 502")
+		}
+		return nil
+	}
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	fail = false
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if !removedLabels50(client)["stage:Validate:complete"] {
+		t.Fatalf("retry after a failed removal never re-ran Validate: %v", removedLabels50(client))
 	}
 }
