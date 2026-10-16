@@ -198,3 +198,50 @@ func TestStatusRefresh_LeavesClosedRecordAlone(t *testing.T) {
 		t.Fatalf("closed record disturbed: closed=%v rec=%v", st.IsClosed, st.EngineWriteAt)
 	}
 }
+
+// Only the engine-write protection (protectStatusClosed) can keep the engine's
+// value here: the read is fetched after the write, so it is not older than the
+// observed move (StatusEnteredAt < fetchedAt) and the stale-observation drop
+// does not apply.
+func TestStatusRefresh_EngineWriteProtectionKeepsValueWithinGrace(t *testing.T) {
+	s := refreshStore(t)
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Implement"})
+	st := stateOf(t, s)
+	w, ok := st.EngineWriteAt["status"]
+	if !ok {
+		t.Fatal("precondition: engine move should record a status write")
+	}
+	fetchedAt := w.Add(testGrace / 2)
+	if !st.StatusEnteredAt.Before(fetchedAt) {
+		t.Fatalf("precondition: StatusEnteredAt %v must be before fetchedAt %v", st.StatusEnteredAt, fetchedAt)
+	}
+	seen := collectChanges(s)
+
+	refresh(s, "Review", fetchedAt)
+
+	after := stateOf(t, s)
+	if after.Status != "Implement" {
+		t.Fatalf("Status = %q, want the engine's Implement kept within grace", after.Status)
+	}
+	if n := len(seen()); n != 0 {
+		t.Fatalf("kept value produced %d changes", n)
+	}
+}
+
+// Twin: a read fetched after the engine write plus grace is applied.
+func TestStatusRefresh_ReadAfterEngineWriteGraceApplies(t *testing.T) {
+	s := refreshStore(t)
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Implement"})
+	st := stateOf(t, s)
+	w := st.EngineWriteAt["status"]
+	fetchedAt := w.Add(testGrace + time.Millisecond)
+	if !st.StatusEnteredAt.Before(fetchedAt) {
+		t.Fatalf("precondition: StatusEnteredAt %v must be before fetchedAt %v", st.StatusEnteredAt, fetchedAt)
+	}
+
+	refresh(s, "Review", fetchedAt)
+
+	if got := stateOf(t, s).Status; got != "Review" {
+		t.Fatalf("Status = %q, want Review applied after grace", got)
+	}
+}
