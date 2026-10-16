@@ -137,6 +137,9 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 			Action string `json:"action"`
 		}
 		if err := json.Unmarshal(payload, &pv); err == nil && pv.Action == "created" {
+			// Deliberately not filtered by project (#2345): the cache drops a
+			// foreign-project event itself, and clearing the negative cache is
+			// the safe direction — at worst it costs one re-check.
 			e.layer1OffBoardClearAll()
 		}
 		return
