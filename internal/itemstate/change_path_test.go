@@ -78,3 +78,21 @@ func TestChangePath_BoardReconciledIsReconcile(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
+
+func TestChangePath_StatusRefreshIsNamed(t *testing.T) {
+	s := NewStore(nil)
+	item := testProjectItem(testRepo, 1)
+	item.Status = "Plan"
+	s.Apply(IssueOpened{Item: item})
+	seen := collectChanges(s)
+
+	s.Apply(StatusRefreshed{Repo: testRepo, Number: 1, Status: "Implement"})
+
+	got := seen()
+	if len(got) != 1 || got[0].Path != PathRefresh || got[0].EngineStatusWrite || got[0].StatusFrom != "Plan" || got[0].StatusTo != "Implement" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+	if PathRefresh.String() != "status-refresh" {
+		t.Errorf("String() = %q", PathRefresh.String())
+	}
+}

@@ -508,6 +508,24 @@ type ProbeBoardItemUpdated struct {
 func (ProbeBoardItemUpdated) isMutation()       {}
 func (m ProbeBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// StatusRefreshed applies a Status the engine read live from GitHub for one item
+// (the Layer 1 status refresh, #2347). It is a GitHub read, not an engine write:
+// it goes through the same engine-write protection as a listing, is dropped when
+// it predates a move the Store has already observed, and never records an
+// engine write, marks an engine move or sets an Origin.
+type StatusRefreshed struct {
+	Repo   string
+	Number int
+	Status string
+	// FetchedAt is the wall-clock instant the read was started, taken before the
+	// GitHub call. Zero means unknown: no protection, the read wins (but it still
+	// records no engine write).
+	FetchedAt time.Time
+}
+
+func (StatusRefreshed) isMutation()       {}
+func (m StatusRefreshed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ---- Engine internals ----
 
 // StageAttempted records the start of a new Claude invocation for a stage.
