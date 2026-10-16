@@ -37,6 +37,10 @@ var recognizedRepoConfigKeys = map[string]bool{
 	// has not set repo_review_skill: false (selectReviewSkill), and a value
 	// that does not resolve degrades to the default review visibly.
 	"review_skill": true,
+	// review_tools (#2308) selects within the operator's review_tools ceiling:
+	// it can only name rules the operator already allowed (selectReviewTools)
+	// and has no effect at all for an author without write access.
+	"review_tools": true,
 }
 
 // yamlRepoConfig is the schema a repo-resident .pruefer/config.yaml is
@@ -63,6 +67,9 @@ type yamlRepoConfig struct {
 	MaxDiffBytes            *int64   `yaml:"max_diff_bytes"`
 	RequestChangesThreshold *string  `yaml:"request_changes_threshold"`
 	ReviewSkill             *string  `yaml:"review_skill"`
+	// ReviewTools is a pointer so an absent key (the operator's full list
+	// applies) differs from an explicit empty list (the repo selects none).
+	ReviewTools *[]string `yaml:"review_tools"`
 }
 
 // RepoConfigProvenance records what happened when resolving a repo-resident

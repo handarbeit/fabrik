@@ -254,6 +254,13 @@ type Config struct {
 	// LoadConfig applies is true; a hand-built Config (tests) is the zero value,
 	// false, which fails safe — the same convention as PatchSkip.
 	RepoReviewSkill bool `reload:"live"`
+	// ReviewTools (#2308, R1) is the operator's ceiling of extra permission
+	// rules, for example "Bash(golangci-lint:*)" or "Bash(shellcheck *)",
+	// appended to the base read-only review grant for an author with write
+	// access. Empty (the default) keeps the base grant. A repo's base-ref
+	// review_tools can select a subset, never add a rule. LoadConfig refuses a
+	// test-runner rule, a blanket or malformed rule, and normalises the rest.
+	ReviewTools []string `reload:"live"`
 
 	// KeepTranscripts is #2303's retention policy for a review invocation's
 	// raw stream-json transcript: KeepTranscriptsPartial (the default when
@@ -459,6 +466,8 @@ type yamlConfig struct {
 	Plugins         []string `yaml:"plugins"`
 	ReviewSkill     string   `yaml:"review_skill"`
 	RepoReviewSkill *bool    `yaml:"repo_review_skill"`
+	// ReviewTools is #2308's operator ceiling of coded review tools.
+	ReviewTools []string `yaml:"review_tools"`
 	// KeepTranscripts/TranscriptDir are #2303's operator-only transcript
 	// retention settings — see Config.KeepTranscripts.
 	KeepTranscripts string `yaml:"keep_transcripts"`
@@ -543,6 +552,7 @@ type flagValues struct {
 	plugins                 string
 	reviewSkill             string
 	repoReviewSkill         bool
+	reviewTools             string
 	keepTranscripts         string
 	cadence                 string
 	appID                   int64
@@ -601,6 +611,7 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.StringVar(&fv.reviewGuidance, "review-guidance", "", "Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own .pruefer/skills/review/SKILL.md) per -review-guidance-mode")
 	fs.StringVar(&fv.plugins, "plugins", "", "Comma-separated local review-plugin directories, loaded for every review after pruefer-review (#2307)")
 	fs.StringVar(&fv.reviewSkill, "review-skill", "", "plugin:skill reference that performs the review (default pruefer-review:review)")
+	fs.StringVar(&fv.reviewTools, "review-tools", "", "Comma-separated extra --allowedTools rules for coded review tools, for example 'Bash(golangci-lint:*)'; granted only to authors with write access (#2308)")
 	fs.BoolVar(&fv.repoReviewSkill, "repo-review-skill", true, "Let a repo's base-ref .pruefer/config.yaml override -review-skill with its own review_skill; false ignores the repo's value")
 	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
@@ -659,6 +670,7 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		CatchUpMarkerAuthors: yc.CatchUpMarkerAuthors,
 		PatchSkip:            true,
 		Plugins:              yc.Plugins,
+		ReviewTools:          yc.ReviewTools,
 		RepoReviewSkill:      true,
 		Cadence:              DefaultCadence,
 		RepoCadence:          yc.RepoCadence,
@@ -852,6 +864,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	if explicit["plugins"] {
 		cfg.Plugins = splitCSV(fv.plugins)
 	}
+	if explicit["review-tools"] {
+		cfg.ReviewTools = splitCSV(fv.reviewTools)
+	}
 	if explicit["review-skill"] {
 		cfg.ReviewSkill = fv.reviewSkill
 	}
@@ -947,6 +962,16 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("review_skill: %q is not a plugin:skill reference (for example %q)", cfg.ReviewSkill, DefaultReviewSkill)
 	}
 
+	// review_tools is the operator's ceiling for coded review tools (#2308). A
+	// refused rule (a test runner, a blanket or malformed grant) fails loud at
+	// startup and on reload; the stored list is normalised so the repo
+	// comparison and the constructed arguments see one spelling.
+	tools, err := validateReviewTools(cfg.ReviewTools)
+	if err != nil {
+		return Config{}, claudeprofile.Resolution{}, err
+	}
+	cfg.ReviewTools = tools
+
 	switch cfg.KeepTranscripts {
 	case KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff:
 	default:
@@ -1035,6 +1060,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_PLUGINS"); v != "" {
 		cfg.Plugins = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_REVIEW_TOOLS"); v != "" {
+		cfg.ReviewTools = splitCSV(v)
 	}
 	if v := os.Getenv("PRUEFER_REVIEW_SKILL"); v != "" {
 		cfg.ReviewSkill = v
