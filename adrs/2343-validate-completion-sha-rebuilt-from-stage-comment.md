@@ -51,6 +51,10 @@ a yolo item land on the first post-restart poll.
    `handleValidateSHAInvalidation` with one `[validate-sha]` log line. Holding the landing was rejected: it
    adds a stuck state only `fabrik:revalidate` could clear. Re-running reuses a tested path and heals itself,
    because the re-run records a fresh SHA. The cost is one extra Validate for an item whose evidence is gone.
+   The empty SHA can also arise in process (worktree HEAD unreadable at completion, `commit: unknown`), so the
+   re-run is bounded to once per (item, live head) by an in-memory set: a second empty SHA on the same head
+   means Validate already re-ran on exactly that head, so nothing unvalidated can land, and a new head
+   re-runs again. A restart allows one more re-run.
 6. **R4.** A pure engine catch-up head after a restart is re-recorded rather than invalidated: the rebuilt
    (older) SHA differs from the catch-up head, `headIsPureCatchUp` reads the durable self-authored marker, and
    the head is re-recorded exactly as ADR 2158 describes. Only the in-flight window state is memory-only, and

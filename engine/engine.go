@@ -265,8 +265,12 @@ type Engine struct {
 	// validateSHARebuildOff disables the post-restart rebuild of the Validate
 	// completion SHA (#2343); per-Engine test seam, zero value = production.
 	validateSHARebuildOff atomic.Bool
-	channelMu             sync.Mutex
-	channel               *channelEvents
+	// validateSHARerun records the (item, live head) pairs for which the R3 re-run of
+	// Validate was already requested (#2343), so an unrecoverable SHA that persists
+	// cannot re-run Validate every cycle. In memory only: a restart allows one more.
+	validateSHARerun sync.Map
+	channelMu        sync.Mutex
+	channel          *channelEvents
 	// boardPopulated is set once the first poll has completed successfully: the
 	// board is then "initially populated" and an item the store learns about
 	// afterwards is an arrival (item-added, #2123). Items created before it —

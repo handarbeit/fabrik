@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strconv"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -128,7 +129,15 @@ func (e *Engine) hydrateValidateCompletionSHAs(candidates []gh.ProjectItem) map[
 		}
 		sha, ok := rebuildValidateSHA(item.Comments, e.selfLogin(), liveHead)
 		if !ok {
-			e.logf(item.Number, "validate-sha", "no Validate completion SHA recoverable after restart — re-running Validate instead of trusting head %s\n", liveHead)
+			// R3 is bounded to one re-run per (item, head): the SHA can also be empty in
+			// process (worktree HEAD unreadable at completion), and a persistent cause
+			// would otherwise re-run Validate every cycle. A second empty SHA on the same
+			// head means Validate already re-ran on exactly this head, so nothing
+			// unvalidated can land; a new head is a new key and re-runs again.
+			if _, seen := e.validateSHARerun.LoadOrStore(repoStr+"#"+strconv.Itoa(item.Number)+"@"+liveHead, struct{}{}); seen {
+				continue
+			}
+			e.logf(item.Number, "validate-sha", "no Validate completion SHA recoverable (empty in the Store; no usable Validate stage comment) — re-running Validate instead of trusting head %s\n", liveHead)
 			e.handleValidateSHAInvalidation(item, owner, repo)
 			if invalidated == nil {
 				invalidated = map[string]bool{}

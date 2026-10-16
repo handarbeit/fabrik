@@ -241,3 +241,28 @@ func TestHydrate_PureCatchUpHeadAfterRestartKeepsValidate(t *testing.T) {
 		t.Fatalf("completion SHA = %q, want the catch-up head re-recorded", snap.ValidateCompletedSHA())
 	}
 }
+
+// The R3 re-run is bounded to once per (item, head): an unrecoverable SHA that persists
+// in process (e.g. an unreadable worktree HEAD at completion) must not re-run Validate
+// every poll (#2343 review).
+func TestHydrate_NoRecoverableSHARerunsOncePerHead(t *testing.T) {
+	eng, client := rebuildItemFixture(t, rebuildLabels, nil, rebuildFullHead)
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !removedLabels50(client)["stage:Validate:complete"] {
+		t.Fatalf("first poll: Validate not re-run: %v", removedLabels50(client))
+	}
+	client.mu.Lock()
+	first := len(client.removeLabelCalls)
+	client.mu.Unlock()
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	client.mu.Lock()
+	second := len(client.removeLabelCalls)
+	client.mu.Unlock()
+	if second != first {
+		t.Fatalf("second poll on the same head re-ran Validate again (%d -> %d label removals)", first, second)
+	}
+}
