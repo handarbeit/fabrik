@@ -681,3 +681,151 @@ func TestCoverage_SkillCallDoesNotDisturbDerivation(t *testing.T) {
 		t.Errorf("cov = %+v, want partial naming d.go", cov)
 	}
 }
+
+// bigContent is a staged entry text far larger than a 2 KB preview, so a
+// preview can never contain a whole entry and the crediting tests below do not
+// depend on the preview-never-credits guard.
+func bigContent(id string) string {
+	return "big content of " + id + "\n" + strings.Repeat("a line of the diff that is long enough\n", 120)
+}
+
+func bigStaged(n int) *StagedDiff {
+	paths := make([]string, n)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("f%d.go", i+1)
+	}
+	s := testStaged(paths...)
+	for i := range s.Entries {
+		s.Entries[i].content = bigContent(s.Entries[i].ID)
+	}
+	return s
+}
+
+// persistedNotice is the shape of a Bash result the CLI replaced with a preview
+// (seen in the transcripts #2303 keeps; testdata/persisted_output_cat.jsonl is
+// built from that shape, not captured from a live run).
+const persistedNotice = "<persisted-output>\nOutput too large (62.1KB). Full output saved to: /session/tool-results/x.txt\n\nPreview (first 2KB):\n--- a/x.go\n...\n</persisted-output>"
+
+func TestDeriveOpened_PersistedOutputFixture(t *testing.T) {
+	stream, err := os.ReadFile("testdata/persisted_output_cat.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := bigStaged(6)
+	f := analyzeTranscript(stream, s)
+	if len(f.opened) != 0 {
+		t.Errorf("a preview credited entries: %v", f.opened)
+	}
+	for _, id := range []string{"0001", "0002", "0003", "0004", "0005"} {
+		if !f.truncated[id] {
+			t.Errorf("entry %s not attributed to the truncated result", id)
+		}
+	}
+	if f.truncated["0006"] || len(f.truncated) != 5 {
+		t.Errorf("truncated = %v, want exactly 0001-0005", f.truncated)
+	}
+	opened, auth := deriveOpened(stream, s)
+	if len(opened) != 0 || !auth {
+		t.Errorf("deriveOpened = %v, %v", opened, auth)
+	}
+	cov := computeCoverage(coverageInput{
+		Staged: s, Reported: []string{"0001", "0002", "0003", "0004", "0005", "0006"}, ReportOK: true,
+		Transcript: f.opened, TranscriptAuthoritative: f.authoritative, Truncated: f.truncated,
+	})
+	if cov.Complete || cov.UnreadCount != 6 || cov.TruncatedUnread != 5 {
+		t.Errorf("coverage = %+v, want 6 unread, 5 truncated", cov)
+	}
+}
+
+func TestAnalyzeTranscript_Truncation(t *testing.T) {
+	s := bigStaged(3)
+	t.Run("a later proper read credits and uncounts the entry", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /stage/0001.diff /stage/0002.diff"}`)
+		x.result("", "b1", false, persistedNotice)
+		x.toolUse("", "b2", "Bash", `{"command":"cat /stage/0001.diff"}`)
+		x.result("", "b2", false, strings.TrimRight(bigContent("0001"), "\n"))
+		f := analyzeTranscript(x.bytes(), s)
+		if !f.opened["0001"] || f.opened["0002"] {
+			t.Errorf("opened = %v", f.opened)
+		}
+		cov := computeCoverage(coverageInput{Staged: s, Reported: []string{"0001", "0002", "0003"}, ReportOK: true,
+			Transcript: f.opened, TranscriptAuthoritative: f.authoritative, Truncated: f.truncated})
+		if cov.TruncatedUnread != 1 {
+			t.Errorf("TruncatedUnread = %d, want 1 (0002 only)", cov.TruncatedUnread)
+		}
+	})
+	t.Run("a result that only mentions the marker is not a preview", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /stage/0001.diff"}`)
+		x.result("", "b1", false, "diff text mentioning <persisted-output> in a comment")
+		if f := analyzeTranscript(x.bytes(), s); len(f.truncated) != 0 {
+			t.Errorf("truncated = %v", f.truncated)
+		}
+	})
+	t.Run("an error result is not a preview", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /stage/0001.diff"}`)
+		x.result("", "b1", true, persistedNotice)
+		if f := analyzeTranscript(x.bytes(), s); len(f.truncated) != 0 {
+			t.Errorf("truncated = %v", f.truncated)
+		}
+	})
+	t.Run("a preview for a command naming no staged entry is not counted", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /repo/README.md"}`)
+		x.result("", "b1", false, persistedNotice)
+		if f := analyzeTranscript(x.bytes(), s); len(f.truncated) != 0 {
+			t.Errorf("truncated = %v", f.truncated)
+		}
+	})
+	t.Run("mixed command attributes only the staged entries", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /stage/0002.diff /repo/README.md"}`)
+		x.result("", "b1", false, persistedNotice)
+		f := analyzeTranscript(x.bytes(), s)
+		if len(f.truncated) != 1 || !f.truncated["0002"] {
+			t.Errorf("truncated = %v", f.truncated)
+		}
+	})
+	t.Run("a subagent's preview is counted", func(t *testing.T) {
+		var x tl
+		x.toolUse("", "task1", "Task", `{}`)
+		x.toolUse("task1", "b1", "Bash", `{"command":"cat /stage/0003.diff"}`)
+		x.result("task1", "b1", false, persistedNotice)
+		f := analyzeTranscript(x.bytes(), s)
+		if !f.truncated["0003"] || !f.authoritative {
+			t.Errorf("facts = %+v", f)
+		}
+	})
+	t.Run("a preview never credits even an entry that fits inside it", func(t *testing.T) {
+		small := testStaged("a.go")
+		var x tl
+		x.toolUse("", "b1", "Bash", `{"command":"cat /stage/0001.diff"}`)
+		x.result("", "b1", false, persistedNotice+"\n"+strings.TrimRight(small.Entries[0].content, "\n"))
+		f := analyzeTranscript(x.bytes(), small)
+		if f.opened["0001"] || !f.truncated["0001"] {
+			t.Errorf("facts = %+v", f)
+		}
+	})
+}
+
+func TestLogCoverage_TruncatedCount(t *testing.T) {
+	logs := captureLogs(t)
+	base := Coverage{Reason: "2 of 3 diff entries not opened", Unread: []string{"a", "b"}, UnreadCount: 2, TotalEntries: 3}
+	logCoverage(7, base, true, "")
+	withTrunc := base
+	withTrunc.TruncatedUnread = 2
+	logCoverage(7, withTrunc, true, "/tmp/t.jsonl")
+	got := logs()
+	if len(got) != 2 {
+		t.Fatalf("logs = %q", got)
+	}
+	if strings.Contains(got[0], "preview") {
+		t.Errorf("zero count must not change the line: %q", got[0])
+	}
+	want := "(2 unread path(s); 2 of the unread entries were in shell results cut to a preview; transcript authoritative=true); transcript saved: /tmp/t.jsonl"
+	if !strings.Contains(got[1], want) {
+		t.Errorf("line = %q, want it to contain %q", got[1], want)
+	}
+}
