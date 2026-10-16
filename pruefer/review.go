@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -469,6 +470,16 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
 
+	// #2308: the coded review tools this review may use, and whether operator
+	// plugins keep their hooks and MCP servers. Decided once here, from the
+	// operator ceiling, the repo's base-ref selection and the PR author, and
+	// carried in the request so the fallback re-run shares it.
+	grant := resolveReviewGrant(cfg.ReviewTools, repoYAML.ReviewTools, pr.Author, pr.AuthorAssociation)
+	logf(pr.Number, "config", "%s\n", grant.grantLogLine(pr.Author))
+	if line := grant.ignoredLogLine(); line != "" {
+		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, line)
+	}
+
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number, pr.HeadSHA)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("cloning PR head: %w", err)}
@@ -511,7 +522,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 		Staged:      staged,
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
-		BaseSHA: baseSHA,
+		BaseSHA: baseSHA, Grant: grant,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -541,6 +552,9 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	body := appendCoverage(buildReviewBody(summary, demoted), cov)
 	if result.FallbackFrom != "" {
 		body = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason) + "\n\n" + body
+	}
+	if notice := readOnlyNotice(grant, result.PluginsStripped); notice != "" {
+		body = notice + "\n\n" + body
 	}
 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
@@ -573,6 +587,36 @@ func fallbackNotice(ref, baseSHA, reason string) string {
 	}
 	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (`%s`); this review ran `%s`.",
 		sanitizeNoticeText(ref), sha, sanitizeNoticeReason(reason), DefaultReviewSkill)
+}
+
+// readOnlyNotice is the line a posted review carries when the outside-author
+// policy removed something the author would otherwise have had (#2308, R3):
+// the coded review tools, or the hooks and MCP servers of operator plugins. It
+// is empty when nothing was removed, so a review with no tools configured gets
+// no banner. The association comes from GitHub and the plugin names from the
+// operator's manifests; both are sanitised and rendered in code spans, and no
+// text from the repo (such as a requested rule) is ever echoed.
+func readOnlyNotice(g reviewGrant, strippedPlugins []string) string {
+	if g.Trust.Trusted || (!g.DowngradedExtras && len(strippedPlugins) == 0) {
+		return ""
+	}
+	var removed []string
+	if g.DowngradedExtras {
+		removed = append(removed, "the coded review tools the operator allows were not available")
+	}
+	if len(strippedPlugins) > 0 {
+		names := make([]string, len(strippedPlugins))
+		for i, n := range strippedPlugins {
+			names[i] = "`" + sanitizeNoticeText(n) + "`"
+		}
+		removed = append(removed, "the hooks and MCP servers of operator plugin "+strings.Join(names, ", ")+" were not loaded")
+	}
+	assoc := "unknown"
+	if g.Trust.Association != "" {
+		assoc = sanitizeNoticeText(g.Trust.Association)
+	}
+	return fmt.Sprintf("> 🏭 **Read-only review** — the PR author's association with this repository is `%s`, not owner, member or collaborator, so this review ran with the read-only tool grant: %s.",
+		assoc, strings.Join(removed, "; "))
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary
