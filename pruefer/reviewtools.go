@@ -321,3 +321,11 @@ func (g reviewGrant) ignoredLogLine() string {
 	}
 	return fmt.Sprintf("review tools: repo rules %s ignored: outside the operator's review_tools", logRules(g.RepoIgnored))
 }
+
+// toolRuleValid reports whether rule is already in the normalised form
+// validateReviewToolRule produces and passes it. It is the structural check
+// checkReviewArgsScopedTools applies to every extra rule it is told about.
+func toolRuleValid(rule string) bool {
+	n, err := validateReviewToolRule(rule)
+	return err == nil && n == rule
+}
