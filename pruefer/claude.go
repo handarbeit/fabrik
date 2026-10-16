@@ -18,6 +18,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
+	"github.com/handarbeit/fabrik/pruefer/reviewplugin"
 )
 
 // reviewShellAllow lists the read-only shell commands the reviewer may run
@@ -103,6 +104,14 @@ func resolveAbs(p string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
+// skillRef is the qualified review skill this request runs.
+func (r ReviewRequest) skillRef() string {
+	if r.SkillRef != "" {
+		return r.SkillRef
+	}
+	return reviewplugin.DefaultRef
+}
+
 // buildReviewToolRules builds the permission rules for a review from the
 // already-resolved clone and staged-diff-directory paths (#2192, R1-R3; the
 // diff is a directory of entries since #2190). Scope is expressed as
@@ -111,7 +120,7 @@ func resolveAbs(p string) (string, error) {
 // bare Read, Grep or Glob entry: an unscoped allow admits every path, and
 // probing showed Read(...) rules do not scope the Grep/Glob tools, so each
 // gets its own path rule. Task (subagents) inherits these rules.
-func buildReviewToolRules(clone, stagedDir string) (allow, deny []string) {
+func buildReviewToolRules(clone, stagedDir, skillRef string) (allow, deny []string) {
 	root := "//" + strings.TrimPrefix(escapeRulePath(clone), "/") + "/**"
 	allow = append(allow, "Read("+root+")", "Grep("+root+")", "Glob("+root+")")
 	if stagedDir != "" {
@@ -121,7 +130,7 @@ func buildReviewToolRules(clone, stagedDir string) (allow, deny []string) {
 	for _, c := range reviewShellAllow {
 		allow = append(allow, "Bash("+c+" *)")
 	}
-	allow = append(allow, "Task")
+	allow = append(allow, "Task", "Skill("+skillRef+")")
 	return allow, append([]string(nil), reviewShellDeny...)
 }
 
@@ -150,6 +159,7 @@ func checkReviewArgsScoped(args []string) error {
 	for _, r := range allows {
 		switch {
 		case r == "Task" || shell[r]:
+		case strings.HasPrefix(r, "Skill("+reviewplugin.PluginName+":") && strings.HasSuffix(r, ")") && !strings.Contains(r, "*"):
 		case strings.HasPrefix(r, "Read(//") || strings.HasPrefix(r, "Grep(//") || strings.HasPrefix(r, "Glob(//"):
 		default:
 			return fmt.Errorf("allow rule %q is not a scoped read-only rule", r)
@@ -199,8 +209,15 @@ type ReviewRequest struct {
 	// keeps the value it started with across a reload. Empty means nothing
 	// resolved: the review process then carries no CLAUDE_CONFIG_DIR at all.
 	ClaudeConfigDir string
-	WorkDir         string        // ephemeral clone directory; claude's cwd
-	MaxWallTime     time.Duration // 0 = no wall-time cap
+	WorkDir         string // ephemeral clone directory; claude's cwd
+	// PluginDir is the per-review directory holding the embedded pruefer-review
+	// plugin, passed as the only --plugin-dir (#2306). SkillRef is the
+	// qualified review skill resolved against it; empty means the default,
+	// pruefer-review:review. Review fills both; tests building args or prompts
+	// directly may leave them empty.
+	PluginDir   string
+	SkillRef    string
+	MaxWallTime time.Duration // 0 = no wall-time cap
 	// ReviewThreads carries existing review threads (resolved and
 	// unresolved) on the PR, fetched by ReviewPR via
 	// GitHubReviewer.FetchPRReviewThreads (R1). nil when the fetch failed
@@ -443,49 +460,22 @@ func renderOmittedPaths(b *strings.Builder, excluded, trimmed, reviewed []string
 	b.WriteString("\n")
 }
 
-// defaultReviewGuidance is the embedded default review-guidance text (C2):
-// what to look for and how to weigh findings. This is the base layer of
-// #1446's guidance composition — the only layer that is always present, and
-// exactly the text buildReviewPrompt wrote inline before this issue split
-// it out, so a zero-config ReviewRequest still produces a byte-identical
-// prompt (AC1). Deliberately excludes the output contract and no-approval-
-// language rule (C5, see renderContract) and all Go-supplied dynamic
-// context (C7, see renderDynamicContext) — those are never part of any
-// guidance layer, so a repo or operator override can never touch them.
-const defaultReviewGuidance = `Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems.
-
-**The diff tells you what changed. It does not tell you what to check.** Reading it is the start of the review, not the whole of it. Before you conclude, follow the change outward:
-
-- For every symbol the diff adds, removes, renames, or changes the meaning of, search the repository for its other uses. A change that is correct in its own file is still a defect if a caller, test, or script depends on the old behavior.
-- Check whether the change falsifies anything written down. Grep the docs, README files, ADRs, and nearby comments for the flags, keys, functions, and behaviors the diff touches. A doc that now describes behavior the code no longer has is a real finding.
-- Read the tests the diff adds or changes. Ask what would still pass if the fix were removed — a test that holds either way is not evidence.
-- When the diff removes or narrows something, ask what depended on it.
-
-**Verify before asserting.** Do not report a defect you have not confirmed by reading the relevant code. If you suspect something but cannot establish it, either check it or say plainly that it is unverified — never state it as fact. Equally, do not claim the absence of a problem ("no other call sites", "nothing else uses this") from a single narrow search; sweep properly or do not make the claim.
-
-**Finish the review.** If some part of the change is hard to assess, say so explicitly and name what you could not check. Do not silently stop at the first file, and do not treat an early confident impression as a completed review. State what you examined, so a reader can tell a thorough pass from a partial one.
-
-**Make every finding falsifiable.** For each one, state the concrete path to the failure: the input, state, or sequence that produces the wrong result, and what the wrong result is. "This could be a problem" is not a finding — if you cannot describe how it goes wrong, either work out whether it does, or leave it out.
-
-**Say which findings you verified.** Begin a finding you have confirmed by reading the relevant code with "Confirmed:". Begin one you believe is real but could not establish with "Plausible:", and say what you would need to check. A reader must be able to tell the two apart without re-deriving your reasoning.
-
-On a large PR, raise the bar for a "low"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.`
-
-// resolveGuidance composes #1446's three guidance layers — embedded default,
-// operator override, repo skill — into the single guidance string
-// buildReviewPrompt emits between the dynamic-context and contract halves.
-// Each overridable layer folds onto the result of the layer below it via
-// composeGuidanceLayer, with its own independent append/replace mode (R3's
-// "each layer able to append or (explicitly) replace the one below" —
-// per-layer, not one global mode): the operator layer folds onto the
-// embedded default first, then the repo layer folds onto whatever the
-// operator layer produced. An absent layer (empty guidance text) is a
-// no-op regardless of its mode — see composeGuidanceLayer.
-func resolveGuidance(req ReviewRequest) string {
-	guidance := defaultReviewGuidance
-	guidance = composeGuidanceLayer(guidance, req.OperatorGuidance, req.OperatorGuidanceMode)
+// resolveGuidance composes the operator and repo guidance layers (#1446, R3)
+// that sit on top of the default review skill (#2306). The default layer is
+// no longer text: it is the embedded pruefer-review:review skill, which the
+// prompt tells the reviewer to invoke. Each overridable layer still folds onto
+// the one below with its own independent append/replace mode — the operator
+// layer first, then the repo layer onto that result. An absent layer (empty
+// guidance text) is a no-op regardless of its mode.
+//
+// replacesDefault reports that some non-empty layer is in replace mode, i.e.
+// the guidance replaces the skill's own criteria rather than adding to them.
+func resolveGuidance(req ReviewRequest) (guidance string, replacesDefault bool) {
+	guidance = composeGuidanceLayer("", req.OperatorGuidance, req.OperatorGuidanceMode)
 	guidance = composeGuidanceLayer(guidance, req.RepoGuidance, req.RepoGuidanceMode)
-	return guidance
+	replacesDefault = (strings.TrimSpace(req.OperatorGuidance) != "" && req.OperatorGuidanceMode == GuidanceModeReplace) ||
+		(strings.TrimSpace(req.RepoGuidance) != "" && req.RepoGuidanceMode == GuidanceModeReplace)
+	return guidance, replacesDefault
 }
 
 // composeGuidanceLayer folds overlay onto base according to mode (R2/R4):
@@ -526,6 +516,7 @@ func renderReviewTools(b *strings.Builder, req ReviewRequest) {
 		fmt.Fprintf(b, "`%s`", c)
 	}
 	b.WriteString(". Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n")
+	b.WriteString("- Skill: invoke the review skill named below. It only loads instructions; it grants no other access.\n")
 	b.WriteString("- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\n")
 	b.WriteString("Path limits: Read, Grep, Glob and the shell commands reach only the working directory")
 	if req.Staged != nil {
@@ -610,8 +601,8 @@ func renderContract(b *strings.Builder, withCoverage bool) {
 func buildReviewPrompt(req ReviewRequest) string {
 	var b strings.Builder
 	renderDynamicContext(&b, req)
-	b.WriteString(resolveGuidance(req))
-	b.WriteString("\n\n")
+	guidance, replaces := resolveGuidance(req)
+	renderSkillSection(&b, req.skillRef(), guidance, replaces)
 	renderContract(&b, req.Staged != nil)
 	return b.String()
 }
@@ -660,12 +651,15 @@ func buildReviewArgs(req ReviewRequest) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	allow, deny := buildReviewToolRules(clone, staged)
+	allow, deny := buildReviewToolRules(clone, staged, req.skillRef())
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "dontAsk",
 		"--setting-sources", "",
+	}
+	if req.PluginDir != "" {
+		args = append(args, "--plugin-dir", req.PluginDir)
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -818,10 +812,20 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		resolvedStaged.IndexPath = filepath.Join(staged, stagedIndexName)
 		req.Staged = &resolvedStaged
 	}
+	// R1/R2: a fresh plugin directory for this review alone, removed on every
+	// return path, with the default skill resolved against exactly it.
+	rp, err := setupReviewPlugin()
+	if err != nil {
+		return ReviewResult{}, fmt.Errorf("preparing review plugin: %w", err)
+	}
+	defer rp.Close()
+	req.PluginDir, req.SkillRef = rp.Dir, rp.Ref
 	args, err := buildReviewArgs(req)
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
 	}
+	_, replaces := resolveGuidance(req)
+	logf(req.PRNumber, "claude", "%s\n", rp.logLine(replaces))
 	logf(req.PRNumber, "claude", "review tool rules: %s\n", strings.Join(args, " "))
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = req.WorkDir
@@ -911,6 +915,9 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	}
 	if strings.TrimSpace(resp.Result) == "" {
 		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
+	}
+	if err := checkSkillRan(stdout.Bytes(), rp.Ref); err != nil {
+		return ReviewResult{}, err
 	}
 	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
 	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,

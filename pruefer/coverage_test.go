@@ -650,3 +650,34 @@ func TestReviewPR_EmptyTranscriptCreatesNoDir(t *testing.T) {
 		t.Errorf("transcript dir created for an empty transcript: %v", err)
 	}
 }
+
+// #2306: the reviewer now makes a Skill call first. It is not a Read, so it
+// credits nothing and must not disturb coverage derivation or the
+// subagent-authoritative rule.
+func TestCoverage_SkillCallDoesNotDisturbDerivation(t *testing.T) {
+	s := testStaged("a.go", "b.go", "c.go", "d.go")
+	for i := range s.Entries {
+		s.Entries[i].Lines = 100
+	}
+	build := func(readByB []string) []byte {
+		var tr tl
+		tr.toolUse("", "sk", "Skill", `{"skill":"pruefer-review:review"}`)
+		tr.result("", "sk", false, "loaded")
+		return append(tr.bytes(), subagentTranscript(readByB)...)
+	}
+	opened, auth := deriveOpened(build([]string{"/stage/0003.diff", "/stage/0004.diff"}), s)
+	if !auth || len(opened) != 4 {
+		t.Fatalf("opened=%v authoritative=%v, want all four credited and authoritative", opened, auth)
+	}
+	reportAll := []string{"0001", "0002", "0003", "0004"}
+	cov := computeCoverage(coverageInput{Staged: s, Reported: reportAll, ReportOK: true, Transcript: opened, TranscriptAuthoritative: auth})
+	if !cov.Complete {
+		t.Errorf("cov = %+v, want complete", cov)
+	}
+	// Non-vacuous: a subagent that read less is still caught with the Skill call present.
+	opened, auth = deriveOpened(build([]string{"/stage/0003.diff"}), s)
+	cov = computeCoverage(coverageInput{Staged: s, Reported: reportAll, ReportOK: true, Transcript: opened, TranscriptAuthoritative: auth})
+	if cov.Complete || strings.Join(cov.Unread, ",") != "d.go" {
+		t.Errorf("cov = %+v, want partial naming d.go", cov)
+	}
+}
