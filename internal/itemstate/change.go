@@ -150,7 +150,7 @@ type Change struct {
 	// closed (#2123).
 	Closed bool
 	// Path names the cache-refresh path that produced the change when it came
-	// from a reconcile, a deep fetch or the probe loop (#2170); PathNone for every
+	// from a reconcile, a deep fetch, the probe loop or the Layer 1 status refresh (#2170, #2347); PathNone for every
 	// other mutation. Origin cannot tell these apart (all are OriginOther, or
 	// OriginProbe for the probe), and the cache-divergence detector needs the name.
 	Path ChangePath
@@ -175,6 +175,8 @@ const (
 	PathDeepFetch
 	// PathProbe is a mutation applied by the probe loop (FromProbe).
 	PathProbe
+	// PathRefresh is the Layer 1 status refresh (StatusRefreshed, #2347).
+	PathRefresh
 )
 
 // String is the wire name used in cache-divergence events.
@@ -186,6 +188,8 @@ func (p ChangePath) String() string {
 		return "deep-fetch"
 	case PathProbe:
 		return "probe"
+	case PathRefresh:
+		return "status-refresh"
 	}
 	return ""
 }

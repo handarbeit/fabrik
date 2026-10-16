@@ -1262,6 +1262,13 @@ func (c *CacheImpl) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 // timestamp only if the mutation actually changed anything. opName is used
 // only in the invalid-key log line.
 func (c *CacheImpl) applyKeyedMutation(key, opName string, build func(repo string, number int) itemstate.Mutation) {
+	c.applyKeyedMutationBump(key, opName, true, build)
+}
+
+// applyKeyedMutationBump is applyKeyedMutation with the local-delta bump
+// optional. A mutation that is a GitHub read rather than a local write passes
+// bump=false: it must not anchor the freshness baseline (ADR 2180, #2347).
+func (c *CacheImpl) applyKeyedMutationBump(key, opName string, bump bool, build func(repo string, number int) itemstate.Mutation) {
 	repo, number, ok := parseItemKey(key)
 	if !ok {
 		c.logFn("[cache] %s: key %q invalid — no-op\n", opName, key)
@@ -1272,10 +1279,23 @@ func (c *CacheImpl) applyKeyedMutation(key, opName string, build func(repo strin
 		return
 	}
 	_, changes, _ := c.store.Apply(build(repo, number))
-	if len(changes) == 0 {
+	if len(changes) == 0 || !bump {
 		return
 	}
 	c.bumpLocalDeltaAt(key)
+}
+
+// ApplyStatusRefresh applies a Status the engine read live from GitHub (the
+// Layer 1 status refresh, #2347) as a read-sourced mutation, not an engine
+// write: fetchedAt is the wall-clock instant the read was started, the Store
+// applies the same engine-write protection it applies to a listing, drops a read
+// older than a move it has already observed, records no engine write and does
+// not bump the local-delta freshness baseline. No-op when the key is not in the
+// cache. Safe for concurrent use.
+func (c *CacheImpl) ApplyStatusRefresh(key, status string, fetchedAt time.Time) {
+	c.applyKeyedMutationBump(key, "ApplyStatusRefresh", false, func(repo string, number int) itemstate.Mutation {
+		return itemstate.StatusRefreshed{Repo: repo, Number: number, Status: status, FetchedAt: fetchedAt}
+	})
 }
 
 // UpdateItemStatus updates the Status field for the item identified by key.

@@ -512,3 +512,42 @@ func sameStringSet(a, b []string) bool {
 	}
 	return true
 }
+
+// applyStatusRefresh applies a Status read live from GitHub (the Layer 1 status
+// refresh, #2347). It is a read, not an engine write:
+//
+//   - the engine-write protection is the same rule listings use
+//     (protectStatusClosed, #2178), evaluated against the item's own closed state
+//     so a status-only read never confirms, drops or keeps the closed record;
+//   - a read started before the Store last observed a differing move of a held
+//     Status (StatusEnteredAt: any source) is dropped, so a stale read can never
+//     undo a newer move;
+//   - an equal read applies nothing;
+//   - it never calls recordEngineWrite, and the Change it yields is not marked as
+//     an engine move, so it is not attributed to Fabrik;
+//   - the read carries no GitHub move time, so on a change StatusAtGitHub becomes
+//     unknown (zero) rather than keeping the previous column's time.
+func applyStatusRefresh(item *ItemState, status string, fetchedAt time.Time, grace time.Duration, now time.Time) ChangeFlags {
+	if status == "" {
+		return 0
+	}
+	var flags ChangeFlags
+
+	view := protectStatusClosed(item, status, item.IsClosed, fetchedAt, grace, now)
+	if dropEngineWrites(item, view.Drop) {
+		flags |= EngineWriteRecordedChanged
+	}
+
+	if view.Status == item.Status {
+		return flags
+	}
+	if item.Status != "" && !fetchedAt.IsZero() && fetchedAt.Before(item.StatusEnteredAt) {
+		return flags
+	}
+
+	item.Status = view.Status
+	item.Terminal = false
+	item.StatusEnteredAt = now
+	item.StatusAtGitHub = time.Time{}
+	return flags | StatusChanged
+}

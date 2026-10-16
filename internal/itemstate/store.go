@@ -336,6 +336,8 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 		change.Path = PathDeepFetch
 	case ProbeBoardItemUpdated:
 		change.Path = PathProbe
+	case StatusRefreshed:
+		change.Path = PathRefresh
 	}
 	if fromProbe {
 		change.Origin = OriginProbe
@@ -1207,6 +1209,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case ProbeBoardItemUpdated:
 		return applyProbeItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
+
+	case StatusRefreshed:
+		return applyStatusRefresh(item, v.Status, v.FetchedAt, s.graceLocked(), time.Now())
 	}
 
 	return 0
