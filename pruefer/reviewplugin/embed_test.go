@@ -55,7 +55,7 @@ func TestSkillBodyAndVersion(t *testing.T) {
 	if len(body) < 500 || body[:8] != "Write a " {
 		t.Errorf("unexpected skill body start: %.60q", body)
 	}
-	if Version() != "0.1.0" {
+	if Version() != "0.1.1" {
 		t.Errorf("Version = %q", Version())
 	}
 }
@@ -69,6 +69,14 @@ func TestSkillBodyIsTheOriginalDefaultGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// #2362 added one paragraph on reading the staged diff. The criteria around
+	// it are what this test guards, so the paragraph is cut out before digesting.
+	const readingStart, criteriaStart = "**Read the staged diff in amounts", "**The diff tells you what changed."
+	i, j := strings.Index(body, readingStart), strings.Index(body, criteriaStart)
+	if i < 0 || j < i {
+		t.Fatalf("staged-diff reading paragraph not found before the criteria (i=%d, j=%d)", i, j)
+	}
+	body = body[:i] + body[j:]
 	sum := sha256.Sum256([]byte(body))
 	const want = "a62ec3991b1d58de9f7314449a64dd4d68aff6be4a549ff8b5bc5e74283b086f"
 	if got := hex.EncodeToString(sum[:]); got != want {
