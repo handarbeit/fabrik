@@ -24,7 +24,7 @@ import (
 // responsibility.
 var reviewToolsTestRunners = [][]string{
 	{"go", "test"},
-	{"npm", "test"}, {"npm", "run", "test"}, {"npm", "t"},
+	{"npm", "test"}, {"npm", "run", "test"}, {"npm", "run-script", "test"}, {"npm", "t"}, {"npm", "tst"}, {"npm", "it"},
 	{"yarn", "test"}, {"pnpm", "test"}, {"bun", "test"}, {"deno", "test"},
 	{"pytest"}, {"py.test"}, {"python", "-m", "pytest"}, {"python3", "-m", "pytest"},
 	{"cargo", "test"}, {"cargo", "nextest"},
@@ -52,7 +52,34 @@ var reviewToolsInterpreters = []string{
 	"find", "rm", "cp", "mv", "tee", "dd", "chmod", "chown", "ssh", "scp", "nc",
 }
 
+// reviewToolsRunSubcommands are generic "run something" subcommands of the
+// launchers above. A launcher rule containing one of them ("Bash(npm run:*)",
+// "Bash(go run:*)", "Bash(cargo run)", "Bash(npm exec:*)") executes whatever the
+// repo's scripts or arguments name, which is exactly the head-tree execution
+// the author gate exists to contain, and "npm run test" would also slip past
+// the test-runner list. Any later word equal to one of these refuses the rule.
+var reviewToolsRunSubcommands = []string{
+	"run", "run-script", "exec", "x", "dlx", "generate", "install", "i", "ci", "add",
+	"start", "create", "init", "rebuild", "link", "pack", "publish",
+}
+
+// reviewToolsRepoCodeRunners are executables whose normal operation runs
+// recipes the repo's tree defines (a Makefile). They are refused in every form,
+// not just with a "test" target.
+var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant"}
+
 const maxReviewToolRuleLen = 200
+
+// versionlessExe strips a trailing version from an executable's base name
+// ("python3.12" -> "python", "node20" -> "node") so a versioned interpreter
+// cannot slip past the exact-name lists. Names that merely contain digits
+// elsewhere ("sha256sum") are untouched.
+func versionlessExe(exe string) string {
+	if v := strings.TrimRight(exe, "0123456789."); v != "" {
+		return v
+	}
+	return exe
+}
 
 // normalizeToolRule trims a rule and collapses internal runs of spaces to one
 // space. It is the single normalisation behind both validation and the
@@ -130,10 +157,11 @@ func validateReviewToolRule(raw string) (string, error) {
 		return bad("the command must start with an executable name")
 	}
 	exe := path.Base(words[0])
-	if slices.Contains(reviewToolsInterpreters, exe) {
+	bare := versionlessExe(exe)
+	if slices.Contains(reviewToolsInterpreters, exe) || slices.Contains(reviewToolsInterpreters, bare) {
 		return bad("%q runs arbitrary code and is not permitted", exe)
 	}
-	if len(words) == 1 && slices.Contains(reviewToolsLaunchers, exe) {
+	if len(words) == 1 && (slices.Contains(reviewToolsLaunchers, exe) || slices.Contains(reviewToolsLaunchers, bare)) {
 		return bad("%q with no narrowing subcommand subsumes test runners and arbitrary code; name the subcommand, for example Bash(%s vet:*)", exe, exe)
 	}
 	norm := append([]string{exe}, words[1:]...)
@@ -143,6 +171,16 @@ func validateReviewToolRule(raw string) (string, error) {
 		}
 		if isSubsequence(runner[1:], norm[1:]) {
 			return bad("test runners are not permitted (%q): running tests is the worker's job, not Pruefer's", strings.Join(runner, " "))
+		}
+	}
+	if slices.Contains(reviewToolsRepoCodeRunners, exe) {
+		return bad("%q runs recipes defined in the reviewed tree and is not permitted", exe)
+	}
+	if slices.Contains(reviewToolsLaunchers, exe) || slices.Contains(reviewToolsLaunchers, bare) {
+		for _, w := range words[1:] {
+			if slices.Contains(reviewToolsRunSubcommands, w) {
+				return bad("%q with the %q subcommand runs code or scripts from the reviewed tree and is not permitted", exe, w)
+			}
 		}
 	}
 	return rule, nil

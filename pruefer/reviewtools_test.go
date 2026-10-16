@@ -15,6 +15,8 @@ func TestValidateReviewToolRule_Accepts(t *testing.T) {
 		"Bash(govulncheck ./...)":                "Bash(govulncheck ./...)",
 		"Bash(staticcheck)":                      "Bash(staticcheck)",
 		"Bash(/usr/local/bin/gitleaks detect *)": "Bash(/usr/local/bin/gitleaks detect *)",
+		"Bash(go list -m all)":                   "Bash(go list -m all)",
+		"Bash(sha256sum *)":                      "Bash(sha256sum *)",
 	} {
 		got, err := validateReviewToolRule(in)
 		if err != nil {
@@ -32,7 +34,7 @@ func TestValidateReviewToolRule_RefusesTestRunners(t *testing.T) {
 		"Bash(npm test)", "Bash(npm run test:*)", "Bash(yarn test *)", "Bash(pnpm test)",
 		"Bash(pytest:*)", "Bash(/usr/bin/pytest *)", "Bash(cargo test:*)", "Bash(cargo nextest run)",
 		"Bash(make test)", "Bash(make check:*)", "Bash(jest:*)", "Bash(vitest *)",
-		"Bash(mocha)", "Bash(rspec)", "Bash(tox)", "Bash(dotnet test)", "Bash(mvn -q test)",
+		"Bash(mocha)", "Bash(rspec)", "Bash(npm run-script test)", "Bash(npm it)", "Bash(yarn run test)", "Bash(tox)", "Bash(dotnet test)", "Bash(mvn -q test)",
 	} {
 		_, err := validateReviewToolRule(in)
 		if err == nil {
@@ -58,6 +60,14 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		"Bash(-x)", "Bash(go:*)", "Bash(make:*)", "Bash(npm *)", "Bash(cargo)",
 		"Bash(bash -c *)", "Bash(sh:*)", "Bash(env *)", "Bash(xargs *)", "Bash(python3 -m foo)", "Bash(node *)",
 		"Bash(git *)", "Bash(curl *)", "Bash(" + strings.Repeat("a", 300) + ")",
+		// Launchers with a generic run subcommand execute repo-controlled code.
+		"Bash(npm run:*)", "Bash(yarn run:*)", "Bash(pnpm run:*)", "Bash(npm exec:*)", "Bash(npm run-script lint)",
+		"Bash(go run:*)", "Bash(go generate:*)", "Bash(cargo run:*)", "Bash(pnpm dlx foo)", "Bash(bun x foo)",
+		"Bash(npm --prefix web run lint)", "Bash(/usr/bin/npm run lint)",
+		// make and friends run recipes from the reviewed tree, whatever the target.
+		"Bash(make lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
+		// Versioned interpreters match their unversioned name.
+		"Bash(python3.12 -m foo)", "Bash(node20 x.js)", "Bash(ruby3.2 x.rb)", "Bash(/usr/bin/perl5 x)",
 	} {
 		if got, err := validateReviewToolRule(in); err == nil {
 			t.Errorf("%q: expected refusal, accepted as %q", in, got)
