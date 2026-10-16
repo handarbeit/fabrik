@@ -163,7 +163,7 @@ func checkReviewArgsScoped(args []string, allowedSkills ...string) error {
 	// names. A bare Skill, a wildcard or any other ref is a violation.
 	var allowedSkillRules []string
 	for _, ref := range allowedSkills {
-		if wellFormedSkillRef(ref) && !strings.Contains(ref, "*") && !strings.Contains(ref, "(") && !strings.Contains(ref, ")") {
+		if wellFormedSkillRef(ref) {
 			allowedSkillRules = append(allowedSkillRules, "Skill("+ref+")")
 		}
 	}
@@ -840,6 +840,11 @@ func chooseReviewSkill(set *pluginSet, requested, defaultRef string) (ref, reaso
 	res, why, _, ok := skillref.NewResolver(set.Dirs(), skillref.Options{}).Resolve(requested)
 	if !ok {
 		return defaultRef, fmt.Sprintf("it did not resolve: %s", why)
+	}
+	// The resolved name is what goes into the Skill(<ref>) allow rule; a skill
+	// directory name can carry characters the requested reference could not.
+	if !wellFormedSkillRef(res.Name) {
+		return defaultRef, "the resolved skill name is not a plain plugin:skill reference"
 	}
 	return res.Name, ""
 }

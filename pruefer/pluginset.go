@@ -17,12 +17,15 @@ import (
 var DefaultReviewSkill = reviewplugin.DefaultRef
 
 // wellFormedSkillRef reports whether ref is a non-empty plugin:skill pair with
-// no whitespace or backtick. Pruefer accepts only qualified references: a bare
-// name would resolve by load order, which for a repo-chosen reference would let
-// plugin order decide which skill reviews the PR.
+// no whitespace, backtick, "*", "(" or ")". Pruefer accepts only qualified
+// references: a bare name would resolve by load order, which for a repo-chosen
+// reference would let plugin order decide which skill reviews the PR. The
+// reference is spliced into the reviewer's Skill(<ref>) allow rule, so a
+// character that is a pattern or rule delimiter there (a skill directory named
+// "foo*" in a repo plugin) must never pass.
 func wellFormedSkillRef(ref string) bool {
 	pn, skill, ok := plugin.Split(ref)
-	return ok && pn != "" && skill != "" && !strings.ContainsAny(ref, " \t\r\n`")
+	return ok && pn != "" && skill != "" && !strings.ContainsAny(ref, " \t\r\n`*()")
 }
 
 // sanitizeNoticeText makes a repo-controlled string safe to render in a posted

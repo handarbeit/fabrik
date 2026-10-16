@@ -242,9 +242,34 @@ func TestWellFormedSkillRef(t *testing.T) {
 	for ref, want := range map[string]bool{
 		"pruefer-review:review": true, "a:b": true,
 		"review": false, ":x": false, "x:": false, "": false, "a b:c": false, "a:`b`": false,
+		"p:foo*": false, "p:foo(x)": false, "p:*": false, "p*:s": false,
 	} {
 		if got := wellFormedSkillRef(ref); got != want {
 			t.Errorf("wellFormedSkillRef(%q) = %v, want %v", ref, got, want)
+		}
+	}
+}
+
+// A repo-controlled skill directory name must not widen or break the
+// Skill(<ref>) allow rule: a name carrying "*", "(" or ")" falls back to the
+// default skill instead of being spliced into the rule.
+func TestChooseReviewSkill_RejectsRuleDelimitersInSkillName(t *testing.T) {
+	root := t.TempDir()
+	// One plugin holds all three skills so a single manifest name resolves them.
+	dir := filepath.Join(root, "mine")
+	for _, skill := range []string{"foo*", "foo(x)", "plain"} {
+		writeTestPlugin(t, dir, "mine", "1", skill)
+	}
+	set := &pluginSet{Plugins: []loadedPlugin{{Name: "mine", Dir: dir}}}
+	def := reviewplugin.DefaultRef
+
+	if ref, reason := chooseReviewSkill(set, "mine:plain", def); ref != "mine:plain" || reason != "" {
+		t.Fatalf("plain skill: got %q, %q", ref, reason)
+	}
+	for _, req := range []string{"mine:foo*", "mine:foo(x)"} {
+		ref, reason := chooseReviewSkill(set, req, def)
+		if ref != def || reason == "" {
+			t.Errorf("%q: got %q, %q; want the default with a reason", req, ref, reason)
 		}
 	}
 }
