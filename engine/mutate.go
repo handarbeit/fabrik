@@ -27,6 +27,37 @@ func (e *Engine) cache() *boardcache.CacheImpl {
 	return c
 }
 
+// updateIssueBody is the single engine write of an issue body (#2346): the
+// GitHub mutation, then — only on success — the Store write-through, the probe
+// staleness baseline advance (#1090) and the issues/edited webhook echo. The body
+// is read back from the cache into .fabrik-context/issue.md (writeContextFiles),
+// so the content must reach the Store in the same step that moves the baseline
+// past GitHub's edit time; otherwise a poll-only daemon (no issues.edited echo)
+// serves the pre-edit text to the next invocation. A failed GitHub write changes
+// nothing. The caller owns the error log text and whatever follows (persistSpec,
+// push, breaker reset).
+func (e *Engine) updateIssueBody(item gh.ProjectItem, owner, repo, body string) error {
+	if err := e.client.UpdateIssueBody(owner, repo, item.Number, body); err != nil {
+		return err
+	}
+	key := boardcache.ItemKey(owner+"/"+repo, item.Number)
+	if c := e.cache(); c != nil && !e.issueBodyWriteThroughOff.Load() {
+		c.ApplyIssueBodyUpdated(key, body)
+	}
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "edited", key)
+	}
+	return nil
+}
+
+// SetIssueBodyWriteThroughDisabledForTest skips only the Store write-through of
+// updateIssueBody (the baseline advance and echo still run), reproducing the
+// #2346 defect so a test can show its assertions bite (the non-vacuity seam).
+func (e *Engine) SetIssueBodyWriteThroughDisabledForTest(disabled bool) {
+	e.issueBodyWriteThroughOff.Store(disabled)
+}
+
 // syncLabelAdd mirrors a label addition into the cache and, when echo is
 // true, registers a webhook echo. Split out from applyLabelAdd, symmetric to
 // syncLabelRemoval, so callers that must perform the GitHub mutation

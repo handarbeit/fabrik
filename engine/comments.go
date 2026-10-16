@@ -998,17 +998,11 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	// Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		e.logf(item.Number, "edit", "updating issue body\n")
-		// no write-through: excluded — issue body is not read from cache for dispatch decisions
-		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
+		// updateIssueBody writes through to the Store and advances the probe
+		// staleness baseline (#1090) together: the body feeds the next invocation's
+		// .fabrik-context/issue.md (#2346).
+		if err := e.updateIssueBody(item, owner, repo, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-		} else {
-			// Advances the probe staleness baseline (#1090) — the edit above just
-			// bumped the issue's real GitHub updatedAt, so the next probe cycle
-			// must not treat that bump as a stale signal.
-			e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
 		}
 		// Persist the canonical body as specs/<N>-<slug>/spec.md (ADR 2034). Comment
 		// rounds never push on their own, so push only when a commit was made —
