@@ -128,3 +128,14 @@ func TestDiscover_ManifestSkillsSiblingPrefixIgnored(t *testing.T) {
 		t.Errorf("skills = %v, want none", p.SkillNames())
 	}
 }
+
+func TestDiscover_ManifestVersion(t *testing.T) {
+	with := writePlugin(t, t.TempDir(), `{"name":"v","version":"1.2.3"}`)
+	if got := Discover(with).Version; got != "1.2.3" {
+		t.Errorf("version = %q, want 1.2.3", got)
+	}
+	without := namedPlugin(t, t.TempDir(), "nov")
+	if got := Discover(without).Version; got != "" {
+		t.Errorf("version = %q, want empty", got)
+	}
+}
