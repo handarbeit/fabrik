@@ -534,7 +534,19 @@ func applyStatusRefresh(item *ItemState, status string, fetchedAt time.Time, gra
 	var flags ChangeFlags
 
 	view := protectStatusClosed(item, status, item.IsClosed, fetchedAt, grace, now)
-	if dropEngineWrites(item, view.Drop) {
+	// A status-only read says nothing about closed state: passing the item's own
+	// IsClosed makes protectStatusClosed "confirm" the closed record, which this
+	// read must not do. Only an expired closed record is dropped.
+	drop := view.Drop[:0:0]
+	for _, k := range view.Drop {
+		if k == engineWriteClosedKey {
+			if w, ok := item.EngineWriteAt[k]; ok && now.Before(w.Add(grace)) {
+				continue
+			}
+		}
+		drop = append(drop, k)
+	}
+	if dropEngineWrites(item, drop) {
 		flags |= EngineWriteRecordedChanged
 	}
 
