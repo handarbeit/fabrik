@@ -2491,8 +2491,10 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 // linked PR's HEAD SHA changed after stage:Validate:complete was recorded. Called
 // from the SHA-invalidation scan in poll.go after the in-flight worker guard passes.
 // Mirrors handleRevalidateLabel's deferral-on-error pattern: on partial failure
-// the scan retries on the next poll without leaving a partially-cleared state.
-func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo string) {
+// the scan retries on the next poll without leaving a partially-cleared state. It
+// returns true only when every label removal succeeded and the store was reset; false
+// means stage:Validate:complete may still be on GitHub and the attempt is deferred.
+func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo string) bool {
 	e.logf(item.Number, "validate-sha", "SHA changed after Validate completion — clearing stale completion labels\n")
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -2523,7 +2525,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 
 	if hasError {
 		e.logf(item.Number, "warn", "validate-sha: some labels failed to remove; deferring store reset to next poll\n")
-		return
+		return false
 	}
 
 	e.store.Apply(itemstate.ValidateCompletedAtSHACleared{Repo: repoStr, Number: item.Number})
@@ -2537,6 +2539,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	// resets neither.
 	e.resetCommentBreaker(item)
 	e.logf(item.Number, "validate-sha", "store reset complete; Validate will dispatch on next poll\n")
+	return true
 }
 
 // buildAwaitingInputComment builds the notification comment body for a

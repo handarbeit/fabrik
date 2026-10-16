@@ -1744,7 +1744,15 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// joint-clearing handoff (CI gate clears → landing decision reached in the same
 	// pass) still applies to awaiting-ci items now that they route through the
 	// dedicated scan instead of this loop.
+	//
+	// #2343: after a restart the Validate completion SHA is empty, and this loop's Phase 2
+	// (the landing decision) runs before settleSHAInvalidationScan. Rebuild the SHA first
+	// and drop any item it invalidated — its label copy below is stale.
+	validateInvalidated := e.hydrateValidateCompletionSHAs(deepFetchCandidates)
 	for _, item := range deepFetchCandidates {
+		if validateInvalidated[issueKey(item, e.defaultRepo())] {
+			continue
+		}
 		// Skip paused items in both phases.
 		if hasLabel(item.Labels, "fabrik:paused") {
 			continue

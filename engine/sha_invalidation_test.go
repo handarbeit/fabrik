@@ -134,6 +134,10 @@ func TestSHAInvalidation_NoopOnSameSHA(t *testing.T) {
 // stage:Validate:complete is present but ValidateCompletedSHA is empty
 // (pre-feature or worktree-HEAD-unavailable item), the scan leaves the item
 // untouched even when the linked PR's HEAD SHA changes.
+//
+// Since #2343 the pre-landing hydrate rebuilds or handles an empty SHA before the
+// scan runs (see validate_sha_rebuild_test.go), so this test disables it to keep
+// pinning the scan's own FR-5 skip.
 func TestSHAInvalidation_NoopOnEmptySHA(t *testing.T) {
 	stgs := testStagesForSHAInvalidation()
 	labels := []string{
@@ -144,6 +148,7 @@ func TestSHAInvalidation_NoopOnEmptySHA(t *testing.T) {
 		fetchProjectBoardFn: shaInvalidationBoardFn(44, labels),
 	}
 	eng := testEngineWithStages(t, client, stgs)
+	defer eng.SetValidateSHARebuildDisabledForTest()()
 
 	// Set HeadSHA but apply no ValidateCompletedAtSHA mutation → completion SHA is "".
 	eng.store.Apply(itemstate.PRHeadSHAUpdated{
