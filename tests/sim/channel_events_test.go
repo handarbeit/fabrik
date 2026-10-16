@@ -348,13 +348,13 @@ func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.
 	// Refuse every landing call until released: whichever of auto-merge, enqueue
 	// or direct merge the engine tries, the PR "no longer merges cleanly".
 	bounce := simgh.WrapErr(gh.ErrNotMergeable, "simgh: injected conflict")
-	for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+	for _, m := range []string{"MergePRAtHeadSHA", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
 		env.Sim.Faults().FailAlways(m, bounce)
 	}
 	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
 	AdvanceUntil(t, env, func(env *Env) bool {
 		fired := 0
-		for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+		for _, m := range []string{"MergePRAtHeadSHA", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
 			fired += env.Sim.Faults().FiredCount(m)
 		}
 		return fired > 0
@@ -365,7 +365,7 @@ func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.
 	}
 
 	// Heal the base: the landing now goes through and is announced once.
-	for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+	for _, m := range []string{"MergePRAtHeadSHA", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
 		env.Sim.Faults().Clear(m)
 	}
 	WaitForIssueClosed(t, env, num, 120)

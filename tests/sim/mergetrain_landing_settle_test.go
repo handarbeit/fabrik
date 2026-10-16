@@ -30,7 +30,7 @@ func assertLandedOnFirstTrial(t *testing.T, env *Env, members []int) {
 		t.Errorf("merged trial PRs = %v, want exactly one", merged)
 	}
 	okMerges := 0
-	for _, e := range env.Sim.Log().ByMethod("MergePR") {
+	for _, e := range env.Sim.Log().ByMethod("MergePRAtHeadSHA") {
 		if e.Err == nil {
 			okMerges++
 		}
@@ -224,7 +224,7 @@ func TestMergeTrainLandingSettle_RestartMidWaitLandsKeptPRExactlyOnce(t *testing
 		t.Errorf("merged trial PRs = %v, want exactly the kept #%d", merged, trialPRs[0])
 	}
 	okMerges := 0
-	for _, e := range env2.Sim.Log().ByMethod("MergePR") {
+	for _, e := range env2.Sim.Log().ByMethod("MergePRAtHeadSHA") {
 		if e.Err == nil {
 			okMerges++
 		}

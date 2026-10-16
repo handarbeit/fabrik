@@ -119,6 +119,14 @@ func (e *Engine) settleSHAInvalidationScan(candidates []gh.ProjectItem) {
 // FR-6 worker guard all live here, so the scan and the pre-landing hydrate (#2343)
 // apply exactly the same rule.
 func (e *Engine) checkValidateSHAInvalidation(item gh.ProjectItem) bool {
+	return e.checkValidateSHAInvalidationAt(item, "")
+}
+
+// checkValidateSHAInvalidationAt is checkValidateSHAInvalidation judged against liveHead
+// when it is non-empty: the landing decision (#2342) has just read the PR head live and
+// that read, not the Store's possibly older copy, is the head it is about to land. An
+// empty liveHead uses the Store's head, exactly as the scan does.
+func (e *Engine) checkValidateSHAInvalidationAt(item gh.ProjectItem, liveHead string) bool {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, snapErr := e.store.Get(repoStr, item.Number)
@@ -132,6 +140,11 @@ func (e *Engine) checkValidateSHAInvalidation(item gh.ProjectItem) bool {
 		return false
 	}
 	lpr := snap.LinkedPR()
+	if lpr != nil && liveHead != "" {
+		withLive := *lpr
+		withLive.HeadSHA = liveHead
+		lpr = &withLive
+	}
 	if lpr != nil && lpr.HeadSHA == "" {
 		// Right after a restart the engine-recorded head can still be empty while the
 		// poll's PR facts already name the head (#2343): fall back to the observed head.

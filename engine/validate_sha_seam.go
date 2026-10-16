@@ -25,3 +25,11 @@ func (e *Engine) SetValidateSHARebuildDisabledForTest() (restore func()) {
 	e.validateSHARebuildOff.Store(true)
 	return func() { e.validateSHARebuildOff.Store(false) }
 }
+
+// SetLandingValidateSHACheckDisabledForTest turns off the landing decision's check that
+// the head it is about to land is the head Validate completed on (#2342), and returns
+// the restore function. It is how the sim and engine twins show they are not vacuous.
+func (e *Engine) SetLandingValidateSHACheckDisabledForTest() (restore func()) {
+	e.landingValidateSHACheckOff.Store(true)
+	return func() { e.landingValidateSHACheckOff.Store(false) }
+}

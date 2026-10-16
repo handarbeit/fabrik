@@ -141,6 +141,15 @@ branch — every other `MergePR` caller merges a Fabrik-owned trial/integration/
 landing branch nobody else pushes to, where this residual exposure was never
 reachable in practice.
 
+**Since #2342 (ADR 2342) every engine merge is `MergePRAtHeadSHA`.** `MergePR`
+is no longer on `engine.GitHubClient` (the sim keeps `Sim.MergePR`, which
+scenarios use to play GitHub or a human completing a merge), so the "unpinned"
+discussion above now describes only that scenario-side method. The model's
+head-mismatch refusal is `gh.ErrHeadMoved` wrapping `gh.ErrConflict`, the same
+shape the production client returns after classifying a 409 from the live head.
+`BeforeNthCall` (see the merge-queue and auto-merge entries) is how a scenario puts a
+push between two engine calls.
+
 **Risk:** low, and bounded by construction — the window only exists for a
 scenario that mutates a repo concurrently with its own `MergePR` call. A
 scenario that wants to exercise "a required check went red mid-merge" cannot do
@@ -685,6 +694,20 @@ regressions (no prior scenario relied on the stale-list behavior).
 flag, surfaced as `PRDetails.AutoMergeEnabled`. Enabling it is refused when the
 repo's `AllowAutoMerge` is false, as GitHub refuses it.
 
+**Pinned to a head (#2342).** `EnablePullRequestAutoMerge` takes the
+`expectedHeadOID` the engine judged and refuses with `gh.ErrHeadMoved` when the
+PR branch is no longer there (an empty value is refused outright). The check
+reads the head under `gitMu` before `mu` is taken, so it is not atomic with the
+flag write — the same recorded gap as the enqueue below; GitHub does it
+server-side. GitHub's real error text for this refusal is undocumented, so the
+production client classifies from the live head, not the message
+(`tests/e2e/landing_head_pin_test.go` captures the real text).
+`SeedAutoMergeRefusedClean` makes the next enable refuse with
+`gh.ErrAutoMergeAlreadyClean`, GitHub's refusal of a PR that is already
+immediately mergeable (a repo with no required checks); the sim does not derive
+that state itself, because doing so would change every existing auto-merge
+scenario.
+
 **The sim never acts on the flag.** It does not watch checks and merge the PR
 when they go green. A scenario that enables auto-merge and then turns CI green
 will find the PR still open; it must call `MergePR` to make the merge happen.
@@ -708,8 +731,11 @@ justifies.
 ### Merge queue — **Simplified (bookkeeping only)**
 
 `EnqueuePullRequest` / `DequeuePullRequest` record queue membership and assign a
-position, and `EnqueuePullRequest` rejects a stale `expectedHeadOID` (as GitHub
-does, which is how a race with a concurrent push is caught).
+position, and `EnqueuePullRequest` rejects a stale `expectedHeadOID` with
+`gh.ErrHeadMoved` (as GitHub does, which is how a race with a concurrent push is
+caught). `Sim.FetchLinkedPR` reports the repo's merge-queue flag as
+`IsMergeQueueEnabled` (production reports it on a boardcache hit), which is what
+the engine's landing decision reads (#2342).
 
 **The queue never advances.** It does not run checks, never reorders itself,
 never merges anything, and dequeuing does not renumber the PRs behind it.
@@ -1682,3 +1708,13 @@ Neither mechanism can tell you whether a **Modelled** entry matches *real
 GitHub* — only that the model does what this document says. For anything subtle
 and load-bearing, prefer deriving the behaviour from a recorded real response
 over reasoning about it.
+
+### `FaultTable.BeforeNthCall` — a push between two engine calls (#2342)
+
+`BeforeNthCall(method, n, fn)` runs `fn` on the calling goroutine immediately before
+the n-th call to `method` (counted from the table's creation, like `FailOnCall`)
+reaches the model, with the table's mutex released so `fn` may call the Sim. It
+is how a scenario commits to a PR branch between the gates clearing and the
+engine's merge request; a scenario that could only push between polls would pass
+against unpinned code, because the next poll's gates would read the new head.
+Hooks are not carried through Sim snapshots (they close over live test state).

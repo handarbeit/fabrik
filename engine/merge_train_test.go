@@ -4543,9 +4543,6 @@ func TestTrySingletonFastPath_Eligible_LandsMemberPRDirectly(t *testing.T) {
 	if len(client.mergePRAtHeadSHACalls) != 1 || client.mergePRAtHeadSHACalls[0].prNumber != 90 || client.mergePRAtHeadSHACalls[0].expectedHeadSHA != "head-sha" {
 		t.Fatalf("expected MergePRAtHeadSHA called once on the member's own PR #90 pinned to head-sha, got %+v", client.mergePRAtHeadSHACalls)
 	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected the unpinned MergePR to never be called for the singleton fast path, got %+v", client.mergePRCalls)
-	}
 	if len(client.createPRCalls) != 0 {
 		t.Errorf("expected no dedicated landing PR to be created, got %d", len(client.createPRCalls))
 	}
@@ -5066,10 +5063,14 @@ func TestMergeTrainWorker_MultiMemberBatch_NeverInvokesSingletonFastPath(t *test
 			t.Errorf("expected no direct merge of a member's own PR in a multi-member batch, got %+v", c)
 		}
 	}
-	// The singleton fast path is the only caller of MergePRAtHeadSHA — asserting
-	// it was never called at all is a stronger version of the same guarantee.
-	if len(client.mergePRAtHeadSHACalls) != 0 {
-		t.Errorf("expected MergePRAtHeadSHA never called for a multi-member batch, got %+v", client.mergePRAtHeadSHACalls)
+	// Since #2342 the integration PR's landing merge is pinned too, so
+	// MergePRAtHeadSHA is no longer the fast path's alone; the guarantee is that
+	// no member's own PR is merged, which the loop above (it reads the pinned
+	// calls as well) already asserts.
+	for _, c := range client.mergePRAtHeadSHACalls {
+		if c.prNumber == 10 || c.prNumber == 11 {
+			t.Errorf("expected no pinned merge of a member's own PR in a multi-member batch, got %+v", c)
+		}
 	}
 }
 
@@ -7080,7 +7081,7 @@ func TestReconstructTrainState_ResumeOpenPR(t *testing.T) {
 		State:       "open",
 		Merged:      false,
 		HeadRefName: "fabrik/merge-train/merge-train-main-1",
-		HeadSHA:     "trialsha",
+		HeadSHA:     "mockhead", // equals the seam fixture's FetchPRDetails head (#2342: the landing pins it)
 		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker,
 	}
 	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // green

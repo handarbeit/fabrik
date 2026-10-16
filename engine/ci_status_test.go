@@ -132,6 +132,7 @@ func TestCIStatus_ReadErrorsAreUnknown(t *testing.T) {
 	})
 	t.Run("empty head SHA", func(t *testing.T) {
 		client := ciStatusClient(nil)
+		client.noHeadBackfill = true
 		client.fetchPRDetailsFn = func(owner, repo string, n int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: n, State: "open"}, nil
 		}

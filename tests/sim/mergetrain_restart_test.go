@@ -175,7 +175,7 @@ func TestMergeTrainRestart_ResumesOpenTrialFromLiveBranch(t *testing.T) {
 
 	// Exactly one merge — landMergeTrainBatch, reached via
 	// resumeTrain->landGreenBatch, never doubles up.
-	if got := len(restarted.Sim.Log().ByMethod("MergePR")); got != 1 {
+	if got := len(restarted.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 1 {
 		t.Errorf("MergePR called %d time(s), want exactly 1 — no double-merge", got)
 	}
 
@@ -289,7 +289,7 @@ func TestMergeTrainRestart_CompletesDeferredLandingAfterMerge(t *testing.T) {
 	// The whole point: MergePR is never called for this crash-recovery
 	// landing — the seeded PR was already merged, and completeDeferredLanding
 	// must find alreadyMerged=true and skip straight to the bookkeeping.
-	if got := len(restarted.Sim.Log().ByMethod("MergePR")); got != 0 {
+	if got := len(restarted.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 0 {
 		t.Errorf("MergePR called %d time(s), want 0 — completeDeferredLanding must never re-merge an already-merged landing PR (no double-merge):\n%s",
 			got, restarted.Sim.Log().Dump(20))
 	}

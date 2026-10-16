@@ -1991,7 +1991,9 @@ func TestAttemptMergeOnValidate_ReviewGate_OptOutCostsNothing(t *testing.T) {
 	eng.cfg.MergeTrain = "off"
 	// LinkedPRNumber set: a linked item, so the feedback gate reads GraphQL
 	// review data rather than resolving the PR over REST (#1962).
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
+	// The item carries its judged head explicitly (#2342) so the mock's head
+	// backfill does not add a FetchLinkedPR call of its own.
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10, LinkedPRHeadSHA: "sha1"}
 
 	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate"}); err != nil {

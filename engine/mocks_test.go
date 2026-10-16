@@ -70,6 +70,7 @@ type mockGitHubClient struct {
 	createIssueFn                 func(owner, repo, title, body string, assignees []string) (int, string, error)
 	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
 	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
+	noHeadBackfill                bool // disable the head backfill in FetchItemDetails / FetchPRDetails (#2342)
 	enablePullRequestAutoMergeFn  func(owner, repo string, prNumber int, strategy string) error
 	disablePullRequestAutoMergeFn func(owner, repo string, prNumber int) error
 	enqueuePullRequestFn          func(owner, repo string, prNumber int, expectedHeadOID string) error
@@ -320,11 +321,21 @@ func (m *mockGitHubClient) FetchItemDetails(item *gh.ProjectItem) error {
 	m.mu.Lock()
 	m.fetchItemDetailsCalls = append(m.fetchItemDetailsCalls, item.Number)
 	fn := m.fetchItemDetailsFn
+	linkedFn := m.fetchLinkedPRFn
 	m.mu.Unlock()
+	var err error
 	if fn != nil {
-		return fn(item)
+		err = fn(item)
 	}
-	return nil
+	// Real FetchItemDetails fills LinkedPRHeadSHA from the PR's headRefOid; the
+	// landing decision's judged head (#2342) comes from it. Emulate that for
+	// fixtures that script only the linked PR, never overriding an explicit value.
+	if err == nil && !m.noHeadBackfill && item.LinkedPRHeadSHA == "" && linkedFn != nil {
+		if pr, perr := linkedFn("", "", item.Number); perr == nil && pr != nil {
+			item.LinkedPRHeadSHA = pr.HeadSHA
+		}
+	}
+	return err
 }
 
 func (m *mockGitHubClient) FetchStatusField(projectID string) (*gh.StatusField, error) {
@@ -603,7 +614,15 @@ func (m *mockGitHubClient) FetchPRDetails(owner, repo string, prNumber int) (*gh
 	fn := m.fetchPRDetailsFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(owner, repo, prNumber)
+		pr, err := fn(owner, repo, prNumber)
+		// Real PR details always carry a head SHA, and the train's landing merge
+		// is pinned to it (#2342): backfill fixtures that script none.
+		if err == nil && pr != nil && pr.HeadSHA == "" && !m.noHeadBackfill {
+			cp := *pr
+			cp.HeadSHA = "mockhead"
+			return &cp, nil
+		}
+		return pr, err
 	}
 	return nil, nil
 }
@@ -674,10 +693,17 @@ func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
 func (m *mockGitHubClient) MergePRAtHeadSHA(owner, repo string, prNumber int, expectedHeadSHA string) error {
 	m.mu.Lock()
 	m.mergePRAtHeadSHACalls = append(m.mergePRAtHeadSHACalls, mergePRAtHeadSHACall{owner, repo, prNumber, expectedHeadSHA})
+	// Every engine merge is pinned since #2342, so the unpinned-era fixtures
+	// (mergePRFn / mergePRCalls) observe pinned merges too.
+	m.mergePRCalls = append(m.mergePRCalls, mergePRCall{owner, repo, prNumber})
 	fn := m.mergePRAtHeadSHAFn
+	legacy := m.mergePRFn
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, prNumber, expectedHeadSHA)
+	}
+	if legacy != nil {
+		return legacy(owner, repo, prNumber)
 	}
 	return nil
 }
@@ -973,6 +999,7 @@ type enablePullRequestAutoMergeCall struct {
 	owner, repo string
 	prNumber    int
 	strategy    string
+	headOID     string // the head the request was pinned to (#2342)
 }
 
 type disablePullRequestAutoMergeCall struct {
@@ -1000,9 +1027,9 @@ type dequeuePullRequestCall struct {
 	prNumber    int
 }
 
-func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error {
 	m.mu.Lock()
-	m.enablePullRequestAutoMergeCalls = append(m.enablePullRequestAutoMergeCalls, enablePullRequestAutoMergeCall{owner, repo, prNumber, strategy})
+	m.enablePullRequestAutoMergeCalls = append(m.enablePullRequestAutoMergeCalls, enablePullRequestAutoMergeCall{owner, repo, prNumber, strategy, expectedHeadOID})
 	fn := m.enablePullRequestAutoMergeFn
 	m.mu.Unlock()
 	if fn != nil {

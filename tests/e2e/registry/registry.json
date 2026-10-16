@@ -252,6 +252,21 @@
       "traversal": "none"
     },
     {
+      "name": "TestLandingHeadPinRefusedOnMovedHead",
+      "parity": "sim",
+      "sim": [
+        "TestLandingHeadPin_AutoMerge_PushAfterGate_DefersThenNewHeadLands",
+        "TestLandingHeadPin_DirectMergeFallback_PushAfterGate_DefersThenNewHeadLands",
+        "TestLandingHeadPin_AlreadyClean_PushAfterEnableRefusal_DoesNotMergeUnchecked",
+        "TestLandingHeadPin_MergeQueueEnqueue_PushAfterGate_DefersThenNewHeadLands"
+      ],
+      "note": "sim twins prove the engine flow with an injected push between gate and merge; this live test proves GitHub's real refusal and its error text for the pinned merge, auto-merge enable and enqueue (undocumented for the two GraphQL mutations). It cannot race inside one engine poll, so it replays the precondition (head A, push B, pinned request at A) through the client methods the engine uses.",
+      "auth": "neutral",
+      "train": "neutral",
+      "entry": "none",
+      "traversal": "none"
+    },
+    {
       "name": "TestLateCheckRunSuiteGate",
       "parity": "sim",
       "sim": [

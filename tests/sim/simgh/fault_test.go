@@ -157,11 +157,11 @@ func TestClearAndClearAll(t *testing.T) {
 // exactly the sentinel a production path matches on.
 func TestInjectedSentinelsSurviveWrapping(t *testing.T) {
 	in, _ := newInstrumented(t)
-	in.Faults().FailOnce("MergePR", WrapErr(gh.ErrNotMergeable, "simgh: injected"))
+	in.Faults().FailOnce("MergePRAtHeadSHA", WrapErr(gh.ErrNotMergeable, "simgh: injected"))
 
-	err := in.MergePR("acme", "widgets", 1)
+	err := in.MergePRAtHeadSHA("acme", "widgets", 1, "x")
 	if !errors.Is(err, gh.ErrNotMergeable) {
-		t.Fatalf("MergePR err = %v, want errors.Is(err, gh.ErrNotMergeable)", err)
+		t.Fatalf("MergePRAtHeadSHA err = %v, want errors.Is(err, gh.ErrNotMergeable)", err)
 	}
 }
 

@@ -113,6 +113,36 @@ type FaultTable struct {
 	// hooks are the BeforeCall callbacks, keyed by method name. They are not
 	// part of a Sim snapshot (they are scenario closures, like match).
 	hooks map[string][]func(Args)
+	// nthHooks are BeforeNthCall side effects, consulted by next() ahead of the
+	// fault rules. Not carried through Sim snapshots (a hook closes over live
+	// test state).
+	nthHooks map[string][]*hookRule
+}
+
+// hookRule runs fn once, immediately before the onCall-th call to a method.
+type hookRule struct {
+	onCall int
+	fn     func()
+	done   bool
+}
+
+// BeforeNthCall runs fn immediately before the nth call (1-based, counted from the
+// table's creation like FailOnCall) to method reaches the Sim, then lets the
+// call proceed. It is how a scenario injects an event — typically a push to a
+// PR branch — into the window between two engine calls that the engine
+// believes are back to back (#2342). fn runs on the calling goroutine with the
+// table's mutex released, so it may call into the Sim freely.
+func (f *FaultTable) BeforeNthCall(method string, nth int, fn func()) {
+	validateMethod(method)
+	if nth < 1 || fn == nil {
+		panic(fmt.Sprintf("simgh: BeforeNthCall(%s, %d): nth must be positive and fn non-nil", method, nth))
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nthHooks == nil {
+		f.nthHooks = make(map[string][]*hookRule)
+	}
+	f.nthHooks[method] = append(f.nthHooks[method], &hookRule{onCall: nth, fn: fn})
 }
 
 // NewFaultTable returns an empty table.
@@ -266,10 +296,21 @@ func (f *FaultTable) next(method string, args Args) error {
 	f.runHooks(method, args)
 
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	f.calls[method]++
 	n := f.calls[method]
+	var due []func()
+	for _, h := range f.nthHooks[method] {
+		if !h.done && h.onCall == n {
+			h.done = true
+			due = append(due, h.fn)
+		}
+	}
+	f.mu.Unlock()
+	for _, fn := range due {
+		fn()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	for _, r := range f.rules[method] {
 		if r.match != nil && !r.match(args) {

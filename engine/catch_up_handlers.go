@@ -641,5 +641,11 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	// CI is no longer pending: end the recorded hold (#2121).
 	e.noteGateClear(pctx.item, gateCI)
 
+	// #2342: remember which head the CI gate cleared, so the landing decision in
+	// Phase 2 can refuse a different one. Only a wait_for_ci stage makes a CI claim.
+	if pctx.stage.WaitForCI != nil && *pctx.stage.WaitForCI && settle.PR != nil {
+		e.noteCIJudgedHead(pctx.item, settle.PR.HeadSHA)
+	}
+
 	return false
 }

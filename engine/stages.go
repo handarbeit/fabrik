@@ -488,8 +488,31 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// Observation only (#1968 R2, R10): every landing gate has passed — the
 	// engine is about to queue or merge. Recorded here because a yolo item lands
 	// inside this call and never reaches runCatchUpPhase2. Changes nothing.
+	// The judged head (#2342): the PR head the review, thread and feedback gates
+	// just evaluated, taken once from the live re-read above. It is handed to
+	// landValidated, which pins every merge, auto-merge enablement and enqueue
+	// to it — the landing never reads a head of its own. When the CI gate
+	// recorded the head it cleared (wait_for_ci stages), it must be this same
+	// commit; a different one means the CI verdict is for a superseded head.
+	judgedHead := item.LinkedPRHeadSHA
+	if ciHead, ok := e.takeCIJudgedHead(item); ok && judgedHead != "" && ciHead != judgedHead {
+		e.deferLandingHeadMoved(item, ciHead, judgedHead)
+		return false, true, nil
+	}
+
+	// Land only the head Validate verified (#2342): the gates judge the head as it is
+	// now, which is not necessarily the head Validate completed on. If a commit was
+	// pushed after Validate completed, the settle scan that would strip the completion
+	// runs after this landing decision in the poll, so run its rule here, against the
+	// head just read live. An invalidation re-runs Validate on the new head and defers
+	// this landing silently, like a moved head.
+	if !e.landingValidateSHACheckOff.Load() && e.checkValidateSHAInvalidationAt(item, judgedHead) {
+		e.logf(item.Number, "landing", "not landing: head %s is not the head Validate completed on — Validate re-runs on it, landing deferred\n", judgedHead)
+		return false, true, nil
+	}
+
 	landing := e.noteValidateLanding(item, stage)
-	enabled, deferred, err = e.landValidated(ctx, board, item, owner, repo)
+	enabled, deferred, err = e.landValidated(ctx, board, item, owner, repo, judgedHead)
 	// Announced only once the merge or enqueue went through (#1968 R2): a failed
 	// landing, e.g. a conflict leading to fabrik:rebase-needed, announces nothing.
 	landing.finish(err == nil && !deferred && (enabled || e.cfg.MergeTrain == "on"))
@@ -498,7 +521,13 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 
 // landValidated performs the landing action once every gate has passed: advance
 // to Queued under the merge train, otherwise enqueue, auto-merge or merge directly.
-func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) (enabled bool, deferred bool, err error) {
+//
+// judgedHead is the PR head the gates evaluated for this decision (#2342). Every
+// write below names it, so GitHub itself refuses a head that moved: the refusal
+// (gh.ErrHeadMoved) is a silent deferral — no label, comment, pause or counter —
+// and the next poll judges the new head. An empty judgedHead is never papered
+// over with a head read here (FR-008): the landing defers.
+func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo, judgedHead string) (enabled bool, deferred bool, err error) {
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
 	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
 	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.
@@ -524,17 +553,28 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		return false, false, nil
 	}
 
+	// The PR read above supplies the number and the merge-queue flag only; its
+	// head may be up to linkedPRCacheTTL old and is never used to pin (#2342).
+	if judgedHead == "" {
+		e.logf(item.Number, "landing", "PR #%d: no judged head for this landing decision — deferring, not issuing an unpinned merge\n", pr.Number)
+		return false, true, nil
+	}
+
 	// Enqueue path: when the repo requires a merge queue and merge-queue routing is not disabled.
 	//
 	// Merge-queue awareness audit (ADR-058 D3 FR-1): this early-return IS the guard for
-	// the MergePR direct-merge fallback below. On a queue-enabled repo (default config),
+	// the direct-merge fallback below. On a queue-enabled repo (default config),
 	// the enqueue path returns here before MergePR is ever reached — a queued PR is never
 	// directly merged (a direct merge on a queue-required branch returns HTTP 405). The
-	// only way to reach the MergePR fallback on a queue repo is merge_queue: off (the
+	// only way to reach the direct-merge fallback on a queue repo is merge_queue: off (the
 	// kill-switch), an operator's explicit choice. No separate guard is required at the
-	// MergePR site; this early-return is the audit evidence.
+	// merge site; this early-return is the audit evidence.
 	if e.cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled {
-		queued, queueErr := e.enqueueForQueue(owner, repo, item, pr.Number, pr.HeadSHA)
+		queued, queueErr := e.enqueueForQueue(owner, repo, item, pr.Number, judgedHead)
+		if errors.Is(queueErr, gh.ErrHeadMoved) {
+			e.deferLandingHeadMoved(item, judgedHead, "")
+			return false, true, nil
+		}
 		return queued, false, queueErr
 	}
 
@@ -542,13 +582,17 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 	if strategy == "" {
 		strategy = "MERGE"
 	}
-	if err := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); err != nil {
+	if err := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy, judgedHead); err != nil {
+		if errors.Is(err, gh.ErrHeadMoved) {
+			e.deferLandingHeadMoved(item, judgedHead, "")
+			return false, true, nil
+		}
 		if errors.Is(err, gh.ErrAutoMergeNotEnabled) {
 			e.logf(item.Number, "warn", "auto-merge is not enabled for this repository — "+
 				"enable it in Settings → General → Allow auto-merge; Fabrik will retry on the next poll\n")
 			return false, false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
 		}
-		// Any error other than ErrAutoMergeNotEnabled means the PR is in a terminal
+		// Any error other than ErrAutoMergeNotEnabled and ErrHeadMoved means the PR is in a terminal
 		// GitHub state (CLEAN, UNSTABLE, or any future variant) where auto-merge cannot
 		// be queued. Fall back to a direct merge call. If that also fails (e.g. DIRTY),
 		// surface the MergePR error so existing rebase/CI-fix gates can act on it.
@@ -572,6 +616,13 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		if e.refuseIfPaused(fresh, "merging (direct-merge fallback)") {
 			return false, true, nil
 		}
+		// #2342: this re-read is a second head observation. A different head
+		// means the gates never judged what is there now — defer rather than
+		// merge it (and the pinned merge below would refuse it anyway).
+		if fresh.LinkedPRHeadSHA != "" && fresh.LinkedPRHeadSHA != judgedHead {
+			e.deferLandingHeadMoved(item, judgedHead, fresh.LinkedPRHeadSHA)
+			return false, true, nil
+		}
 		if blocking := e.currentHeadReviewThreadComments(fresh); len(blocking) > 0 {
 			e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s (direct-merge fallback)\n",
 				len(blocking), fresh.LinkedPRHeadSHA)
@@ -582,7 +633,11 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		if e.feedbackGateBlocks(fresh, true, "direct merge") {
 			return false, true, nil
 		}
-		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
+		if mergeErr := e.client.MergePRAtHeadSHA(owner, repo, pr.Number, judgedHead); mergeErr != nil {
+			if errors.Is(mergeErr, gh.ErrHeadMoved) {
+				e.deferLandingHeadMoved(item, judgedHead, "")
+				return false, true, nil
+			}
 			return false, false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
 		}
 		// #2123: announce the landing at the merge itself, before GitHub's close
@@ -619,6 +674,26 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 
 	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
 	return true, false, nil
+}
+
+// deferLandingHeadMoved is the silent deferral for a landing whose PR head is no
+// longer the one the gates judged (#2342): one log line and an admission
+// cooldown so the next poll re-evaluates the new head. It writes no label or
+// comment, pauses nothing and touches no retry, cycle or ejection counter.
+// observed names the head seen instead; empty when GitHub refused the pin.
+func (e *Engine) deferLandingHeadMoved(item gh.ProjectItem, judged, observed string) {
+	short := func(sha string) string { return sha[:min(8, len(sha))] }
+	if observed != "" {
+		e.logf(item.Number, "landing", "PR head moved (judged %s, now %s) — deferring; the new head is evaluated on the next poll\n", short(judged), short(observed))
+	} else {
+		e.logf(item.Number, "landing", "PR head moved since it was judged (%s) — deferring; the new head is evaluated on the next poll\n", short(judged))
+	}
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: mergeUnsettledCooldownReason,
+		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
 }
 
 // enqueueForQueue enqueues a linked PR into the repository's native merge queue

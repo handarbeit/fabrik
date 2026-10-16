@@ -76,6 +76,7 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 		return nil, nil
 	}
 	snap := *found
+	queueEnabled := r.mergeQueueEnabled
 	s.mu.Unlock()
 
 	headSHA, headGone, err := s.resolvePRHead(owner, repo, snap.number, snap.head)
@@ -84,18 +85,21 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 	}
 
 	return &gh.PRDetails{
-		Number:              snap.number,
-		Title:               snap.title,
-		State:               stateWithHeadGone(snap.state, snap.merged, headGone),
-		Merged:              snap.merged,
-		Draft:               snap.draft,
-		HeadSHA:             headSHA,
-		HeadRefName:         snap.head,
-		BaseRef:             snap.base,
-		Body:                snap.body,
-		MergeableState:      "", // omitted by the list endpoint — see doc comment
-		AutoMergeEnabled:    snap.autoMergeEnabled,
-		IsMergeQueueEnabled: false, // GraphQL-only field; REST leaves it false
+		Number:           snap.number,
+		Title:            snap.title,
+		State:            stateWithHeadGone(snap.state, snap.merged, headGone),
+		Merged:           snap.merged,
+		Draft:            snap.draft,
+		HeadSHA:          headSHA,
+		HeadRefName:      snap.head,
+		BaseRef:          snap.base,
+		Body:             snap.body,
+		MergeableState:   "", // omitted by the list endpoint — see doc comment
+		AutoMergeEnabled: snap.autoMergeEnabled,
+		// Production reports this only on a boardcache hit (GraphQL-populated); the
+		// engine's landing decision reads it that way (#2342), so the model reports
+		// the repo flag rather than the REST fallback's false.
+		IsMergeQueueEnabled: queueEnabled,
 		IsInMergeQueue:      false,
 		Author:              snap.author,
 		Labels:              cloneStrings(snap.labels),
@@ -656,8 +660,10 @@ func (s *Sim) mergePR(owner, repo string, prNumber int, expectedHeadSHA string) 
 			// rather than silently merge a tree that was never actually
 			// checked. gh.ErrConflict, not ErrNotMergeable: the caller's
 			// correct response is a fresh read-and-decide, not the rebase path.
-			return fmt.Errorf("simgh: merging PR #%d: expected head %s, live head is %s: %w",
-				prNumber, expectedHeadSHA, liveHeadSHA, gh.ErrConflict)
+			// Also gh.ErrHeadMoved: the production client classifies a 409 as a
+			// head move when the live head positively differs (#2342).
+			return fmt.Errorf("simgh: merging PR #%d: expected head %s, live head is %s: %w: %w",
+				prNumber, expectedHeadSHA, liveHeadSHA, gh.ErrHeadMoved, gh.ErrConflict)
 		}
 	}
 
@@ -761,7 +767,34 @@ func (s *Sim) UpdatePRBase(owner, repo string, prNumber int, newBase string) err
 // Modelled as a flag only: the sim never spontaneously merges the PR when
 // checks later go green. A scenario that wants the merge to happen must call
 // MergePR. See FIDELITY.md.
-func (s *Sim) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+//
+// The request is pinned to expectedHeadOID (#2342): a PR whose live head
+// differs is refused with gh.ErrHeadMoved, before the already-clean check, as
+// GitHub validates the input before evaluating merge state. The head read takes
+// gitMu, so it happens before mu is taken (lock ordering) and is not atomic
+// with the flag write below — the same recorded gap as EnqueuePullRequest.
+func (s *Sim) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error {
+	if expectedHeadOID == "" {
+		return fmt.Errorf("simgh: EnablePullRequestAutoMerge: expectedHeadOID must not be empty")
+	}
+	s.mu.Lock()
+	_, pr, err := s.prLocked(owner, repo, prNumber)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	head := pr.head
+	s.mu.Unlock()
+
+	actual, err := s.resolveRefSHA(owner, repo, head)
+	if err != nil {
+		return err
+	}
+	if actual != expectedHeadOID {
+		return fmt.Errorf("simgh: enable auto-merge on PR #%d: expected head %s but branch is at %s: %w",
+			prNumber, expectedHeadOID, actual, gh.ErrHeadMoved)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, pr, err := s.prLocked(owner, repo, prNumber)
@@ -770,6 +803,9 @@ func (s *Sim) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strat
 	}
 	if !r.access.AllowAutoMerge {
 		return fmt.Errorf("simgh: auto-merge is not enabled for %s", repoKey(owner, repo))
+	}
+	if pr.autoMergeRefusedClean {
+		return fmt.Errorf("simgh: enable auto-merge on PR #%d: %w", prNumber, gh.ErrAutoMergeAlreadyClean)
 	}
 	pr.autoMergeEnabled = true
 	pr.autoMergeStrategy = strategy
@@ -828,7 +864,7 @@ func (s *Sim) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadO
 		// under the merge queue rather than closed, because closing it would
 		// cost the invariant that keeps the whole package deadlock-free.
 		if actual != expectedHeadOID {
-			return fmt.Errorf("simgh: enqueue PR #%d: expected head %s but branch is at %s", prNumber, expectedHeadOID, actual)
+			return fmt.Errorf("simgh: enqueue PR #%d: expected head %s but branch is at %s: %w", prNumber, expectedHeadOID, actual, gh.ErrHeadMoved)
 		}
 	}
 

@@ -65,7 +65,7 @@ func TestMergeTrainLanding_OneAtATimeViaInteractionOnlyPoison(t *testing.T) {
 		}
 	}
 	merged := map[int]bool{}
-	for _, e := range log.ByMethod("MergePR") {
+	for _, e := range log.ByMethod("MergePRAtHeadSHA") {
 		if e.Err != nil {
 			continue
 		}
@@ -138,7 +138,7 @@ func TestMergeTrainLanding_BatchCloseAsymmetryPin(t *testing.T) {
 	// The ordering that explains why: the integration PR's merge (which
 	// carries #A's "Closes #%d" line) happens before landMergeTrainBatch's
 	// own explicit, faulted CloseIssue(#A) attempt.
-	mergePRPred := simgh.MethodIs("MergePR")
+	mergePRPred := simgh.MethodIs("MergePRAtHeadSHA")
 	closeAPred := simgh.And(simgh.MethodIs("CloseIssue"), simgh.OnIssue(numA), simgh.WasInjected())
 	precedes, err := env.Sim.Log().Precedes(mergePRPred, closeAPred)
 	if err != nil {

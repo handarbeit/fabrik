@@ -153,8 +153,10 @@ func TestMergeTrainSingletonCatchUp_BehindMember_LandsWithoutTrial(t *testing.T)
 	if got := len(env.Sim.Log().ByMethod("CreatePR")); got != 0 {
 		t.Errorf("expected no landing PR, got %d CreatePR call(s)", got)
 	}
-	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 0 {
-		t.Errorf("expected the unpinned MergePR never called, got %d", got)
+	for _, m := range env.Sim.Log().ByMethod("MergePRAtHeadSHA") {
+		if m.Args.Number != prNum {
+			t.Errorf("expected only the member's own PR #%d merged (no landing/integration PR), got a merge of #%d", prNum, m.Args.Number)
+		}
 	}
 	newHead, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 	if newHead == orig {

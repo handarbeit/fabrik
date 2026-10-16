@@ -143,9 +143,6 @@ func assertLandedViaCatchUp(t *testing.T, env *Env, num, prNum int, orig string,
 	if got := draftPRCount(env); got != draftPRsBefore {
 		t.Errorf("expected no draft CI PR (no trial): %d before approval, %d after", draftPRsBefore, got)
 	}
-	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 0 {
-		t.Errorf("expected the unpinned MergePR never called, got %d", got)
-	}
 	newHead, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 	if newHead == orig {
 		t.Fatal("the member branch was not caught up")

@@ -130,7 +130,7 @@ func TestMergeTrainAdmission_AllRed_NothingAssembled(t *testing.T) {
 	if got := draftPRCount(env); got != 0 {
 		t.Errorf("expected no trial to be assembled when every member is deferred, got %d CreateDraftPR call(s)", got)
 	}
-	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 0 {
+	if got := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 0 {
 		t.Errorf("expected no merge, got %d", got)
 	}
 }

@@ -55,7 +55,7 @@ func TestMergeTrainCICancelled_TrialRerunThenAbandonedUncharged(t *testing.T) {
 			t.Errorf("#%d was charged or dissolved over a cancelled run", n)
 		}
 	}
-	if n := len(env.Sim.Log().ByMethod("MergePR")); n != 0 {
+	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 0 {
 		t.Errorf("MergePR calls = %d, want 0 — a cancelled trial must never land", n)
 	}
 	// Bisection would have built more than one trial PR.
