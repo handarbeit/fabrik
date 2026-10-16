@@ -584,14 +584,16 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 // skill was replaced by the default (#2307, R4): the requested reference, the
 // base SHA it was looked up at and the reason. The reference and reason can
 // come from a repo's files, so both are sanitised and rendered in code spans;
-// nothing in them can form markdown or a mention.
+// nothing in them can form markdown or a mention. The reason keeps quotes,
+// parentheses, commas and semicolons so the resolver's message and the plugin
+// notes read as written.
 func fallbackNotice(ref, baseSHA, reason string) string {
 	sha := sanitizeNoticeText(baseSHA)
 	if sha == "" {
 		sha = "unknown"
 	}
-	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (%s); this review ran `%s`.",
-		sanitizeNoticeText(ref), sha, sanitizeNoticeTextN(reason, maxNoticeReasonLen), DefaultReviewSkill)
+	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (`%s`); this review ran `%s`.",
+		sanitizeNoticeText(ref), sha, sanitizeNoticeReason(reason), DefaultReviewSkill)
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary

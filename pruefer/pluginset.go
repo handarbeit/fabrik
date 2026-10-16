@@ -37,7 +37,22 @@ func sanitizeNoticeText(s string) string { return sanitizeNoticeTextN(s, 120) }
 const maxNoticeReasonLen = 480
 
 // sanitizeNoticeTextN is sanitizeNoticeText with an explicit character cap.
-func sanitizeNoticeTextN(s string, limit int) string {
+func sanitizeNoticeTextN(s string, limit int) string { return sanitizeNoticeRunes(s, limit, "") }
+
+// noticeReasonPunctuation is what a fallback reason may carry beyond the
+// reference alphabet so the resolver's message and the plugin notes stay
+// readable: quotes, parentheses, commas and semicolons. The reason is always
+// rendered in a code span, where none of them can form markdown, and the
+// backtick that could close the span, "@" and "#" stay excluded.
+const noticeReasonPunctuation = `"'(),;`
+
+// sanitizeNoticeReason is sanitizeNoticeText for the reason of a fallback
+// notice, with the wider alphabet and cap that reason needs.
+func sanitizeNoticeReason(s string) string {
+	return sanitizeNoticeRunes(s, maxNoticeReasonLen, noticeReasonPunctuation)
+}
+
+func sanitizeNoticeRunes(s string, limit int, extra string) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
@@ -46,7 +61,7 @@ func sanitizeNoticeTextN(s string, limit int) string {
 			break
 		}
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', strings.ContainsRune("._:/ -", r):
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', strings.ContainsRune("._:/ -", r), strings.ContainsRune(extra, r):
 			b.WriteRune(r)
 		default:
 			b.WriteByte('?')

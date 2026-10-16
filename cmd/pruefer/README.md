@@ -704,7 +704,7 @@ A repo tree is checked before anything is written. A plugin is skipped whole, an
 
 **The visible fallback.** A review is never failed or silently substituted for a bad choice. If the selected skill is not a `plugin:skill` reference, does not resolve against the plugins passed, fails to load, or is never invoked by the reviewer, Pruefer runs `pruefer-review:review` instead and the posted review begins with a notice naming the requested reference, the base SHA and the reason:
 
-> 🏭 **Review skill fallback** — requested `mine:deep` at base `0123…` was not used (it did not resolve: plugin "mine" is not loaded); this review ran `pruefer-review:review`.
+> 🏭 **Review skill fallback** — requested `mine:deep` at base `0123…` was not used (`it did not resolve: plugin "mine" is not loaded`); this review ran `pruefer-review:review`.
 
 The reference and reason are sanitised before posting. A skill that fails only after the reviewer started costs a second review run: the turns and cost reported for the review cover both runs. A failure that is not about the skill (a crash, a timeout, empty output) is not a fallback and posts nothing, as before; the default skill itself not running also posts nothing.
 

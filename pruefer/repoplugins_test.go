@@ -212,3 +212,29 @@ func TestRepoPluginCodeWarnings(t *testing.T) {
 		t.Errorf("manifest warning should name both kinds: %s", got[2])
 	}
 }
+
+// A plugin directory committed as a symlink or a submodule has no "/" in its
+// path; it must be reported as a refused plugin, not silently dropped (FR-018).
+func TestValidateRepoPluginEntries_ReportsTopLevelSymlinkAndSubmodule(t *testing.T) {
+	entries := []gh.TreeEntry{
+		{Path: "linked", Mode: "120000", Type: "blob", SHA: "s"},
+		{Path: "subm", Mode: "160000", Type: "commit", SHA: "s"},
+		{Path: "README.md", Mode: "100644", Type: "blob", SHA: "s", Size: 1},
+		{Path: "ok", Mode: "040000", Type: "tree", SHA: "s"},
+		blobEntry("ok/.claude-plugin/plugin.json", 3),
+	}
+	byDir, skipped := validateRepoPluginEntries(entries)
+	if len(byDir["ok"]) != 1 {
+		t.Errorf("healthy sibling affected: %v", byDir)
+	}
+	reasons := map[string]string{}
+	for _, s := range skipped {
+		reasons[s.Dir] = s.Reason
+	}
+	if !strings.Contains(reasons["linked"], "symlink") || !strings.Contains(reasons["subm"], "submodule") {
+		t.Errorf("top-level symlink/submodule not reported: %+v", skipped)
+	}
+	if len(skipped) != 2 {
+		t.Errorf("a plain top-level file or tree entry must stay unreported: %+v", skipped)
+	}
+}

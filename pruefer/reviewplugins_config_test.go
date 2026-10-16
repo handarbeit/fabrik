@@ -307,6 +307,22 @@ func TestCheckReviewArgsScoped_AcceptsOnlyTheNamedSkills(t *testing.T) {
 	}
 }
 
+// The reason keeps its quotes, parentheses, commas and semicolons, sits in a code
+// span, and still cannot carry a backtick, mention or issue reference.
+func TestFallbackNotice_ReasonStaysReadableAndSafe(t *testing.T) {
+	reason := "it did not resolve: plugin \"mine\" is not loaded (repo plugin a skipped: x; repo plugin b skipped: y, z)"
+	n := fallbackNotice("mine:deep", "abc", reason)
+	if !strings.Contains(n, "(`"+reason+"`)") {
+		t.Errorf("reason not kept verbatim in a code span: %s", n)
+	}
+	hostile := fallbackNotice("mine:deep", "abc", "bad `x` @evil #12\n> quote")
+	for _, bad := range []string{"@evil", "#12", "`x`", "\n"} {
+		if strings.Contains(hostile, bad) {
+			t.Errorf("hostile reason leaked %q: %s", bad, hostile)
+		}
+	}
+}
+
 func TestFallbackNotice_KeepsPluginNotesBeyondTheReferenceCap(t *testing.T) {
 	reason := "it did not resolve: plugin \"mine\" is not loaded (repo plugin mine-dir skipped: the plugin exceeds 4194304 bytes; repo plugin other skipped: \"hooks/run.sh\" is a symlink, which is not followed)"
 	n := fallbackNotice("mine:deep", "abc", reason)

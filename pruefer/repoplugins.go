@@ -187,18 +187,26 @@ type pluginEntry struct {
 // read.
 func validateRepoPluginEntries(entries []gh.TreeEntry) (map[string][]pluginEntry, []repoPluginSkip) {
 	groups := map[string][]gh.TreeEntry{}
+	var skipped []repoPluginSkip
 	for _, e := range entries {
 		dir, _, nested := strings.Cut(e.Path, "/")
 		if !nested {
-			// A bare file or a plugin directory entry itself. A file at the top of
-			// .pruefer/plugins is not a plugin; the directory entry carries nothing.
+			// A plugin directory's own tree entry carries nothing, and a regular
+			// file at the top of .pruefer/plugins is not a plugin. But a plugin
+			// directory committed as a symlink or a submodule is a refused plugin
+			// (FR-018) and must be reported, not silently dropped.
+			switch {
+			case e.Type == "commit" || e.Mode == "160000":
+				skipped = append(skipped, repoPluginSkip{e.Path, "the plugin directory is a submodule, which is not followed"})
+			case e.Mode == "120000":
+				skipped = append(skipped, repoPluginSkip{e.Path, "the plugin directory is a symlink, which is not followed"})
+			}
 			continue
 		}
 		groups[dir] = append(groups[dir], e)
 	}
 
 	out := map[string][]pluginEntry{}
-	var skipped []repoPluginSkip
 	for _, dir := range sortedKeys(groups) {
 		reason, files := validateOnePlugin(dir, groups[dir])
 		if reason != "" {
