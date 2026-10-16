@@ -63,9 +63,11 @@ type GitHubReviewer interface {
 
 // CloneFunc creates an ephemeral clone of a PR's head commit and returns its
 // directory plus a cleanup function. Matches CloneForReview's signature;
+// headSHA is the commit the review was selected on, which the clone must end
+// up at exactly;
 // injectable so tests can substitute a local git repo instead of hitting
 // github.com.
-type CloneFunc func(ctx context.Context, owner, repo, token string, prNumber int) (dir string, cleanup func(), err error)
+type CloneFunc func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (dir string, cleanup func(), err error)
 
 // ReviewOutcome records what happened when ReviewPR was asked to review a
 // PR, so callers (daemon.go, tests) can observe results without parsing logs.
@@ -468,14 +470,15 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
 
-	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
+	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number, pr.HeadSHA)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("cloning PR head: %w", err)}
 	}
 	defer cleanup()
 
 	// Hand the model the diff we already have. The clone is a depth-1 fetch
-	// of refs/pull/<N>/head alone, so the base branch is not a ref in it and
+	// of the PR head alone (refs/pull/<N>/head, or the selected SHA when that ref
+	// is missing), so the base branch is not a ref in it and
 	// the model cannot derive the change from git — see ReviewRequest.Staged.
 	// Staged as a directory outside the clone (one entry per changed path or
 	// bounded chunk, plus an index), so it never appears in the reviewed tree,

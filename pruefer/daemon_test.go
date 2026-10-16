@@ -332,7 +332,7 @@ func TestDaemonPoll_RoutesEachRepoThroughOwnersToken(t *testing.T) {
 
 	var cloneMu sync.Mutex
 	var cloneTokens []string
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		cloneMu.Lock()
 		cloneTokens = append(cloneTokens, owner+"/"+repo+"="+token)
 		cloneMu.Unlock()

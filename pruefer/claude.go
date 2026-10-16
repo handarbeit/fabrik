@@ -295,7 +295,7 @@ type ReviewRequest struct {
 	//
 	// It exists because the review clone structurally cannot produce that
 	// diff itself: CloneForReview does a depth-1 fetch of
-	// refs/pull/<N>/head and nothing else, so the base branch is not a ref
+	// the PR head (refs/pull/<N>/head, or the selected SHA) and nothing else, so the base branch is not a ref
 	// in that repository and `git diff <base>...HEAD` cannot resolve. nil (the
 	// degraded case: no diff text, or staging failed) falls back to the older
 	// wording so a review still runs, and its coverage is `partial`.

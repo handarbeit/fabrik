@@ -47,7 +47,7 @@ func newEventDrivenTestDaemon(source *fakeEventSource) (*Daemon, *fakeLister) {
 	client := newFakeLister()
 	client.prsByRepo["owner/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1"}}
 	claude := &mockClaudeInvoker{}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{

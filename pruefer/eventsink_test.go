@@ -15,7 +15,7 @@ var errFetchPRDetailsBoom = errors.New("boom: fetching PR details failed")
 
 func newTestDaemonForEvents(client *fakeLister) *Daemon {
 	claude := &mockClaudeInvoker{}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	return withDerivedRepos(&Daemon{
@@ -162,7 +162,7 @@ func TestDaemonEventSink_CaseMismatchedOwnerInClientsMap_DispatchesReview(t *tes
 	client := newFakeLister()
 	client.prsByRepo["MyOrg/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	claude := &mockClaudeInvoker{}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{
@@ -195,7 +195,7 @@ func TestDaemonEventSink_CaseMismatchedWatchedRepoSpec_DispatchesReview(t *testi
 	client := newFakeLister()
 	client.prsByRepo["myorg/repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
 	claude := &mockClaudeInvoker{}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{
@@ -294,7 +294,7 @@ func TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation(t *testi
 		<-release
 		return ReviewResult{Text: "mock review"}, nil
 	}}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{
@@ -362,7 +362,7 @@ func TestDaemonEventSink_DuplicateInFlightEvent_DroppedWithoutConsumingSemaphore
 		<-release
 		return ReviewResult{Text: "mock review"}, nil
 	}}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{
@@ -474,7 +474,7 @@ func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testin
 		<-release
 		return ReviewResult{Text: "mock review"}, nil
 	}}
-	clone := func(ctx context.Context, owner, repo, token string, prNumber int) (string, func(), error) {
+	clone := func(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (string, func(), error) {
 		return "/tmp", func() {}, nil
 	}
 	d := withDerivedRepos(&Daemon{
