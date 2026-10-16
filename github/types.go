@@ -195,7 +195,10 @@ type ProjectItem struct {
 	// GitHub (FetchItemDetails), false when they were copied from the board
 	// cache or the item is a plain listing entry. The Store assigns its
 	// LastSeen* freshness baselines from a live fetch but never lets a cache
-	// hit move them backwards (#2344, amends ADR 2180).
+	// hit move them backwards (#2344, amends ADR 2180). The flag describes the
+	// fetch that just filled the item and is never cleared on the caller's copy,
+	// so a result must be applied right after its own FetchItemDetails; applying
+	// an older copy again would present its labels and closed state as live.
 	DeepFetchLive bool
 
 	// IssueLayerUpdatedAt is the issue-and-project-item part of UpdatedAt: the

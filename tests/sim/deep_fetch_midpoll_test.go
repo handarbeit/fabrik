@@ -91,7 +91,7 @@ func TestDeepFetch_WriteBetweenSnapshotAndApplySurvives(t *testing.T) {
 	t.Parallel()
 	status, changes, fired := runMidPollWrite(t, false)
 	if fired != 1 {
-		t.Skipf("the deep fetch was not triggered (%d hook calls): this scenario no longer reproduces the window, so a pass would be vacuous", fired)
+		t.Fatalf("the deep fetch was not triggered (%d hook calls): this scenario no longer reproduces the window, so a pass would be vacuous", fired)
 	}
 	if status != "Plan" {
 		t.Errorf("store Status = %q after the poll, want the mid-poll write (Plan)", status)
@@ -106,7 +106,7 @@ func TestDeepFetch_WriteBetweenSnapshotAndApply_LegacyApplyReverts(t *testing.T)
 	t.Parallel()
 	status, changes, fired := runMidPollWrite(t, true)
 	if fired != 1 {
-		t.Skipf("the deep fetch was not triggered (%d hook calls)", fired)
+		t.Fatalf("the deep fetch was not triggered (%d hook calls): the twin would be vacuous", fired)
 	}
 	if status == "Plan" && changes == 1 {
 		t.Errorf("legacy apply did not revert the mid-poll write (Status %q, %d changes): the twin cannot tell the fix from the old behaviour", status, changes)
