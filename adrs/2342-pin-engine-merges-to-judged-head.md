@@ -43,18 +43,32 @@ commit reaches the base branch. `settleSHAInvalidationScan` runs after the landi
    after any refusal other than `ErrAutoMergeNotEnabled` the client reads the PR head once; only a
    head that differs from the pin is `ErrHeadMoved`. That read classifies a refusal that already
    happened; it is not a head read for a merge. A refusal for another reason keeps its handling.
-5. **A head mismatch is a silent deferral.** `(enabled=false, deferred=true, err=nil)` — no label,
+5. **Land only the head Validate verified (review of PR #2361).** The head the gates judge is the head
+   as it is now, which is not necessarily the head `stage:Validate:complete` was recorded on: if a
+   commit was pushed after Validate completed, the gates would judge it and the pin would name it, so an
+   unvalidated commit would land — `settleSHAInvalidationScan` runs after the landing decision in the
+   poll and cannot stop it. Just before `landValidated`, `attemptMergeOnValidate` therefore runs the
+   scan's own rule, `checkValidateSHAInvalidationAt(item, judgedHead)`: `checkValidateSHAInvalidation`
+   (the #2158 exemptions, the FR-5 empty-SHA skip, the FR-6 worker guard and the catch-up handling,
+   with the ADR-2343 post-restart rebuild keeping the recorded SHA across restarts) judged against the
+   head the decision just read live rather than the Store's older copy. An invalidation strips the
+   completion labels (Validate re-runs on the new head) and the landing defers, silently like a moved
+   head. Corner: `handleStageComplete`'s own call runs before the completion SHA of that dispatch is
+   recorded, so it sees an empty SHA — except for a SHA left by an earlier completion, which at worst
+   costs one extra Validate run; never an unvalidated landing. Seam:
+   `SetLandingValidateSHACheckDisabledForTest`.
+6. **A head mismatch is a silent deferral.** `(enabled=false, deferred=true, err=nil)` — no label,
    comment, pause, retry/cycle/ejection counter, and no fallback to a direct merge — plus one log line
    and the existing `merge-unsettled` admission cooldown so the next poll re-admits the item and
    judges the new head. Repeated pushes defer each poll with no accumulated state.
-6. **Other ordinary-path sites.** `reenableAutoMergeAfterRebase` (re-arm after a rebase push) pins its
+7. **Other ordinary-path sites.** `reenableAutoMergeAfterRebase` (re-arm after a rebase push) pins its
    enable and its already-clean direct merge to the one head it reads at entry; no gate judged that
    post-rebase head, so this only narrows the window, and a moved head is left to the next poll's
    convergence pass. `reEnqueueOrPause` and `routeQueuedGroup` already pass a head from poll-native
    state; a stale pin there fails safe (the enqueue is refused). ADR-058 FR-1's "head from poll-native
    state" rule still holds for those two; the landing decision's enqueue uses `judgedHead`, itself taken
    from the same live `FetchItemDetails` read the decision's gates use.
-7. **The merge train (R4).** The audit found one unpinned train merge: `settleAndMerge`'s `MergePR`.
+8. **The merge train (R4).** The audit found one unpinned train merge: `settleAndMerge`'s `MergePR`.
    It now calls `MergePRAtHeadSHA` on the head `classifyLandingCI` just judged (`pr.HeadSHA`, else the
    head adopted at the first read; with neither it does not merge) and maps `ErrHeadMoved` to the
    existing `outcomeHeadMoved`, which already charges no ejection, no `recordTrial` and no bisection and

@@ -265,6 +265,9 @@ type Engine struct {
 	// validateSHARebuildOff disables the post-restart rebuild of the Validate
 	// completion SHA (#2343); per-Engine test seam, zero value = production.
 	validateSHARebuildOff atomic.Bool
+	// landingValidateSHACheckOff disables the landing decision's Validate-SHA check
+	// (#2342); per-Engine test seam, zero value = production.
+	landingValidateSHACheckOff atomic.Bool
 	// validateSHARerun records the (item, live head) pairs for which the R3 re-run of
 	// Validate was already requested (#2343), so an unrecoverable SHA that persists
 	// cannot re-run Validate every cycle. In memory only: a restart allows one more.

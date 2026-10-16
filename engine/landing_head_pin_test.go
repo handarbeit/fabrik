@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -208,5 +209,90 @@ func TestLanding_UnmovedHead_WriteSequenceUnchanged(t *testing.T) {
 	}
 	if len(client.addCommentCalls) != 0 {
 		t.Errorf("an unmoved landing posts no comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// seedValidateCompleted records a Validate completion on `completed` for item 1 while the
+// Store still holds `stored` as the linked PR head (the poll's copy, which can lag the
+// landing decision's own live read).
+func seedValidateCompleted(eng *Engine, completed, stored string) {
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, LinkedPRNum: 42, SHA: stored})
+	eng.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: "owner/repo", Number: 1, SHA: completed})
+}
+
+func landingRemovedLabel(client *mockGitHubClient, name string) bool {
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate completed on X, Y was pushed before the landing decision: the gates judge Y
+// and the pin would be Y, but Validate never ran on Y. The landing must not happen and
+// Validate must re-run on Y (the completion labels are stripped and the SHA cleared).
+func TestLanding_HeadPushedAfterValidateCompleted_DoesNotLandAndRevalidates(t *testing.T) {
+	for _, tc := range []struct{ name, storedHead string }{
+		{"store already shows the new head", "Y"},
+		{"store lags the landing's live read", "X"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := landingFixture("Y", "Y", false)
+			eng := testEngineForMerge(t, client)
+			seedValidateCompleted(eng, "X", tc.storedHead)
+
+			enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, landItem(), pinValidateStage)
+			if err != nil || enabled || !deferred {
+				t.Fatalf("(enabled=%v, deferred=%v, err=%v), want (false, true, nil)", enabled, deferred, err)
+			}
+			if n := len(client.enablePullRequestAutoMergeCalls) + len(client.mergePRAtHeadSHACalls) + len(client.enqueuePullRequestCalls); n != 0 {
+				t.Errorf("no write may name a head Validate did not verify, got %d", n)
+			}
+			if !landingRemovedLabel(client, "stage:Validate:complete") {
+				t.Errorf("Validate must be re-run on the new head: stage:Validate:complete not removed (%+v)", client.removeLabelCalls)
+			}
+			snap, _ := eng.store.Peek("owner/repo", 1)
+			if sha := snap.ValidateCompletedSHA(); sha != "" {
+				t.Errorf("completion SHA must be cleared so Validate re-records it, got %q", sha)
+			}
+			if len(client.addCommentCalls) != 0 {
+				t.Errorf("the deferral posts no comment, got %d", len(client.addCommentCalls))
+			}
+		})
+	}
+}
+
+// The head Validate completed on is the head that lands, pinned to it.
+func TestLanding_HeadIsTheValidatedHead_Lands(t *testing.T) {
+	client := landingFixture("X", "X", false)
+	eng := testEngineForMerge(t, client)
+	seedValidateCompleted(eng, "X", "X")
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, landItem(), pinValidateStage)
+	if err != nil || !enabled || deferred {
+		t.Fatalf("(enabled=%v, deferred=%v, err=%v), want a landing", enabled, deferred, err)
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 || client.enablePullRequestAutoMergeCalls[0].headOID != "X" {
+		t.Errorf("auto-merge must be pinned to X, got %+v", client.enablePullRequestAutoMergeCalls)
+	}
+	if landingRemovedLabel(client, "stage:Validate:complete") {
+		t.Error("a verified head must keep its completion")
+	}
+}
+
+// Non-vacuity: without the check the head Validate never saw is enabled for auto-merge.
+func TestLanding_ValidateSHACheckDisabled_LandsTheUnvalidatedHead(t *testing.T) {
+	client := landingFixture("Y", "Y", false)
+	eng := testEngineForMerge(t, client)
+	defer eng.SetLandingValidateSHACheckDisabledForTest()()
+	seedValidateCompleted(eng, "X", "Y")
+
+	enabled, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, landItem(), pinValidateStage)
+	if err != nil || !enabled {
+		t.Fatalf("(enabled=%v, err=%v), want the unvalidated head to land with the check off", enabled, err)
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 || client.enablePullRequestAutoMergeCalls[0].headOID != "Y" {
+		t.Errorf("expected auto-merge on the unvalidated head Y, got %+v", client.enablePullRequestAutoMergeCalls)
 	}
 }

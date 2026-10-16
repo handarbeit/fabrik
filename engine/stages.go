@@ -500,6 +500,17 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return false, true, nil
 	}
 
+	// Land only the head Validate verified (#2342): the gates judge the head as it is
+	// now, which is not necessarily the head Validate completed on. If a commit was
+	// pushed after Validate completed, the settle scan that would strip the completion
+	// runs after this landing decision in the poll, so run its rule here, against the
+	// head just read live. An invalidation re-runs Validate on the new head and defers
+	// this landing silently, like a moved head.
+	if !e.landingValidateSHACheckOff.Load() && e.checkValidateSHAInvalidationAt(item, judgedHead) {
+		e.logf(item.Number, "landing", "not landing: head %s is not the head Validate completed on — Validate re-runs on it, landing deferred\n", judgedHead)
+		return false, true, nil
+	}
+
 	landing := e.noteValidateLanding(item, stage)
 	enabled, deferred, err = e.landValidated(ctx, board, item, owner, repo, judgedHead)
 	// Announced only once the merge or enqueue went through (#1968 R2): a failed

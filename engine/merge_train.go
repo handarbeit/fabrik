@@ -2349,8 +2349,9 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
 	// above) on the member's own, externally-writable PR branch. Pinning the
 	// merge request to that exact SHA closes the window between that check and
-	// this call — a push landing in between is rejected (ErrConflict, mapped
-	// from GitHub's 409) rather than silently merged unvalidated.
+	// this call — a push landing in between is rejected (gh.ErrHeadMoved: the
+	// client's live head read, which also wraps ErrConflict, GitHub's 409)
+	// rather than silently merged unvalidated.
 	if err := e.client.MergePRAtHeadSHA(p.owner, p.repo, m.prNum, m.headSHA); err != nil {
 		e.logf(m.item.Number, "merge-train", "singleton fast path: merge of PR #%d failed: %v — leaving #%d in Queued for retry\n", m.prNum, err, m.item.Number)
 		p.episode.noteAbandoned(fmt.Sprintf("fast-path merge of PR #%d failed (left in Queued)", m.prNum))
