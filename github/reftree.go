@@ -79,10 +79,21 @@ func (c *Client) fetchTree(owner, repo, sha string, recursive bool) (treeRespons
 // caller must not trust them.
 //
 // A commit with no dir returns an error wrapping ErrNotFound, the ordinary
-// "nothing there" case.
+// "nothing there" case. That is the only case that does: a commit or tree that
+// cannot be read (a 404 for an unreachable SHA or a missing permission) is a
+// read failure that does not wrap ErrNotFound, so a caller never mistakes an
+// unreadable base for a repo without the directory.
 func (c *Client) FetchTreeAtRef(owner, repo, commitSHA, dir string) (entries []TreeEntry, truncated bool, err error) {
 	wrap := func(e error) error {
 		return fmt.Errorf("reading tree %s at %s in %s/%s: %w", dir, commitSHA, owner, repo, e)
+	}
+	// unreadable wraps a failed commit or tree read. A 404 there means the object
+	// could not be read, not that dir is absent, so ErrNotFound is not propagated.
+	unreadable := func(e error) error {
+		if errors.Is(e, ErrNotFound) {
+			return wrap(fmt.Errorf("object not readable: %s", e.Error()))
+		}
+		return wrap(e)
 	}
 	commitURL := fmt.Sprintf("%s/repos/%s/%s/git/commits/%s", c.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(commitSHA))
 	var commit struct {
@@ -91,7 +102,7 @@ func (c *Client) FetchTreeAtRef(owner, repo, commitSHA, dir string) (entries []T
 		} `json:"tree"`
 	}
 	if err := c.restGetJSON(commitURL, &commit); err != nil {
-		return nil, false, wrap(err)
+		return nil, false, unreadable(err)
 	}
 	cur := commit.Tree.SHA
 	if cur == "" {
@@ -103,7 +114,7 @@ func (c *Client) FetchTreeAtRef(owner, repo, commitSHA, dir string) (entries []T
 		}
 		t, err := c.fetchTree(owner, repo, cur, false)
 		if err != nil {
-			return nil, false, wrap(err)
+			return nil, false, unreadable(err)
 		}
 		next := ""
 		for _, e := range t.Tree {
@@ -119,7 +130,7 @@ func (c *Client) FetchTreeAtRef(owner, repo, commitSHA, dir string) (entries []T
 	}
 	t, err := c.fetchTree(owner, repo, cur, true)
 	if err != nil {
-		return nil, false, wrap(err)
+		return nil, false, unreadable(err)
 	}
 	for _, e := range t.Tree {
 		entries = append(entries, TreeEntry{Path: e.Path, Mode: e.Mode, Type: e.Type, SHA: e.SHA, Size: e.Size})

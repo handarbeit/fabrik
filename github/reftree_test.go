@@ -84,8 +84,9 @@ func TestFetchTreeAtRef_MissingDirIsNotFound(t *testing.T) {
 	if _, _, err := c.FetchTreeAtRef("o", "r", "nodir", ".pruefer/plugins"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
-	if _, _, err := c.FetchTreeAtRef("o", "r", "unknowncommit", ".pruefer/plugins"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("unknown commit err = %v, want ErrNotFound", err)
+	// An unreadable commit is a read failure, never "the repo has no plugins".
+	if _, _, err := c.FetchTreeAtRef("o", "r", "unknowncommit", ".pruefer/plugins"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown commit err = %v, want a non-ErrNotFound read failure", err)
 	}
 }
 
