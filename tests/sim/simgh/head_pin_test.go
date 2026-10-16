@@ -8,7 +8,7 @@ import (
 )
 
 // #2342: the pinned writes refuse a head that moved, with gh.ErrHeadMoved, and
-// the BeforeCall hook runs its side effect between two engine calls.
+// the BeforeNthCall hook runs its side effect between two engine calls.
 
 func movedPR(t *testing.T) (*Sim, string, string) {
 	t.Helper()
@@ -56,10 +56,10 @@ func TestAutoMergeRefusedCleanIsSeedable(t *testing.T) {
 	}
 }
 
-func TestBeforeCallRunsOnceBeforeTheNthCall(t *testing.T) {
+func TestBeforeNthCallRunsOnceBeforeTheNthCall(t *testing.T) {
 	in, _ := newInstrumented(t)
 	ran := 0
-	in.Faults().BeforeCall("GetIssueBody", 2, func() {
+	in.Faults().BeforeNthCall("GetIssueBody", 2, func() {
 		ran++
 		// The hook may call back into the model: the table's mutex is not held.
 		if _, err := in.sim.GetIssueBody("acme", "widgets", 7); err != nil {

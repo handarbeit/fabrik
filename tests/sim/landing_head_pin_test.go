@@ -12,7 +12,7 @@ import (
 // judged, and a push that lands between the gate and the merge request defers
 // the landing silently; the new head lands on its own merits.
 //
-// The window is injected with FaultTable.BeforeCall: the push happens on the
+// The window is injected with FaultTable.BeforeNthCall: the push happens on the
 // calling goroutine immediately before the engine's Nth landing call reaches the
 // model, i.e. after every gate has cleared and before GitHub sees the request.
 // A scenario that could only push between polls would pass against unpinned
@@ -55,7 +55,7 @@ func TestLandingHeadPin_AutoMerge_PushAfterGate_DefersThenNewHeadLands(t *testin
 	num := driveToValidateComplete(t, env, "sim landing head pin: auto-merge")
 
 	var lp latePush
-	env.Sim.Faults().BeforeCall("EnablePullRequestAutoMerge", 1, func() {
+	env.Sim.Faults().BeforeNthCall("EnablePullRequestAutoMerge", 1, func() {
 		old, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 		lp.oldHead = old
 		env.Sim.Sim().SeedCommit(env.OwnerRepo, memberBranch(num), map[string]string{"late.txt": "after the gate\n"}, "late push")
@@ -104,7 +104,7 @@ func TestLandingHeadPin_DirectMergeFallback_PushAfterGate_DefersThenNewHeadLands
 	num := driveToValidateComplete(t, env, "sim landing head pin: direct merge")
 
 	var lp latePush
-	env.Sim.Faults().BeforeCall("MergePRAtHeadSHA", 1, func() {
+	env.Sim.Faults().BeforeNthCall("MergePRAtHeadSHA", 1, func() {
 		old, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 		lp.oldHead = old
 		env.Sim.Sim().SeedCommit(env.OwnerRepo, memberBranch(num), map[string]string{"late.txt": "after the gate\n"}, "late push")
@@ -143,11 +143,11 @@ func TestLandingHeadPin_AlreadyClean_PushAfterEnableRefusal_DoesNotMergeUnchecke
 	num := driveToValidateComplete(t, env, "sim landing head pin: already clean")
 
 	var lp latePush
-	env.Sim.Faults().BeforeCall("EnablePullRequestAutoMerge", 1, func() {
+	env.Sim.Faults().BeforeNthCall("EnablePullRequestAutoMerge", 1, func() {
 		pr, _ := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
 		env.Sim.Sim().SeedAutoMergeRefusedClean(env.OwnerRepo, pr.Number)
 	})
-	env.Sim.Faults().BeforeCall("MergePRAtHeadSHA", 1, func() {
+	env.Sim.Faults().BeforeNthCall("MergePRAtHeadSHA", 1, func() {
 		old, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 		lp.oldHead = old
 		env.Sim.Sim().SeedCommit(env.OwnerRepo, memberBranch(num), map[string]string{"late.txt": "unchecked\n"}, "late push")
@@ -176,7 +176,7 @@ func TestLandingHeadPin_MergeQueueEnqueue_PushAfterGate_DefersThenNewHeadLands(t
 	num := driveToValidateComplete(t, env, "sim landing head pin: enqueue")
 
 	var lp latePush
-	env.Sim.Faults().BeforeCall("EnqueuePullRequest", 1, func() {
+	env.Sim.Faults().BeforeNthCall("EnqueuePullRequest", 1, func() {
 		old, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 		lp.oldHead = old
 		env.Sim.Sim().SeedCommit(env.OwnerRepo, memberBranch(num), map[string]string{"late.txt": "after the gate\n"}, "late push")

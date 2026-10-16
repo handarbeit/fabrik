@@ -72,7 +72,7 @@ commit reaches the base branch. `settleSHAInvalidationScan` runs after the landi
   refusal as `ErrHeadMoved`; the live `TestLandingHeadPinRefusedOnMovedHead` logs the real text for
   capture as a wire-contract fixture. The live suite cannot race a push inside one engine poll, so it
   replays the precondition (head A, push B, pinned request at A) through the client methods the engine
-  uses; the engine flow is covered by the sim twins using `FaultTable.BeforeCall`.
+  uses; the engine flow is covered by the sim twins using `FaultTable.BeforeNthCall`.
 - A pre-existing auto-merge enabled before a push is GitHub's and the post-landing SHA-invalidation
   scan's concern, unchanged.
 

@@ -147,7 +147,7 @@ scenarios use to play GitHub or a human completing a merge), so the "unpinned"
 discussion above now describes only that scenario-side method. The model's
 head-mismatch refusal is `gh.ErrHeadMoved` wrapping `gh.ErrConflict`, the same
 shape the production client returns after classifying a 409 from the live head.
-`BeforeCall` (see the merge-queue and auto-merge entries) is how a scenario puts a
+`BeforeNthCall` (see the merge-queue and auto-merge entries) is how a scenario puts a
 push between two engine calls.
 
 **Risk:** low, and bounded by construction — the window only exists for a
@@ -1709,9 +1709,9 @@ GitHub* — only that the model does what this document says. For anything subtl
 and load-bearing, prefer deriving the behaviour from a recorded real response
 over reasoning about it.
 
-### `FaultTable.BeforeCall` — a push between two engine calls (#2342)
+### `FaultTable.BeforeNthCall` — a push between two engine calls (#2342)
 
-`BeforeCall(method, n, fn)` runs `fn` on the calling goroutine immediately before
+`BeforeNthCall(method, n, fn)` runs `fn` on the calling goroutine immediately before
 the n-th call to `method` (counted from the table's creation, like `FailOnCall`)
 reaches the model, with the table's mutex released so `fn` may call the Sim. It
 is how a scenario commits to a PR branch between the gates clearing and the
