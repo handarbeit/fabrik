@@ -306,3 +306,16 @@ func TestCheckReviewArgsScoped_AcceptsOnlyTheNamedSkills(t *testing.T) {
 		t.Error("a wildcard ref was accepted as an allowed skill")
 	}
 }
+
+func TestFallbackNotice_KeepsPluginNotesBeyondTheReferenceCap(t *testing.T) {
+	reason := "it did not resolve: plugin \"mine\" is not loaded (repo plugin mine-dir skipped: the plugin exceeds 4194304 bytes; repo plugin other skipped: \"hooks/run.sh\" is a symlink, which is not followed)"
+	n := fallbackNotice("mine:deep", "abc", reason)
+	for _, want := range []string{"mine-dir skipped", "other skipped", "is a symlink"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("notice lost %q: %s", want, n)
+		}
+	}
+	if long := fallbackNotice("x:y", "abc", strings.Repeat("a", 2000)); len(long) > 900 {
+		t.Errorf("reason not capped: %d", len(long))
+	}
+}

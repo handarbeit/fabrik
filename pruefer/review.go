@@ -481,6 +481,13 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		for _, n := range pluginNotes {
 			logf(pr.Number, "warn", "%s/%s base %s: %s\n", owner, repo, baseSHA, n)
 		}
+		// repo_review_skill: false stops the repo choosing the skill, not its
+		// plugins loading; say so when that means base-ref code will start.
+		if !cfg.RepoReviewSkill {
+			for _, w := range repoPluginCodeWarnings(repoPlugins.Plugins) {
+				logf(pr.Number, "warn", "%s/%s base %s: repo_review_skill is false but %s\n", owner, repo, baseSHA, w)
+			}
+		}
 	} else {
 		pluginNotes = []string{"repo plugins not loaded: the base commit could not be resolved"}
 	}
@@ -584,7 +591,7 @@ func fallbackNotice(ref, baseSHA, reason string) string {
 		sha = "unknown"
 	}
 	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (%s); this review ran `%s`.",
-		sanitizeNoticeText(ref), sha, sanitizeNoticeText(reason), DefaultReviewSkill)
+		sanitizeNoticeText(ref), sha, sanitizeNoticeTextN(reason, maxNoticeReasonLen), DefaultReviewSkill)
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary

@@ -1,6 +1,7 @@
 package pruefer
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"regexp"
@@ -127,6 +128,45 @@ func fetchRepoPlugins(client GitHubReviewer, owner, repo, baseSHA string) repoPl
 	}
 	sort.Slice(res.Skipped, func(i, j int) bool { return res.Skipped[i].Dir < res.Skipped[j].Dir })
 	return res
+}
+
+// repoPluginCodeWarnings names every loaded repo plugin that carries hooks or an
+// MCP server — components that start processes as the daemon's OS user, outside
+// the reviewer's path-scoped tool rules. Detection is by plugin layout
+// (hooks/, .mcp.json) and by the manifest naming hooks or mcpServers.
+func repoPluginCodeWarnings(trees []repoPluginTree) []string {
+	var out []string
+	for _, t := range trees {
+		var kinds []string
+		for _, f := range t.Files {
+			switch {
+			case f.Path == ".mcp.json":
+				kinds = appendOnce(kinds, "an MCP server")
+			case strings.HasPrefix(f.Path, "hooks/"):
+				kinds = appendOnce(kinds, "hooks")
+			case f.Path == ".claude-plugin/plugin.json":
+				if bytes.Contains(f.Data, []byte(`"mcpServers"`)) {
+					kinds = appendOnce(kinds, "an MCP server")
+				}
+				if bytes.Contains(f.Data, []byte(`"hooks"`)) {
+					kinds = appendOnce(kinds, "hooks")
+				}
+			}
+		}
+		if len(kinds) > 0 {
+			out = append(out, fmt.Sprintf("repo plugin %s still loads and carries %s that will run", t.Dir, strings.Join(kinds, " and ")))
+		}
+	}
+	return out
+}
+
+func appendOnce(list []string, v string) []string {
+	for _, e := range list {
+		if e == v {
+			return list
+		}
+	}
+	return append(list, v)
 }
 
 // pluginEntry is a validated regular-file entry of one plugin, path relative to

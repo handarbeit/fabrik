@@ -29,8 +29,15 @@ func wellFormedSkillRef(ref string) bool {
 // review body and a log line: only [A-Za-z0-9._:/ -] survive (anything else,
 // including markdown, mentions and newlines, becomes "?"), capped at 120
 // characters.
-func sanitizeNoticeText(s string) string {
-	const limit = 120
+func sanitizeNoticeText(s string) string { return sanitizeNoticeTextN(s, 120) }
+
+// maxNoticeReasonLen caps the reason in a posted fallback notice. It is larger
+// than the reference's cap because the reason carries the plugin notes that
+// explain why a repo plugin was skipped, which a 120-character cut would drop.
+const maxNoticeReasonLen = 480
+
+// sanitizeNoticeTextN is sanitizeNoticeText with an explicit character cap.
+func sanitizeNoticeTextN(s string, limit int) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
