@@ -348,3 +348,87 @@ func TestLiveProbePlugins(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveProbeReviewTools is #2308's live check, which CI cannot run. It
+// proves against the installed CLI that (a) a granted Bash(<tool> *) rule runs
+// that tool and an ungranted tool on PATH is denied, (b) the granted tool's
+// environment holds none of the daemon's credentials, and (c) a plugin loaded
+// from stripPluginHooks's copy starts no hook and no MCP server although the
+// source plugin declares both, while its skill still runs. Record the CLI
+// version and the observed values in adrs/2308.
+func TestLiveProbeReviewTools(t *testing.T) {
+	if os.Getenv("PRUEFER_LIVE_PROBE") != "1" {
+		t.Skip("set PRUEFER_LIVE_PROBE=1 to run the live probe")
+	}
+	root := t.TempDir()
+	out := filepath.Join(root, "out")
+	bin := filepath.Join(root, "bin")
+	clone := filepath.Join(root, "clone")
+	for _, d := range []string{out, bin, clone} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(p, c string, mode os.FileMode) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"probetool", "othertool"} {
+		write(filepath.Join(bin, name), "#!/bin/sh\nenv > \""+filepath.Join(out, name+".env")+"\"\necho "+strings.ToUpper(name)+"-RAN\n", 0o755)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	setDaemonSecrets(t)
+
+	// (a) and (b): the granted tool runs scrubbed, the ungranted one is denied.
+	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone,
+		Grant: resolveReviewGrant([]string{"Bash(probetool *)"}, nil, "alice", "MEMBER")}
+	po := runProbe(t, req, "Run the shell command `probetool one`, then the shell command `othertool two`. Report what each printed, then reply DONE.")
+	t.Logf("calls=%v denials=%d result=%q", po.Calls, len(po.Denials), po.Result)
+	b, err := os.ReadFile(filepath.Join(out, "probetool.env"))
+	if err != nil {
+		t.Fatalf("the granted tool never ran: %v", err)
+	}
+	env := strings.Split(strings.TrimSpace(string(b)), "\n")
+	for name := range daemonSecrets {
+		if envHas(env, name) {
+			t.Errorf("the granted tool inherited %s", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(out, "othertool.env")); err == nil {
+		t.Errorf("an ungranted tool on PATH ran")
+	}
+	if len(po.Denials) == 0 {
+		t.Errorf("the ungranted command was not reported as a permission denial")
+	}
+
+	// (c): the stripped copy of a plugin that declares a hook and an MCP server.
+	plug := filepath.Join(root, "src", "probeplug")
+	record := "#!/bin/sh\nenv > \"$1\"\n"
+	write(filepath.Join(plug, ".claude-plugin", "plugin.json"), `{"name":"probeplug","version":"0.0.1"}`, 0o644)
+	write(filepath.Join(plug, "hooks", "record.sh"), record, 0o755)
+	write(filepath.Join(plug, "hooks", "hooks.json"),
+		fmt.Sprintf(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/record.sh %s"}]}]}}`, filepath.Join(out, "hook.env")), 0o644)
+	write(filepath.Join(plug, "mcp", "server.sh"), record, 0o755)
+	write(filepath.Join(plug, ".mcp.json"),
+		fmt.Sprintf(`{"mcpServers":{"probe":{"command":"${CLAUDE_PLUGIN_ROOT}/mcp/server.sh","args":["%s"]}}}`, filepath.Join(out, "mcp.env")), 0o644)
+	write(filepath.Join(plug, "skills", "probe", "SKILL.md"), "---\nname: probe\ndescription: Probe skill\n---\nSay SKILL-RAN.\n", 0o644)
+	dirs, stripped := stripOperatorPlugins(filepath.Join(root, "copies"), []string{plug}, 1)
+	if len(dirs) != 1 || len(stripped) != 1 {
+		t.Fatalf("dirs=%v stripped=%v", dirs, stripped)
+	}
+	req = ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, PluginDirs: dirs, SkillRef: "probeplug:probe"}
+	po = runProbe(t, req, "Invoke the probeplug:probe skill with the Skill tool, then reply DONE.")
+	t.Logf("calls=%v result=%q", po.Calls, po.Result)
+	if po.Calls["Skill"] == 0 {
+		t.Errorf("the stripped plugin's skill never ran")
+	}
+	for _, which := range []string{"hook", "mcp"} {
+		if _, err := os.Stat(filepath.Join(out, which+".env")); err == nil {
+			t.Errorf("the stripped copy still started the plugin's %s", which)
+		}
+	}
+}
