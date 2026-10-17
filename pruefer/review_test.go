@@ -98,6 +98,11 @@ type fakeReviewer struct {
 	baseSHAErr   error
 	resolveCalls int
 
+	// git is #2366's in-memory git store for repo plugin loading: commits with
+	// files, refs, and counters for every tree/blob/ref read. Nil by default,
+	// in which case every ordinary read is a not-found.
+	git *fakeGit
+
 	mu             sync.Mutex
 	submitCalls    []submitCall
 	diffCalls      int
@@ -147,7 +152,7 @@ func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, er
 		}
 		return f.repoSkillData, nil
 	default:
-		return nil, gh.ErrNotFound
+		return f.git.fileAtRef(owner, repo, path, ref)
 	}
 }
 

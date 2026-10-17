@@ -101,8 +101,8 @@ func TestResolveRefKind(t *testing.T) {
 		kind RefKind
 		sha  string
 	}{
-		{"main", RefBranch, ""},
-		{"both", RefAmbiguous, ""},
+		{"main", RefBranch, "mainsha"},
+		{"both", RefAmbiguous, "bothsha"},
 		{"v1", RefTag, "v1commit"},
 		{"v2", RefTag, "v2commit"}, // annotated: peeled through the tag object
 		{"feat/x", RefTag, "slashtag"},
@@ -162,7 +162,7 @@ func TestFetchSubtreeSHA_MissingDirIsNotFound(t *testing.T) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 	// An unreadable commit is a read failure, never "the repo has no plugins".
-	if _, err := c.FetchSubtreeSHA("o", "r", "unknowncommit", "plugins"); err == nil || errors.Is(err, ErrNotFound) {
+	if _, err := c.FetchSubtreeSHA("o", "r", "unknowncommit", "plugins"); err == nil || errors.Is(err, ErrNotFound) || !errors.Is(err, ErrUnreadable) {
 		t.Errorf("unknown commit err = %v, want a non-ErrNotFound read failure", err)
 	}
 	// A file named like the directory is not a directory.

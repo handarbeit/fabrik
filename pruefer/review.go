@@ -29,6 +29,16 @@ type GitHubReviewer interface {
 	// guidance) then uses. Required unconditionally, not type-asserted, for the
 	// same structural reason as FetchFileAtRef.
 	ResolveRefSHA(owner, repo, branch string) (string, error)
+	// ResolveRefKind, FetchSubtreeSHA, FetchTreeBySHA and FetchBlob back repo
+	// plugin loading (#2366): classify and peel a ref to a fixed commit, find a
+	// plugin directory's tree SHA at a commit, list that tree, and read a blob.
+	// They are called only from repoplugin_fetch.go, only behind the
+	// repo_plugins gate (TestRepoPluginReadersAreOnlyReachableBehindTheGate).
+	// Required unconditionally, not type-asserted, like FetchFileAtRef.
+	ResolveRefKind(owner, repo, ref string) (gh.ResolvedRef, error)
+	FetchSubtreeSHA(owner, repo, commitSHA, dir string) (string, error)
+	FetchTreeBySHA(owner, repo, treeSHA string) ([]gh.TreeEntry, bool, error)
+	FetchBlob(owner, repo, sha string, maxBytes int64) ([]byte, error)
 	// FetchCommit and FetchCommitsBehind back the pure merge-train
 	// catch-up skip (#2066): the head's parent shape, and whether a commit is
 	// on the PR's base branch. Required unconditionally, not type-asserted,

@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// ErrUnreadable marks a git object (commit or tree) GitHub answered 404 for when
+// the repository itself is expected to have it: the SHA is unknown, or the
+// repository is not readable with the caller's token. It is deliberately not
+// ErrNotFound, which means only "the directory is absent from a readable tree".
+var ErrUnreadable = errors.New("object not readable")
+
 // TreeEntry is one entry of a git tree as the Git Trees API reports it. Mode is
 // the git file mode ("100644" file, "100755" executable, "120000" symlink,
 // "160000" gitlink/submodule, "040000" tree); Type is "blob", "tree" or "commit".
@@ -58,8 +64,10 @@ const (
 	RefAmbiguous RefKind = "ambiguous"
 )
 
-// ResolvedRef is the result of ResolveRefKind. SHA is the commit a tag peels
-// to (empty for a branch or an ambiguous name, which a caller refuses anyway).
+// ResolvedRef is the result of ResolveRefKind. SHA is the commit a tag peels to
+// (RefTag, and RefAmbiguous when it has one) or the tip a branch points at
+// (RefBranch): a caller that wants a fixed commit accepts only RefTag and
+// refuses the rest, so a branch tip is reported for diagnostics, not for use.
 type ResolvedRef struct {
 	Kind RefKind
 	SHA  string
@@ -92,13 +100,14 @@ func (c *Client) ResolveRefKind(owner, repo, ref string) (ResolvedRef, error) {
 		}
 		hasTag = false
 	}
-	switch {
-	case hasHead && hasTag:
-		return ResolvedRef{Kind: RefAmbiguous}, nil
-	case hasHead:
-		return ResolvedRef{Kind: RefBranch}, nil
-	case !hasTag:
-		return ResolvedRef{}, wrap(ErrNotFound)
+	if hasHead && head.Object.Type != "commit" {
+		return ResolvedRef{}, wrap(fmt.Errorf("branch points at %q, not a commit", head.Object.Type))
+	}
+	if !hasTag {
+		if !hasHead {
+			return ResolvedRef{}, wrap(ErrNotFound)
+		}
+		return ResolvedRef{Kind: RefBranch, SHA: head.Object.SHA}, nil
 	}
 	obj := tag.Object
 	for i := 0; obj.Type == "tag"; i++ {
@@ -118,6 +127,9 @@ func (c *Client) ResolveRefKind(owner, repo, ref string) (ResolvedRef, error) {
 	}
 	if obj.Type != "commit" || obj.SHA == "" {
 		return ResolvedRef{}, wrap(fmt.Errorf("tag points at %q %q, not a commit", obj.Type, obj.SHA))
+	}
+	if hasHead {
+		return ResolvedRef{Kind: RefAmbiguous, SHA: obj.SHA}, nil
 	}
 	return ResolvedRef{Kind: RefTag, SHA: obj.SHA}, nil
 }
@@ -165,7 +177,7 @@ func (c *Client) FetchSubtreeSHA(owner, repo, commitSHA, dir string) (string, er
 	// could not be read, not that dir is absent, so ErrNotFound is not propagated.
 	unreadable := func(e error) error {
 		if errors.Is(e, ErrNotFound) {
-			return wrap(fmt.Errorf("object not readable: %s", e.Error()))
+			return wrap(fmt.Errorf("object not readable (%w): %s", ErrUnreadable, e.Error()))
 		}
 		return wrap(e)
 	}
