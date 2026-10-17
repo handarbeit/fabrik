@@ -35,6 +35,7 @@ type loopPass struct {
 	turns   int
 	cost    float64
 	exit1   bool // the process exits non-zero with no output
+	isError bool // the result object reports is_error
 }
 
 func passText(summary string, ids ...string) string {
@@ -61,7 +62,7 @@ func (p loopPass) stream(s *StagedDiff, n int) string {
 		e := byID[id]
 		t.read("", fmt.Sprintf("p%d-q%s", n, id), s.EntryPath(e), "", 1, last)
 	}
-	res, _ := json.Marshal(map[string]any{"type": "result", "result": p.text, "is_error": false, "num_turns": p.turns, "total_cost_usd": p.cost, "session_id": p.session})
+	res, _ := json.Marshal(map[string]any{"type": "result", "result": p.text, "is_error": p.isError, "num_turns": p.turns, "total_cost_usd": p.cost, "session_id": p.session})
 	t.lines = append(t.lines, string(res))
 	return strings.Join(t.lines, "\n") + "\n"
 }
@@ -502,6 +503,53 @@ func TestCoverageLoop_SessionsRemovedWhenTheReviewEnds(t *testing.T) {
 	}
 	if _, err := os.Stat(otherJSONL); err != nil {
 		t.Errorf("an unrelated session was removed: %v", err)
+	}
+}
+
+// A first pass that fails posts nothing, but the session it created holds the
+// files the reviewer read: it must leave the profile all the same (#2375).
+func TestCoverageLoop_FailedFirstRunSessionIsRemoved(t *testing.T) {
+	cases := []struct {
+		name   string
+		passes []loopPass
+		op     string // operator skill selection ("" = the default skill)
+		owned  []string
+	}{
+		{"default skill run reports an error", []loopPass{
+			{skill: "pruefer-review:review", reads: []string{"0001"}, text: "boom", session: sessA, isError: true},
+		}, "", []string{sessA}},
+		{"default skill never ran", []loopPass{
+			{reads: []string{"0001"}, text: passText("x", "0001"), session: sessA},
+		}, "", []string{sessA}},
+		{"fallback run reports an error", []loopPass{
+			{reads: []string{"0001"}, text: passText("x", "0001"), session: sessA}, // selected skill never ran
+			{skill: "pruefer-review:review", text: "boom", session: sessB, isError: true},
+		}, "mine:deep", []string{sessA, sessB}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			profile := t.TempDir()
+			var files []string
+			for _, id := range c.owned {
+				jsonl, _ := seedSession(t, profile, "-a-b-c", id)
+				files = append(files, jsonl)
+			}
+			bed := newLoopBed(t, 2, c.passes...)
+			req := bed.req(2)
+			if c.op != "" {
+				req, _ = selReqOp(t, c.op)
+				req.Staged, req.MaxCoveragePasses = bed.s, 2
+			}
+			req.ClaudeConfigDir = profile
+			if _, err := (&RealClaudeInvoker{}).Review(context.Background(), req); err == nil {
+				t.Fatal("expected the review to fail")
+			}
+			for _, f := range files {
+				if _, err := os.Stat(f); !os.IsNotExist(err) {
+					t.Errorf("%s survived a failed review: %v", f, err)
+				}
+			}
+		})
 	}
 }
 

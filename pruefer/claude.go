@@ -916,9 +916,6 @@ type skillNotRunError struct {
 	Err      error
 	NumTurns int
 	CostUSD  float64
-	// SessionID is the failed run's session, so Review can remove it from the
-	// profile with the others (#2375).
-	SessionID string
 }
 
 func (e *skillNotRunError) Error() string { return e.Err.Error() }
@@ -1068,7 +1065,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	var spentTurns int
 	var spentCost float64
 	if why == "" {
-		res, err := r.runReview(ctx, req, set, ref)
+		res, err := r.runReview(ctx, req, set, ref, &sessions)
 		var notRun *skillNotRunError
 		if err == nil {
 			res.PluginsStripped, res.PluginsSkipped, res.PluginsPartial = copied.Stripped, copied.Skipped, copied.Partial
@@ -1078,9 +1075,6 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 			return ReviewResult{}, err
 		}
 		spentTurns, spentCost = notRun.NumTurns, notRun.CostUSD
-		if notRun.SessionID != "" {
-			sessions = append(sessions, notRun.SessionID)
-		}
 		// The posted reason stays free of local paths and skill output; the
 		// detail goes to the log only.
 		logf(req.PRNumber, "warn", "selected review skill did not run: %v\n", notRun.Err)
@@ -1094,7 +1088,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		why = appendNotes(why, set.Notes)
 	}
 	logf(req.PRNumber, "warn", "review skill %q at base %s not used (%s); running %s instead\n", sanitizeNoticeText(requested), req.BaseSHA, why, rp.Ref)
-	res, err := r.runReview(ctx, req, set, rp.Ref)
+	res, err := r.runReview(ctx, req, set, rp.Ref, &sessions)
 	if err != nil {
 		return ReviewResult{}, err
 	}
@@ -1123,15 +1117,16 @@ type passOutput struct {
 
 // runReview runs the first claude invocation of skill ref over the plugins in
 // set. A zero-value ReviewResult accompanies every error; a skill that
-// demonstrably did not run is a *skillNotRunError.
-func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, set *pluginSet, ref string) (ReviewResult, error) {
+// demonstrably did not run is a *skillNotRunError. Whatever the outcome, the
+// session the run created is added to sessions (#2375), so Review removes it
+// from the Claude profile even when the run failed and the review posts nothing.
+func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, set *pluginSet, ref string, sessions *[]string) (ReviewResult, error) {
 	req.SkillRef = ref
 	out, err := r.runPass(ctx, req, set, ref, "", buildReviewPrompt(req))
+	if out.Resp.SessionID != "" {
+		*sessions = append(*sessions, out.Resp.SessionID)
+	}
 	if err != nil {
-		var notRun *skillNotRunError
-		if errors.As(err, &notRun) {
-			notRun.SessionID = out.Resp.SessionID
-		}
 		return ReviewResult{}, err
 	}
 	facts := analyzeTranscript(out.Stdout, req.Staged)
