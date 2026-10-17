@@ -41,6 +41,14 @@ var recognizedRepoConfigKeys = map[string]bool{
 	// it can only name rules the operator already allowed (selectReviewTools)
 	// and has no effect at all for an author without write access.
 	"review_tools": true,
+	// plugins (#2366) names Claude Code plugins (<plugin>@<marketplace>) whose
+	// code Pruefer loads for this repo's reviews. Like review_skill it selects
+	// rather than narrows, so it is honoured only when the operator has turned
+	// repo_plugins on, and only for a PR whose base is the default branch
+	// (evaluateRepoPluginGate). It is a different thing from the operator's
+	// plugins: setting, a list of local directories, which has no place in a
+	// repo file.
+	"plugins": true,
 }
 
 // yamlRepoConfig is the schema a repo-resident .pruefer/config.yaml is
@@ -70,6 +78,8 @@ type yamlRepoConfig struct {
 	// ReviewTools is a pointer so an absent key (the operator's full list
 	// applies) differs from an explicit empty list (the repo selects none).
 	ReviewTools *[]string `yaml:"review_tools"`
+	// Plugins is #2366's repo plugin selection: <plugin>@<marketplace> entries.
+	Plugins []string `yaml:"plugins"`
 }
 
 // RepoConfigProvenance records what happened when resolving a repo-resident

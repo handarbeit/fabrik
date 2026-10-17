@@ -475,6 +475,11 @@ type PRDetails struct {
 	// BaseRef is the PR's base branch name (e.g. "main"). Populated by
 	// ListOpenPRs; other constructors may leave it empty.
 	BaseRef string
+	// DefaultBranch is the default branch of the PR's base repository, from
+	// the REST payload's base.repo.default_branch (#2366). Populated by
+	// ListOpenPRs and FetchPRDetails; empty means unknown, which a caller that
+	// gates on it must treat as "not the default branch".
+	DefaultBranch string
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
@@ -575,7 +580,10 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 			Ref string `json:"ref"`
 		} `json:"head"`
 		Base struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				DefaultBranch string `json:"default_branch"`
+			} `json:"repo"`
 		} `json:"base"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
@@ -591,6 +599,7 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		HeadSHA:           raw.Head.SHA,
 		HeadRefName:       raw.Head.Ref,
 		BaseRef:           raw.Base.Ref,
+		DefaultBranch:     raw.Base.Repo.DefaultBranch,
 		MergeableState:    raw.MergeableState,
 		AutoMergeEnabled:  raw.AutoMerge != nil,
 		Author:            raw.User.Login,
@@ -944,7 +953,10 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			Ref string `json:"ref"`
 		} `json:"head"`
 		Base struct {
-			Ref string `json:"ref"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				DefaultBranch string `json:"default_branch"`
+			} `json:"repo"`
 		} `json:"base"`
 	}
 	raw, err := paginateREST[rawPR](c, fmt.Sprintf("open PRs for %s/%s", owner, repo), func(page int) string {
@@ -969,6 +981,7 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			AuthorAssociation: pr.AuthorAssociation,
 			Labels:            labelNames(pr.Labels),
 			BaseRef:           pr.Base.Ref,
+			DefaultBranch:     pr.Base.Repo.DefaultBranch,
 		}
 	}
 	return out, nil

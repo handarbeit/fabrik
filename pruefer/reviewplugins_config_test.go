@@ -3,7 +3,6 @@ package pruefer
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -120,18 +119,23 @@ func TestSelectReviewSkill_RepoValueIsSanitisedInTheLog(t *testing.T) {
 // ADR 1642 AC4 still holds: review_skill is the only new repo key, and every
 // operator-only key stays unparseable from a repo file.
 func TestFetchRepoConfig_ReviewSkillRecognisedOperatorKeysStillNot(t *testing.T) {
-	data := []byte("review_skill: mine:deep\nplugins:\n  - /etc\nrepo_review_skill: true\nreview_guidance: be nice\nmodel: opus\n")
+	data := []byte("review_skill: mine:deep\nplugins:\n  - acme@tools\nrepo_review_skill: true\nrepo_plugins: true\nrepo_plugin_marketplaces:\n  - evil/x\nreview_guidance: be nice\nmodel: opus\n")
 	rc, prov := fetchRepoConfig(newFakeContentsClient(data, nil), "o", "r", "sha")
 	if rc.ReviewSkill == nil || *rc.ReviewSkill != "mine:deep" {
 		t.Errorf("review_skill not parsed: %+v", rc)
 	}
-	want := []string{"model", "plugins", "repo_review_skill", "review_guidance"}
+	// plugins (#2366) is a repo key (<plugin>@<marketplace> entries); the
+	// operator switches that gate and widen it are not.
+	if !equalStrings(rc.Plugins, []string{"acme@tools"}) {
+		t.Errorf("plugins not parsed: %+v", rc.Plugins)
+	}
+	want := []string{"model", "repo_plugin_marketplaces", "repo_plugins", "repo_review_skill", "review_guidance"}
 	if !equalStrings(prov.UnknownKeys, want) {
 		t.Errorf("UnknownKeys = %v, want %v (operator-only keys must not be recognised from a repo)", prov.UnknownKeys, want)
 	}
 	// applyRepoNarrowing never carries the selection into Config.
 	eff, _ := applyRepoNarrowing(Config{}, rc)
-	if eff.ReviewSkill != "" || eff.Plugins != nil {
+	if eff.ReviewSkill != "" || eff.Plugins != nil || eff.RepoPlugins || eff.RepoPluginMarketplaces != nil {
 		t.Errorf("the repo reached operator-only Config fields: %+v", eff)
 	}
 }
@@ -193,10 +197,10 @@ func TestReviewPR_RepoReviewSkillFalseIgnoresTheRepoSelection(t *testing.T) {
 	}
 }
 
-// No code from the reviewed repo is loaded (#2307; repo-supplied plugins are
-// deferred to #2366): a repo's review_skill can only name a skill of the
-// embedded plugin or an operator plugin, so with none configured the invoker
-// is handed no plugin directory at all, whatever the repo's base holds.
+// With repo_plugins off (the default) no code from the reviewed repo is loaded
+// (#2307, #2366): a repo's review_skill can only name a skill of the embedded
+// plugin or an operator plugin, so with none configured the invoker is handed
+// no plugin directory at all, whatever the repo's base holds.
 func TestReviewPR_NoRepoSuppliedPluginReachesTheInvoker(t *testing.T) {
 	client := newFakeReviewer()
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
@@ -206,33 +210,6 @@ func TestReviewPR_NoRepoSuppliedPluginReachesTheInvoker(t *testing.T) {
 	}
 	if req.ReviewSkill != "mine:deep" {
 		t.Errorf("selection must be unchanged: %q", req.ReviewSkill)
-	}
-}
-
-// A static scan: nothing in the pruefer or github packages reads a plugin tree
-// from the reviewed repo, by any route. Adding such a reader is #2366's work and
-// must change this test deliberately.
-func TestNoRepoPluginReaderExists(t *testing.T) {
-	for _, dir := range []string{".", "../github"} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			src, err := os.ReadFile(filepath.Join(dir, name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, banned := range []string{"FetchTreeAtRef", "FetchBlob", `".pruefer/plugins`, "git/trees/", "git/blobs/"} {
-				if strings.Contains(string(src), banned) {
-					t.Errorf("%s/%s mentions %q: no code path may load a plugin from the reviewed repo", dir, name, banned)
-				}
-			}
-		}
 	}
 }
 

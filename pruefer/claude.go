@@ -266,6 +266,14 @@ type ReviewRequest struct {
 	// OperatorPluginDirs are the operator's plugins: directories, already
 	// resolved by resolveOperatorPluginDirs; used in place.
 	OperatorPluginDirs []string
+	// RepoPlugins are the plugins fetched from the reviewed repo at the base SHA
+	// (#2366), validated and held in memory; Review writes them under its
+	// per-review root. RepoPluginNotes are the reasons selected repo plugins
+	// were not loaded, which join the plugin set's notes so a fallback they
+	// caused names them. Both are empty unless repo_plugins is on and the gate
+	// opened.
+	RepoPlugins     []loadedRepoPlugin
+	RepoPluginNotes []string
 	// BaseSHA is the commit every base-ref read of this review was pinned to; it
 	// is named in a fallback's log line (ReviewPR names it in the posted notice).
 	BaseSHA     string
@@ -969,7 +977,40 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		grantRules, _ := buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
 		operatorDirs, copied.Skipped = sanitizeOperatorPreapprovals(rp.Root, operatorDirs, grantRules, req.PRNumber)
 	}
-	set := buildPluginSet(rp, operatorDirs)
+	// Repo plugins (#2366) get the same author-class policy as operator plugins.
+	// Their reports join the operator ones, named so the posted notice says
+	// which plugin was affected.
+	var repoPolicy repoPluginPolicy
+	if len(req.RepoPlugins) > 0 {
+		var grantRules []string
+		if !req.Grant.StripPluginHooks {
+			grantRules, _ = buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
+		}
+		repoPolicy = func(root, dir, what string) (string, bool) {
+			label := what + " (repo plugin)"
+			if req.Grant.StripPluginHooks {
+				out, rep := stripOperatorPlugins(root, []string{dir}, req.PRNumber)
+				if len(out) == 0 {
+					copied.Skipped = append(copied.Skipped, label)
+					return "", false
+				}
+				if len(rep.Stripped) > 0 {
+					copied.Stripped = append(copied.Stripped, label)
+				}
+				if len(rep.Partial) > 0 {
+					copied.Partial = append(copied.Partial, label)
+				}
+				return out[0], true
+			}
+			out, _ := sanitizeOperatorPreapprovals(root, []string{dir}, grantRules, req.PRNumber)
+			if len(out) == 0 {
+				copied.Skipped = append(copied.Skipped, label)
+				return "", false
+			}
+			return out[0], true
+		}
+	}
+	set := buildPluginSet(rp, operatorDirs, req.RepoPlugins, req.RepoPluginNotes, repoPolicy)
 	for _, p := range set.Plugins {
 		logf(req.PRNumber, "claude", "%s\n", p.logLine())
 	}

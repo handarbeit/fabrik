@@ -26,6 +26,12 @@ type reviewPlugin struct {
 	cleanup func()
 }
 
+// RepoRoot is the directory the repo plugins fetched at the base SHA are written
+// under (#2366), one numbered subdirectory each. The numbers are indices, never
+// repo-controlled text, so no repo string becomes a directory name. It sits
+// inside Root, so Close removes it with everything else.
+func (p *reviewPlugin) RepoRoot() string { return filepath.Join(p.Root, "repo") }
+
 // Close removes the directory. Safe to call more than once.
 func (p *reviewPlugin) Close() {
 	if p != nil && p.cleanup != nil {
