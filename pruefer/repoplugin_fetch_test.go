@@ -357,6 +357,11 @@ func TestFetch_TotalCapsAcrossPlugins(t *testing.T) {
 	if len(res.Plugins) != 2 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "together exceed") {
 		t.Fatalf("result = plugins %d skipped %+v", len(res.Plugins), res.Skipped)
 	}
+	// The cross-plugin caps are decided from the listing, before any blob: the
+	// refused third plugin costs no blob read (two plugins of four files each).
+	if n := len(f.git.BlobReads); n != 8 {
+		t.Errorf("blob reads = %d, want 8 (none for the plugin refused by the total cap): %v", n, f.git.BlobReads)
+	}
 }
 
 func TestFetch_TransportFailuresDegradeTheOutcome(t *testing.T) {

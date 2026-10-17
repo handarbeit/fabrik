@@ -494,6 +494,15 @@ func (f *fetcher) fetchTree(repo, commit, dir string, external bool) (*loadedRep
 	if why != "" {
 		return nil, &refusal{reason: "its plugin tree was refused: " + sanitizeNoticeReason(why), detail: why}
 	}
+	// The across-plugins caps are decided from the listing's sizes too, before
+	// the first blob, so a plugin that cannot fit costs no blob reads.
+	var listed int64
+	for _, e := range files {
+		listed += e.Size
+	}
+	if why := f.budget.fits(listed, len(files)); why != "" {
+		return nil, refuse(why)
+	}
 	tree := &repoPluginTree{}
 	for _, e := range files {
 		data, err := f.client.FetchBlob(owner, name, e.SHA, maxRepoPluginFileBytes)

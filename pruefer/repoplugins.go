@@ -186,14 +186,25 @@ type repoPluginBudget struct {
 	files int
 }
 
-// admit charges a plugin of the given size to the budget and reports why it
-// does not fit ("" if it does). A refused plugin is not charged.
-func (b *repoPluginBudget) admit(bytes int64, files int) string {
+// fits reports why a plugin of the given size would not fit in the budget
+// ("" if it would), without charging it. fetchTree calls it with the sizes the
+// validated listing already carries, so the cross-plugin caps are decided from
+// tree metadata before any blob is read.
+func (b *repoPluginBudget) fits(bytes int64, files int) string {
 	if b.bytes+bytes > maxRepoPluginsAllBytes && repoPluginRuleOn(ruleTotalBytes) {
 		return fmt.Sprintf("the repo's plugins together exceed %d bytes", maxRepoPluginsAllBytes)
 	}
 	if b.files+files > maxRepoPluginsAllFiles && repoPluginRuleOn(ruleTotalFiles) {
 		return fmt.Sprintf("the repo's plugins together exceed %d files", maxRepoPluginsAllFiles)
+	}
+	return ""
+}
+
+// admit charges a plugin of the given size to the budget and reports why it
+// does not fit ("" if it does). A refused plugin is not charged.
+func (b *repoPluginBudget) admit(bytes int64, files int) string {
+	if why := b.fits(bytes, files); why != "" {
+		return why
 	}
 	b.bytes += bytes
 	b.files += files
