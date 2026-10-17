@@ -40,33 +40,29 @@ var reviewToolsTestRunners = [][]string{
 // rule such as "Bash(go vet:*)" stays allowed.
 var reviewToolsLaunchers = []string{
 	"go", "make", "npm", "yarn", "pnpm", "cargo", "pip", "pip3", "uv", "bun", "deno",
-	"gradle", "gradlew", "mvn", "dotnet", "git",
+	"gradle", "gradlew", "mvn", "dotnet",
 }
 
+// git is refused in every form (it is in the list below). The reviewer's base
+// grant leaves it out on purpose (see reviewShellAllow in claude.go): the
+// checkout is a depth-1 clone with no history for log or blame to report, and
+// diff, blame and grep read outside the clone (--no-index, --contents) or write
+// and execute (--output, -O) through option spellings a prefix rule cannot
+// exclude. A trailing wildcard admits all of them, so no git subcommand is safe
+// to grant by prefix.
+//
 // reviewToolsInterpreters are refused in every form: a rule that starts an
 // interpreter, shell or command wrapper grants whatever it is then told to run.
 var reviewToolsInterpreters = []string{
 	"sh", "bash", "zsh", "dash", "ksh", "fish", "env", "xargs", "sudo", "doas", "nice",
 	"time", "timeout", "nohup", "exec", "eval",
 	"node", "npx", "pnpx", "bunx", "uvx", "pipx", "docker", "podman", "nerdctl", "python", "python3", "ruby", "perl", "php", "lua", "awk", "sed",
-	"find", "rm", "cp", "mv", "tee", "dd", "chmod", "chown", "ssh", "scp", "nc",
+	"git", "find", "rm", "cp", "mv", "tee", "dd", "chmod", "chown", "ssh", "scp", "nc",
 	// Network clients: a trailing wildcard admits any arguments, so narrowing by a
 	// leading flag ("curl -s *", "gh api:*") would still let the model send repo
 	// contents or the daemon's on-disk files to any host. gh also reaches the
 	// GitHub API with whatever credentials its config holds.
 	"curl", "wget", "gh", "ftp", "sftp", "rsync", "telnet", "socat", "ncat", "netcat",
-}
-
-// reviewToolsGitSubcommands are the only git subcommands a rule may name. They
-// read the object database and the working tree and run no repo-defined code.
-// The subcommand must be the first word after "git": a leading global option
-// ("git -c core.pager=sh log", "git -C dir", "git --exec-path=…") can change
-// configuration or which program git runs, so a rule that puts a flag first is
-// refused. Flags after the subcommand are the operator's responsibility, like
-// every other rule's trailing arguments.
-var reviewToolsGitSubcommands = []string{
-	"diff", "log", "show", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list",
-	"shortlog", "describe", "cat-file", "merge-base", "name-rev", "diff-tree",
 }
 
 // reviewToolsRunSubcommands are generic "run something" subcommands of the
@@ -212,11 +208,6 @@ func validateReviewToolRule(raw string) (string, error) {
 	}
 	if len(words) == 1 && (slices.Contains(reviewToolsLaunchers, exe) || slices.Contains(reviewToolsLaunchers, bare)) {
 		return bad("%q with no narrowing subcommand subsumes test runners and arbitrary code; name the subcommand, for example Bash(%s vet:*)", exe, exe)
-	}
-	if exe == "git" || bare == "git" {
-		if len(words) < 2 || !slices.Contains(reviewToolsGitSubcommands, words[1]) {
-			return bad("a git rule must start with a read-only subcommand (%s); a leading option or any other subcommand can run code or write", strings.Join(reviewToolsGitSubcommands, ", "))
-		}
 	}
 	norm := append([]string{exe}, words[1:]...)
 	for _, runner := range reviewToolsTestRunners {
