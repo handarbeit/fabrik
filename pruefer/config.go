@@ -26,8 +26,13 @@ const (
 	DefaultModel          = "sonnet"
 	DefaultEffort         = "medium"
 	DefaultConcurrencyCap = 3
-	DefaultMaxDiffBytes   = 500_000 // 500 KB
-	DefaultConfigPath     = ".pruefer/config.yaml"
+
+	// DefaultMaxCoveragePasses is #2375's default extra-pass cap for the
+	// coverage loop: after a first pass that leaves staged entries unread,
+	// Pruefer resumes the session at most this many times. 0 disables.
+	DefaultMaxCoveragePasses = 2
+	DefaultMaxDiffBytes      = 500_000 // 500 KB
+	DefaultConfigPath        = ".pruefer/config.yaml"
 	// CadenceEveryPush, CadenceOnce, and CadenceOnRequest are the three
 	// recognized Config.Cadence/RepoCadence values (#1610) — see
 	// Config.Cadence's doc comment and adrs/1610-pruefer-review-cadence.md.
@@ -283,6 +288,14 @@ type Config struct {
 	// absent from the repo-resident config, so a reviewed repo cannot change
 	// retention. LoadConfig fails loud on an unrecognized value.
 	KeepTranscripts string `reload:"live"`
+	// MaxCoveragePasses is #2375's cap on the *extra* passes of the coverage
+	// loop: when a review pass leaves staged entries unread, the same Claude
+	// session is resumed to open them, at most this many times. 0 disables the
+	// loop (today's single-pass behaviour, byte for byte); a negative value is
+	// refused by LoadConfig. Operator-only: deliberately absent from the
+	// repo-resident config (ADR 1642), so a reviewed repo cannot change how
+	// much model budget a review of its own PR may spend.
+	MaxCoveragePasses int `reload:"live"`
 	// TranscriptDir is the directory kept transcripts are written to
 	// (default DefaultTranscriptDir, cwd-relative). YAML-only.
 	TranscriptDir string `reload:"restart"`
@@ -490,6 +503,10 @@ type yamlConfig struct {
 	// retention settings — see Config.KeepTranscripts.
 	KeepTranscripts string `yaml:"keep_transcripts"`
 	TranscriptDir   string `yaml:"transcript_dir"`
+	// MaxCoveragePasses is #2375's operator-only coverage-loop cap — see
+	// Config.MaxCoveragePasses. A pointer so an explicit 0 is distinguishable
+	// from absent.
+	MaxCoveragePasses *int `yaml:"max_coverage_passes"`
 	// Cadence/RepoCadence are #1610's operator-only review cadence setting —
 	// see Config.Cadence/RepoCadence's doc comments. Deliberately absent
 	// from yamlRepoConfig (reporeconfig.go): a repo-resident config has no
@@ -574,6 +591,7 @@ type flagValues struct {
 	repoPlugins             bool
 	repoPluginMarketplaces  string
 	keepTranscripts         string
+	maxCoveragePasses       int
 	cadence                 string
 	appID                   int64
 	appPrivateKeyPath       string
@@ -636,6 +654,7 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.BoolVar(&fv.repoPlugins, "repo-plugins", false, "Load review plugins a repo's base-ref .pruefer/config.yaml names from its own marketplace declarations (#2366). Runs code from the reviewed repo on this host: default off")
 	fs.StringVar(&fv.repoPluginMarketplaces, "repo-plugin-marketplaces", "", "Comma-separated owner/repo (or owner/*) GitHub repositories repo plugins may be fetched from, besides the reviewed repo itself (#2366); default none")
 	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
+	fs.IntVar(&fv.maxCoveragePasses, "max-coverage-passes", DefaultMaxCoveragePasses, "Extra passes a review may spend resuming its Claude session to open staged diff entries the first pass left unread (#2375); 0 disables the loop")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
@@ -702,6 +721,7 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		TUI:                    true,
 		LogFile:                DefaultLogPath,
 		KeepTranscripts:        KeepTranscriptsPartial,
+		MaxCoveragePasses:      DefaultMaxCoveragePasses,
 		TranscriptDir:          DefaultTranscriptDir,
 		AutoUpgrade:            false,
 		MaxDerivedRepos:        DefaultMaxDerivedRepos,
@@ -731,6 +751,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if yc.RepoPlugins != nil {
 		cfg.RepoPlugins = *yc.RepoPlugins
+	}
+	if yc.MaxCoveragePasses != nil {
+		cfg.MaxCoveragePasses = *yc.MaxCoveragePasses
 	}
 	if yc.KeepTranscripts != "" {
 		cfg.KeepTranscripts = yc.KeepTranscripts
@@ -838,6 +861,14 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 
 	applyEnv(&cfg)
+	// A non-integer PRUEFER_MAX_COVERAGE_PASSES is refused rather than ignored
+	// like the older numeric variables: a typo must not silently leave a
+	// budget-bearing loop on (or off) (#2375).
+	if v := os.Getenv("PRUEFER_MAX_COVERAGE_PASSES"); v != "" {
+		if _, err := strconv.Atoi(v); err != nil {
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("PRUEFER_MAX_COVERAGE_PASSES: %q is not an integer", v)
+		}
+	}
 
 	if explicit["repos"] {
 		cfg.WatchedRepos = splitCSV(fv.repos)
@@ -907,6 +938,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if explicit["keep-transcripts"] {
 		cfg.KeepTranscripts = fv.keepTranscripts
+	}
+	if explicit["max-coverage-passes"] {
+		cfg.MaxCoveragePasses = fv.maxCoveragePasses
 	}
 	if explicit["cadence"] {
 		cfg.Cadence = fv.cadence
@@ -1008,6 +1042,10 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	case KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff:
 	default:
 		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("keep_transcripts: %q is not recognized (must be %q, %q or %q)", cfg.KeepTranscripts, KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff)
+	}
+
+	if cfg.MaxCoveragePasses < 0 {
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("max_coverage_passes: %d is negative (use 0 to disable the coverage loop)", cfg.MaxCoveragePasses)
 	}
 
 	if !validCadence(cfg.Cadence) {
@@ -1122,6 +1160,11 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_REPO_PLUGIN_MARKETPLACES"); v != "" {
 		cfg.RepoPluginMarketplaces = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_MAX_COVERAGE_PASSES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MaxCoveragePasses = n
+		}
 	}
 	if v := os.Getenv("PRUEFER_KEEP_TRANSCRIPTS"); v != "" {
 		cfg.KeepTranscripts = v
