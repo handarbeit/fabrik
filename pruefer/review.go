@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -469,6 +470,16 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 	operatorPluginDirs := resolveOperatorPluginDirs(cfg.Plugins, pr.Number)
 
+	// #2308: the coded review tools this review may use, and whether operator
+	// plugins keep their hooks and MCP servers. Decided once here, from the
+	// operator ceiling, the repo's base-ref selection and the PR author, and
+	// carried in the request so the fallback re-run shares it.
+	grant := resolveReviewGrant(cfg.ReviewTools, repoYAML.ReviewTools, pr.Author, pr.AuthorAssociation)
+	logf(pr.Number, "config", "%s\n", grant.grantLogLine(pr.Author))
+	if line := grant.ignoredLogLine(); line != "" {
+		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, line)
+	}
+
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number, pr.HeadSHA)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("cloning PR head: %w", err)}
@@ -511,7 +522,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 		Staged:      staged,
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
-		BaseSHA: baseSHA,
+		BaseSHA: baseSHA, Grant: grant,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -541,6 +552,9 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	body := appendCoverage(buildReviewBody(summary, demoted), cov)
 	if result.FallbackFrom != "" {
 		body = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason) + "\n\n" + body
+	}
+	if notice := readOnlyNotice(grant, result.PluginsStripped, result.PluginsSkipped, result.PluginsPartial); notice != "" {
+		body = notice + "\n\n" + body
 	}
 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
@@ -573,6 +587,71 @@ func fallbackNotice(ref, baseSHA, reason string) string {
 	}
 	return fmt.Sprintf("> 🏭 **Review skill fallback** — requested `%s` at base `%s` was not used (`%s`); this review ran `%s`.",
 		sanitizeNoticeText(ref), sha, sanitizeNoticeReason(reason), DefaultReviewSkill)
+}
+
+// readOnlyNotice is the line a posted review carries when the outside-author
+// policy removed something the author would otherwise have had (#2308, R3):
+// the coded review tools, or the hooks and MCP servers of operator plugins. It
+// is empty when nothing was removed, so a review with no tools configured gets
+// no banner. The association comes from GitHub and the plugin names from the
+// operator's manifests; both are sanitised and rendered in code spans, and no
+// text from the repo (such as a requested rule) is ever echoed.
+func readOnlyNotice(g reviewGrant, strippedPlugins, skippedPlugins, partialPlugins []string) string {
+	if g.Trust.Trusted {
+		return skippedPluginNotice(skippedPlugins)
+	}
+	if !g.DowngradedExtras && len(strippedPlugins) == 0 && len(skippedPlugins) == 0 && len(partialPlugins) == 0 {
+		return ""
+	}
+	var removed []string
+	if g.DowngradedExtras {
+		removed = append(removed, "the coded review tools the operator allows were not available")
+	}
+	if len(strippedPlugins) > 0 {
+		names := make([]string, len(strippedPlugins))
+		for i, n := range strippedPlugins {
+			names[i] = "`" + sanitizeNoticeText(n) + "`"
+		}
+		removed = append(removed, "the hooks, MCP servers and tool pre-approvals of operator plugin "+strings.Join(names, ", ")+" were not loaded")
+	}
+	if len(skippedPlugins) > 0 {
+		names := make([]string, len(skippedPlugins))
+		for i, n := range skippedPlugins {
+			names[i] = "`" + sanitizeNoticeText(n) + "`"
+		}
+		removed = append(removed, "operator plugin "+strings.Join(names, ", ")+" could not be prepared for a read-only review and was not loaded")
+	}
+	if len(partialPlugins) > 0 {
+		names := make([]string, len(partialPlugins))
+		for i, n := range partialPlugins {
+			names[i] = "`" + sanitizeNoticeText(n) + "`"
+		}
+		removed = append(removed, "operator plugin "+strings.Join(names, ", ")+" was loaded without the scripts and other files its read-only copy omits, so a skill that relies on them may be limited")
+	}
+	assoc := "unknown"
+	if g.Trust.Association != "" {
+		assoc = sanitizeNoticeText(g.Trust.Association)
+	}
+	return fmt.Sprintf("> 🏭 **Read-only review** — the PR author's association with this repository is `%s`, not owner, member or collaborator, so this review ran with the read-only tool grant: %s.",
+		assoc, strings.Join(removed, "; "))
+}
+
+// skippedPluginNotice is the line a trusted author's posted review carries
+// when an operator plugin was dropped because it could not be scanned or copied
+// while its tool pre-approvals were checked. Nothing about the author's grant
+// changed, but the review ran without that plugin's skills and agents, and the
+// log line alone would leave a reader assuming it was loaded. Names come from
+// the operator's plugin directories and are sanitised into code spans.
+func skippedPluginNotice(skipped []string) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	names := make([]string, len(skipped))
+	for i, n := range skipped {
+		names[i] = "`" + sanitizeNoticeText(n) + "`"
+	}
+	return "> 🏭 **Operator plugin not loaded** — operator plugin " + strings.Join(names, ", ") +
+		" could not be prepared for this review and was not loaded, so its skills and agents were unavailable."
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary
