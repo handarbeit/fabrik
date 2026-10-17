@@ -22,6 +22,8 @@ func TestValidateReviewToolRule_Accepts(t *testing.T) {
 		"Bash(cargo tree)":                       "Bash(cargo tree)",
 		"Bash(pnpm audit --prod)":                "Bash(pnpm audit --prod)",
 		"Bash(sha256sum *)":                      "Bash(sha256sum *)",
+		"Bash(git log *)":                        "Bash(git log *)",
+		"Bash(git diff:*)":                       "Bash(git diff:*)",
 	} {
 		got, err := validateReviewToolRule(in)
 		if err != nil {
@@ -75,6 +77,10 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		"Bash(npm --prefix web run lint)", "Bash(./scripts/lint.sh *)", "Bash(./lint.sh)", "Bash(../lint:*)", "Bash(scripts/lint.sh *)", "Bash(.hidden-tool *)", "Bash(cargo r:*)", "Bash(cargo r --bin x)", "Bash(cargo clippy:*)", "Bash(cargo check:*)", "Bash(cargo build)", "Bash(cargo doc *)", "Bash(mvn verify:*)", "Bash(gradle build:*)", "Bash(./gradlew build)", "Bash(dotnet build:*)", "Bash(dotnet list package)", "Bash(yarn lint)", "Bash(yarn lint:*)", "Bash(pnpm lint:*)", "Bash(bun lint)", "Bash(yarn --cwd web lint)", "Bash(yarn)", "Bash(pnpm --version)", "Bash(deno task build)", "Bash(npm stop)", "Bash(/usr/bin/npm run lint)",
 		// make and friends run recipes from the reviewed tree, whatever the target.
 		"Bash(make lint)", "Bash(make4 lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
+		// Network clients are refused in every form: a leading flag does not narrow a trailing wildcard.
+		"Bash(curl -s *)", "Bash(curl:*)", "Bash(wget -q *)", "Bash(gh api:*)", "Bash(gh pr view *)", "Bash(/usr/bin/curl -s *)", "Bash(rsync -a *)", "Bash(sftp *)",
+		// git is accepted only with a read-only subcommand directly after it.
+		"Bash(git -c core.pager=cat log *)", "Bash(git -C sub log *)", "Bash(git --exec-path=x log *)", "Bash(git fetch *)", "Bash(git push:*)", "Bash(git config *)", "Bash(git checkout *)", "Bash(git log-evil *)", "Bash(git clone *)", "Bash(/usr/bin/git -c x=y diff)",
 		// Versioned interpreters match their unversioned name.
 		"Bash(python3.12 -m foo)", "Bash(node20 x.js)", "Bash(ruby3.2 x.rb)", "Bash(/usr/bin/perl5 x)",
 	} {
