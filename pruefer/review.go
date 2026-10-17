@@ -597,7 +597,10 @@ func fallbackNotice(ref, baseSHA, reason string) string {
 // operator's manifests; both are sanitised and rendered in code spans, and no
 // text from the repo (such as a requested rule) is ever echoed.
 func readOnlyNotice(g reviewGrant, strippedPlugins, skippedPlugins, partialPlugins []string) string {
-	if g.Trust.Trusted || (!g.DowngradedExtras && len(strippedPlugins) == 0 && len(skippedPlugins) == 0 && len(partialPlugins) == 0) {
+	if g.Trust.Trusted {
+		return skippedPluginNotice(skippedPlugins)
+	}
+	if !g.DowngradedExtras && len(strippedPlugins) == 0 && len(skippedPlugins) == 0 && len(partialPlugins) == 0 {
 		return ""
 	}
 	var removed []string
@@ -631,6 +634,24 @@ func readOnlyNotice(g reviewGrant, strippedPlugins, skippedPlugins, partialPlugi
 	}
 	return fmt.Sprintf("> 🏭 **Read-only review** — the PR author's association with this repository is `%s`, not owner, member or collaborator, so this review ran with the read-only tool grant: %s.",
 		assoc, strings.Join(removed, "; "))
+}
+
+// skippedPluginNotice is the line a trusted author's posted review carries
+// when an operator plugin was dropped because it could not be scanned or copied
+// while its tool pre-approvals were checked. Nothing about the author's grant
+// changed, but the review ran without that plugin's skills and agents, and the
+// log line alone would leave a reader assuming it was loaded. Names come from
+// the operator's plugin directories and are sanitised into code spans.
+func skippedPluginNotice(skipped []string) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	names := make([]string, len(skipped))
+	for i, n := range skipped {
+		names[i] = "`" + sanitizeNoticeText(n) + "`"
+	}
+	return "> 🏭 **Operator plugin not loaded** — operator plugin " + strings.Join(names, ", ") +
+		" could not be prepared for this review and was not loaded, so its skills and agents were unavailable."
 }
 
 // logSummaryParseInfo implements R4: logs when parseReviewFindings' summary

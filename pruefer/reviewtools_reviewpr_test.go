@@ -222,8 +222,15 @@ func TestReadOnlyNotice_NamesSkippedOperatorPlugins(t *testing.T) {
 		t.Errorf("notice with nothing removed = %q, want empty", got)
 	}
 	trusted := reviewGrant{Trust: authorTrust{Trusted: true, Association: "MEMBER"}}
-	if got := readOnlyNotice(trusted, nil, []string{"broken"}, nil); got != "" {
-		t.Errorf("trusted author got a read-only notice: %q", got)
+	got := readOnlyNotice(trusted, nil, []string{"broken`x"}, nil)
+	if !strings.Contains(got, "`broken?x`") || !strings.Contains(got, "not loaded") {
+		t.Errorf("trusted author's skipped plugin is not named: %q", got)
+	}
+	if strings.Contains(got, "Read-only review") {
+		t.Errorf("trusted author got a read-only claim: %q", got)
+	}
+	if got := readOnlyNotice(trusted, nil, nil, nil); got != "" {
+		t.Errorf("trusted author with nothing skipped got a notice: %q", got)
 	}
 }
 
