@@ -23,16 +23,6 @@ func TestRepoPluginCache_HitMissAndKeyIsolation(t *testing.T) {
 	if _, ok := c.get(treeCacheKey("other/repo", "sha1")); ok {
 		t.Error("the same SHA in another repository must not hit")
 	}
-	if _, ok := c.get(commitCacheKey("acme/tools", "sha1", "")); ok {
-		t.Error("a commit key must not hit a tree entry")
-	}
-	if _, ok := c.get(commitCacheKey("acme/tools", "sha1", "a")); ok {
-		t.Error("unexpected hit")
-	}
-	c.put(commitCacheKey("acme/tools", "sha1", "a"), cacheTree(5))
-	if _, ok := c.get(commitCacheKey("acme/tools", "sha1", "b")); ok {
-		t.Error("a different path in the same commit must not hit")
-	}
 }
 
 func TestRepoPluginCache_EvictsLeastRecentlyUsedByBytes(t *testing.T) {

@@ -16,17 +16,12 @@ const repoPluginCacheBytes = 32 << 20
 // in two repositories can never carry a trust decision from one to the other.
 type repoPluginCacheKey struct {
 	Repo string // lower-cased owner/repo
-	Kind string // "tree" (in-repo, by subtree SHA) or "commit" (external, by commit SHA + path)
+	Kind string // "tree": by subtree SHA
 	SHA  string
-	Path string // the plugin directory within the commit; empty for a tree key
 }
 
 func treeCacheKey(repo, treeSHA string) repoPluginCacheKey {
 	return repoPluginCacheKey{Repo: strings.ToLower(repo), Kind: "tree", SHA: treeSHA}
-}
-
-func commitCacheKey(repo, commitSHA, path string) repoPluginCacheKey {
-	return repoPluginCacheKey{Repo: strings.ToLower(repo), Kind: "commit", SHA: commitSHA, Path: path}
 }
 
 type repoPluginCacheEntry struct {

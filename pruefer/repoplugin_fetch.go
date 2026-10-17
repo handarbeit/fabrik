@@ -458,19 +458,15 @@ func (f *fetcher) load(id string) (*loadedRepoPlugin, *refusal) {
 }
 
 // fetchTree reads the plugin directory dir of repo at commit: from the cache
-// when its tree SHA (or, for an external source, its commit) is known, else
+// when its tree SHA is known, else
 // through the Trees and Blobs API after validating the listing's metadata.
 func (f *fetcher) fetchTree(repo, commit, dir string, external bool) (*loadedRepoPlugin, *refusal) {
 	owner, name, _ := strings.Cut(repo, "/")
 	p := &loadedRepoPlugin{Repo: repo, Commit: commit, Path: dir}
-	// An external source is fixed by its commit alone, so a hit here costs no
-	// request at all.
-	if external {
-		if t, ok := f.cache.get(commitCacheKey(repo, commit, dir)); ok {
-			p.Tree, p.Cached = t, true
-			return p, nil
-		}
-	}
+	// The subtree read comes first even for an external source: it is also the
+	// check that this review's own client can read the repository, so a tree
+	// cached by a review under another installation never serves one whose
+	// token cannot read it (FR-010). It costs one request, never a blob.
 	treeSHA, err := f.client.FetchSubtreeSHA(owner, name, commit, dir)
 	switch {
 	case errors.Is(err, gh.ErrNotFound):
@@ -484,9 +480,6 @@ func (f *fetcher) fetchTree(repo, commit, dir string, external bool) (*loadedRep
 	// A tree SHA is content-addressed: an unchanged plugin has the same one at
 	// every commit, so a hit skips the listing and every blob read.
 	if t, ok := f.cache.get(treeCacheKey(repo, treeSHA)); ok {
-		if external {
-			f.cache.put(commitCacheKey(repo, commit, dir), t)
-		}
 		p.Tree, p.Cached = t, true
 		return p, nil
 	}
@@ -511,9 +504,6 @@ func (f *fetcher) fetchTree(repo, commit, dir string, external bool) (*loadedRep
 		tree.Bytes += int64(len(data))
 	}
 	f.cache.put(treeCacheKey(repo, treeSHA), tree)
-	if external {
-		f.cache.put(commitCacheKey(repo, commit, dir), tree)
-	}
 	p.Tree = tree
 	return p, nil
 }

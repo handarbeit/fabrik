@@ -538,7 +538,7 @@ func TestFetch_ExternalSources(t *testing.T) {
 			t.Errorf("the unreadable source was read %d times, want exactly one attempt", n)
 		}
 	})
-	t.Run("an unchanged external plugin costs no request after the first review", func(t *testing.T) {
+	t.Run("an unchanged external plugin costs no blob or listing read after the first review", func(t *testing.T) {
 		f := externalWorld(`{"source":"github","repo":"acme/shared","sha":"` + sha40a + `"}`)
 		cache := newRepoPluginCache(64 << 20)
 		runFetch(t, f, fetchOpts{selected: sel, allow: allow, cache: cache})
@@ -547,8 +547,25 @@ func TestFetch_ExternalSources(t *testing.T) {
 		if len(res.Plugins) != 1 || !res.Plugins[0].Cached {
 			t.Fatalf("second = %+v", res)
 		}
-		if len(f.git.SubtreeReads) != sub || len(f.git.BlobReads) != blobs || len(f.git.TreeReads) != trees {
+		if len(f.git.BlobReads) != blobs || len(f.git.TreeReads) != trees {
 			t.Errorf("the cached external plugin was read again")
+		}
+		if len(f.git.SubtreeReads) != sub+1 {
+			t.Errorf("a cache hit must still check readability with one subtree read: %d -> %d", sub, len(f.git.SubtreeReads))
+		}
+	})
+	t.Run("a cached external tree does not serve a review whose token cannot read the repository", func(t *testing.T) {
+		f := externalWorld(`{"source":"github","repo":"acme/shared","sha":"` + sha40a + `"}`)
+		cache := newRepoPluginCache(64 << 20)
+		if res := runFetch(t, f, fetchOpts{selected: sel, allow: allow, cache: cache}); len(res.Plugins) != 1 {
+			t.Fatalf("priming review = %+v", res)
+		}
+		// Another installation: same process-wide cache, no access to the repository.
+		f.git.repo("acme/shared").private = true
+		res := runFetch(t, f, fetchOpts{selected: sel, allow: allow, cache: cache})
+		oneSkip(t, res, "not readable")
+		if len(res.Plugins) != 0 {
+			t.Errorf("an unreadable repository was served from the cache: %+v", res.Plugins)
 		}
 	})
 	t.Run("unsupported and foreign-host sources", func(t *testing.T) {
