@@ -73,6 +73,16 @@ func TestValidateReviewToolRule_CaseFoldsEveryExecutableList(t *testing.T) {
 	}
 }
 
+// A leading environment assignment must not hide the executable from the lists.
+func TestValidateReviewToolRule_RefusesLeadingEnvAssignment(t *testing.T) {
+	for _, in := range []string{"Bash(A=1 vim *)", "Bash(X=y tar *)", "Bash(PATH=/x python3 -c *)", "Bash(FOO=1 bash -c *)", "Bash(A=1 shellcheck *)", "Bash(A=1)", "Bash(A=1 B=2 less x)"} {
+		_, err := validateReviewToolRule(in)
+		if err == nil || !strings.Contains(err.Error(), "environment assignment") {
+			t.Errorf("%q: error = %v, want an environment-assignment refusal", in, err)
+		}
+	}
+}
+
 // The returned rule keeps the case as typed, so repo-versus-operator equality
 // and deduplication are unaffected by the folding.
 func TestValidateReviewToolRule_KeepsTypedCase(t *testing.T) {

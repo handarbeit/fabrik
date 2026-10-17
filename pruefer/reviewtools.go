@@ -248,6 +248,11 @@ func validateReviewToolRule(raw string) (string, error) {
 	if strings.HasPrefix(words[0], "-") {
 		return bad("the command must start with an executable name")
 	}
+	// A leading NAME=value word is a shell environment assignment: the shell runs
+	// the next word, which no executable list below would ever see ("A=1 vim").
+	if strings.Contains(words[0], "=") {
+		return bad("the command %q starts with an environment assignment, which would hide the real executable from the checks; name the executable first", words[0])
+	}
 	// A bare name (resolved on the daemon's PATH) or an absolute path only: a
 	// relative path such as ./scripts/lint.sh, ../x or tools/lint names a file in
 	// the reviewed tree, and the validator's executable checks below look at the
