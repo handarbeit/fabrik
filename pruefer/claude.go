@@ -735,6 +735,11 @@ func buildReviewPrompt(req ReviewRequest) string {
 // and Pruefer's own config alone. Authentication is unaffected: it comes
 // from the config directory, not from any settings layer.
 func buildReviewArgs(req ReviewRequest) ([]string, error) {
+	// Re-check every granted extra at the point of use (#2370): config validates
+	// them at load, but this is the only place that turns them into CLI arguments.
+	if err := validateGrantExtras(req.Grant.Extras); err != nil {
+		return nil, err
+	}
 	stagedDir := ""
 	if req.Staged != nil {
 		stagedDir = req.Staged.Dir
@@ -917,6 +922,12 @@ func chooseReviewSkill(set *pluginSet, requested, defaultRef string) (ref, reaso
 // requirement, callers must not submit a review when err != nil.
 func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (ReviewResult, error) {
 	logf(req.PRNumber, "claude", "reviewing %s/%s#%d (head %s) in %s\n", req.Owner, req.Repo, req.PRNumber, req.HeadSHA, req.WorkDir)
+
+	// Fail early on an invalid granted rule (#2370), before the plugin root is
+	// created; buildReviewArgs re-checks as the authoritative gate.
+	if err := validateGrantExtras(req.Grant.Extras); err != nil {
+		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
+	}
 
 	// Fail closed: never run a review without its path scope. The resolved
 	// paths replace the request's so the prompt, the cwd and the rules all
