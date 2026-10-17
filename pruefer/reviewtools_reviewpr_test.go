@@ -175,7 +175,7 @@ func TestReviewPR_ReadOnlyNotice(t *testing.T) {
 	}
 	// Plugins stripped, no tools configured.
 	_, body, _ = reviewAs(t, newFakeReviewer(), toolsCfg(), "mallory", "NONE", []string{"ops`@x"})
-	if !strings.Contains(body, "hooks and MCP servers of operator plugin `ops??x` were not loaded") || strings.Contains(body, "coded review tools") {
+	if !strings.Contains(body, "hooks, MCP servers and tool pre-approvals of operator plugin `ops??x` were not loaded") || strings.Contains(body, "coded review tools") {
 		t.Errorf("plugin notice wrong (name must be sanitised):\n%s", body)
 	}
 	// Association is sanitised and never a repo-controlled string.

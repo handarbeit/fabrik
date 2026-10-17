@@ -609,7 +609,7 @@ func readOnlyNotice(g reviewGrant, strippedPlugins, skippedPlugins, partialPlugi
 		for i, n := range strippedPlugins {
 			names[i] = "`" + sanitizeNoticeText(n) + "`"
 		}
-		removed = append(removed, "the hooks and MCP servers of operator plugin "+strings.Join(names, ", ")+" were not loaded")
+		removed = append(removed, "the hooks, MCP servers and tool pre-approvals of operator plugin "+strings.Join(names, ", ")+" were not loaded")
 	}
 	if len(skippedPlugins) > 0 {
 		names := make([]string, len(skippedPlugins))

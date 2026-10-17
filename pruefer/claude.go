@@ -951,6 +951,12 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		// per-review plugin root, so they go away with it, and the fallback
 		// re-run below reuses them.
 		operatorDirs, copied = stripOperatorPlugins(rp.Root, operatorDirs, req.PRNumber)
+	} else if len(operatorDirs) > 0 {
+		// A trusted author's review loads operator plugins as they are, except
+		// that a plugin may not pre-approve a tool (allowed-tools frontmatter)
+		// outside the grant it is reviewed with (ADR 2308 decision 13).
+		grantRules, _ := buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
+		operatorDirs, copied.Skipped = sanitizeOperatorPreapprovals(rp.Root, operatorDirs, grantRules, req.PRNumber)
 	}
 	set := buildPluginSet(rp, operatorDirs)
 	for _, p := range set.Plugins {

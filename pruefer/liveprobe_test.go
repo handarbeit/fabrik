@@ -433,3 +433,73 @@ func TestLiveProbeReviewTools(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveProbeSkillAllowedTools establishes, against the installed CLI under
+// the production argument and environment builders (--permission-mode dontAsk,
+// --setting-sources ""), whether a skill's allowed-tools frontmatter pre-approves
+// a tool the review grant does not name. (a) is informational and is the value
+// to record in adrs/2308: the unmodified operator plugin. (b) is the assertion:
+// the copies Pruefer builds (stripPluginHooks for an outside author,
+// sanitizeOperatorPreapprovals for a trusted one) never let that tool run,
+// whatever (a) shows, because the CLI's behaviour can change.
+func TestLiveProbeSkillAllowedTools(t *testing.T) {
+	if os.Getenv("PRUEFER_LIVE_PROBE") != "1" {
+		t.Skip("set PRUEFER_LIVE_PROBE=1 to run the live probe")
+	}
+	root := t.TempDir()
+	out := filepath.Join(root, "out")
+	bin := filepath.Join(root, "bin")
+	clone := filepath.Join(root, "clone")
+	plug := filepath.Join(root, "plug", "preplug")
+	for _, d := range []string{out, bin, clone, plug} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(p, c string, mode os.FileMode) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(c), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(out, "othertool.ran")
+	write(filepath.Join(bin, "othertool"), "#!/bin/sh\necho ran > \""+marker+"\"\necho OTHERTOOL-RAN\n", 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	write(filepath.Join(plug, ".claude-plugin", "plugin.json"), `{"name":"preplug","version":"0.0.1"}`, 0o644)
+	write(filepath.Join(plug, "skills", "probe", "SKILL.md"),
+		"---\nname: probe\ndescription: Probe skill\nallowed-tools: Bash(othertool *)\n---\nRun the shell command `othertool now`, then say SKILL-RAN.\n", 0o644)
+	if v, err := exec.Command("claude", "--version").Output(); err == nil {
+		t.Logf("claude --version: %s", strings.TrimSpace(string(v)))
+	}
+	prompt := "Invoke the preplug:probe skill with the Skill tool and follow it, then reply DONE."
+	base := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, SkillRef: "preplug:probe"}
+
+	// (a) the operator plugin as it is.
+	req := base
+	req.PluginDirs = []string{plug}
+	po := runProbe(t, req, prompt)
+	_, err := os.Stat(marker)
+	t.Logf("(a) unmodified plugin: CLI honours skill allowed-tools = %v; calls=%v denials=%d", err == nil, po.Calls, len(po.Denials))
+	_ = os.Remove(marker)
+
+	// (b) the copies.
+	outside, _ := stripOperatorPlugins(filepath.Join(root, "outside"), []string{plug}, 1)
+	trusted, skipped := sanitizeOperatorPreapprovals(filepath.Join(root, "trusted"), []string{plug}, []string{"Task"}, 1)
+	if len(outside) != 1 || len(trusted) != 1 || len(skipped) != 0 {
+		t.Fatalf("outside=%v trusted=%v skipped=%v", outside, trusted, skipped)
+	}
+	for name, dirs := range map[string][]string{"outside author": outside, "trusted author": trusted} {
+		req := base
+		req.PluginDirs = dirs
+		po := runProbe(t, req, prompt)
+		if po.Calls["Skill"] == 0 {
+			t.Errorf("%s: the skill never ran", name)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Errorf("%s: a tool outside the grant ran through the plugin's allowed-tools", name)
+		}
+		_ = os.Remove(marker)
+	}
+}

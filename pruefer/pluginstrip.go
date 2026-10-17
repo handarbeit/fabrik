@@ -48,6 +48,15 @@ func hooksOrMCPKey(k string) bool {
 	return false
 }
 
+// allowedToolsKey reports whether a frontmatter key pre-approves tools while its
+// skill, agent or command is active (allowed-tools, allowed_tools, allowedTools).
+// Such a key can grant a tool outside the review grant, so an outside author's
+// copy never keeps it and a trusted author's copy keeps it only when every entry
+// is already in the grant (pluginpreapprove.go).
+func allowedToolsKey(k string) bool {
+	return strings.ToLower(strings.NewReplacer("-", "", "_", "").Replace(k)) == "allowedtools"
+}
+
 // strippedPlugin is the report of one copy.
 type strippedPlugin struct {
 	// Removed lists the hooks and MCP servers the copy dropped (empty when the
@@ -258,11 +267,20 @@ func copyPluginFile(src, dst, rel string, rep *strippedPlugin) error {
 	return os.WriteFile(to, data, 0o644)
 }
 
-// stripFrontmatter removes the hooks and MCP keys from a markdown file's YAML
-// frontmatter. ok is false when the file opens a frontmatter block that cannot
-// be parsed as a YAML mapping or is not closed: the caller then drops the file.
-// A file with no frontmatter is returned unchanged.
+// stripFrontmatter removes the hooks, MCP and tool pre-approval keys from a
+// markdown file's YAML frontmatter, for an outside author's copy.
 func stripFrontmatter(data []byte) (out []byte, removed []string, ok bool) {
+	return rewriteFrontmatter(data, func(k string, _ *yaml.Node) bool {
+		return hooksOrMCPKey(k) || allowedToolsKey(k)
+	})
+}
+
+// rewriteFrontmatter removes from a markdown file's YAML frontmatter every
+// top-level key drop reports true for. ok is false when the file opens a
+// frontmatter block that cannot be parsed as a YAML mapping or is not closed:
+// the caller then drops the file. A file with no frontmatter is returned
+// unchanged, as is one where drop removes nothing.
+func rewriteFrontmatter(data []byte, drop func(key string, value *yaml.Node) bool) (out []byte, removed []string, ok bool) {
 	text := string(data)
 	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
 		if strings.HasPrefix(strings.TrimLeft(text, "\ufeff"), "---") {
@@ -304,7 +322,7 @@ func stripFrontmatter(data []byte) (out []byte, removed []string, ok bool) {
 	kept := m.Content[:0:0]
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		k, v := m.Content[i], m.Content[i+1]
-		if k.Kind == yaml.ScalarNode && hooksOrMCPKey(k.Value) {
+		if k.Kind == yaml.ScalarNode && drop(k.Value, v) {
 			removed = append(removed, k.Value)
 			continue
 		}
@@ -368,7 +386,7 @@ func stripOperatorPlugins(root string, dirs []string, prNumber int) (out []strin
 		switch {
 		case len(cp.Removed) > 0:
 			name := skillref.Discover(dst).Name
-			logf(prNumber, "claude", "read-only copy of review plugin %q removed hooks/MCP: %s\n", name, strings.Join(cp.Removed, "; "))
+			logf(prNumber, "claude", "read-only copy of review plugin %q removed hooks/MCP/tool pre-approvals: %s\n", name, strings.Join(cp.Removed, "; "))
 			rep.Stripped = append(rep.Stripped, name)
 		case len(cp.Omitted) > 0:
 			rep.Partial = append(rep.Partial, skillref.Discover(dst).Name)
