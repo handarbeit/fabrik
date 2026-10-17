@@ -1,10 +1,15 @@
-# Fabrik Plugin for Claude Code
+# Fabrik Stage Workflow Plugin (`fabrik-stages`)
 
 Stage workflow skills for the [Fabrik](https://github.com/handarbeit/fabrik) SDLC pipeline orchestrator.
 
+This is the plugin the Fabrik engine loads into its workers. It is not the human-facing
+PM plugin, which is named `fabrik` and is a separate plugin.
+
 ## What This Plugin Provides
 
-Six skills, one per pipeline stage:
+Twelve skills: one per pipeline stage, plus a `<stage>-comment` counterpart for each
+(for example `fabrik-stages:plan-comment`), which the engine uses when it processes
+comments on that stage. The stage skills are:
 
 | Skill | Stage | Purpose |
 |-------|-------|---------|
@@ -17,19 +22,26 @@ Six skills, one per pipeline stage:
 
 ## Installation
 
+### In a Fabrik project
+
+`fabrik init` copies this plugin from the binary into `.fabrik/plugin/`, and the engine
+passes that directory to every worker with `--plugin-dir`. Nothing needs to be installed
+separately. This plugin is not published through a plugin marketplace.
+
 ### For development (local testing)
 
 ```bash
-claude --plugin-dir /path/to/fabrik/plugin/fabrik
+claude --plugin-dir /path/to/fabrik/plugin/fabrik-workflows
 ```
 
-### For regular use
-
-Add to a Fabrik plugin marketplace and install via Claude Code's plugin manager.
+This loads the `fabrik-stages:*` skills. To make the engine itself use a checkout of the
+plugin, start it with `--plugin-dir` (or `FABRIK_PLUGIN_DIR`) pointing at the same directory.
 
 ## How It Works
 
-The Fabrik engine invokes Claude Code for each stage of the pipeline. Claude auto-loads these skills from `~/.claude/skills/`. The engine injects a minimal prompt directing Claude to follow the relevant stage skill, along with the issue context (title, body, comments).
+The Fabrik engine invokes Claude Code for each stage of the pipeline and passes the plugin
+directory to it with `--plugin-dir`. The engine injects a minimal prompt directing Claude to
+follow the relevant `fabrik-stages:<skill>`, along with the issue context (title, body, comments).
 
 The skills contain:
 - **What to do** at each stage (methodology)
