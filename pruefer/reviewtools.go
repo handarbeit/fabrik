@@ -87,6 +87,11 @@ var reviewToolsImplicitScriptLaunchers = map[string][]string{
 	"yarn": {"audit", "list", "ls", "info", "why", "outdated", "licenses"},
 	"pnpm": {"audit", "list", "ls", "why", "outdated", "licenses"},
 	"bun":  {"pm", "outdated", "audit", "info"},
+	// pip builds the tree's setup.py or build backend for wheel, download,
+	// install and friends. Only subcommands that read the installed environment
+	// are accepted.
+	"pip":  {"list", "show", "check", "freeze"},
+	"pip3": {"list", "show", "check", "freeze"},
 	// cargo compiles the head tree's build.rs and proc-macros for check, clippy,
 	// build, doc, bench and the rest, and resolves aliases from the tree's
 	// .cargo/config.toml. Only subcommands that read manifests and lockfiles are
@@ -104,7 +109,12 @@ var reviewToolsImplicitScriptLaunchers = map[string][]string{
 // plugins, build scripts and targets from the reviewed tree (pom.xml,
 // build.gradle, *.csproj) for every goal ("mvn verify", "gradle build",
 // "dotnet build", even "dotnet list package").
-var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant", "mvn", "mvnw", "gradle", "gradlew", "dotnet"}
+//
+// uv and deno are here as well: uv sync, build, lock and run build the project
+// (setup.py, build backends) and fetch from the network, and deno run, eval,
+// bench, compile and lint execute code from the tree or from a URL. Neither has
+// a subcommand set that is both useful for review and free of that.
+var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant", "mvn", "mvnw", "gradle", "gradlew", "dotnet", "uv", "deno"}
 
 const maxReviewToolRuleLen = 200
 
