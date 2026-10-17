@@ -261,6 +261,20 @@ type Config struct {
 	// review_tools can select a subset, never add a rule. LoadConfig refuses a
 	// test-runner rule, a blanket or malformed rule, and normalises the rest.
 	ReviewTools []string `reload:"live"`
+	// RepoPlugins (#2366) lets a repo's base-ref .pruefer/config.yaml name
+	// Claude Code plugins, declared by the repo's own marketplace files at the
+	// review's base SHA, that Pruefer fetches through the API and loads with
+	// --plugin-dir. This runs code from the reviewed repo on the Pruefer host,
+	// so it is the operator's switch and DEFAULT OFF: when false nothing is
+	// read, fetched or loaded. Even when true it applies only to a PR whose base
+	// is the repository's default branch. A hand-built Config (tests) is the
+	// zero value, false, which fails safe.
+	RepoPlugins bool `reload:"live"`
+	// RepoPluginMarketplaces (#2366) is the allowlist of external GitHub
+	// repositories ("owner/repo", or "owner/*") a repo's plugin declarations may
+	// fetch plugin code from. Default empty: only plugins inside the reviewed
+	// repo itself can load.
+	RepoPluginMarketplaces []string `reload:"live"`
 
 	// KeepTranscripts is #2303's retention policy for a review invocation's
 	// raw stream-json transcript: KeepTranscriptsPartial (the default when
@@ -468,6 +482,10 @@ type yamlConfig struct {
 	RepoReviewSkill *bool    `yaml:"repo_review_skill"`
 	// ReviewTools is #2308's operator ceiling of coded review tools.
 	ReviewTools []string `yaml:"review_tools"`
+	// RepoPlugins/RepoPluginMarketplaces are #2366's repo-plugin settings — see
+	// the Config fields of the same names.
+	RepoPlugins            *bool    `yaml:"repo_plugins"`
+	RepoPluginMarketplaces []string `yaml:"repo_plugin_marketplaces"`
 	// KeepTranscripts/TranscriptDir are #2303's operator-only transcript
 	// retention settings — see Config.KeepTranscripts.
 	KeepTranscripts string `yaml:"keep_transcripts"`
@@ -553,6 +571,8 @@ type flagValues struct {
 	reviewSkill             string
 	repoReviewSkill         bool
 	reviewTools             string
+	repoPlugins             bool
+	repoPluginMarketplaces  string
 	keepTranscripts         string
 	cadence                 string
 	appID                   int64
@@ -613,6 +633,8 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.StringVar(&fv.reviewSkill, "review-skill", "", "plugin:skill reference that performs the review (default pruefer-review:review)")
 	fs.StringVar(&fv.reviewTools, "review-tools", "", "Comma-separated extra --allowedTools rules for coded review tools, for example 'Bash(golangci-lint:*)'; granted only to authors with write access (#2308)")
 	fs.BoolVar(&fv.repoReviewSkill, "repo-review-skill", true, "Let a repo's base-ref .pruefer/config.yaml override -review-skill with its own review_skill; false ignores the repo's value")
+	fs.BoolVar(&fv.repoPlugins, "repo-plugins", false, "Load review plugins a repo's base-ref .pruefer/config.yaml names from its own marketplace declarations (#2366). Runs code from the reviewed repo on this host: default off")
+	fs.StringVar(&fv.repoPluginMarketplaces, "repo-plugin-marketplaces", "", "Comma-separated owner/repo (or owner/*) GitHub repositories repo plugins may be fetched from, besides the reviewed repo itself (#2366); default none")
 	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
@@ -657,31 +679,32 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 
 	cfg := Config{
-		WatchedRepos:         yc.WatchedRepos,
-		ServedAccounts:       yc.ServedAccounts,
-		PollInterval:         DefaultPollInterval,
-		Model:                DefaultModel,
-		Effort:               DefaultEffort,
-		ConcurrencyCap:       DefaultConcurrencyCap,
-		MaxDiffBytes:         DefaultMaxDiffBytes,
-		ExcludedAuthors:      yc.ExcludedAuthors,
-		ExcludedPaths:        yc.ExcludedPaths,
-		ExcludedLabels:       yc.ExcludedLabels,
-		CatchUpMarkerAuthors: yc.CatchUpMarkerAuthors,
-		PatchSkip:            true,
-		Plugins:              yc.Plugins,
-		ReviewTools:          yc.ReviewTools,
-		RepoReviewSkill:      true,
-		Cadence:              DefaultCadence,
-		RepoCadence:          yc.RepoCadence,
-		AppPrivateKeyPath:    DefaultPrivateKeyPath,
-		AppStatePath:         DefaultAppStatePath,
-		TUI:                  true,
-		LogFile:              DefaultLogPath,
-		KeepTranscripts:      KeepTranscriptsPartial,
-		TranscriptDir:        DefaultTranscriptDir,
-		AutoUpgrade:          false,
-		MaxDerivedRepos:      DefaultMaxDerivedRepos,
+		WatchedRepos:           yc.WatchedRepos,
+		ServedAccounts:         yc.ServedAccounts,
+		PollInterval:           DefaultPollInterval,
+		Model:                  DefaultModel,
+		Effort:                 DefaultEffort,
+		ConcurrencyCap:         DefaultConcurrencyCap,
+		MaxDiffBytes:           DefaultMaxDiffBytes,
+		ExcludedAuthors:        yc.ExcludedAuthors,
+		ExcludedPaths:          yc.ExcludedPaths,
+		ExcludedLabels:         yc.ExcludedLabels,
+		CatchUpMarkerAuthors:   yc.CatchUpMarkerAuthors,
+		PatchSkip:              true,
+		Plugins:                yc.Plugins,
+		ReviewTools:            yc.ReviewTools,
+		RepoReviewSkill:        true,
+		RepoPluginMarketplaces: yc.RepoPluginMarketplaces,
+		Cadence:                DefaultCadence,
+		RepoCadence:            yc.RepoCadence,
+		AppPrivateKeyPath:      DefaultPrivateKeyPath,
+		AppStatePath:           DefaultAppStatePath,
+		TUI:                    true,
+		LogFile:                DefaultLogPath,
+		KeepTranscripts:        KeepTranscriptsPartial,
+		TranscriptDir:          DefaultTranscriptDir,
+		AutoUpgrade:            false,
+		MaxDerivedRepos:        DefaultMaxDerivedRepos,
 
 		RepoRederivationInterval: DefaultRepoRederivationInterval,
 
@@ -705,6 +728,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if yc.RepoReviewSkill != nil {
 		cfg.RepoReviewSkill = *yc.RepoReviewSkill
+	}
+	if yc.RepoPlugins != nil {
+		cfg.RepoPlugins = *yc.RepoPlugins
 	}
 	if yc.KeepTranscripts != "" {
 		cfg.KeepTranscripts = yc.KeepTranscripts
@@ -872,6 +898,12 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if explicit["repo-review-skill"] {
 		cfg.RepoReviewSkill = fv.repoReviewSkill
+	}
+	if explicit["repo-plugins"] {
+		cfg.RepoPlugins = fv.repoPlugins
+	}
+	if explicit["repo-plugin-marketplaces"] {
+		cfg.RepoPluginMarketplaces = splitCSV(fv.repoPluginMarketplaces)
 	}
 	if explicit["keep-transcripts"] {
 		cfg.KeepTranscripts = fv.keepTranscripts
@@ -1077,6 +1109,19 @@ func applyEnv(cfg *Config) {
 			cfg.RepoReviewSkill = false
 			logf(0, "config", "PRUEFER_REPO_REVIEW_SKILL=%q is not a boolean; treating it as false (a repo's review_skill is ignored)\n", v)
 		}
+	}
+	if v := os.Getenv("PRUEFER_REPO_PLUGINS"); v != "" {
+		// Enabling this runs code from the reviewed repo, so an unparseable value
+		// (a typo such as "ture") fails closed to off rather than guessing.
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.RepoPlugins = b
+		} else {
+			cfg.RepoPlugins = false
+			logf(0, "config", "PRUEFER_REPO_PLUGINS=%q is not a boolean; treating it as false (repo plugins stay off)\n", v)
+		}
+	}
+	if v := os.Getenv("PRUEFER_REPO_PLUGIN_MARKETPLACES"); v != "" {
+		cfg.RepoPluginMarketplaces = splitCSV(v)
 	}
 	if v := os.Getenv("PRUEFER_KEEP_TRANSCRIPTS"); v != "" {
 		cfg.KeepTranscripts = v

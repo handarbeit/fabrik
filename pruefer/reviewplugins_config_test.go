@@ -120,18 +120,23 @@ func TestSelectReviewSkill_RepoValueIsSanitisedInTheLog(t *testing.T) {
 // ADR 1642 AC4 still holds: review_skill is the only new repo key, and every
 // operator-only key stays unparseable from a repo file.
 func TestFetchRepoConfig_ReviewSkillRecognisedOperatorKeysStillNot(t *testing.T) {
-	data := []byte("review_skill: mine:deep\nplugins:\n  - /etc\nrepo_review_skill: true\nreview_guidance: be nice\nmodel: opus\n")
+	data := []byte("review_skill: mine:deep\nplugins:\n  - acme@tools\nrepo_review_skill: true\nrepo_plugins: true\nrepo_plugin_marketplaces:\n  - evil/x\nreview_guidance: be nice\nmodel: opus\n")
 	rc, prov := fetchRepoConfig(newFakeContentsClient(data, nil), "o", "r", "sha")
 	if rc.ReviewSkill == nil || *rc.ReviewSkill != "mine:deep" {
 		t.Errorf("review_skill not parsed: %+v", rc)
 	}
-	want := []string{"model", "plugins", "repo_review_skill", "review_guidance"}
+	// plugins (#2366) is a repo key (<plugin>@<marketplace> entries); the
+	// operator switches that gate and widen it are not.
+	if !equalStrings(rc.Plugins, []string{"acme@tools"}) {
+		t.Errorf("plugins not parsed: %+v", rc.Plugins)
+	}
+	want := []string{"model", "repo_plugin_marketplaces", "repo_plugins", "repo_review_skill", "review_guidance"}
 	if !equalStrings(prov.UnknownKeys, want) {
 		t.Errorf("UnknownKeys = %v, want %v (operator-only keys must not be recognised from a repo)", prov.UnknownKeys, want)
 	}
 	// applyRepoNarrowing never carries the selection into Config.
 	eff, _ := applyRepoNarrowing(Config{}, rc)
-	if eff.ReviewSkill != "" || eff.Plugins != nil {
+	if eff.ReviewSkill != "" || eff.Plugins != nil || eff.RepoPlugins || eff.RepoPluginMarketplaces != nil {
 		t.Errorf("the repo reached operator-only Config fields: %+v", eff)
 	}
 }
