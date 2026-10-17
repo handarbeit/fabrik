@@ -120,13 +120,53 @@ var reviewToolsImplicitScriptLaunchers = map[string][]string{
 // a subcommand set that is both useful for review and free of that.
 var reviewToolsRepoCodeRunners = []string{"make", "gmake", "just", "task", "rake", "ant", "mvn", "mvnw", "gradle", "gradlew", "dotnet", "uv", "deno"}
 
+// reviewToolsSideEffectTools are executables that are not interpreters in the
+// narrow sense but can still run commands (shell escapes in editors and pagers,
+// wrapper launchers, tracers, debuggers), write files (archivers, installers,
+// patch) or reach the network (openssl, nmap). A trailing wildcard admits any
+// arguments, so none of them can be granted by prefix (#2370, ADR 2308
+// amendment). Names are lower case and matched exactly against the whole base
+// name, so "lesspipe" and "tarpit" are not caught.
+//
+// Compilers (gcc, clang, rustc) and jq/sort are deliberately absent: they are
+// not in the arbitrary-code class and refusing them would surprise operators.
+// This stays a denylist; an executable that is not listed is the operator's
+// responsibility.
+var reviewToolsSideEffectTools = []string{
+	// Named in #2370.
+	"stdbuf", "flock", "watch", "busybox", "command", "tar", "less", "vim", "vi", "java",
+	// Shell and awk/sed variants.
+	"rbash", "ash", "csh", "tcsh", "gawk", "mawk", "nawk", "gsed", "toybox",
+	// Editors and pagers with shell escapes.
+	"view", "vimdiff", "nvim", "ex", "ed", "emacs", "nano", "more", "man", "pico",
+	// Command wrappers, tracers and debuggers.
+	"setsid", "unshare", "chroot", "parallel", "script", "unbuffer", "ionice", "chrt",
+	"taskset", "setarch", "su", "runuser", "strace", "ltrace", "gdb", "lldb",
+	// Archive and file writers.
+	"zip", "unzip", "cpio", "ar", "7z", "7za", "pax", "install", "ln", "truncate", "patch",
+	// Runtimes.
+	"jshell", "kotlin", "scala", "groovy", "tclsh", "rscript", "julia", "swift", "pwsh",
+	"powershell", "osascript", "expect",
+	// Network tools.
+	"openssl", "nmap", "dig", "nslookup", "ping",
+}
+
 const maxReviewToolRuleLen = 200
 
 // versionlessExe strips a trailing version from an executable's base name
 // ("python3.12" -> "python", "node20" -> "node") so a versioned interpreter
 // cannot slip past the exact-name lists. Names that merely contain digits
 // elsewhere ("sha256sum") are untouched.
+//
+// A Windows-style suffix (.exe, .bat, .cmd) is removed first, so "java.exe" and
+// "Vim.EXE" are seen as java and vim. The caller passes a lower-cased name.
 func versionlessExe(exe string) string {
+	for _, ext := range []string{".exe", ".bat", ".cmd"} {
+		if t := strings.TrimSuffix(exe, ext); t != exe && t != "" {
+			exe = t
+			break
+		}
+	}
 	if v := strings.TrimRight(exe, "0123456789."); v != "" {
 		return v
 	}
@@ -215,10 +255,18 @@ func validateReviewToolRule(raw string) (string, error) {
 	if strings.HasPrefix(words[0], ".") || (strings.Contains(words[0], "/") && !strings.HasPrefix(words[0], "/")) {
 		return bad("the command %q is a relative path and could run a file from the reviewed tree; use a bare command name on the daemon's PATH or an absolute path", words[0])
 	}
-	exe := path.Base(words[0])
+	// Executable names are compared case-insensitively (a case-insensitive
+	// filesystem resolves "Python3" to python3) and on the base name, so neither
+	// letter case nor an absolute-path prefix bypasses the lists. Only words[0]
+	// is an executable name; later words are arguments. The returned rule keeps
+	// the case as typed so repo-versus-operator comparison is unaffected.
+	exe := strings.ToLower(path.Base(words[0]))
 	bare := versionlessExe(exe)
 	if slices.Contains(reviewToolsInterpreters, exe) || slices.Contains(reviewToolsInterpreters, bare) {
 		return bad("%q runs arbitrary code and is not permitted", exe)
+	}
+	if slices.Contains(reviewToolsSideEffectTools, exe) || slices.Contains(reviewToolsSideEffectTools, bare) {
+		return bad("%q can run commands, write files or reach the network and is not permitted", exe)
 	}
 	if len(words) == 1 && (slices.Contains(reviewToolsLaunchers, exe) || slices.Contains(reviewToolsLaunchers, bare)) {
 		return bad("%q with no narrowing subcommand subsumes test runners and arbitrary code; name the subcommand, for example Bash(%s vet:*)", exe, exe)
@@ -436,6 +484,23 @@ func (g reviewGrant) ignoredLogLine() string {
 		return ""
 	}
 	return fmt.Sprintf("review tools: repo rules %s ignored: outside the operator's review_tools", logRules(g.RepoIgnored))
+}
+
+// validateGrantExtras re-validates every granted extra rule at the point of use
+// (#2370). Extras come from config validated at load, but nothing else enforces
+// that where the review command line is built, so a rule that reached the grant
+// by any other route is refused here. The error names the first offending rule.
+func validateGrantExtras(extras []string) error {
+	for _, r := range extras {
+		n, err := validateReviewToolRule(r)
+		if err != nil {
+			return fmt.Errorf("granted review tool rule refused: %w", err)
+		}
+		if n != r {
+			return fmt.Errorf("granted review tool rule %q is not in normalised form (%q)", sanitizeNoticeRunes(r, 120, "()*,;=@+%'\""), sanitizeNoticeRunes(n, 120, "()*,;=@+%'\""))
+		}
+	}
+	return nil
 }
 
 // toolRuleValid reports whether rule is already in the normalised form
