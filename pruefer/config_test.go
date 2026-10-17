@@ -1373,3 +1373,64 @@ func TestLoadConfig_KeepTranscriptsRejectsUnrecognizedValue(t *testing.T) {
 		t.Fatal("LoadConfig: expected an error for an unrecognized keep_transcripts value, got nil")
 	}
 }
+
+// #2375: max_coverage_passes defaults to 2, follows flag > env > YAML, accepts
+// an explicit 0 (the kill switch) and refuses a negative or non-integer value.
+func TestLoadConfig_MaxCoveragePasses(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxCoveragePasses != DefaultMaxCoveragePasses || DefaultMaxCoveragePasses != 2 {
+		t.Errorf("default = %d, want 2", cfg.MaxCoveragePasses)
+	}
+
+	path := writeYAMLConfig(t, dir, "max_coverage_passes: 0\n")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxCoveragePasses != 0 {
+		t.Errorf("YAML explicit 0 = %d, want 0 (must not fall back to the default)", cfg.MaxCoveragePasses)
+	}
+
+	t.Setenv("PRUEFER_MAX_COVERAGE_PASSES", "4")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxCoveragePasses != 4 {
+		t.Errorf("env should override YAML, got %d", cfg.MaxCoveragePasses)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-max-coverage-passes", "0"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxCoveragePasses != 0 {
+		t.Errorf("explicit flag 0 should override env, got %d", cfg.MaxCoveragePasses)
+	}
+}
+
+func TestLoadConfig_MaxCoveragePassesRefusesBadValues(t *testing.T) {
+	neg := writeYAMLConfig(t, t.TempDir(), "max_coverage_passes: -1\n")
+	if _, err := LoadConfig([]string{"-config", neg}); err == nil || !strings.Contains(err.Error(), "max_coverage_passes") {
+		t.Errorf("negative YAML: err = %v, want a max_coverage_passes error", err)
+	}
+	if _, err := LoadConfig([]string{"-config", filepath.Join(t.TempDir(), "missing.yaml"), "-max-coverage-passes", "-2"}); err == nil {
+		t.Error("negative flag: expected an error")
+	}
+	t.Setenv("PRUEFER_MAX_COVERAGE_PASSES", "two")
+	if _, err := LoadConfig([]string{"-config", filepath.Join(t.TempDir(), "missing.yaml")}); err == nil {
+		t.Error("non-integer env: expected an error")
+	}
+}
+
+// A repo-resident config cannot set the cap (ADR 1642): the key is unknown to
+// the strict repo struct.
+func TestRepoConfig_CannotSetMaxCoveragePasses(t *testing.T) {
+	if _, ok := reflect.TypeOf(yamlRepoConfig{}).FieldByName("MaxCoveragePasses"); ok {
+		t.Fatal("yamlRepoConfig must not carry MaxCoveragePasses (operator-only, ADR 1642)")
+	}
+}

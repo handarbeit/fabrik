@@ -336,6 +336,11 @@ type ReviewRequest struct {
 	// degraded case: no diff text, or staging failed) falls back to the older
 	// wording so a review still runs, and its coverage is `partial`.
 	Staged *StagedDiff
+	// MaxCoveragePasses is #2375's cap on extra passes of the coverage loop,
+	// copied from Config at dispatch so a live reload cannot change a review
+	// that is already running. 0 disables the loop: the review is one pass,
+	// exactly as before the loop existed.
+	MaxCoveragePasses int
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -394,6 +399,16 @@ type ReviewResult struct {
 	// include (scripts, other directories, symlinks); a skill that depends on
 	// them may degrade.
 	PluginsPartial []string
+	// Loop describes the coverage loop (#2375): how many passes the review took,
+	// what each opened and why it stopped. nil for an invoker that has no loop
+	// (every fake) and for a review with no staged diff. NumTurns and CostUSD
+	// above already sum every pass.
+	Loop *CoverageLoop
+	// sessionID is the session of the pass that produced Text, and passCost the
+	// cost that pass's result reported on its own (before any fallback cost is
+	// added to CostUSD), both for the coverage loop.
+	sessionID string
+	passCost  float64
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -625,6 +640,16 @@ func renderReviewTools(b *strings.Builder, req ReviewRequest) {
 	b.WriteString("Not available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n")
 }
 
+// renderReadingRules writes the staged-entry reading rules (open every entry
+// in full, and in amounts the tool returns whole). It is shared by the first
+// pass's prompt and the coverage loop's follow-up (#2375), so a resumed pass is
+// held to exactly the rules the first was. Moved verbatim from
+// renderDynamicContext: the first-pass prompt is unchanged byte for byte.
+func renderReadingRules(b *strings.Builder) {
+	b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
+	fmt.Fprintf(b, "Open entries in amounts the tool returns whole: one entry per Read, or one plain `cat` command naming entries by the absolute paths INDEX.txt lists, whose `bytes` values add up to at most %s (do not prefix it with `cd`). A longer shell result is not returned to you: it is saved to a file and you receive only a `<persisted-output>` notice with a 2 KB preview. A `<persisted-output>` result means you did not see the content of any entry in that command: open those entries again in smaller pieces. Do not try to read the file the notice names; it is outside the paths you may read.\n\n", stagedBatchLimitText())
+}
+
 // renderDynamicContext writes buildReviewPrompt's Go-supplied dynamic
 // context (C7): the reviewer-identity/instructions preamble, the base-branch
 // diff instruction, omitted-paths disclosure, the PR body, and prior review-
@@ -643,8 +668,7 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 		// will fail.
 		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is staged as %d entries in %s. Read %s first: it lists every entry with its ID, file, original path, chunk and size. Each entry is one small file holding one changed path's diff (a large path is cut into numbered chunks that each repeat the file header, and hunk headers carry the true line numbers). Together they are the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", len(req.Staged.Entries), req.Staged.Dir, req.Staged.IndexPath)
 		fmt.Fprintf(b, "Entry files are named <ID>.diff, IDs 0001 through %04d, so if INDEX.txt itself is cut off you can still open the rest by name.\n\n", len(req.Staged.Entries))
-		b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
-		fmt.Fprintf(b, "Open entries in amounts the tool returns whole: one entry per Read, or one plain `cat` command naming entries by the absolute paths INDEX.txt lists, whose `bytes` values add up to at most %s (do not prefix it with `cd`). A longer shell result is not returned to you: it is saved to a file and you receive only a `<persisted-output>` notice with a 2 KB preview. A `<persisted-output>` result means you did not see the content of any entry in that command: open those entries again in smaller pieces. Do not try to read the file the notice names; it is outside the paths you may read.\n\n", stagedBatchLimitText())
+		renderReadingRules(b)
 		if req.BaseBranch != "" {
 			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the staged diff above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
 		}
@@ -843,6 +867,9 @@ type claudeReviewResponse struct {
 	IsError  bool    `json:"is_error"`
 	NumTurns int     `json:"num_turns"`
 	CostUSD  float64 `json:"total_cost_usd"`
+	// SessionID is the CLI's session id from the result object (#2375). The
+	// coverage loop resumes it; empty means the pass cannot be resumed.
+	SessionID string `json:"session_id"`
 }
 
 // parseClaudeReviewJSON parses claude's NDJSON stream output, handling both
@@ -865,11 +892,12 @@ func parseClaudeReviewJSON(output []byte) (claudeReviewResponse, bool) {
 			IsError  bool    `json:"is_error"`
 			NumTurns int     `json:"num_turns"`
 			CostUSD  float64 `json:"total_cost_usd"`
+			Session  string  `json:"session_id"`
 		}
 		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "result" {
 			continue
 		}
-		r := claudeReviewResponse{Result: envelope.Result, IsError: envelope.IsError, NumTurns: envelope.NumTurns, CostUSD: envelope.CostUSD}
+		r := claudeReviewResponse{Result: envelope.Result, IsError: envelope.IsError, NumTurns: envelope.NumTurns, CostUSD: envelope.CostUSD, SessionID: envelope.Session}
 		lastResult = &r
 	}
 	if lastResult != nil {
@@ -1023,15 +1051,25 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	if requested == "" {
 		requested = rp.Ref
 	}
+	// #2375: with the loop on, every session this review creates is removed
+	// from the Claude profile when it ends, on every return path.
+	var sessions []string
+	if req.MaxCoveragePasses > 0 {
+		defer func() {
+			if n, err := removeReviewSessions(req.ClaudeConfigDir, sessions); err != nil {
+				logf(req.PRNumber, "warn", "removing review session(s) from the Claude profile: %v (removed %d)\n", err, n)
+			}
+		}()
+	}
 	ref, why := chooseReviewSkill(set, requested, rp.Ref)
 	var spentTurns int
 	var spentCost float64
 	if why == "" {
-		res, err := r.runReview(ctx, req, set, ref)
+		res, err := r.runReview(ctx, req, set, ref, &sessions)
 		var notRun *skillNotRunError
 		if err == nil {
 			res.PluginsStripped, res.PluginsSkipped, res.PluginsPartial = copied.Stripped, copied.Skipped, copied.Partial
-			return res, nil
+			return r.coverageLoop(ctx, req, set, ref, res, &sessions), nil
 		}
 		if !errors.As(err, &notRun) || ref == rp.Ref {
 			return ReviewResult{}, err
@@ -1050,7 +1088,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		why = appendNotes(why, set.Notes)
 	}
 	logf(req.PRNumber, "warn", "review skill %q at base %s not used (%s); running %s instead\n", sanitizeNoticeText(requested), req.BaseSHA, why, rp.Ref)
-	res, err := r.runReview(ctx, req, set, rp.Ref)
+	res, err := r.runReview(ctx, req, set, rp.Ref, &sessions)
 	if err != nil {
 		return ReviewResult{}, err
 	}
@@ -1058,7 +1096,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	res.PluginsStripped, res.PluginsSkipped, res.PluginsPartial = copied.Stripped, copied.Skipped, copied.Partial
 	res.NumTurns += spentTurns
 	res.CostUSD += spentCost
-	return res, nil
+	return r.coverageLoop(ctx, req, set, rp.Ref, res, &sessions), nil
 }
 
 func appendNotes(why string, notes []string) string {
@@ -1068,10 +1106,42 @@ func appendNotes(why string, notes []string) string {
 	return why + " (" + strings.Join(notes, "; ") + ")"
 }
 
-// runReview runs one claude invocation of skill ref over the plugins in set. A
-// zero-value ReviewResult accompanies every error; a skill that demonstrably did
-// not run is a *skillNotRunError.
-func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, set *pluginSet, ref string) (ReviewResult, error) {
+// passOutput is what one claude invocation produced, before any review-level
+// interpretation. Resp is filled whenever the stream held a result object, even
+// when the pass then failed, so a failed pass's turns and cost can still be
+// summed (#2375).
+type passOutput struct {
+	Stdout []byte
+	Resp   claudeReviewResponse
+}
+
+// runReview runs the first claude invocation of skill ref over the plugins in
+// set. A zero-value ReviewResult accompanies every error; a skill that
+// demonstrably did not run is a *skillNotRunError. Whatever the outcome, the
+// session the run created is added to sessions (#2375), so Review removes it
+// from the Claude profile even when the run failed and the review posts nothing.
+func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, set *pluginSet, ref string, sessions *[]string) (ReviewResult, error) {
+	req.SkillRef = ref
+	out, err := r.runPass(ctx, req, set, ref, "", buildReviewPrompt(req))
+	if out.Resp.SessionID != "" {
+		*sessions = append(*sessions, out.Resp.SessionID)
+	}
+	if err != nil {
+		return ReviewResult{}, err
+	}
+	facts := analyzeTranscript(out.Stdout, req.Staged)
+	return ReviewResult{Text: out.Resp.Result, NumTurns: out.Resp.NumTurns, CostUSD: out.Resp.CostUSD, Opened: facts.opened, OpenedAuthoritative: facts.authoritative,
+		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: out.Stdout, sessionID: out.Resp.SessionID, passCost: out.Resp.CostUSD}, nil
+}
+
+// runPass runs one claude invocation: the first pass of a review (resumeID
+// empty) or a resumed coverage pass (#2375). Both build their arguments with
+// buildReviewArgs from the same request and run under the same environment, so
+// a resumed pass has exactly the first pass's tool grant, plugin set,
+// permission mode and environment; the only addition is --resume <id>. prompt
+// goes to stdin. The returned passOutput is filled as far as it got, so the
+// caller can sum a failed pass's turns and cost.
+func (r *RealClaudeInvoker) runPass(ctx context.Context, req ReviewRequest, set *pluginSet, ref, resumeID, prompt string) (passOutput, error) {
 	stageCtx := ctx
 	cancel := context.CancelFunc(func() {})
 	if req.MaxWallTime > 0 {
@@ -1087,7 +1157,10 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 	req.SkillRef = ref
 	args, err := buildReviewArgs(req)
 	if err != nil {
-		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
+		return passOutput{}, fmt.Errorf("building review arguments: %w", err)
+	}
+	if resumeID != "" {
+		args = append(args, "--resume", resumeID)
 	}
 	_, replaces := resolveGuidance(req)
 	skillPlugin := loadedPlugin{Name: reviewplugin.PluginName, Source: sourceEmbedded}
@@ -1096,12 +1169,14 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 			skillPlugin = lp
 		}
 	}
-	logf(req.PRNumber, "claude", "%s\n", skillLogLine(ref, skillPlugin, replaces))
+	if resumeID == "" {
+		logf(req.PRNumber, "claude", "%s\n", skillLogLine(ref, skillPlugin, replaces))
+	}
 	logf(req.PRNumber, "claude", "review tool rules: %s\n", strings.Join(args, " "))
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = req.WorkDir
 	cmd.Env = reviewProcessEnv(os.Environ(), req)
-	cmd.Stdin = strings.NewReader(buildReviewPrompt(req))
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = stdoutWriter
 	waitDelay := reviewWaitDelay
@@ -1128,7 +1203,7 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 
 	if err := cmd.Start(); err != nil {
 		watchdogCancel()
-		return ReviewResult{}, fmt.Errorf("starting claude: %w", err)
+		return passOutput{}, fmt.Errorf("starting claude: %w", err)
 	}
 	pid := cmd.Process.Pid
 	// #1989: sample the command sessions the Bash tool creates for itself.
@@ -1174,23 +1249,26 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 	}
 
 	if runErr != nil {
-		return ReviewResult{}, fmt.Errorf("claude exited with error: %w", runErr)
+		return passOutput{}, fmt.Errorf("claude exited with error: %w", runErr)
 	}
 
 	resp, ok := parseClaudeReviewJSON(bytes.TrimSpace(stdout.Bytes()))
 	if !ok {
-		return ReviewResult{}, fmt.Errorf("could not parse claude output (%d bytes)", stdout.Len())
+		return passOutput{}, fmt.Errorf("could not parse claude output (%d bytes)", stdout.Len())
 	}
+	out := passOutput{Stdout: stdout.Bytes(), Resp: resp}
 	if resp.IsError {
-		return ReviewResult{}, fmt.Errorf("claude reported an error: %s", resp.Result)
+		return out, fmt.Errorf("claude reported an error: %s", resp.Result)
 	}
 	if strings.TrimSpace(resp.Result) == "" {
-		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
+		return out, fmt.Errorf("claude produced an empty review")
 	}
-	if err := checkSkillRan(stdout.Bytes(), ref); err != nil {
-		return ReviewResult{}, &skillNotRunError{Ref: ref, Err: err, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
+	// Only the first pass loads the skill; a resumed pass continues a session
+	// that already did.
+	if resumeID == "" {
+		if err := checkSkillRan(stdout.Bytes(), ref); err != nil {
+			return out, &skillNotRunError{Ref: ref, Err: err, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}
+		}
 	}
-	facts := analyzeTranscript(stdout.Bytes(), req.Staged)
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: facts.opened, OpenedAuthoritative: facts.authoritative,
-		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: stdout.Bytes()}, nil
+	return out, nil
 }

@@ -553,6 +553,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
 		RepoPlugins: repoPlugins.Plugins, RepoPluginNotes: repoPlugins.Notes(),
 		BaseSHA: baseSHA, Grant: grant,
+		MaxCoveragePasses: cfg.MaxCoveragePasses,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -573,6 +574,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	// removal is deferred above) and before the review is submitted.
 	transcriptPath := maybeKeepTranscript(cfg, pr.Number, owner, repo, pr.HeadSHA, cov, result.Transcript)
 	logCoverage(pr.Number, cov, result.OpenedAuthoritative, transcriptPath)
+	logCoverageLoop(pr.Number, result.Loop, result.NumTurns, result.CostUSD)
 
 	summary, findings, parseInfo := parseReviewFindings(reviewText)
 	logSummaryParseInfo(pr.Number, parseInfo)
