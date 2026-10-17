@@ -977,7 +977,40 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		grantRules, _ := buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
 		operatorDirs, copied.Skipped = sanitizeOperatorPreapprovals(rp.Root, operatorDirs, grantRules, req.PRNumber)
 	}
-	set := buildPluginSet(rp, operatorDirs, req.RepoPlugins, req.RepoPluginNotes)
+	// Repo plugins (#2366) get the same author-class policy as operator plugins.
+	// Their reports join the operator ones, named so the posted notice says
+	// which plugin was affected.
+	var repoPolicy repoPluginPolicy
+	if len(req.RepoPlugins) > 0 {
+		var grantRules []string
+		if !req.Grant.StripPluginHooks {
+			grantRules, _ = buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
+		}
+		repoPolicy = func(root, dir, what string) (string, bool) {
+			label := what + " (repo plugin)"
+			if req.Grant.StripPluginHooks {
+				out, rep := stripOperatorPlugins(root, []string{dir}, req.PRNumber)
+				if len(out) == 0 {
+					copied.Skipped = append(copied.Skipped, label)
+					return "", false
+				}
+				if len(rep.Stripped) > 0 {
+					copied.Stripped = append(copied.Stripped, label)
+				}
+				if len(rep.Partial) > 0 {
+					copied.Partial = append(copied.Partial, label)
+				}
+				return out[0], true
+			}
+			out, _ := sanitizeOperatorPreapprovals(root, []string{dir}, grantRules, req.PRNumber)
+			if len(out) == 0 {
+				copied.Skipped = append(copied.Skipped, label)
+				return "", false
+			}
+			return out[0], true
+		}
+	}
+	set := buildPluginSet(rp, operatorDirs, req.RepoPlugins, req.RepoPluginNotes, repoPolicy)
 	for _, p := range set.Plugins {
 		logf(req.PRNumber, "claude", "%s\n", p.logLine())
 	}

@@ -211,6 +211,12 @@ func (s *pluginSet) byName(name string) (loadedPlugin, bool) {
 	return loadedPlugin{}, false
 }
 
+// repoPluginPolicy applies the review's tool policy to one written repo plugin
+// directory. root is a fresh directory it may copy into; what names the plugin
+// for reports. It returns the directory to load, or false to leave the plugin
+// out.
+type repoPluginPolicy func(root, dir, what string) (string, bool)
+
 // buildPluginSet assembles the plugins a review passes, in the fixed order of
 // #2307 FR-019 extended by #2366: the embedded pruefer-review, then operator
 // plugins in listed order, then the repo plugins fetched at the base SHA (R6).
@@ -221,7 +227,7 @@ func (s *pluginSet) byName(name string) (loadedPlugin, bool) {
 // fetched at all; they join the set's notes so a fallback caused by one names
 // it. A repo plugin that cannot be written to the per-review root is noted
 // without the error, which names a local path.
-func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoPlugins []loadedRepoPlugin, repoSkipNotes []string) *pluginSet {
+func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoPlugins []loadedRepoPlugin, repoSkipNotes []string, repoPolicy repoPluginPolicy) *pluginSet {
 	set := &pluginSet{}
 	seen := map[string]string{} // manifest name -> source that holds it
 	add := func(dir, source, what string, repo *loadedRepoPlugin) {
@@ -248,6 +254,19 @@ func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoPlugins []loade
 			logf(0, "warn", "writing repo plugin %s: %v\n", what, err)
 			set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: it could not be written for the reviewer", what))
 			continue
+		}
+		if repoPolicy != nil {
+			// The same author-class policy operator plugins get (ADR 2308):
+			// an outside author's review loads a copy without hooks, MCP
+			// servers and tool pre-approvals, and a trusted author's drops
+			// pre-approvals outside the review grant. A plugin that cannot be
+			// prepared is left out, never loaded unfiltered.
+			policyDir, ok := repoPolicy(filepath.Join(rp.RepoRoot(), fmt.Sprintf("policy-%02d", i)), dir, what)
+			if !ok {
+				set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: it could not be prepared under the review's tool policy", what))
+				continue
+			}
+			dir = policyDir
 		}
 		add(dir, sourceRepo, what, rpl)
 	}

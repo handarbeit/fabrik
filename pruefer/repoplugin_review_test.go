@@ -136,7 +136,7 @@ func TestBuildPluginSet_RepoPluginsAfterOperatorFirstWinsAndReservedName(t *test
 	other.Tree = &repoPluginTree{Files: []repoPluginFile{{Path: ".claude-plugin/plugin.json", Data: []byte(`{"name":"other","version":"2"}`)}}}
 
 	// A repo plugin named like the operator's "mine" loses to it; the reserved name is refused.
-	set := buildPluginSet(rp, []string{op}, []loadedRepoPlugin{repoDeepPlugin(), reserved, other}, []string{"repo plugin zzz@m not loaded: because"})
+	set := buildPluginSet(rp, []string{op}, []loadedRepoPlugin{repoDeepPlugin(), reserved, other}, []string{"repo plugin zzz@m not loaded: because"}, nil)
 	var names []string
 	for _, p := range set.Plugins {
 		names = append(names, p.Name+":"+p.Source)
