@@ -148,6 +148,7 @@ func resolveOperatorPluginDir(p string) (string, error) {
 const (
 	sourceEmbedded = "embedded"
 	sourceOperator = "operator"
+	sourceRepo     = "repo"
 )
 
 // loadedPlugin is one plugin a review passes with --plugin-dir.
@@ -156,6 +157,10 @@ type loadedPlugin struct {
 	Version string
 	Dir     string
 	Source  string
+	// Repo is set for a sourceRepo plugin (#2366): where its bytes came from, so
+	// the log can say which repository, commit and tree each repo plugin was
+	// read at (R8).
+	Repo *loadedRepoPlugin
 }
 
 func (p loadedPlugin) version() string {
@@ -167,6 +172,14 @@ func (p loadedPlugin) version() string {
 
 // logLine is the per-plugin line every review logs (#2307, R1).
 func (p loadedPlugin) logLine() string {
+	if r := p.Repo; r != nil {
+		tree := r.TreeSHA
+		if tree == "" {
+			tree = "unknown"
+		}
+		return fmt.Sprintf("review plugin: %s v%s (repo plugin %s, %s %s at commit %s, path %q, tree %s, cached=%t, dir %s)",
+			p.Name, p.version(), sanitizeLogID(r.ID), r.Origin, r.Repo, r.Commit, r.Path, tree, r.Cached, p.Dir)
+	}
 	return fmt.Sprintf("review plugin: %s v%s (%s, dir %s)", p.Name, p.version(), p.Source, p.Dir)
 }
 
@@ -199,15 +212,19 @@ func (s *pluginSet) byName(name string) (loadedPlugin, bool) {
 }
 
 // buildPluginSet assembles the plugins a review passes, in the fixed order of
-// #2307 FR-019: the embedded pruefer-review, then operator plugins in listed
-// order. Names are manifest names. The embedded plugin is never replaced: any
-// other plugin declaring its name is skipped and reported, and for every other
-// duplicate the earlier plugin wins. No plugin from the reviewed repo is ever
-// part of the set (repo-supplied plugins are deferred to #2366).
-func buildPluginSet(rp *reviewPlugin, operatorDirs []string) *pluginSet {
+// #2307 FR-019 extended by #2366: the embedded pruefer-review, then operator
+// plugins in listed order, then the repo plugins fetched at the base SHA (R6).
+// Names are manifest names. The embedded plugin is never replaced: any other
+// plugin declaring its name is skipped and reported, and for every other
+// duplicate the earlier plugin wins, so a repo plugin can never shadow an
+// operator plugin. repoSkipNotes are the reasons selected repo plugins were not
+// fetched at all; they join the set's notes so a fallback caused by one names
+// it. A repo plugin that cannot be written to the per-review root is noted
+// without the error, which names a local path.
+func buildPluginSet(rp *reviewPlugin, operatorDirs []string, repoPlugins []loadedRepoPlugin, repoSkipNotes []string) *pluginSet {
 	set := &pluginSet{}
 	seen := map[string]string{} // manifest name -> source that holds it
-	add := func(dir, source, what string) {
+	add := func(dir, source, what string, repo *loadedRepoPlugin) {
 		p := skillref.Discover(dir)
 		switch {
 		case source != sourceEmbedded && p.Name == reviewplugin.PluginName:
@@ -216,12 +233,68 @@ func buildPluginSet(rp *reviewPlugin, operatorDirs []string) *pluginSet {
 			set.Notes = append(set.Notes, fmt.Sprintf("%s plugin %s skipped: manifest name %q is already loaded from a %s plugin", source, what, p.Name, seen[p.Name]))
 		default:
 			seen[p.Name] = source
-			set.Plugins = append(set.Plugins, loadedPlugin{Name: p.Name, Version: p.Version, Dir: dir, Source: source})
+			set.Plugins = append(set.Plugins, loadedPlugin{Name: p.Name, Version: p.Version, Dir: dir, Source: source, Repo: repo})
 		}
 	}
-	add(rp.Dir, sourceEmbedded, reviewplugin.PluginName)
+	add(rp.Dir, sourceEmbedded, reviewplugin.PluginName, nil)
 	for _, d := range operatorDirs {
-		add(d, sourceOperator, filepath.Base(d))
+		add(d, sourceOperator, filepath.Base(d), nil)
 	}
+	for i := range repoPlugins {
+		rpl := &repoPlugins[i]
+		what := describePluginID(rpl.ID)
+		dir := filepath.Join(rp.RepoRoot(), fmt.Sprintf("%02d", i))
+		if err := writeRepoPluginTree(dir, rpl.Tree); err != nil {
+			logf(0, "warn", "writing repo plugin %s: %v\n", what, err)
+			set.Notes = append(set.Notes, fmt.Sprintf("repo plugin %s skipped: it could not be written for the reviewer", what))
+			continue
+		}
+		add(dir, sourceRepo, what, rpl)
+	}
+	set.Notes = append(set.Notes, repoSkipNotes...)
 	return set
+}
+
+// writeRepoPluginTree writes a validated plugin tree under dir, which must not
+// exist. A file is created exclusively (an existing file is an error, never
+// overwritten) and keeps its executable bit, since hook and MCP scripts must run.
+// Paths were validated when the tree was listed; the containment check here is a
+// second, independent line of defence.
+func writeRepoPluginTree(dir string, t *repoPluginTree) error {
+	if t == nil || len(t.Files) == 0 {
+		return fmt.Errorf("empty plugin tree")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating plugin directory: %w", err)
+	}
+	for _, f := range t.Files {
+		rel := filepath.FromSlash(f.Path)
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("file path %q is not local", f.Path)
+		}
+		dst := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("creating directory for %s: %w", f.Path, err)
+		}
+		mode := os.FileMode(0o644)
+		if f.Exec {
+			mode = 0o755
+		}
+		w, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
+			return fmt.Errorf("creating %s: %w", f.Path, err)
+		}
+		_, werr := w.Write(f.Data)
+		cerr := w.Close()
+		if werr != nil || cerr != nil {
+			return fmt.Errorf("writing %s", f.Path)
+		}
+		if f.Exec {
+			// The umask may have cleared bits OpenFile asked for.
+			if err := os.Chmod(dst, mode); err != nil {
+				return fmt.Errorf("chmod %s: %w", f.Path, err)
+			}
+		}
+	}
+	return nil
 }

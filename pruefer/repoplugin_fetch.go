@@ -106,12 +106,26 @@ type repoPluginResult struct {
 	Degraded bool
 }
 
-// Notes renders why each selected plugin did not load, for the log and any
-// fallback notice. Every id is sanitised; none names a local path.
+// sanitizeLogID makes a selection entry safe for a log line, keeping the "@"
+// that separates plugin from marketplace.
+func sanitizeLogID(id string) string { return sanitizeNoticeRunes(id, 120, "@") }
+
+// describePluginID renders a selection entry for a posted notice, where "@" is
+// not allowed (it could form a mention): a well-formed id reads as
+// "plugin in marketplace", anything else is sanitised.
+func describePluginID(id string) string {
+	if p, m, ok := parsePluginID(id); ok {
+		return fmt.Sprintf("%s in marketplace %s", sanitizeNoticeText(p), sanitizeNoticeText(m))
+	}
+	return sanitizeNoticeText(id)
+}
+
+// Notes renders why each selected plugin did not load, for any fallback notice
+// the review posts. Every id is sanitised; none names a local path.
 func (r repoPluginResult) Notes() []string {
 	var n []string
 	for _, s := range r.Skipped {
-		n = append(n, fmt.Sprintf("repo plugin %s not loaded: %s", sanitizeNoticeText(s.ID), s.Reason))
+		n = append(n, fmt.Sprintf("repo plugin %s not loaded: %s", describePluginID(s.ID), s.Reason))
 	}
 	return n
 }

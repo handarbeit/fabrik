@@ -470,10 +470,9 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	logReviewGuidanceResolution(pr.Number, owner, repo, guidanceProv)
 
 	// #2307: the skill that performs the review, and the plugins it may come
-	// from: the embedded pruefer-review plugin and the operator's own plugins,
-	// used in place. No code from the reviewed repo is ever loaded — a repo's
-	// review_skill can only name a skill of those plugins (repo-supplied
-	// plugins are deferred to #2366).
+	// from: the embedded pruefer-review plugin, the operator's own plugins used
+	// in place and — only when the operator turned repo_plugins on — the plugins
+	// the reviewed repo's base-ref config names (#2366).
 	reviewSkill, skillNote := selectReviewSkill(cfg, repoYAML)
 	if skillNote != "" {
 		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, skillNote)
@@ -488,6 +487,26 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	logf(pr.Number, "config", "%s\n", grant.grantLogLine(pr.Author))
 	if line := grant.ignoredLogLine(); line != "" {
 		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, line)
+	}
+
+	// #2366: repo plugins. The gate runs first and is the only way to the
+	// readers: with repo_plugins off (the default) nothing below reads, fetches
+	// or loads anything, whatever the repo declares. Everything is pinned to
+	// baseSHA, never the clone, which is the untrusted PR head.
+	var repoPlugins repoPluginResult
+	pluginGate, gateWhy := evaluateRepoPluginGate(cfg, repoYAML.Plugins, pr.BaseRef, pr.DefaultBranch, baseSHA)
+	if gateWhy != "" {
+		logf(pr.Number, "config", "%s/%s: %s\n", owner, repo, gateWhy)
+	}
+	if pluginGate.open {
+		repoPlugins = fetchRepoPlugins(client, pluginGate, repoPluginInput{
+			Owner: owner, Repo: repo, PRNumber: pr.Number, BaseSHA: baseSHA,
+			Selected: repoYAML.Plugins, Allow: cfg.RepoPluginMarketplaces,
+		})
+		logRepoPlugins(pr.Number, owner, repo, baseSHA, repoPlugins)
+		if repoPlugins.Degraded {
+			degraded = true // a failed read is not a verdict about the repo's plugins
+		}
 	}
 
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number, pr.HeadSHA)
@@ -532,6 +551,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 		Staged:      staged,
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
+		RepoPlugins: repoPlugins.Plugins, RepoPluginNotes: repoPlugins.Notes(),
 		BaseSHA: baseSHA, Grant: grant,
 	})
 	if err != nil {
@@ -581,6 +601,22 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	logf(pr.Number, "review", "submitted review for %s/%s#%d at %s\n", owner, repo, pr.Number, pr.HeadSHA)
 	return ReviewOutcome{Reviewed: true, NumTurns: result.NumTurns, CostUSD: result.CostUSD, FallbackFrom: result.FallbackFrom}
+}
+
+// logRepoPlugins is R8: which repo plugins were selected, which loaded with the
+// repository and commit each came from, and why any were skipped.
+func logRepoPlugins(prNumber int, owner, repo, baseSHA string, res repoPluginResult) {
+	for _, p := range res.Plugins {
+		logf(prNumber, "config", "%s/%s: repo plugin %s will load from %s %s at commit %s (path %q, tree %s, cached=%t); base %s\n",
+			owner, repo, sanitizeLogID(p.ID), p.Origin, p.Repo, p.Commit, p.Path, p.TreeSHA, p.Cached, baseSHA)
+	}
+	for _, s := range res.Skipped {
+		detail := ""
+		if s.Detail != "" {
+			detail = " [" + s.Detail + "]"
+		}
+		logf(prNumber, "warn", "%s/%s: repo plugin %s not loaded: %s%s\n", owner, repo, sanitizeLogID(s.ID), s.Reason, detail)
+	}
 }
 
 // fallbackNotice is the line a posted review carries when the selected review

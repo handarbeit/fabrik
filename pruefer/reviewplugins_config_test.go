@@ -3,7 +3,6 @@ package pruefer
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -198,10 +197,10 @@ func TestReviewPR_RepoReviewSkillFalseIgnoresTheRepoSelection(t *testing.T) {
 	}
 }
 
-// No code from the reviewed repo is loaded (#2307; repo-supplied plugins are
-// deferred to #2366): a repo's review_skill can only name a skill of the
-// embedded plugin or an operator plugin, so with none configured the invoker
-// is handed no plugin directory at all, whatever the repo's base holds.
+// With repo_plugins off (the default) no code from the reviewed repo is loaded
+// (#2307, #2366): a repo's review_skill can only name a skill of the embedded
+// plugin or an operator plugin, so with none configured the invoker is handed
+// no plugin directory at all, whatever the repo's base holds.
 func TestReviewPR_NoRepoSuppliedPluginReachesTheInvoker(t *testing.T) {
 	client := newFakeReviewer()
 	client.repoConfigData = []byte("review_skill: mine:deep\n")
@@ -211,33 +210,6 @@ func TestReviewPR_NoRepoSuppliedPluginReachesTheInvoker(t *testing.T) {
 	}
 	if req.ReviewSkill != "mine:deep" {
 		t.Errorf("selection must be unchanged: %q", req.ReviewSkill)
-	}
-}
-
-// A static scan: nothing in the pruefer or github packages reads a plugin tree
-// from the reviewed repo, by any route. Adding such a reader is #2366's work and
-// must change this test deliberately.
-func TestNoRepoPluginReaderExists(t *testing.T) {
-	for _, dir := range []string{".", "../github"} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			src, err := os.ReadFile(filepath.Join(dir, name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, banned := range []string{"FetchTreeAtRef", "FetchBlob", `".pruefer/plugins`, "git/trees/", "git/blobs/"} {
-				if strings.Contains(string(src), banned) {
-					t.Errorf("%s/%s mentions %q: no code path may load a plugin from the reviewed repo", dir, name, banned)
-				}
-			}
-		}
 	}
 }
 

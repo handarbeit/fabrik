@@ -132,7 +132,7 @@ func TestBuildPluginSet_OrderReservedNameAndDuplicates(t *testing.T) {
 	if err := os.MkdirAll(opNoManifest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	set := buildPluginSet(rp, []string{opA, opReserved, opShared, opSharedAgain, opNoManifest})
+	set := buildPluginSet(rp, []string{opA, opReserved, opShared, opSharedAgain, opNoManifest}, nil, nil)
 
 	var names []string
 	for _, p := range set.Plugins {

@@ -266,6 +266,14 @@ type ReviewRequest struct {
 	// OperatorPluginDirs are the operator's plugins: directories, already
 	// resolved by resolveOperatorPluginDirs; used in place.
 	OperatorPluginDirs []string
+	// RepoPlugins are the plugins fetched from the reviewed repo at the base SHA
+	// (#2366), validated and held in memory; Review writes them under its
+	// per-review root. RepoPluginNotes are the reasons selected repo plugins
+	// were not loaded, which join the plugin set's notes so a fallback they
+	// caused names them. Both are empty unless repo_plugins is on and the gate
+	// opened.
+	RepoPlugins     []loadedRepoPlugin
+	RepoPluginNotes []string
 	// BaseSHA is the commit every base-ref read of this review was pinned to; it
 	// is named in a fallback's log line (ReviewPR names it in the posted notice).
 	BaseSHA     string
@@ -969,7 +977,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		grantRules, _ := buildReviewToolRulesWith(clone, staged, rp.Ref, req.Grant.Extras)
 		operatorDirs, copied.Skipped = sanitizeOperatorPreapprovals(rp.Root, operatorDirs, grantRules, req.PRNumber)
 	}
-	set := buildPluginSet(rp, operatorDirs)
+	set := buildPluginSet(rp, operatorDirs, req.RepoPlugins, req.RepoPluginNotes)
 	for _, p := range set.Plugins {
 		logf(req.PRNumber, "claude", "%s\n", p.logLine())
 	}
