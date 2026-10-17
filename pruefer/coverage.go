@@ -79,10 +79,13 @@ func extractCoverage(text string) (opened []string, ok bool, rest string) {
 
 // Coverage is the computed result for one review.
 type Coverage struct {
-	Complete     bool
-	Reason       string   // why partial; empty when complete
-	Unread       []string // original paths, sorted and unique
-	UnreadCount  int      // entries not opened
+	Complete    bool
+	Reason      string   // why partial; empty when complete
+	Unread      []string // original paths, sorted and unique
+	UnreadCount int      // entries not opened
+	// UnreadIDs are the IDs of the unread staged entries, in entry order. The
+	// coverage loop (#2375) asks for exactly these.
+	UnreadIDs    []string
 	TotalEntries int
 	// TruncatedUnread is how many of the unread entries were named by a shell
 	// command whose result the CLI cut to a `<persisted-output>` preview (#2362).
@@ -161,6 +164,7 @@ func computeCoverage(in coverageInput) Coverage {
 				cov.TruncatedUnread++
 			}
 			unread = append(unread, e.Path)
+			cov.UnreadIDs = append(cov.UnreadIDs, e.ID)
 		}
 	}
 	unread = append(unread, in.TrimmedPaths...)
