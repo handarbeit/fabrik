@@ -22,6 +22,7 @@ func TestValidateReviewToolRule_Accepts(t *testing.T) {
 		"Bash(cargo tree)":                       "Bash(cargo tree)",
 		"Bash(pnpm audit --prod)":                "Bash(pnpm audit --prod)",
 		"Bash(sha256sum *)":                      "Bash(sha256sum *)",
+		"Bash(npm audit:*)":                      "Bash(npm audit:*)",
 		"Bash(pip list:*)":                       "Bash(pip list:*)",
 		"Bash(pip3 check)":                       "Bash(pip3 check)",
 	} {
@@ -79,6 +80,8 @@ func TestValidateReviewToolRule_RefusesBlanketMalformedAndLaunchers(t *testing.T
 		"Bash(make lint)", "Bash(make4 lint)", "Bash(make -C sub lint *)", "Bash(gmake:*)", "Bash(just lint)",
 		// pip/uv/deno build or execute code from the tree for most subcommands.
 		"Bash(pip wheel:*)", "Bash(pip download:*)", "Bash(pip3 wheel *)", "Bash(pip)", "Bash(pip --version)", "Bash(uv sync:*)", "Bash(uv build:*)", "Bash(uv lock:*)", "Bash(uv pip list)", "Bash(uv)", "Bash(deno eval:*)", "Bash(deno bench:*)", "Bash(deno compile:*)", "Bash(deno lint)", "Bash(deno fmt *)", "Bash(/usr/bin/uv sync)",
+		// A read-only subcommand with a trailing wildcard still admits mutating later words.
+		"Bash(npm audit fix)", "Bash(npm audit fix *)", "Bash(npm audit --fix:*)", "Bash(pnpm audit --fix)", "Bash(yarn audit fix)", "Bash(cargo audit fix)", "Bash(npm update:*)", "Bash(pnpm up *)", "Bash(npm uninstall x)", "Bash(cargo fmt)", "Bash(cargo fmt --check)",
 		// Network clients are refused in every form: a leading flag does not narrow a trailing wildcard.
 		"Bash(curl -s *)", "Bash(curl:*)", "Bash(wget -q *)", "Bash(gh api:*)", "Bash(gh pr view *)", "Bash(/usr/bin/curl -s *)", "Bash(rsync -a *)", "Bash(sftp *)",
 		// git is refused in every form: diff/blame/grep read outside the clone or write through options a prefix rule cannot exclude.

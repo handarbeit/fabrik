@@ -74,6 +74,10 @@ var reviewToolsInterpreters = []string{
 var reviewToolsRunSubcommands = []string{
 	"run", "r", "run-script", "exec", "x", "dlx", "generate", "install", "i", "ci", "add",
 	"start", "stop", "restart", "task", "create", "init", "rebuild", "link", "pack", "publish",
+	// Mutating verbs and flags. A read-only subcommand with a trailing wildcard
+	// still admits them as later words: "npm audit fix" and "pnpm audit --fix"
+	// install over the head tree, running lifecycle scripts, and write to it.
+	"fix", "--fix", "update", "upgrade", "up", "uninstall", "remove", "dedupe", "prune", "patch",
 }
 
 // reviewToolsImplicitScriptLaunchers run code defined in the reviewed tree when
@@ -98,7 +102,7 @@ var reviewToolsImplicitScriptLaunchers = map[string][]string{
 	// accepted. An external subcommand such as audit or deny can still be
 	// shadowed by an alias in that file, which stays the operator's
 	// responsibility.
-	"cargo": {"audit", "deny", "tree", "metadata", "outdated", "fmt"},
+	"cargo": {"audit", "deny", "tree", "metadata", "outdated"},
 }
 
 // reviewToolsRepoCodeRunners are executables whose normal operation runs
