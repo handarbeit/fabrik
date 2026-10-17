@@ -404,8 +404,11 @@ type ReviewResult struct {
 	// (every fake) and for a review with no staged diff. NumTurns and CostUSD
 	// above already sum every pass.
 	Loop *CoverageLoop
-	// sessionID is the session of the pass that produced Text, for the loop.
+	// sessionID is the session of the pass that produced Text, and passCost the
+	// cost that pass's result reported on its own (before any fallback cost is
+	// added to CostUSD), both for the coverage loop.
 	sessionID string
+	passCost  float64
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -1133,7 +1136,7 @@ func (r *RealClaudeInvoker) runReview(ctx context.Context, req ReviewRequest, se
 	}
 	facts := analyzeTranscript(out.Stdout, req.Staged)
 	return ReviewResult{Text: out.Resp.Result, NumTurns: out.Resp.NumTurns, CostUSD: out.Resp.CostUSD, Opened: facts.opened, OpenedAuthoritative: facts.authoritative,
-		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: out.Stdout, sessionID: out.Resp.SessionID}, nil
+		UnobservedSubagents: req.Staged != nil && !facts.authoritative, Truncated: facts.truncated, Transcript: out.Stdout, sessionID: out.Resp.SessionID, passCost: out.Resp.CostUSD}, nil
 }
 
 // runPass runs one claude invocation: the first pass of a review (resumeID

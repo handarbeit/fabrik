@@ -503,3 +503,156 @@ func TestLiveProbeSkillAllowedTools(t *testing.T) {
 		_ = os.Remove(marker)
 	}
 }
+
+// TestLiveProbeResume (#2375) measures, against the installed claude and the
+// production argument and environment builders (no -p: a review is fed on stdin
+// like production), what the coverage loop rests on and fakes cannot prove:
+// (a) a pass resumed with --resume <id> and the same arguments still enforces
+// the first pass's tool grant, (b) an entry first opened in pass 2 is credited
+// by analyzeTranscript over the two passes' stdout, (c) whether the resumed
+// stream replays pass 1's events and whether it mints a new session id, (d)
+// whether --no-session-persistence is honoured without -p (a session started
+// with it cannot be resumed), and (e) that removeReviewSessions removes the
+// sessions the passes created. Record the CLI version and the observed values
+// in adrs/2375.
+func TestLiveProbeResume(t *testing.T) {
+	if os.Getenv("PRUEFER_LIVE_PROBE") != "1" {
+		t.Skip("set PRUEFER_LIVE_PROBE=1 to run the live probe")
+	}
+	clone := t.TempDir()
+	var blocks []diffFileBlock
+	for i := 1; i <= 2; i++ {
+		p := fmt.Sprintf("f%d.txt", i)
+		blocks = append(blocks, diffFileBlock{Path: p, Raw: fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +1,2 @@\n ctx\n+TOKEN%d\n", p, p, p, p, i)})
+	}
+	staged, cleanup, err := stageDiff(blocks, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	profile := os.Getenv(claudeprofile.BareEnv)
+	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, Staged: staged, ClaudeConfigDir: profile}
+	args := mustArgs(t, req)
+	var sessions []string
+	t.Cleanup(func() {
+		n, err := removeReviewSessions(profile, sessions)
+		t.Logf("removeReviewSessions: removed %d (%v) of %v", n, err, sessions)
+	})
+
+	run := func(extra []string, prompt string) (passOutput, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "claude", append(append([]string{}, args...), extra...)...)
+		cmd.Dir = clone
+		cmd.Env = reviewProcessEnv(os.Environ(), req)
+		cmd.Stdin = strings.NewReader(prompt)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return passOutput{Stdout: out.Bytes()}, err
+		}
+		resp, _ := parseClaudeReviewJSON(bytes.TrimSpace(out.Bytes()))
+		if resp.SessionID != "" {
+			sessions = append(sessions, resp.SessionID)
+		}
+		return passOutput{Stdout: out.Bytes(), Resp: resp}, nil
+	}
+	e1, e2 := staged.Entries[0], staged.Entries[1]
+
+	p1, err := run(nil, "Make exactly one Read tool call on file_path="+staged.EntryPath(e1)+" with no offset or limit, then reply with only the word ONE.")
+	if err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	t.Logf("pass 1: session=%q turns=%d", p1.Resp.SessionID, p1.Resp.NumTurns)
+	if p1.Resp.SessionID == "" {
+		t.Fatal("the result carries no session_id: the loop cannot resume (stop reason: resume failure, no session id)")
+	}
+	if got := analyzeTranscript(p1.Stdout, staged).opened; !got[e1.ID] || got[e2.ID] {
+		t.Fatalf("pass 1 credited %v, want only %s", got, e1.ID)
+	}
+
+	denied := filepath.Join(clone, "should-not-exist.txt")
+	p2, err := run([]string{"--resume", p1.Resp.SessionID}, "Make exactly one Read tool call on file_path="+staged.EntryPath(e2)+" with no offset or limit. Then try the Write tool once to create "+denied+" with the text hi. Then reply with only the word TWO.")
+	if err != nil {
+		t.Fatalf("pass 2 (resume): %v", err)
+	}
+	t.Logf("pass 2: session=%q (pass 1: %q, same=%t) turns=%d", p2.Resp.SessionID, p1.Resp.SessionID, p2.Resp.SessionID == p1.Resp.SessionID, p2.Resp.NumTurns)
+	// The loop sums turns and cost over passes: that is only right when a
+	// resumed pass reports its own, not the session's running total.
+	t.Logf("num_turns pass1=%d pass2=%d (2 and 3 tool/reply turns were made: per-pass if pass 2 < 5); total_cost_usd pass1=%.5f pass2=%.5f", p1.Resp.NumTurns, p2.Resp.NumTurns, p1.Resp.CostUSD, p2.Resp.CostUSD)
+
+	// (a) the grant still holds on a resumed pass.
+	if _, err := os.Stat(denied); err == nil {
+		t.Errorf("the resumed pass wrote %s: the resume dropped the first pass's tool grant", denied)
+	}
+	var denials []probeDenial
+	for _, line := range strings.Split(string(p2.Stdout), "\n") {
+		var ev struct {
+			Type    string        `json:"type"`
+			Denials []probeDenial `json:"permission_denials"`
+		}
+		if json.Unmarshal([]byte(line), &ev) == nil && ev.Type == "result" {
+			denials = ev.Denials
+		}
+	}
+	t.Logf("pass 2 permission denials: %d", len(denials))
+	if len(denials) == 0 {
+		t.Errorf("pass 2 recorded no permission denial for the Write it attempted")
+	}
+
+	// (b) an entry first opened in pass 2 is credited over the whole session.
+	pass2Alone := analyzeTranscript(p2.Stdout, staged).opened
+	whole := analyzeTranscript(append(append([]byte{}, p1.Stdout...), p2.Stdout...), staged).opened
+	t.Logf("opened in pass 2's stream alone: %v; over both streams: %v", pass2Alone, whole)
+	if !whole[e1.ID] || !whole[e2.ID] {
+		t.Errorf("opened over both passes = %v, want both entries", whole)
+	}
+
+	// (c) whether the resumed stream replays pass 1's events.
+	replayed := strings.Contains(string(p2.Stdout), `"name":"Read"`) && pass2Alone[e1.ID]
+	t.Logf("pass 2's stream replays pass 1's Read of %s: %t", e1.ID, replayed)
+
+	// A third, trivial pass: its cost and tokens next to pass 2's show which
+	// counters are per pass and which are session totals.
+	p3, err := run([]string{"--resume", p2.Resp.SessionID}, "Reply with only the word FIVE.")
+	if err != nil {
+		t.Fatalf("pass 3 (resume): %v", err)
+	}
+	t.Logf("pass 3 (one-word reply): num_turns=%d total_cost_usd=%.5f (pass 2: %.5f)", p3.Resp.NumTurns, p3.Resp.CostUSD, p2.Resp.CostUSD)
+
+	// usage is per pass; modelUsage is a running session total. Pruefer reads
+	// neither, only num_turns and total_cost_usd, which this logs beside them.
+	for n, o := range []passOutput{p1, p2, p3} {
+		lines := strings.Split(strings.TrimSpace(string(o.Stdout)), "\n")
+		var ev struct {
+			Usage struct {
+				Output int `json:"output_tokens"`
+				Read   int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+			ModelUsage map[string]struct {
+				Output int `json:"outputTokens"`
+			} `json:"modelUsage"`
+		}
+		_ = json.Unmarshal([]byte(lines[len(lines)-1]), &ev)
+		for _, mu := range ev.ModelUsage {
+			t.Logf("pass %d: usage.output_tokens=%d (per pass) modelUsage.outputTokens=%d (session total) cache_read=%d cost=%.5f turns=%d", n+1, ev.Usage.Output, mu.Output, ev.Usage.Read, o.Resp.CostUSD, o.Resp.NumTurns)
+		}
+	}
+
+	// (d) --no-session-persistence without -p.
+	np, err := run([]string{"--no-session-persistence"}, "Reply with only the word THREE.")
+	if err != nil {
+		t.Logf("--no-session-persistence without -p: the CLI refused it: %v", err)
+	} else {
+		_, rerr := run([]string{"--resume", np.Resp.SessionID}, "Reply with only the word FOUR.")
+		t.Logf("--no-session-persistence without -p: accepted; resuming that session -> err=%v", rerr)
+	}
+
+	// (e) cleanup.
+	n, err := removeReviewSessions(profile, sessions)
+	t.Logf("removeReviewSessions removed %d (err=%v)", n, err)
+	if n == 0 {
+		t.Errorf("removeReviewSessions found none of the sessions the passes created: the on-disk layout changed")
+	}
+}

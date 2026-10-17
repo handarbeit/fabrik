@@ -178,7 +178,7 @@ func TestCoverageLoop_PartialFirstPassCompletedByOneResume(t *testing.T) {
 	// the entries pass 1 read.
 	bed := newLoopBed(t, 6,
 		loopPass{skill: "pruefer-review:review", reads: []string{"0001", "0002"}, text: passText("first", "0001", "0002"), session: sessA, turns: 5, cost: 0.10},
-		loopPass{reads: []string{"0003", "0004", "0005", "0006"}, text: passText("second", "0003", "0004", "0005", "0006"), session: sessA, turns: 4, cost: 0.08},
+		loopPass{reads: []string{"0003", "0004", "0005", "0006"}, text: passText("second", "0003", "0004", "0005", "0006"), session: sessA, turns: 4, cost: 0.18},
 	)
 	req := bed.req(2)
 	res := bed.review(req)
@@ -195,8 +195,10 @@ func TestCoverageLoop_PartialFirstPassCompletedByOneResume(t *testing.T) {
 	if res.Loop == nil || res.Loop.Stop != StopComplete || !sameStrings(passOpened(res), []string{"0001-0002", "0003-0006"}) {
 		t.Errorf("loop = %+v", res.Loop)
 	}
+	// Turns are per pass and sum; the CLI reports a resumed pass's cost as the
+	// session's running total (0.10 then 0.18), so the review cost 0.18, not 0.28.
 	if res.NumTurns != 9 || res.CostUSD < 0.1799 || res.CostUSD > 0.1801 {
-		t.Errorf("turns/cost = %d/%v, want both passes summed (9, 0.18)", res.NumTurns, res.CostUSD)
+		t.Errorf("turns/cost = %d/%v, want (9, 0.18)", res.NumTurns, res.CostUSD)
 	}
 	// The saved transcript holds the whole session.
 	if !strings.Contains(string(res.Transcript), "p1-r0001") || !strings.Contains(string(res.Transcript), "p2-r0006") {
@@ -705,4 +707,18 @@ func TestCoverageLoop_SeamsAreNotVacuous(t *testing.T) {
 			t.Errorf("text = %q; the seam must drop the earlier output", res.Text)
 		}
 	})
+}
+
+func TestSessionCostDelta(t *testing.T) {
+	for name, tc := range map[string]struct{ total, reported, delta, newTotal float64 }{
+		"running total":   {0.10, 0.18, 0.08, 0.18},
+		"equal":           {0.10, 0.10, 0, 0.10},
+		"per-pass figure": {0.10, 0.04, 0.04, 0.14},
+		"first pass":      {0, 0.05, 0.05, 0.05},
+	} {
+		d, n := sessionCostDelta(tc.total, tc.reported)
+		if d < tc.delta-1e-9 || d > tc.delta+1e-9 || n < tc.newTotal-1e-9 || n > tc.newTotal+1e-9 {
+			t.Errorf("%s: sessionCostDelta(%v, %v) = %v, %v; want %v, %v", name, tc.total, tc.reported, d, n, tc.delta, tc.newTotal)
+		}
+	}
 }

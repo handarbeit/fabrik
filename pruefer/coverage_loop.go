@@ -79,6 +79,20 @@ var (
 	coverageResumeFailureDropsOutputForTest bool
 )
 
+// sessionCostDelta is what a resumed pass added to a review's cost. The CLI's
+// total_cost_usd on a resumed pass is the session's running total, not the
+// pass's own (observed on 2.1.302 by TestLiveProbeResume, where num_turns and
+// usage are per pass), so adding it to the first pass's would count the first
+// pass again. A figure at least as large as the total so far is read that way;
+// a smaller one can only be a per-pass figure and is added whole. It returns
+// the pass's cost and the new session total.
+func sessionCostDelta(totalSoFar, reported float64) (delta, newTotal float64) {
+	if reported >= totalSoFar {
+		return reported - totalSoFar, reported
+	}
+	return reported, totalSoFar + reported
+}
+
 // contractComplete reports whether a pass's output carries the whole output
 // contract: a summary between its markers, a findings array in a JSON fence and
 // a coverage block. The loop starts and continues only on such an output.
@@ -226,6 +240,7 @@ func (r *RealClaudeInvoker) coverageLoop(ctx context.Context, req ReviewRequest,
 	accepted := 1
 	sessionID := res.sessionID
 	turns, cost := res.NumTurns, res.CostUSD
+	sessionTotal := res.passCost
 	transcript := res.Transcript
 
 	finish := func() ReviewResult {
@@ -265,7 +280,9 @@ func (r *RealClaudeInvoker) coverageLoop(ctx context.Context, req ReviewRequest,
 		out, err := r.runPass(ctx, req, set, ref, sessionID, buildFollowUpPrompt(req.Staged, unread))
 		loop.Passes = append(loop.Passes, CoveragePass{})
 		turns += out.Resp.NumTurns
-		cost += out.Resp.CostUSD
+		var delta float64
+		delta, sessionTotal = sessionCostDelta(sessionTotal, out.Resp.CostUSD)
+		cost += delta
 		note(out.Resp.SessionID)
 		if err != nil {
 			logf(req.PRNumber, "warn", "coverage pass %d failed: %v\n", extra+1, err)
