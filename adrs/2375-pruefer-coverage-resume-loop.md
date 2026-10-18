@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Builds on ADR 2190 (diff coverage contract), ADR 2303 (kept transcripts), ADR 2307 (skill fallback) and ADR 2362 (staged-entry batch limit); keeps ADR 1642 (a reviewed repo cannot set operator settings). Names what #2363 (`--no-session-persistence`, transcript purge) must leave room for.
+Accepted. **Decisions 8 and 9 are amended by ADR 2363:** sessions are removed at every `max_coverage_passes` value, tool results are moved to `.pruefer/transcripts/` before removal, and the emptied encoded-cwd directory is removed. Builds on ADR 2190 (diff coverage contract), ADR 2303 (kept transcripts), ADR 2307 (skill fallback) and ADR 2362 (staged-entry batch limit); keeps ADR 1642 (a reviewed repo cannot set operator settings). Names what #2363 (`--no-session-persistence`, transcript purge) must leave room for.
 
 ## Context
 
