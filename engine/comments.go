@@ -835,7 +835,11 @@ func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasRew
 	if !wasReworking {
 		return
 	}
-	if !completedThisCycle {
+	if !completedThisCycle && !(stage.Name == "Validate" && !e.validateReworkRestoreGuardOff.Load() && e.validateRerunPending(item)) {
+		// A forced Validate re-run withdrew the label (#2378, ADR 2378): a pass that
+		// began from a stale snapshot must not put it back on a non-completing exit
+		// (error, turn cap, blocked, setup failure). Only the reworking marker comes
+		// off, as on the suppressed-completion arm. validateRerunPending fails closed.
 		completeLabel := "stage:" + stage.Name + ":complete"
 		if err := e.addLabelChecked(item, completeLabel); err != nil {
 			e.logf(item.Number, "warn", "could not restore %q: %v — leaving %s in place for recovery\n", completeLabel, err, reworkingLabelName(stage.Name))

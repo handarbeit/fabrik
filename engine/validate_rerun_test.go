@@ -228,3 +228,116 @@ func TestValidateRerun_StageFirstRouting(t *testing.T) {
 		t.Error("the disabled seam must restore the old routing")
 	}
 }
+
+// A rework bracket opened from a stale poll-start snapshot (which still carried the
+// label the strip had just removed) must not put stage:Validate:complete back on a
+// non-completing exit while the forced re-run is outstanding. Only the reworking
+// marker comes off.
+func TestValidateRerun_NonCompletingReworkExitDoesNotRestoreComplete(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(string, string, int) ([]string, error) { return []string{validateRerunLabel}, nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 2378, Repo: "owner/repo"}
+
+	eng.endStageRework(item, rerunStage("Validate"), true, false)
+
+	if labelsAdded(client)["stage:Validate:complete"] {
+		t.Error("a non-completing exit restored stage:Validate:complete during a forced re-run")
+	}
+	var unmarked bool
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:reworking:Validate" {
+			unmarked = true
+		}
+	}
+	if !unmarked {
+		t.Error("fabrik:reworking:Validate was not removed")
+	}
+}
+
+func TestValidateRerun_NonCompletingReworkExitFailsClosedOnUnreadableLabels(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(string, string, int) ([]string, error) { return nil, errors.New("boom") },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.endStageRework(gh.ProjectItem{Number: 2378, Repo: "owner/repo"}, rerunStage("Validate"), true, false)
+	if labelsAdded(client)["stage:Validate:complete"] {
+		t.Error("completion restored although a forced re-run could not be ruled out")
+	}
+}
+
+func TestValidateRerun_NonCompletingReworkExitRestoresWithoutMarkerOrOtherStage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stage  string
+		labels []string
+		off    bool
+	}{
+		{"no marker", "Validate", nil, false},
+		{"other stage", "Review", []string{validateRerunLabel}, false},
+		{"seam", "Validate", []string{validateRerunLabel}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			labels := tc.labels
+			client := &mockGitHubClient{
+				fetchLabelsFn: func(string, string, int) ([]string, error) { return labels, nil },
+			}
+			eng := testEngine(t, client, &mockClaudeInvoker{})
+			eng.SetValidateRerunGuardDisabledForTest(tc.off)
+			eng.endStageRework(gh.ProjectItem{Number: 2378, Repo: "owner/repo"}, rerunStage(tc.stage), true, false)
+			if !labelsAdded(client)["stage:"+tc.stage+":complete"] {
+				t.Errorf("stage:%s:complete was not restored on a non-completing exit", tc.stage)
+			}
+		})
+	}
+}
+
+// Defence in depth: whatever put stage:Validate:complete back, the catch-up landing
+// decision refuses while the marker is on the live labels, silently (no label write).
+func TestValidateRerun_CatchUpLandingRefusedWhileMarkerPresent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		off    bool
+		lands  bool
+	}{
+		{"marker", []string{"fabrik:yolo", validateRerunLabel}, false, false},
+		{"no marker", []string{"fabrik:yolo"}, false, true},
+		{"seam", []string{"fabrik:yolo", validateRerunLabel}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockGitHubClient{
+				fetchLabelsFn: func(string, string, int) ([]string, error) { return tc.labels, nil },
+				fetchLinkedPRFn: func(string, string, int) (*gh.PRDetails, error) {
+					return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
+				},
+			}
+			eng := testEngineWithStages(t, client, testStagesWithValidate())
+			eng.SetValidateRerunGuardDisabledForTest(tc.off)
+			item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: tc.labels}
+			eng.runCatchUpPhase2(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Validate"}, map[string]bool{})
+			got := len(client.enablePullRequestAutoMergeCalls) + len(client.mergePRCalls)
+			if tc.lands && got == 0 {
+				t.Error("landing did not proceed")
+			}
+			if !tc.lands && got != 0 {
+				t.Errorf("landing proceeded (%d call(s)) while a forced re-run was outstanding", got)
+			}
+			if !tc.lands && len(client.addLabelCalls) != 0 {
+				t.Errorf("a refusal wrote labels: %v", client.addLabelCalls)
+			}
+		})
+	}
+}
+
+func TestValidateRerun_LandingGuardFailsClosedOnUnreadableLabels(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(string, string, int) ([]string, error) { return nil, errors.New("boom") },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.SetPauseGuardUnreadFailOpenForTest(false) // test engines default to fail-open on unreadable labels
+	if !eng.refuseIfValidateRerun(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "landing") {
+		t.Error("landing not refused although a forced re-run could not be ruled out")
+	}
+}

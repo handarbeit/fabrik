@@ -43,7 +43,15 @@ records a SHA). The item then landed with no Validate stage run (v0.0.88 gate, b
 5. **Stage first.** While the marker is set `stageRanOnEntry` is false for Validate (except for an
    engine-paused or resumed item), so a comment arriving after the strip waits for the Validate stage run
    (ADR 2220). The pending comment is processed either way, and landing needs `stage:Validate:complete`, so it
-   waits for both; no extra landing guard.
+   waits for both.
+   **Review follow-up (non-completing exit, landing guard).** A pass dispatched from a poll-start snapshot that
+   still carried the withdrawn label ends its rework bracket through `endStageRework`; the non-completing exit
+   re-added `stage:Validate:complete` directly. That branch now skips the re-add while `validateRerunPending`
+   (fail closed) and removes only `fabrik:reworking:Validate`. And because any other path that brings the label
+   back would otherwise land an unverified head, the catch-up landing decision (`runCatchUpPhase2`) refuses to land while the marker is on
+   the live labels (an unreadable set counts as present), as a silent `merge-unsettled` deferral like the pause
+   guard. It is not inside `attemptMergeOnValidate`: `handleStageComplete` calls that from the very Validate
+   stage run that clears the marker, which must not be refused.
 6. **Scope.** The marker is set by every path that strips the label to force a re-run (the issue's
    assumption), not only R3. The SHA rebuild rule is unchanged. `fabrik:validate-rerun` is in
    `transientLifecycleLabels`, so a closed issue does not keep it.
@@ -56,5 +64,6 @@ records a SHA). The item then landed with no Validate stage run (v0.0.88 gate, b
   loop.
 - A transient label-read failure on a Validate comment pass defers its completion (fail closed); the label is
   restored by the rework bracket or the next Validate run.
-- Neutralisation seam: `Engine.SetValidateRerunGuardDisabledForTest` (per-Engine). Sim twin:
-  `tests/sim/validate_sha_restart_test.go` (`PendingCommentDoesNotSatisfyForcedRerun` and its non-vacuity run).
+- Neutralisation seams: `Engine.SetValidateRerunGuardDisabledForTest` (per-Engine, everything) and
+  `SetValidateReworkRestoreGuardDisabledForTest` (the rework-bracket guard alone). Sim twin:
+  `tests/sim/validate_sha_restart_test.go` (`PendingCommentDoesNotSatisfyForcedRerun`, `NonCompletingCommentPassDoesNotRestoreForcedRerun` and their non-vacuity runs).

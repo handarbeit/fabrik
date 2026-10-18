@@ -335,6 +335,7 @@ type Engine struct {
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)
+	validateReworkRestoreGuardOff         atomic.Bool                               // test seam: SetValidateReworkRestoreGuardDisabledForTest (#2378)
 	restoreRebaseDisabledForTest          bool                                      // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	branchSyncDisabledForTest             bool                                      // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
 	bareLeasePushForTest                  bool                                      // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too

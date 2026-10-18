@@ -2,6 +2,7 @@ package engine
 
 import (
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // validateRerunLabel is the durable marker of a forced Validate re-run (#2378,
@@ -18,6 +19,14 @@ const validateRerunLabel = "fabrik:validate-rerun"
 // test can show its assertions bite (the non-vacuity seam).
 func (e *Engine) SetValidateRerunGuardDisabledForTest(disabled bool) {
 	e.validateRerunGuardOff.Store(disabled)
+}
+
+// SetValidateReworkRestoreGuardDisabledForTest neutralises only the rework-bracket
+// guard (a non-completing exit of a comment pass restoring the completion label while
+// a forced re-run is outstanding), leaving every other #2378 guard on, so a test can
+// show that guard on its own bites.
+func (e *Engine) SetValidateReworkRestoreGuardDisabledForTest(disabled bool) {
+	e.validateReworkRestoreGuardOff.Store(disabled)
 }
 
 // markValidateRerun records a forced Validate re-run. It must run before the
@@ -42,16 +51,26 @@ func (e *Engine) markValidateRerun(item gh.ProjectItem) bool {
 // lets a comment pass restore the label and an unvalidated head land. The cost of
 // a wrong "pending" is a completion that the next Validate stage run supplies.
 func (e *Engine) validateRerunPending(item gh.ProjectItem) bool {
-	if e.validateRerunGuardOff.Load() {
-		return false
-	}
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	pending, err := e.readValidateRerun(item)
 	if err != nil {
 		e.logf(item.Number, "validate-rerun", "could not re-read the labels (%v), so a forced Validate re-run cannot be ruled out — treating it as outstanding\n", err)
 		return true
 	}
-	return hasLabel(labels, validateRerunLabel)
+	return pending
+}
+
+// readValidateRerun is the live read behind validateRerunPending: whether the marker
+// is on the item, or the read error (the caller decides how to fail).
+func (e *Engine) readValidateRerun(item gh.ProjectItem) (bool, error) {
+	if e.validateRerunGuardOff.Load() {
+		return false, nil
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	if err != nil {
+		return false, err
+	}
+	return hasLabel(labels, validateRerunLabel), nil
 }
 
 // clearValidateRerun drops the marker once a Validate stage run has produced a
@@ -71,4 +90,31 @@ func (e *Engine) clearValidateRerun(item gh.ProjectItem, live bool) {
 		return
 	}
 	e.logf(item.Number, "validate-rerun", "Validate stage run completed — forced re-run marker cleared\n")
+}
+
+// refuseIfValidateRerun is the landing-side form of validateRerunPending: it refuses
+// (true) while a forced Validate re-run is outstanding or the labels cannot be
+// re-read, logging once and recording the merge-unsettled admission cooldown so the
+// decision is taken again on a later poll. It writes no label or comment, pauses
+// nothing and touches no retry, cycle or ejection counter.
+func (e *Engine) refuseIfValidateRerun(item gh.ProjectItem, site string) bool {
+	pending, err := e.readValidateRerun(item)
+	if err != nil {
+		// Fail closed, with the pause guard's test seam for mocks whose FetchLabels is
+		// unconfigured (it errors by design).
+		if e.pauseGuardUnreadOK.Load() {
+			return false
+		}
+		e.logf(item.Number, "validate-rerun", "could not re-read the labels (%v), so a forced Validate re-run cannot be ruled out\n", err)
+	} else if !pending {
+		return false
+	}
+	e.logf(item.Number, "validate-rerun", "not %s: a forced Validate re-run is outstanding (%s) — a Validate stage run must verify the current head first\n", site, validateRerunLabel)
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: mergeUnsettledCooldownReason,
+		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
+	return true
 }

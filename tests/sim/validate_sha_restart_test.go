@@ -195,6 +195,13 @@ func makeValidateCommentUnusable(t *testing.T, env *Env, num int) {
 // installForcedRerunScripts makes the Validate comment pass report completion, as the
 // incident's "acknowledge only" pass did, and logs the order of both invocations.
 func installForcedRerunScripts(env *Env, log *forcedRerunLog) {
+	installForcedRerunScriptsMode(env, log, true)
+}
+
+// installForcedRerunScriptsMode is installForcedRerunScripts with the comment pass's outcome
+// chosen: completes=false ends the pass without FABRIK_STAGE_COMPLETE (the turn cap, an
+// error, ...), the non-completing exit of the rework bracket.
+func installForcedRerunScriptsMode(env *Env, log *forcedRerunLog, completes bool) {
 	env.Claude.ForStage("Validate", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, nc []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
 		log.add("stage:Validate")
 		out, ok, usage, err := simclaude.DefaultScript(ctx, stage, issue, nc, resume, workDir, opts)
@@ -202,6 +209,9 @@ func installForcedRerunScripts(env *Env, log *forcedRerunLog) {
 	})
 	env.Claude.ForStageComments("Validate", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
 		log.add("comment:Validate")
+		if !completes {
+			return "Looking into it.\n", false, engine.TokenUsage{TurnsUsed: 15}, nil
+		}
 		return "Acknowledged.\n\nFABRIK_STAGE_COMPLETE\n", true, engine.TokenUsage{TurnsUsed: 4}, nil
 	})
 }
@@ -251,10 +261,15 @@ func runForcedRerunScenario(t *testing.T, restarted *Env, num int, log *forcedRe
 
 func forcedRerunRestart(t *testing.T) (*Env, int, *forcedRerunLog) {
 	t.Helper()
+	return forcedRerunRestartMode(t, true)
+}
+
+func forcedRerunRestartMode(t *testing.T, commentCompletes bool) (*Env, int, *forcedRerunLog) {
+	t.Helper()
 	env, num, _ := validateSHARestartEnv(t)
 	restarted := RestartEnv(t, env)
 	log := &forcedRerunLog{}
-	installForcedRerunScripts(restarted, log)
+	installForcedRerunScriptsMode(restarted, log, commentCompletes)
 	makeValidateCommentUnusable(t, restarted, num)
 	return restarted, num, log
 }
@@ -300,5 +315,45 @@ func TestValidateSHARestart_PendingCommentForcedRerun_NonVacuity(t *testing.T) {
 
 	if early := runForcedRerunScenario(t, restarted, num, log); !early {
 		t.Errorf("with the guard disabled the completion label never preceded the Validate stage run — the twin is vacuous; invocations = %v\n\n%s", log.get(), diagnostics(restarted))
+	}
+}
+
+// The same restart, but the Validate comment pass ends WITHOUT the completion marker (the
+// turn cap here). It was dispatched from the poll-start snapshot that still carried
+// stage:Validate:complete, so its rework bracket's non-completing exit used to restore the
+// label R3 had just withdrawn. The label must stay absent until a Validate stage run.
+func TestValidateSHARestart_NonCompletingCommentPassDoesNotRestoreForcedRerun(t *testing.T) {
+	t.Parallel()
+	restarted, num, log := forcedRerunRestartMode(t, false)
+
+	if early := runForcedRerunScenario(t, restarted, num, log); early {
+		t.Errorf("%s was present before any Validate stage run — a non-completing comment pass restored it\n\n%s", validateCompleteLabel, diagnostics(restarted))
+	}
+	hasStage := false
+	for _, e := range log.get() {
+		if e == "stage:Validate" {
+			hasStage = true
+		}
+	}
+	if !hasStage {
+		t.Fatalf("no Validate stage run happened; invocations = %v\n\n%s", log.get(), diagnostics(restarted))
+	}
+	labels := IssueLabels(t, restarted, num)
+	if !hasLabel(labels, validateCompleteLabel) {
+		t.Errorf("%s missing after the Validate stage run: %v\n\n%s", validateCompleteLabel, labels, diagnostics(restarted))
+	}
+	if hasLabel(labels, "fabrik:validate-rerun") {
+		t.Errorf("fabrik:validate-rerun left behind after the Validate stage run: %v", labels)
+	}
+}
+
+// Disabling the rework-bracket guard alone makes the scenario above fail.
+func TestValidateSHARestart_NonCompletingCommentPass_NonVacuity(t *testing.T) {
+	t.Parallel()
+	restarted, num, log := forcedRerunRestartMode(t, false)
+	restarted.Engine.SetValidateReworkRestoreGuardDisabledForTest(true)
+
+	if early := runForcedRerunScenario(t, restarted, num, log); !early {
+		t.Errorf("with the rework guard disabled the completion label never preceded the Validate stage run — the twin is vacuous; invocations = %v\n\n%s", log.get(), diagnostics(restarted))
 	}
 }
