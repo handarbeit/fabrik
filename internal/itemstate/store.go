@@ -1370,6 +1370,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 	if obsAt.IsZero() {
 		obsAt = v.At
 	}
+	obsAt = authorityOf(obsAt, v.ObservedIsFetchStart, s.graceLocked())
 	if observedStale(item, observedStatusKey, obsAt) {
 		s.mu.Unlock()
 		return Snapshot{}, nil, nil // older than the recorded Status: dropped silently (#2348)

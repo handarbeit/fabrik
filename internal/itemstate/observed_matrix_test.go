@@ -223,7 +223,9 @@ func reviewsCase() factCase {
 }
 
 func milestoneCase() factCase {
-	ms := func(newer bool) *gh.Milestone { return &gh.Milestone{Title: pick(newer, "v2", "v1"), Number: pickInt(newer, 2, 1)} }
+	ms := func(newer bool) *gh.Milestone {
+		return &gh.Milestone{Title: pick(newer, "v2", "v1"), Number: pickInt(newer, 2, 1)}
+	}
 	return factCase{
 		name: "milestone",
 		producers: []producer{

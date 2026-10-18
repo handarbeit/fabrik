@@ -1404,10 +1404,20 @@ func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
 // Entries whose itemID is not in the Store's itemIDToKey index are silently skipped.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
+	c.ApplyStatusBatchAt(updates, time.Time{})
+}
+
+// ApplyStatusBatchAt is ApplyStatusBatch for a bulk read that began at fetchedAt
+// (the Layer 2 status sweep): the Store orders each Status against its record of
+// that fact, like a listing, so a sweep that lags a webhook move or an engine
+// write cannot undo it (#2348). A zero fetchedAt carries no ordering.
+func (c *CacheImpl) ApplyStatusBatchAt(updates map[string]string, fetchedAt time.Time) {
 	for itemID, status := range updates {
 		snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
-			ItemID:    itemID,
-			NewStatus: status,
+			ItemID:               itemID,
+			NewStatus:            status,
+			Observed:             fetchedAt,
+			ObservedIsFetchStart: true,
 		})
 		if len(changes) == 0 {
 			continue

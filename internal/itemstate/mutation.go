@@ -234,6 +234,10 @@ type ProjectV2ItemEdited struct {
 	// otherwise the receipt time. Zero means no ordering information, and At is
 	// used for ordering instead.
 	Observed time.Time
+	// ObservedIsFetchStart marks Observed as the start of a bulk read (the Layer 2
+	// status sweep) rather than a webhook's own time: the listing-lag allowance
+	// applies to it like any other read (#2348).
+	ObservedIsFetchStart bool
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
