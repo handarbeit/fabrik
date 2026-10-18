@@ -300,6 +300,18 @@ func (e *Engine) dispatchLimitReached(item gh.ProjectItem, stage *stages.Stage) 
 func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage, rec stageDispatchRecord, limit int) {
 	e.logf(item.Number, "dispatch-limit", "stage %q dispatched %d time(s), reaching the limit of %d — pausing\n", stage.Name, rec.Count, limit)
 
+	// The loop this bound exists for is typically a GitHub write failure, so the
+	// pause label itself can fail. Write it with its error checked and stop if it
+	// did not land: recording Paused/EnginePaused for a pause that is not on the
+	// item would read as a manual unpause on the next poll and reset the count,
+	// handing the runaway stage a fresh allowance. The count stays at the cap, so
+	// the next poll retries the pause (with no comment posted until it lands).
+	// pauseIssue's own add of the same label is an idempotent repeat.
+	if err := e.addLabelChecked(item, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "dispatch-limit", "warning: could not add fabrik:paused for stage %q; the pause is not recorded and will be retried on the next poll: %v\n", stage.Name, err)
+		return
+	}
+
 	// The literal prefix at the call site is what the comment-compliance scan
 	// checks (it never reads through a helper's return value).
 	comment := fmt.Sprintf("🏭 **Fabrik — stage dispatch limit reached**\n\n%s", formatDispatchLimitComment(stage.Name, rec, limit))

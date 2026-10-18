@@ -152,6 +152,49 @@ func TestStageDispatch_CapPausesOnceAndIsStrict(t *testing.T) {
 	}
 }
 
+// A failed fabrik:paused write must not be recorded as a pause: the next poll
+// would read EnginePaused-without-label as a manual unpause and reset the count,
+// giving the looping stage a fresh allowance. The pause is retried instead.
+func TestStageDispatch_FailedPauseLabelIsNotRecordedAndIsRetried(t *testing.T) {
+	e, client := dispatchTestEngine(t, 2)
+	stage := testStageByName(t, "Research")
+	fail := true
+	client.addLabelToIssueFn = func(_, _ string, _ int, label string) error {
+		if fail && label == "fabrik:paused" {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	for i := 0; i < 2; i++ {
+		e.recordStageDispatch(dispatchTestItem, "Research", dispatchOutcomeComplete, stageInputs{})
+	}
+	if !e.dispatchLimitReached(dispatchTestItem, stage) {
+		t.Fatal("expected the dispatch to be refused at the cap")
+	}
+	rec, _ := readStageDispatch(e.stageDispatchPath(dispatchTestItem, "Research"))
+	if rec.Paused || rec.Count != 2 {
+		t.Errorf("record paused=%v count=%d, want paused=false count=2", rec.Paused, rec.Count)
+	}
+	if snap, err := e.store.Get("owner/repo", dispatchTestItem.Number); err == nil && snap.PausedByEngine("Research") {
+		t.Error("EnginePaused recorded for a pause label that was never written")
+	}
+	client.mu.Lock()
+	n := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if n != 0 {
+		t.Errorf("comments = %d, want 0 until the pause lands", n)
+	}
+	// The next poll still refuses (the count was not reset) and now the pause lands.
+	fail = false
+	if !e.dispatchLimitReached(dispatchTestItem, stage) {
+		t.Fatal("expected the retry to pause at the cap")
+	}
+	rec, _ = readStageDispatch(e.stageDispatchPath(dispatchTestItem, "Research"))
+	if !rec.Paused || rec.Count != 2 {
+		t.Errorf("after retry paused=%v count=%d, want true 2", rec.Paused, rec.Count)
+	}
+}
+
 func TestStageDispatch_ZeroDisablesAndSeamNeutralises(t *testing.T) {
 	stage := testStageByName(t, "Research")
 	e, client := dispatchTestEngine(t, 0)
