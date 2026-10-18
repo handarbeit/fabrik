@@ -139,6 +139,9 @@ func (m *testGitHubUpgradeClient) AddProjectV2ItemById(projectID, contentNodeID 
 func (m *testGitHubUpgradeClient) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
 	return nil
 }

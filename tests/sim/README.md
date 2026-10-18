@@ -924,6 +924,11 @@ first, not a defect in the refund mechanism itself.
 
 ### Fixture additions
 
+- **`Sim.RemoveBlockedByIssue`** (`tests/sim/simgh/deps.go`, #2385) — the
+  interface-level removal behind `fabrik_set_blocked_by`. Like
+  `SeedRemoveBlockedBy` it does not bump `updatedAt` (#977); an absent edge is a
+  silent no-op. See `simgh/FIDELITY.md`.
+
 - **`Sim.SeedRemoveBlockedBy`** (`tests/sim/simgh/seed.go`) — removes one
   `blockedBy` edge, modelling a human deleting the dependency link directly
   (GitHub UI, or the REST dependencies API). No `GitHubClient` interface

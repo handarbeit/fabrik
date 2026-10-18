@@ -562,3 +562,84 @@ func TestReAddingLiveCardIsANoOp(t *testing.T) {
 		}
 	})
 }
+
+// seedTwoIssuesWithEdge seeds acme/widgets #7 (basic board) plus #8, and an
+// edge #7 blocked by #8.
+func seedTwoIssuesWithEdge(t *testing.T) *Sim {
+	t.Helper()
+	s, _ := seedBasicBoard(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: 8, Title: "blocker", Author: "human", Status: "Implement"})
+	if err := s.AddBlockedByIssue("issue:acme/widgets#7", "issue:acme/widgets#8"); err != nil {
+		t.Fatalf("AddBlockedByIssue: %v", err)
+	}
+	return s
+}
+
+// TestRemoveBlockedByIssueRemovesEdge pins that the edge is gone afterwards and
+// that, like SeedRemoveBlockedBy (#977), removal does not bump updatedAt.
+func TestRemoveBlockedByIssueRemovesEdge(t *testing.T) {
+	s := seedTwoIssuesWithEdge(t)
+	before, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil || len(before.BlockedBy) != 1 {
+		t.Fatalf("setup: item=%+v err=%v, want one edge", before, err)
+	}
+
+	if err := s.RemoveBlockedByIssue("issue:acme/widgets#7", "issue:acme/widgets#8"); err != nil {
+		t.Fatalf("RemoveBlockedByIssue: %v", err)
+	}
+	after, err := s.FetchProjectItem("acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("FetchProjectItem: %v", err)
+	}
+	if len(after.BlockedBy) != 0 {
+		t.Fatalf("BlockedBy = %+v after removal, want none", after.BlockedBy)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("UpdatedAt moved %v -> %v on removal; real GitHub leaves it alone (#977)", before.UpdatedAt, after.UpdatedAt)
+	}
+}
+
+// TestRemoveBlockedByIssueAbsentEdgeIsNoop pins the lenient reading for an
+// absent edge, and a refusal for node IDs that resolve to nothing.
+func TestRemoveBlockedByIssueAbsentEdgeIsNoop(t *testing.T) {
+	s := seedTwoIssuesWithEdge(t)
+	s.SeedIssue("acme/widgets", IssueSeed{Number: 9, Title: "other", Author: "human", Status: "Implement"})
+
+	if err := s.RemoveBlockedByIssue("issue:acme/widgets#7", "issue:acme/widgets#9"); err != nil {
+		t.Fatalf("removing an absent edge: %v, want a silent no-op", err)
+	}
+	item, _ := s.FetchProjectItem("acme", "widgets", 7)
+	if len(item.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %+v, want the unrelated edge untouched", item.BlockedBy)
+	}
+	if err := s.RemoveBlockedByIssue("issue:acme/widgets#7", "issue:acme/widgets#999"); err == nil {
+		t.Error("RemoveBlockedByIssue accepted a blocker that does not exist; want a refusal")
+	}
+}
+
+// TestFetchProjectItemFlagsPRs pins that the REST fallback reports a PR number
+// as a PR with its own node ID (#2385).
+func TestFetchProjectItemFlagsPRs(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedCommit("acme/widgets", "feature", map[string]string{"a.txt": "a"}, "work").
+		SeedPR("acme/widgets", PRSeed{Number: 4, Title: "a PR", Head: "feature"}).
+		SeedIssue("acme/widgets", IssueSeed{Number: 5, Title: "an issue", Author: "human"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	pr, err := s.FetchProjectItem("acme", "widgets", 4)
+	if err != nil || pr == nil {
+		t.Fatalf("PR: item=%v err=%v", pr, err)
+	}
+	if !pr.IsPR || pr.ID != "pr:acme/widgets#4" {
+		t.Errorf("PR item = IsPR %v ID %q, want a PR with node ID pr:acme/widgets#4", pr.IsPR, pr.ID)
+	}
+	iss, err := s.FetchProjectItem("acme", "widgets", 5)
+	if err != nil || iss == nil {
+		t.Fatalf("issue: item=%v err=%v", iss, err)
+	}
+	if iss.IsPR || iss.ID != "issue:acme/widgets#5" {
+		t.Errorf("issue item = IsPR %v ID %q", iss.IsPR, iss.ID)
+	}
+}
