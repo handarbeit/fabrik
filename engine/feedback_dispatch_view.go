@@ -66,23 +66,23 @@ func feedbackGap(held, view []gh.Comment) []gh.Comment {
 // missing-link item resolves its reviews over REST on both sides, so the two
 // cannot disagree and nothing is read. A read error leaves the gap empty; it
 // never loosens the hold.
-func (e *Engine) dispatcherGap(orig gh.ProjectItem, pf pendingFeedback) []gh.Comment {
+func (e *Engine) dispatcherGap(orig gh.ProjectItem, pf pendingFeedback) (gap []gh.Comment, unread bool) {
 	held := append(append([]gh.Comment{}, pf.Threads...), pf.Bodies...)
 	if len(held) == 0 {
-		return nil
+		return nil, false
 	}
 	view := orig
 	if itemHasBaseLabel(orig) {
-		return nil
+		return nil, false
 	}
 	if err := e.readClient.FetchItemDetails(&view); err != nil {
 		e.logf(orig.Number, "warn", "feedback-gate: dispatcher-view read failed (%v) — skipping gap check\n", err)
-		return nil
+		return nil, true
 	}
 	if reviewDataRidesMissingLink(view) {
-		return nil
+		return nil, false
 	}
-	return feedbackGap(held, dispatcherVisibleIDs(view))
+	return feedbackGap(held, dispatcherVisibleIDs(view)), false
 }
 
 // repairDispatcherBlindness handles a gate hold on feedback the dispatcher does

@@ -29,7 +29,7 @@ The 2026-10-15 engine state audit (§4) found four places where engine-private s
 - A restart cannot grant a fresh ejection, trial or auto-repair budget, and a restart during a usage-limit outage dispatches nothing into the limit, keeps `fabrik:claude-limit` and posts no second comment.
 - A stop request or a daemon shutdown cancels a running reinvoke, refunds its cycle charge and runs none of its HEAD-based follow-up.
 - New files under `.fabrik/state/engine-decisions/` (`train-caps.json`, `usage-limit.json`). No new flag, environment variable, label or YAML key.
-- Existing tests that read `mergeTrainEjectionCounts` / `mergeTrainTrials` keep working: the map types are unchanged, `ejectMember` keeps its signature (it delegates to `ejectMemberAtHead` with the item's linked-PR head).
+- Existing tests that read `mergeTrainEjectionCounts` / `mergeTrainTrials` keep working: the map types are unchanged, `ejectMember` keeps its signature (it delegates to `ejectMemberAtHead` with an *unknown* head, `""`: the item's cached `LinkedPRHeadSHA` can lag the live head, and mixing the two sources would make the recorded head alternate and reset the count; an empty head neither resets nor overwrites the recorded one, so the count errs toward counting). Paths with a live head pass it (`trainMember.headSHA`; the review-finding eject reads it with `FetchLinkedPR`, unknown on error).
 
 ## Known costs
 

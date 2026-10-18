@@ -274,3 +274,24 @@ func TestUsageLimitSeed_NotSpentOnEmptyBoard(t *testing.T) {
 		t.Fatal("seeding must leave a hold active")
 	}
 }
+
+// The ejectMember wrapper has no live head: a stale cached head on the item must neither reset
+// the count nor overwrite the head a trial path recorded (#2349).
+func TestEjectionCount_WrapperWithCachedHeadDoesNotAlternate(t *testing.T) {
+	eng := restartedEngine(t, &mockGitHubClient{}, t.TempDir())
+	member := makeTrainItem(5, "Problem Issue")
+	member.LinkedPRHeadSHA = "stale"
+
+	eng.ejectMemberAtHead("owner", "repo", member, "live", "conflict", nil, nil, true)
+	eng.ejectMember("owner", "repo", member, "conflict", nil, nil, true)
+	eng.ejectMemberAtHead("owner", "repo", member, "live", "conflict", nil, nil, true)
+	if n := ejectionCount(eng, "owner/repo#5"); n != 0 {
+		t.Fatalf("count = %d, want 0 (third ejection hit the cap and reset it) — alternating head sources must not restart the count", n)
+	}
+	eng.mergeTrainEjectionsMu.Lock()
+	head := eng.mergeTrainEjectionHeads["owner/repo#5"]
+	eng.mergeTrainEjectionsMu.Unlock()
+	if head == "stale" {
+		t.Fatal("the cached head overwrote the live one")
+	}
+}

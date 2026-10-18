@@ -247,11 +247,12 @@ func TestRunCatchUpPhase2_HoldsAdvanceForUnprocessedReviewBody(t *testing.T) {
 type laggingReadClient struct {
 	boardcache.ReadClient
 	fetches int
+	err     error // when set, the dispatcher-view read fails
 }
 
 func (l *laggingReadClient) FetchItemDetails(*gh.ProjectItem) error {
 	l.fetches++
-	return nil
+	return l.err
 }
 
 // gapItem is the item a gap scenario passes: it has a linked PR (the cached copy a
@@ -490,5 +491,28 @@ func TestFeedbackGate_SpentGapBudgetResetsWhenGateClears(t *testing.T) {
 	eng.feedbackGateBlocks(gapItem(), false, "advance")
 	if !gapInvalidated(eng) {
 		t.Fatal("a gap that recurs after the gate cleared must get a fresh budget")
+	}
+}
+
+// A failed dispatcher-view read leaves the gap unknown, not absent: it must not reset the
+// spent repair budget, or an intermittently failing read would defeat the bound (#2349).
+func TestFeedbackGate_UnreadDispatcherViewDoesNotResetSpentBudget(t *testing.T) {
+	eng, lag := gapEngine(t)
+	for i := 1; i <= feedbackGapRepairBudget; i++ {
+		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+		eng.feedbackGateBlocks(gapItem(), false, "advance")
+	}
+
+	lag.err = errors.New("transient dispatcher-view read failure")
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
+		t.Fatal("the gate must keep holding when the dispatcher view is unreadable")
+	}
+
+	lag.err = nil
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	eng.feedbackGateBlocks(gapItem(), false, "advance")
+	if gapInvalidated(eng) {
+		t.Fatal("the failed read reset the spent budget: the gap was repaired again with nothing changed")
 	}
 }

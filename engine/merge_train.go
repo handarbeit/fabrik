@@ -3555,7 +3555,11 @@ func reentryInstruction(targetName, fixDescription string) string {
 // the other causes. Callers reroute the member's board Status themselves before calling
 // this with stayInQueue=false; this function only varies the comment's wording.
 func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember, stayInQueue bool) {
-	e.ejectMemberAtHead(owner, repo, memberItem, memberItem.LinkedPRHeadSHA, reason, diag, otherMembers, stayInQueue)
+	// The head is unknown here: the item's cached LinkedPRHeadSHA can lag the live head, and
+	// mixing the two sources would make the recorded head alternate and reset the count on
+	// every call (#2349). An empty head never resets and never overwrites the recorded one, so
+	// the count errs toward counting. Callers holding a live head use ejectMemberAtHead.
+	e.ejectMemberAtHead(owner, repo, memberItem, "", reason, diag, otherMembers, stayInQueue)
 }
 
 // ejectMemberAtHead is ejectMember with the member's PR head SHA given explicitly (#2349).
@@ -3809,7 +3813,13 @@ func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.Pr
 	// diag/otherMembers are nil (no combined-Validate diagnostic exists for this
 	// cause, per ADR-1420's contract); stayInQueue is false — this is the one
 	// ejectMember cause where the member must leave Queued rather than stay.
-	e.ejectMember(owner, repo, item, reason, nil, nil, false)
+	// A live head (not the cached item's) keeps the count's head source consistent with the
+	// trial paths; unreadable means unknown, which never resets the count.
+	head := ""
+	if pr, err := e.client.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil {
+		head = pr.HeadSHA
+	}
+	e.ejectMemberAtHead(owner, repo, item, head, reason, nil, nil, false)
 }
 
 // pendingReviewEject is one review-finding eject signal: the unresolved-finding count and
