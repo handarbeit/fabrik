@@ -127,7 +127,7 @@ func TestStageDispatch_CapPausesOnceAndIsStrict(t *testing.T) {
 		t.Fatalf("comments = %d, want exactly 1", len(comments))
 	}
 	body := comments[0].body
-	for _, want := range []string{"🏭 **Fabrik", "Research", "3 time(s)", "limit of 3", "complete (completion not recorded)", "--max-stage-dispatches"} {
+	for _, want := range []string{"🏭 **Fabrik — stage dispatch limit reached**", "Research", "3 time(s)", "limit of 3", "complete (completion not recorded)", "--max-stage-dispatches"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pause comment missing %q:\n%s", want, body)
 		}

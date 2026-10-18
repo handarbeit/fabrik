@@ -300,7 +300,10 @@ func (e *Engine) dispatchLimitReached(item gh.ProjectItem, stage *stages.Stage) 
 func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage, rec stageDispatchRecord, limit int) {
 	e.logf(item.Number, "dispatch-limit", "stage %q dispatched %d time(s), reaching the limit of %d — pausing\n", stage.Name, rec.Count, limit)
 
-	e.pauseIssue(item, formatDispatchLimitComment(stage.Name, rec, limit), pauseOpts{
+	// The literal prefix at the call site is what the comment-compliance scan
+	// checks (it never reads through a helper's return value).
+	comment := fmt.Sprintf("🏭 **Fabrik — stage dispatch limit reached**\n\n%s", formatDispatchLimitComment(stage.Name, rec, limit))
+	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
@@ -310,11 +313,10 @@ func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage,
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
-// formatDispatchLimitComment builds the pause comment: the stage, the count, the
+// formatDispatchLimitComment builds the pause comment's body, after its header: the stage, the count, the
 // cap, the most recent outcomes and how to resume.
 func formatDispatchLimitComment(stageName string, rec stageDispatchRecord, limit int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "🏭 **Fabrik — stage dispatch limit reached**\n\n")
 	fmt.Fprintf(&b, "Stage **%s** has been dispatched %d time(s) in this episode, which has reached the configured limit of %d "+
 		"(override with `--max-stage-dispatches` or `FABRIK_MAX_STAGE_DISPATCHES`; `0` disables the limit).\n\n", stageName, rec.Count, limit)
 	if n := len(rec.Outcomes); n > 0 {
