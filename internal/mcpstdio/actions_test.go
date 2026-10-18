@@ -17,6 +17,7 @@ type stubActor struct {
 	clear    []localapi.ClearClaudeLimitParams
 	advance  []localapi.AdvanceParams
 	park     []localapi.MoveParkedParams
+	blocked  []localapi.SetBlockedByParams
 }
 
 func (a *stubActor) Promote(p localapi.PromoteParams) (*localapi.ActionResult, error) {
@@ -49,6 +50,11 @@ func (a *stubActor) MoveParked(p localapi.MoveParkedParams) (*localapi.ActionRes
 	return &localapi.ActionResult{Action: localapi.MethodMoveParked, Issue: p.Issue}, nil
 }
 
+func (a *stubActor) SetBlockedBy(p localapi.SetBlockedByParams) (*localapi.ActionResult, error) {
+	a.blocked = append(a.blocked, p)
+	return &localapi.ActionResult{Action: localapi.MethodSetBlockedBy, Issue: p.Issue}, nil
+}
+
 func startActionDaemon(t *testing.T, withActor bool) (*localapi.Server, *stubActor) {
 	t.Helper()
 	srv := localapi.NewServer(filepath.Join(shortDir(t), "s.sock"), &stubBackend{}, nil)
@@ -72,9 +78,10 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 		callTool(4, ToolClearClaudeLimit, `{}`),
 		callTool(5, ToolAdvance, `{"issue":"5"}`),
 		callTool(6, ToolMoveParked, `{"issue":"5","to":"Backlog"}`),
+		callTool(7, ToolSetBlockedBy, `{"issue":"5","add":["o/x#4",3],"remove":["o/r#9"]}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7"} {
 		if text, isErr := toolText(t, ids[id]); isErr {
 			t.Errorf("call %s failed: %s", id, text)
 		}
@@ -97,6 +104,9 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 	if !reflect.DeepEqual(act.park, []localapi.MoveParkedParams{{Subscriber: "my-topic", Issue: "5", To: "Backlog"}}) {
 		t.Errorf("move_parked = %+v", act.park)
 	}
+	if !reflect.DeepEqual(act.blocked, []localapi.SetBlockedByParams{{Subscriber: "my-topic", Issue: "5", Add: []string{"o/x#4", "3"}, Remove: []string{"o/r#9"}}}) {
+		t.Errorf("set_blocked_by = %+v", act.blocked)
+	}
 }
 
 // Every action is attributable: with no --subscriber the shim refuses before
@@ -110,15 +120,16 @@ func TestActionToolsRefuseWithoutASubscriber(t *testing.T) {
 		callTool(4, ToolClearClaudeLimit, `{}`),
 		callTool(5, ToolAdvance, `{"issue":"5"}`),
 		callTool(6, ToolMoveParked, `{"issue":"5","to":"Backlog"}`),
+		callTool(7, ToolSetBlockedBy, `{"issue":"5","add":["3"]}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "--subscriber") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park)+len(act.blocked) != 0 {
 		t.Errorf("the daemon was reached without a requester: %+v", act)
 	}
 }
@@ -133,16 +144,20 @@ func TestActionToolArgumentErrors(t *testing.T) {
 		callTool(5, ToolRevalidate, `{}`),
 		callTool(6, ToolClearClaudeLimit, `{"issue":"5"}`), // takes no arguments
 		callTool(7, ToolAdvance, `{}`),
-		callTool(8, ToolMoveParked, `{"issue":"5"}`), // missing to
+		callTool(8, ToolMoveParked, `{"issue":"5"}`),                      // missing to
+		callTool(9, ToolSetBlockedBy, `{"issue":"5"}`),                    // neither add nor remove
+		callTool(10, ToolSetBlockedBy, `{"issue":"5","add":[""]}`),        // empty blocker
+		callTool(11, ToolSetBlockedBy, `{"issue":"5","add":["3"],"x":1}`), // unknown field
+		callTool(12, ToolSetBlockedBy, `{"add":["3"]}`),                   // missing issue
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7", "8"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "invalid arguments") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park)+len(act.blocked) != 0 {
 		t.Errorf("invalid calls reached the daemon: %+v", act)
 	}
 }
@@ -188,7 +203,7 @@ func TestNoPauseLiftOrCommentTool(t *testing.T) {
 			t.Errorf("unexpected state-changing tool %q", n)
 		}
 	}
-	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked}; !reflect.DeepEqual(got, want) {
+	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked, ToolSetBlockedBy}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ActionTools = %v", got)
 	}
 }

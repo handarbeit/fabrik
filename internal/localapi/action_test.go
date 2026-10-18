@@ -17,6 +17,7 @@ type fakeActor struct {
 	clear    ClearClaudeLimitParams
 	advance  AdvanceParams
 	park     MoveParkedParams
+	blocked  SetBlockedByParams
 	calls    int
 }
 
@@ -62,6 +63,13 @@ func (f *fakeActor) MoveParked(p MoveParkedParams) (*ActionResult, error) {
 	return &ActionResult{Action: MethodMoveParked, Issue: p.Issue, Changed: true}, nil
 }
 
+func (f *fakeActor) SetBlockedBy(p SetBlockedByParams) (*ActionResult, error) {
+	f.calls++
+	f.blocked = p
+	return &ActionResult{Action: MethodSetBlockedBy, Issue: p.Issue, Changed: true,
+		Edges: []EdgeResult{{Blocker: "o/r#2", Op: EdgeAdd, Outcome: EdgeApplied}}}, nil
+}
+
 func startActionServer(t *testing.T, a Actor) *Server {
 	t.Helper()
 	path := filepath.Join(shortDir(t), "s.sock")
@@ -93,6 +101,7 @@ func actionCalls(srv *Server) map[string]any {
 		MethodClearClaudeLimit: ClearClaudeLimitParams{Subscriber: "s"},
 		MethodAdvance:          AdvanceParams{Subscriber: "s", Issue: "o/r#1"},
 		MethodMoveParked:       MoveParkedParams{Subscriber: "s", Issue: "o/r#1", To: "Backlog"},
+		MethodSetBlockedBy:     SetBlockedByParams{Subscriber: "s", Issue: "o/r#1", Add: []string{"o/r#2"}},
 	}
 }
 
@@ -151,6 +160,12 @@ func TestActorDispatchAndHello(t *testing.T) {
 	}
 	if err := Call(ctx, srv.Path(), MethodMoveParked, MoveParkedParams{Subscriber: "s", Issue: "o/r#7", To: "Backlog"}, &res); err != nil || fa.park != (MoveParkedParams{Subscriber: "s", Issue: "o/r#7", To: "Backlog"}) || res.Action != MethodMoveParked {
 		t.Fatalf("move_parked: %v %+v %+v", err, fa.park, res)
+	}
+	var edges ActionResult
+	if err := Call(ctx, srv.Path(), MethodSetBlockedBy, SetBlockedByParams{Subscriber: "s", Issue: "o/r#7", Add: []string{"3"}, Remove: []string{"o/x#4"}}, &edges); err != nil ||
+		fa.blocked.Issue != "o/r#7" || len(fa.blocked.Add) != 1 || fa.blocked.Add[0] != "3" || len(fa.blocked.Remove) != 1 || fa.blocked.Remove[0] != "o/x#4" ||
+		edges.Action != MethodSetBlockedBy || len(edges.Edges) != 1 || edges.Edges[0].Outcome != EdgeApplied {
+		t.Fatalf("set_blocked_by: %v %+v %+v", err, fa.blocked, edges)
 	}
 }
 
