@@ -256,3 +256,21 @@ func TestUsageLimitHold_ExpiredAndFarFutureAtLoad(t *testing.T) {
 		t.Fatalf("a far-future deadline must be clamped to the 8-day ceiling, got %v held=%v", until, held)
 	}
 }
+
+// An empty first board is unreadable: the one-shot label seeding must not be spent on it, so
+// the poll that does see the labelled items still seeds the hold instead of sweeping them.
+func TestUsageLimitSeed_NotSpentOnEmptyBoard(t *testing.T) {
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	eng := restartedEngine(t, &mockGitHubClient{}, t.TempDir(), clk)
+
+	if eng.seedUsageLimitFromLabels(&gh.ProjectBoard{}) {
+		t.Fatal("an empty board must not seed a hold")
+	}
+	board := &gh.ProjectBoard{Items: []gh.ProjectItem{{Number: 7, Repo: "owner/repo", Labels: []string{"fabrik:claude-limit"}}}}
+	if !eng.seedUsageLimitFromLabels(board) {
+		t.Fatal("the seed was spent by the empty board; the later labelled board must still seed")
+	}
+	if _, held := eng.claudeUsageLimitedUntilTime(clk.t); !held {
+		t.Fatal("seeding must leave a hold active")
+	}
+}

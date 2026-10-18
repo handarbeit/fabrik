@@ -92,6 +92,12 @@ const usageLimitSeedMaxReads = 5
 // error counts as "applied now", failing closed), persists it, and reports true so the
 // sweep skips this poll. A usable file at startup is authoritative and nothing is seeded.
 func (e *Engine) seedUsageLimitFromLabels(board *gh.ProjectBoard) bool {
+	// An empty board is an unreadable one (pruneDecisionState treats it the same way):
+	// do not spend the one-shot seed on it, or the next poll's sweep would strip the
+	// labels the seed exists to protect.
+	if board == nil || len(board.Items) == 0 {
+		return false
+	}
 	if e.usageLimitSeedChecked.Swap(true) {
 		return false
 	}
