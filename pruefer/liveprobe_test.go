@@ -535,7 +535,7 @@ func TestLiveProbeResume(t *testing.T) {
 	args := mustArgs(t, req)
 	var sessions []string
 	t.Cleanup(func() {
-		n, err := removeReviewSessions(profile, sessions)
+		n, err := removeReviewSessions(profile, sessions, removeSessionsOpts{})
 		t.Logf("removeReviewSessions: removed %d (%v) of %v", n, err, sessions)
 	})
 
@@ -650,7 +650,7 @@ func TestLiveProbeResume(t *testing.T) {
 	}
 
 	// (e) cleanup.
-	n, err := removeReviewSessions(profile, sessions)
+	n, err := removeReviewSessions(profile, sessions, removeSessionsOpts{})
 	t.Logf("removeReviewSessions removed %d (err=%v)", n, err)
 	if n == 0 {
 		t.Errorf("removeReviewSessions found none of the sessions the passes created: the on-disk layout changed")

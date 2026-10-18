@@ -99,6 +99,7 @@ n=$(cat "$D/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$D/n"
 cat > "$D/stdin.$n"
 for a in "$@"; do printf '%s\n' "$a"; done > "$D/args.$n"
 echo "$CLAUDE_CONFIG_DIR" > "$D/profile.$n"
+ls "$CLAUDE_CONFIG_DIR"/projects/*/ > "$D/ls.$n" 2>/dev/null
 [ -f "$D/exit.$n" ] && exit 1
 cat "$D/out.$n"
 `
@@ -301,7 +302,7 @@ func TestCoverageLoop_CapZeroIsToday(t *testing.T) {
 	if a, b := masked("stdin", off), masked("stdin", on); a != b {
 		t.Errorf("the first-pass prompt depends on the cap")
 	}
-	// A cap-0 review leaves the session where it always has (#2363 owns that).
+	// #2363: a cap-0 review no longer leaves its session in the profile.
 	profile := t.TempDir()
 	sess := filepath.Join(profile, "projects", "-x", sessA+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(sess), 0o755); err != nil || os.WriteFile(sess, []byte("{}"), 0o644) != nil {
@@ -311,8 +312,8 @@ func TestCoverageLoop_CapZeroIsToday(t *testing.T) {
 	req := zero.req(0)
 	req.ClaudeConfigDir = profile
 	zero.review(req)
-	if _, err := os.Stat(sess); err != nil {
-		t.Errorf("cap 0 must not touch the profile: %v", err)
+	if _, err := os.Stat(sess); !os.IsNotExist(err) {
+		t.Errorf("cap 0 must remove the review's session too: %v", err)
 	}
 }
 
@@ -559,14 +560,14 @@ func TestRemoveReviewSessions_OnlyValidatedIDs(t *testing.T) {
 	if err := os.MkdirAll(victim, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	n, err := removeReviewSessions(profile, []string{"..", "../projects", "*", "", "not-a-uuid", "projects/x"})
+	n, err := removeReviewSessions(profile, []string{"..", "../projects", "*", "", "not-a-uuid", "projects/x"}, removeSessionsOpts{})
 	if err != nil || n != 0 {
 		t.Errorf("n = %d err = %v: a malformed id must be skipped", n, err)
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Errorf("a malformed id reached the filesystem: %v", err)
 	}
-	if n, err := removeReviewSessions(profile, []string{sessA}); err != nil || n != 0 {
+	if n, err := removeReviewSessions(profile, []string{sessA}, removeSessionsOpts{}); err != nil || n != 0 {
 		t.Errorf("a missing session is not an error: %d %v", n, err)
 	}
 }

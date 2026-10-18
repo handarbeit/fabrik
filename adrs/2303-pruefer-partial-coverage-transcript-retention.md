@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Builds on ADR 2190 (diff coverage contract); `deriveOpened`'s credit rules are unchanged.
+Accepted. **Amended by ADR 2363:** the default is now `all`, retention is by age (`transcript_max_age`, default 168h) with a `transcript_max_bytes` backstop instead of a count of 50, and a review's hidden tool results are kept beside its transcript. Builds on ADR 2190 (diff coverage contract); `deriveOpened`'s credit rules are unchanged.
 
 ## Context
 
