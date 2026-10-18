@@ -623,12 +623,26 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case BlockedByEdgeAdded:
 		for _, d := range item.BlockedBy {
-			if d.Repo == v.Dep.Repo && d.Number == v.Dep.Number {
+			if sameDependency(v.Repo, d, v.Dep) {
 				return 0
 			}
 		}
 		item.BlockedBy = append(item.BlockedBy, v.Dep)
 		return BlockedByChanged
+
+	case BlockedByEdgeRemoved:
+		for i, d := range item.BlockedBy {
+			if sameDependency(v.Repo, d, v.Dep) {
+				// Copy rather than splice in place: snapshots handed out earlier
+				// may share the backing array.
+				next := make([]gh.Dependency, 0, len(item.BlockedBy)-1)
+				next = append(next, item.BlockedBy[:i]...)
+				next = append(next, item.BlockedBy[i+1:]...)
+				item.BlockedBy = next
+				return BlockedByChanged
+			}
+		}
+		return 0
 
 	case StageAttempted:
 		ensureStageStateMaps(item)

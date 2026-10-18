@@ -306,6 +306,63 @@ func TestApplyItemDeepFetched(t *testing.T) {
 	}
 }
 
+// ---- BlockedByEdgeRemoved (#2385) ----
+
+func TestApplyBlockedByEdgeRemoved(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: "owner/other", Number: 42}}, BlockedByChanged)
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: "owner/other", Number: 43}}, BlockedByChanged)
+
+	applyExpect(t, s, BlockedByEdgeRemoved{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: "owner/other", Number: 42}}, BlockedByChanged)
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 1 || st.BlockedBy[0].Number != 43 {
+		t.Fatalf("BlockedBy = %+v; want only #43 left", st.BlockedBy)
+	}
+}
+
+// TestApplyBlockedByEdgeRemoved_AbsentIsNoop: removing an edge that is not
+// cached changes nothing and emits no change.
+func TestApplyBlockedByEdgeRemoved_AbsentIsNoop(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: "owner/other", Number: 42}}, BlockedByChanged)
+
+	_, changes, err := s.Apply(BlockedByEdgeRemoved{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: "owner/other", Number: 99}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("removing an absent edge produced Changes %v; want none", changes)
+	}
+	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 1 {
+		t.Errorf("BlockedBy = %+v; want the existing edge untouched", st.BlockedBy)
+	}
+}
+
+// TestBlockedByEdges_SameRepoEmptyEqualsFull: a fetched same-repo edge carries
+// an empty Repo while a write-through records the full "owner/repo"; both name
+// one blocker, so an add must not duplicate it and a remove must find it.
+func TestBlockedByEdges_SameRepoEmptyEqualsFull(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	// A fetched same-repo edge: empty Repo.
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Number: 7}}, BlockedByChanged)
+
+	_, changes, err := s.Apply(BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: testRepo, Number: 7}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("adding the full-Repo form of an existing same-repo edge produced Changes %v; want none", changes)
+	}
+	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %+v; want a single edge, no duplicate", st.BlockedBy)
+	}
+
+	applyExpect(t, s, BlockedByEdgeRemoved{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: testRepo, Number: 7}}, BlockedByChanged)
+	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %+v; want empty after removing by the full-Repo form", st.BlockedBy)
+	}
+}
+
 // ---- BlockedByEdgeAdded ----
 
 func TestApplyBlockedByEdgeAdded(t *testing.T) {
