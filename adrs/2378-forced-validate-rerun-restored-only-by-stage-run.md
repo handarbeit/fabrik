@@ -67,3 +67,7 @@ records a SHA). The item then landed with no Validate stage run (v0.0.88 gate, b
 - Neutralisation seams: `Engine.SetValidateRerunGuardDisabledForTest` (per-Engine, everything) and
   `SetValidateReworkRestoreGuardDisabledForTest` (the rework-bracket guard alone). Sim twin:
   `tests/sim/validate_sha_restart_test.go` (`PendingCommentDoesNotSatisfyForcedRerun`, `NonCompletingCommentPassDoesNotRestoreForcedRerun` and their non-vacuity runs).
+
+## Amendment: leftover marker
+
+`handleStageComplete` clears the marker once, best-effort. If that write fails after the Validate stage run recorded its completion, `refuseIfValidateRerun` retries the clear when the live labels carry `stage:Validate:complete` and the Store holds a Validate completion SHA (the strip clears the SHA; only a stage run records one while the marker is set). Likewise `handleValidateSHAInvalidation` rolls the marker back when its strip fails before reaching the completion label.

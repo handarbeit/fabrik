@@ -62,15 +62,42 @@ func (e *Engine) validateRerunPending(item gh.ProjectItem) bool {
 // readValidateRerun is the live read behind validateRerunPending: whether the marker
 // is on the item, or the read error (the caller decides how to fail).
 func (e *Engine) readValidateRerun(item gh.ProjectItem) (bool, error) {
+	pending, _, err := e.readValidateRerunState(item)
+	return pending, err
+}
+
+// readValidateRerunState is readValidateRerun that also reports whether the live
+// label set carries stage:Validate:complete.
+func (e *Engine) readValidateRerunState(item gh.ProjectItem) (pending, complete bool, err error) {
 	if e.validateRerunGuardOff.Load() {
-		return false, nil
+		return false, false, nil
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	labels, err := e.client.FetchLabels(owner, repo, item.Number)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return hasLabel(labels, validateRerunLabel), nil
+	return hasLabel(labels, validateRerunLabel), hasLabel(labels, "stage:Validate:complete"), nil
+}
+
+// healStaleValidateRerun reports whether the marker is left over from a Validate stage
+// run whose marker clear failed (handleStageComplete clears it best-effort, once): the
+// completion label is on the live labels and the Store holds a Validate completion SHA.
+// The strip clears that SHA (ValidateCompletedAtSHACleared) and only a Validate stage
+// run records one again (a comment pass never reaches handleStageComplete while the
+// marker is set), so the pair means a stage run completed after the strip. It then
+// retries the clear. The landing path still re-checks the head against that SHA.
+func (e *Engine) healStaleValidateRerun(item gh.ProjectItem) bool {
+	snap, err := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number)
+	if err != nil || snap.ValidateCompletedSHA() == "" {
+		return false
+	}
+	if err := e.removeLabelChecked(item, validateRerunLabel); err != nil {
+		e.logf(item.Number, "warn", "validate-rerun: could not remove stale %s: %v\n", validateRerunLabel, err)
+		return false
+	}
+	e.logf(item.Number, "validate-rerun", "Validate stage run already completed (completion label and SHA present) — cleared the leftover forced re-run marker\n")
+	return true
 }
 
 // clearValidateRerun drops the marker once a Validate stage run has produced a
@@ -98,7 +125,7 @@ func (e *Engine) clearValidateRerun(item gh.ProjectItem, live bool) {
 // decision is taken again on a later poll. It writes no label or comment, pauses
 // nothing and touches no retry, cycle or ejection counter.
 func (e *Engine) refuseIfValidateRerun(item gh.ProjectItem, site string) bool {
-	pending, err := e.readValidateRerun(item)
+	pending, complete, err := e.readValidateRerunState(item)
 	if err != nil {
 		// Fail closed, with the pause guard's test seam for mocks whose FetchLabels is
 		// unconfigured (it errors by design).
@@ -107,6 +134,8 @@ func (e *Engine) refuseIfValidateRerun(item gh.ProjectItem, site string) bool {
 		}
 		e.logf(item.Number, "validate-rerun", "could not re-read the labels (%v), so a forced Validate re-run cannot be ruled out\n", err)
 	} else if !pending {
+		return false
+	} else if complete && e.healStaleValidateRerun(item) {
 		return false
 	}
 	e.logf(item.Number, "validate-rerun", "not %s: a forced Validate re-run is outstanding (%s) — a Validate stage run must verify the current head first\n", site, validateRerunLabel)

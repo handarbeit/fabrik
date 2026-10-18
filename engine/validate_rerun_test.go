@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -382,6 +383,48 @@ func TestValidateRerun_FailedStripRollsBackMarkerOnlyWhileCompleteLabelRemains(t
 			}
 			if marker != tc.wantMarker {
 				t.Errorf("marker present = %v, want %v", marker, tc.wantMarker)
+			}
+		})
+	}
+}
+
+// handleStageComplete clears the marker best-effort, once. If that write failed after
+// the Validate stage run recorded its completion (label and SHA), the landing guard
+// retries the clear instead of refusing every poll; without a recorded SHA (a strip
+// that stopped on the completion label) the marker stays.
+func TestValidateRerun_LandingGuardClearsMarkerLeftByAFailedClear(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sha     string
+		refused bool
+		removed bool
+	}{
+		{"stage run completed", "abc123", false, true},
+		{"no recorded completion", "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			removed := false
+			client := &mockGitHubClient{
+				fetchLabelsFn: func(string, string, int) ([]string, error) {
+					return []string{"stage:Validate:complete", validateRerunLabel}, nil
+				},
+				removeLabelFromIssueFn: func(_, _ string, _ int, l string) error {
+					if l == validateRerunLabel {
+						removed = true
+					}
+					return nil
+				},
+			}
+			eng := testEngine(t, client, &mockClaudeInvoker{})
+			if tc.sha != "" {
+				eng.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: "owner/repo", Number: 1, SHA: tc.sha})
+			}
+			item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"stage:Validate:complete", validateRerunLabel}}
+			if got := eng.refuseIfValidateRerun(item, "landing"); got != tc.refused {
+				t.Errorf("refused = %v, want %v", got, tc.refused)
+			}
+			if removed != tc.removed {
+				t.Errorf("marker removed = %v, want %v", removed, tc.removed)
 			}
 		})
 	}
