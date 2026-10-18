@@ -647,7 +647,7 @@ mutate "SeedRateLimits accepts a remaining above the limit" \
 
 mutate "the fault injector silently succeeds" \
   'TestFaultFailsNTimesThenSucceeds|TestAFaultedCallDoesNotReachTheModel|TestEveryInterfaceMethodIsFaultable' \
-  'instrumented.go::s{if err := in\.faults\.next\(method, args\); err != nil \{}{if err := in.faults.next(method, args); err != nil \&\& false \{}g'
+  'instrumented.go::s{if err := in\.faults\.next\(method, args, mutation\); err != nil \{}{if err := in.faults.next(method, args, mutation); err != nil \&\& false \{}g'
 
 mutate "injected failures are not distinguished from model failures" \
   'TestFaultFailsNTimesThenSucceeds|TestEveryInterfaceMethodIsFaultable' \
@@ -680,6 +680,26 @@ mutate "a fault registered with a nil error is accepted" \
 mutate "a BeforeCall hook never runs" \
   'TestBeforeCallRunsBeforeTheCallAndTheFault' \
   'fault.go::s{\tfor _, h := range hooks \{\n\t\th\(args\)\n\t\}\n}{}'
+
+mutate "FailAllWrites also fails reads" \
+  'TestFailAllWritesFailsOnlyMutations' \
+  'fault.go::s{if mutation && f\.failWrites != nil \{}{if f.failWrites != nil \{}'
+
+mutate "FailAllWrites fails nothing" \
+  'TestFailAllWritesFailsOnlyMutations' \
+  'fault.go::s{if mutation && f\.failWrites != nil \{}{if false \{}'
+
+mutate "FailAll spares reads" \
+  'TestFailAllFailsEverythingUntilCleared' \
+  'fault.go::s{if f\.failAll != nil \{}{if f.failAll != nil \&\& mutation \{}'
+
+mutate "ClearBlanket leaves the blanket fault in place" \
+  'TestFailAllFailsEverythingUntilCleared|TestFailAllWritesFailsOnlyMutations' \
+  'fault.go::s{\tf\.failWrites, f\.failAll = nil, nil}{\t_ = f}'
+
+mutate "the result observer is never told" \
+  'TestResultObserverSeesEveryOutcome' \
+  'fault.go::s{\tif obs != nil \{\n\t\tobs\(err\)\n\t\}\n}{}'
 
 # --- R4: mutation log (#1457) -----------------------------------------------
 
