@@ -419,6 +419,12 @@ func (a *overseerActor) partialBlockedByFailure(t *overseerTarget, requester str
 		return fmt.Errorf("changing the blockers of %s failed at %s %s (%v); no writes had landed; no audit comment posted", t.ref, doing, failed.ref, werr)
 	}
 	applied := blockedByWhat(added, removed)
+	// A removal that landed before the failure is just as real as one in a
+	// successful call: without the nudge the item waits out the whole dependency
+	// recheck interval (#977: removal bumps nothing).
+	if len(removed) > 0 {
+		a.nudgeRelease(t)
+	}
 	note := "audit comment posted"
 	what := fmt.Sprintf("PARTIALLY applied blocker changes to %s: %s, then failed at %s `%s`; not applied: %s", t.ref, applied, doing, failed.ref, strings.Join(notApplied, ", "))
 	if cerr := a.postAudit(t, localapi.MethodSetBlockedBy, what, requester); cerr != nil {

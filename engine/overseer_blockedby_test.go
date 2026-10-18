@@ -375,6 +375,35 @@ func TestOverseerSetBlockedBy_RemovalNudgesAdmissionButNeverTheLabel(t *testing.
 	}
 }
 
+// A removal that landed before a later write failed still nudges the release of
+// an item carrying fabrik:blocked, like the success path does.
+func TestOverseerSetBlockedBy_PartialFailureAfterRemovalStillNudges(t *testing.T) {
+	client := &mockGitHubClient{}
+	client.removeBlockedByIssueFn = func(_, blocker string) error {
+		if blocker == "I_7" {
+			return errors.New("github said no")
+		}
+		return nil
+	}
+	eng, _, act := overseerEngine(t, client,
+		ovItem{number: 5, status: "Backlog", labels: []string{"fabrik:blocked"}}, ovItem{number: 6, status: "Backlog"}, ovItem{number: 7, status: "Backlog"})
+	ovDeepFetch(t, eng, 6)
+	ovDeepFetch(t, eng, 7)
+	ovDeepFetch(t, eng, 5, dep(6), dep(7))
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 5, Reason: "dep-blocked", Until: eng.now().Add(time.Hour)})
+
+	if _, err := act.SetBlockedBy(localapi.SetBlockedByParams{Subscriber: "ovr", Issue: "5", Remove: []string{"6", "7"}}); err == nil {
+		t.Fatal("want an error")
+	}
+	snap, _ := eng.store.Peek("owner/repo", 5)
+	if c := snap.State().CooldownAt["dep-blocked"]; c.After(eng.now()) {
+		t.Errorf("dep-blocked cooldown = %v, want already due after a landed removal", c)
+	}
+	if !hasLabelStr(snap.State().Labels, "fabrik:blocked") || len(client.addLabelCalls)+len(client.removeLabelCalls) != 0 {
+		t.Error("the tool touched fabrik:blocked")
+	}
+}
+
 // The whole SetBlockedBy path posts only the 🏭-prefixed audit comment, and the
 // real predicates ignore it as it is cached after a real action.
 func TestOverseerSetBlockedBy_PostedAuditCommentIsNotSteering(t *testing.T) {
