@@ -2,8 +2,11 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/events"
@@ -268,5 +271,103 @@ func TestCheckHookdeckInstallationCoverage_FetchErrorLeavesNoteUnchanged(t *test
 	want := "installation missing: 1 repo(s) (a/one)"
 	if note != want {
 		t.Errorf("installationNote = %q after fetch error, want unchanged %q", note, want)
+	}
+}
+
+// newLoggingTestHookdeckManager is newTestHookdeckManager with a logFn that
+// captures every line, for the #2384 cause-logging tests.
+func newLoggingTestHookdeckManager(t *testing.T) (*hookdeckManager, func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var sb strings.Builder
+	hm := newHookdeckManager(
+		func(_ int, tag, format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			sb.WriteString(tag + ": " + fmt.Sprintf(format, args...))
+		},
+		func(tui.Event) {},
+		nil, nil, "test-api-key", "test-webhook-secret",
+	)
+	return hm, func() string { mu.Lock(); defer mu.Unlock(); return sb.String() }
+}
+
+func TestHookdeckHandleHealth_FirstUnhealthyTransitionLogsCause(t *testing.T) {
+	hm, out := newLoggingTestHookdeckManager(t)
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	const cause = "dial tcp: lookup api.hookdeck.com: no such host"
+	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting, Err: cause})
+
+	got := out()
+	transition := strings.Index(got, "health state: healthy → unhealthy")
+	errLine := strings.Index(got, "connection error: "+cause)
+	if transition < 0 || errLine < 0 || errLine < transition {
+		t.Fatalf("want the transition line followed by the cause, got:\n%s", got)
+	}
+}
+
+func TestHookdeckHandleHealth_EmptyErrLogsNoCause(t *testing.T) {
+	hm, out := newLoggingTestHookdeckManager(t)
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting})
+	got := out()
+	if !strings.Contains(got, "health state: healthy → unhealthy") {
+		t.Errorf("transition not logged:\n%s", got)
+	}
+	if strings.Contains(got, "connection") {
+		t.Errorf("unexpected cause line:\n%s", got)
+	}
+}
+
+func TestHookdeckHandleHealth_RepeatedErrorCoalescedChangedLoggedReminderCounted(t *testing.T) {
+	hm, out := newLoggingTestHookdeckManager(t)
+	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	ev := func(err string, at time.Time) events.HealthEvent {
+		return events.HealthEvent{State: events.HealthReconnecting, Err: err, At: at}
+	}
+	hm.handleHealth(ev("boom", t0))
+	for i := 1; i <= 10; i++ {
+		hm.handleHealth(ev("boom", t0.Add(time.Duration(i)*time.Second)))
+	}
+	if n := strings.Count(out(), "boom"); n != 1 {
+		t.Fatalf("identical error logged %d times, want 1:\n%s", n, out())
+	}
+
+	hm.handleHealth(ev("tls: handshake failure", t0.Add(time.Minute)))
+	if !strings.Contains(out(), "connection error: tls: handshake failure") {
+		t.Errorf("changed error not logged:\n%s", out())
+	}
+
+	hm.handleHealth(ev("tls: handshake failure", t0.Add(time.Minute+events.HealthErrorReminderInterval)))
+	if !strings.Contains(out(), "connection still failing: tls: handshake failure (1 occurrences since last report)") {
+		t.Errorf("reminder with count missing:\n%s", out())
+	}
+}
+
+func TestHookdeckHandleHealth_ConnectedLogsNoErrorAndEndsEpisode(t *testing.T) {
+	hm, out := newLoggingTestHookdeckManager(t)
+	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting, Err: "boom"})
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	before := strings.Count(out(), "connection")
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if strings.Count(out(), "connection") != before {
+		t.Errorf("Connected added an error line:\n%s", out())
+	}
+	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting, Err: "boom"})
+	if n := strings.Count(out(), "connection error: boom"); n != 2 {
+		t.Errorf("new episode should log the same text again; got %d lines:\n%s", n, out())
+	}
+}
+
+func TestHookdeckHandleHealth_ErrorLoggedWhileSignatureDriftActive(t *testing.T) {
+	hm, out := newLoggingTestHookdeckManager(t)
+	hm.handleSignatureDrift(true)
+	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting, Err: "websocket: close 1006"})
+	got := out()
+	if !strings.Contains(got, "connection error: websocket: close 1006") {
+		t.Errorf("cause not logged under drift:\n%s", got)
+	}
+	if strings.Contains(got, "(websocket") || strings.Count(got, "health state:") > 1 {
+		t.Errorf("transition line changed by the cause:\n%s", got)
 	}
 }

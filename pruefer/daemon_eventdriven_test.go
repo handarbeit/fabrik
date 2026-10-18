@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -233,5 +234,74 @@ func TestDaemonRun_DispatchesToEventDrivenWhenEventSourceSet(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancellation")
+	}
+}
+
+func TestHealthHandler_LogsReconnectCauseAndCoalescesRepeats(t *testing.T) {
+	snapshot := captureLogf(t)
+	out := func() string { return strings.Join(snapshot(), "") }
+	d := &Daemon{}
+	handler := d.HealthHandler(context.Background())
+	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
+	handler(events.HealthEvent{State: events.HealthReconnecting, At: t0, Err: "dial tcp: lookup ws.hookdeck.com: no such host"})
+	for i := 1; i <= 10; i++ {
+		handler(events.HealthEvent{State: events.HealthReconnecting, At: t0.Add(time.Duration(i) * time.Second), Err: "dial tcp: lookup ws.hookdeck.com: no such host"})
+	}
+	if n := strings.Count(out(), "no such host"); n != 1 {
+		t.Fatalf("identical error logged %d times, want 1:\n%s", n, out())
+	}
+	if !strings.Contains(out(), "event source connection error: dial tcp") {
+		t.Errorf("cause line missing:\n%s", out())
+	}
+
+	handler(events.HealthEvent{State: events.HealthReconnecting, At: t0.Add(time.Minute), Err: "websocket: bad handshake"})
+	if !strings.Contains(out(), "websocket: bad handshake") {
+		t.Errorf("changed error not logged:\n%s", out())
+	}
+	handler(events.HealthEvent{State: events.HealthReconnecting, At: t0.Add(time.Minute + events.HealthErrorReminderInterval), Err: "websocket: bad handshake"})
+	if !strings.Contains(out(), "connection still failing: websocket: bad handshake (1 occurrences since last report)") {
+		t.Errorf("reminder missing:\n%s", out())
+	}
+}
+
+func TestHealthHandler_ConnectedLogsNoErrorOnFirstConnect(t *testing.T) {
+	snapshot := captureLogf(t)
+	out := func() string { return strings.Join(snapshot(), "") }
+	d := &Daemon{}
+	handler := d.HealthHandler(context.Background())
+	handler(events.HealthEvent{State: events.HealthReconnecting, Err: "boom"})
+	before := out()
+	handler(events.HealthEvent{State: events.HealthConnected}) // first connect: no reconcile, no log
+	if out() != before {
+		t.Errorf("first Connected logged something:\n%s", out()[len(before):])
+	}
+}
+
+func TestHealthHandler_ReconnectMessageUnchangedAndEpisodeReset(t *testing.T) {
+	snapshot := captureLogf(t)
+	out := func() string { return strings.Join(snapshot(), "") }
+	source := &fakeEventSource{}
+	d, client := newEventDrivenTestDaemon(source)
+	client.prsByRepo["owner/repo"] = nil // the reconciliation poll finds nothing to review
+	d.Config.ReconciliationStartup = false
+	d.Config.ReconciliationFallbackInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := d.HealthHandler(ctx)
+
+	handler(events.HealthEvent{State: events.HealthConnected})
+	handler(events.HealthEvent{State: events.HealthReconnecting, Err: "boom"})
+	handler(events.HealthEvent{State: events.HealthConnected})
+	// Let the reconciliation poll finish before captureLogf's cleanup restores Logf.
+	waitUntil(t, 2*time.Second, func() bool {
+		return client.listOpenPRsCallCount() >= 1 && !d.pollInFlight.Load()
+	})
+	if !strings.Contains(out(), "event source reconnected — running a reconciliation poll") {
+		t.Errorf("reconnect message lost:\n%s", out())
+	}
+	handler(events.HealthEvent{State: events.HealthReconnecting, Err: "boom"})
+	if n := strings.Count(out(), "connection error: boom"); n != 2 {
+		t.Errorf("new episode should log the same text again; got %d:\n%s", n, out())
 	}
 }

@@ -65,6 +65,11 @@ type hookdeckManager struct {
 	cacheDriftActive bool
 	cacheDriftReason string
 
+	// healthErrLog coalesces the cause carried by reconnecting health events
+	// into log lines (#2384). It has its own lock and is never called with
+	// mu held.
+	healthErrLog events.HealthErrorLog
+
 	// per-event-type received counts (protected by mu), mirroring
 	// webhookManager.eventCounts for TUI/log parity.
 	eventCounts map[string]int
@@ -227,6 +232,12 @@ func (hm *hookdeckManager) handleHealth(ev events.HealthEvent) {
 	hm.connHealth = newConnHealth
 	hm.mu.Unlock()
 	hm.recomputeHealthState()
+	// The cause is logged after the transition line, independent of whether a
+	// transition happened: errors arriving while already unhealthy (or while a
+	// drift condition masks the state) are still coalesced and reported.
+	if line, ok := hm.healthErrLog.Observe(ev); ok {
+		hm.logFn(0, "hookdeck", "%s\n", line)
+	}
 }
 
 // handleSignatureDrift adapts hookdeck.Config.OnSignatureDrift (R4,
