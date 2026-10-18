@@ -153,7 +153,9 @@ type ItemState struct {
 	// ObservedAt records, per fact, the authority time of the last applied
 	// observation of any producer (#2348, ADR 2348): keys "status", "closed",
 	// "label:<name>", "labels" (the baseline of a full label set), "head",
-	// "linkedpr", "reviews", "milestone" and "blockedBy". A write whose authority
+	// "linkedpr", "reviews" (whole-list reads), "reviews:<author>" (webhook review
+	// events), "reviews:submitted:<author>" (submitted events only), "milestone"
+	// and "blockedBy". A write whose authority
 	// time is older than the recorded one (the later of this and EngineWriteAt) is
 	// dropped; see observed.go. In memory only; bookkeeping, excluded from no-op
 	// detection. Label entries expire after observedLabelRetention.
