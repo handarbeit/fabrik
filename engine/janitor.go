@@ -449,6 +449,15 @@ func pruneSessions(
 		}
 		inFlight := isInFlight(ownerRepo, issueNumber)
 		for _, fe := range fileEntries {
+			// A stage dispatch record (#2395) has no pointer of its own to be pruned
+			// with: age it out on its own, or an abandoned loop's record would keep
+			// the issue directory alive for ever.
+			if !fe.IsDir() && strings.HasSuffix(fe.Name(), ".dispatches") && !inFlight {
+				if info, infoErr := fe.Info(); infoErr == nil && info.ModTime().Before(cutoff) {
+					os.Remove(filepath.Join(issueDirPath, fe.Name()))
+				}
+				continue
+			}
 			if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".session") {
 				continue
 			}

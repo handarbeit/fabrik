@@ -332,6 +332,8 @@ type Engine struct {
 	stageFirstRoutingOff                  atomic.Bool                               // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                               // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                               // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
+	stageDispatchCapOff                   atomic.Bool                               // test seam: SetStageDispatchCapDisabledForTest (#2395) — the per-episode dispatch bound never pauses
+	unchangedInputExemptionOff            atomic.Bool                               // test seam: SetUnchangedInputExemptionDisabledForTest (#2395) — an unchanged re-dispatch is decided by the #2300 rule alone
 	sessionRootForTest                    atomic.Pointer[string]                    // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
