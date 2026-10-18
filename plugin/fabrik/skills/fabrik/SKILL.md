@@ -108,6 +108,7 @@ These tools write, and each one posts an audit comment on the item naming who as
 | `fabrik_promote` | Move an item out of a parking column (e.g. Backlog) into a pipeline column such as Specify |
 | `fabrik_move_parked` | Move an item between parking columns (e.g. Triage → Backlog); starts no work |
 | `fabrik_advance` | Move an item whose current stage is complete exactly one stage forward, through the engine's own advance (refused while a gate holds it) |
+| `fabrik_set_blocked_by` | Add and remove `blockedBy` edges on one issue to order work (blockers as `owner/repo#N`, a bare `N` meaning the issue's own repo). Set the edges before giving the item an autonomy label or a pipeline column. It starts no work and never touches `fabrik:blocked`; refused for a cycle, a self-block, a pull request, or edges the daemon does not know |
 | `fabrik_set_autonomy` | Make the item `cruise`, `yolo` or `none` |
 | `fabrik_revalidate` | Force a Validate re-run |
 | `fabrik_clear_claude_limit` | Clear an account-wide Claude usage-limit suspension without restarting the daemon |
