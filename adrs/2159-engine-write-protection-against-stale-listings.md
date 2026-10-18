@@ -1,7 +1,7 @@
 # ADR 2159: Protect the engine's own recent writes from stale reconcile listings
 
 **Date**: 2026-10-11
-**Status**: Accepted
+**Status**: Accepted — the engine-write-only scope is superseded by ADR 2348, which generalises this rule to every producer; the engine-write protection described here remains as its special case.
 **Issue**: #2159 — reconcile: a light reconcile reverts the engine's own label writes with a pre-write board listing
 
 ## Context
