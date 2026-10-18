@@ -37,9 +37,12 @@ import (
 //
 // # Deterministic placement (no timing luck)
 //
-// The item is seeded with fabrik:yolo, stage:Validate:complete, a non-draft
-// member PR on fabrik/issue-<N> and NO board Status, so the engine cannot act
-// on it. The scenario then waits for the PR's slow-gate to go green and submits
+// The item is seeded at Validate with a non-draft member PR on fabrik/issue-<N>
+// and no autonomy label, and the engine runs Validate itself: a seeded bare
+// stage:Validate:complete is stripped and re-run because the engine has no
+// Validate completion SHA for it (#2343). Once Validate is complete the scenario
+// clears the board Status, so the engine cannot act on the item, and applies
+// fabrik:yolo. It then waits for the PR's slow-gate to go green and submits
 // a reviewer-token APPROVE (so neither the CI gate, the review gate nor
 // reviewGateBlocksLanding can claim the item first), posts the human comment,
 // verifies it through REST, waits for GitHub to finish computing the PR's
@@ -55,9 +58,9 @@ import (
 // bed relying on Pruefer's review with a long timeout could apply fabrik:paused
 // and corrupt A1/A2.
 //
-// Wall-clock: ~20–35 min per train mode and auth leg (one slow-gate CI wait ~10
-// min, one comment-review Claude invocation, then the landing — train mode adds
-// a trial CI cycle). Cost: ~$0.10–0.50 per run.
+// Wall-clock: ~30–50 min per train mode and auth leg (one Validate run and its
+// slow-gate CI wait ~10 min, one comment-review Claude invocation, then the
+// landing — train mode adds a trial CI cycle). Cost: ~$1–3 per run.
 func TestCommentLandingGateHolds(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -73,9 +76,21 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	trainMode := resolveTrainMode(t, env)
 	t.Logf("bed train mode: %s", trainMode)
 
-	issue, pr, itemID := seedLandingCandidate(t, env, repo, "main", "gate", "e2e/comment-landing/gate.md", "fabrik:yolo")
+	// The engine runs Validate itself, so it holds a Validate completion record
+	// it trusts (#2343). No autonomy label yet, so a completed Validate lands
+	// nothing. The approval comes first so the authoritative review gate cannot
+	// hold the completion.
+	issue, pr, itemID := seedLandingCandidate(t, env, repo, "main", "gate", "e2e/comment-landing/gate.md")
+	SubmitPRReview(t, env, reviewerToken, repo, pr, "APPROVE")
+	WaitForIssueLabel(t, env, repo, issue, "stage:Validate:complete", 60*time.Minute)
 
-	// Clear the CI and review gates before the item is visible to the engine.
+	// Hide the item from the engine, then make it a landing candidate.
+	clearIssueStatus(t, env, itemID)
+	AddLabel(t, env, repo, issue, "fabrik:yolo")
+	t.Logf("Validate complete on %s#%d; Status cleared and fabrik:yolo applied", repo, issue)
+
+	// Clear the CI and review gates on the head Validate left (it may have
+	// rebased) before the item is visible to the engine again.
 	WaitForCheckConclusion(t, env, repo, pr, "slow-gate", "success", 30*time.Minute)
 	SubmitPRReview(t, env, reviewerToken, repo, pr, "APPROVE")
 
