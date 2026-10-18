@@ -2428,6 +2428,34 @@ func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
 	})
 }
 
+// lockWriteRetryReason is the admission-cooldown reason recorded when a worker
+// was refused because its lock (or fabrik:editing) label could not be written
+// (#2393, ADR 2393).
+const lockWriteRetryReason = "lock-write-failed"
+
+// lockWriteRetryInterval is the short cooldown after a refused dispatch: one
+// poll, floored at a second. The entry is consumed on admission (ADR 2096), so a
+// persistent failure costs one failed label write per poll, never a model run.
+func (e *Engine) lockWriteRetryInterval() time.Duration {
+	d := time.Duration(e.cfg.PollSeconds) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// recordLockWriteCooldown re-admits an item whose dispatch was refused because
+// the lock write failed (#2393). It records nothing else: no StageAttempted, no
+// retry or breaker charge.
+func (e *Engine) recordLockWriteCooldown(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: lockWriteRetryReason,
+		Until:  e.now().Add(e.lockWriteRetryInterval()),
+	})
+}
+
 // rearmPeriodicReEval re-stamps the periodic re-evaluation cooldown for an item
 // that was admitted (and had its expired cooldowns consumed) but dropped before
 // joining deepFetchCandidates, which is the only place the poll defer re-stamps

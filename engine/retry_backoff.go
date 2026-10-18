@@ -82,6 +82,9 @@ var shortAdmissionCooldownReasons = map[string]bool{
 	"retry-backoff":   true,
 	"sentinel-live":   true,
 	"merge-unsettled": true,
+	// lockWriteRetryReason (#2393): a refused dispatch must be retried on the
+	// next poll, not after an idle back-off.
+	"lock-write-failed": true,
 }
 
 // minDueWakeInterval floors the FR-003 cap, matching the retry_backoff minimum.

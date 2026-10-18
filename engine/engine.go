@@ -257,6 +257,9 @@ type Engine struct {
 	// forge tracks the unbroken run of GitHub transport failures behind the
 	// account-wide forge-unreachable hold (#2393, forge_hold.go). Zero-value ready.
 	forge forgeHealth
+	// lockWriteRefusalDisabled is the test seam that restores the pre-#2393
+	// "spawn the worker unlocked" behaviour (forge_hold.go).
+	lockWriteRefusalDisabled atomic.Bool
 	// localAPI is the local read API server (#1967); nil until Run() binds it
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex

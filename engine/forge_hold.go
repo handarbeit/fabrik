@@ -59,6 +59,13 @@ func (e *Engine) SetForgeHoldDisabledForTest(disabled bool) {
 	e.forge.mu.Unlock()
 }
 
+// SetLockWriteRefusalDisabledForTest neutralises the lock-write refusal (R1/R2):
+// a failed lock or fabrik:editing write is logged and the worker spawns anyway,
+// as before #2393.
+func (e *Engine) SetLockWriteRefusalDisabledForTest(disabled bool) {
+	e.lockWriteRefusalDisabled.Store(disabled)
+}
+
 // SetForgeHoldThresholdsForTest overrides the engagement thresholds (0 = default).
 func (e *Engine) SetForgeHoldThresholdsForTest(minFailures int, window time.Duration) {
 	e.forge.mu.Lock()

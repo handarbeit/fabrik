@@ -726,7 +726,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// the stage completes or is permanently abandoned — NOT on every
 	// processItem return. This keeps the issue locked through cooldown
 	// retries so other instances don't pick it up.
-	releaseLock, workerStartedAt, workerDone, ok := e.acquireLockAndVerify(ctx, item, stage, owner, repo, repoStr, lockLabel)
+	if e.forgeHeld() {
+		// Backstop for the dispatch-site gate (#2393): the forge went unreachable
+		// between admission and here. Nothing recorded; the item is re-admitted
+		// when the hold lifts.
+		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting stage %q\n", stage.Name)
+		return nil
+	}
+	releaseLock, workerStartedAt, workerDone, ok, lockErr := e.acquireLockAndVerify(ctx, item, stage, owner, repo, repoStr, lockLabel)
 	defer func() {
 		if workerDone != nil {
 			close(workerDone)
@@ -751,6 +758,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Skipped:     true,
 	})
 
+	if lockErr != nil {
+		// The lock label could not be written (#2393, ADR 2393): without it the
+		// worker's results cannot be recorded and the next poll would dispatch
+		// the item again. No worker, no in_progress write, no StageAttempted and
+		// no retry charge — only a short admission cooldown.
+		e.logf(item.Number, "lock", "could not add lock label %q for stage %q: %v — not starting a worker; retrying after a short cooldown\n", lockLabel, stage.Name, lockErr)
+		e.recordLockWriteCooldown(item)
+		return nil
+	}
 	if !ok {
 		// Lock-then-verify tie-break was lost — acquireLockAndVerify already
 		// released whatever it had acquired.
@@ -1031,10 +1047,17 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 // false, this instance lost the lock-then-verify tie-break against a competing
 // instance and release has already been called — the caller must return immediately
 // without calling release again.
-func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, owner, repo, repoStr, lockLabel string) (release func(), workerStartedAt time.Time, workerDone chan struct{}, ok bool) {
+//
+// lockErr is non-nil (with ok=false and a no-op release) when the lock label
+// could not be written: the caller must not spawn a worker (#2393, ADR 2393). It
+// is checked before any other side effect, so no in_progress write is attempted.
+func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, owner, repo, repoStr, lockLabel string) (release func(), workerStartedAt time.Time, workerDone chan struct{}, ok bool, lockErr error) {
 	lockAcquired := false
 	workerStartedAt = time.Now()
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
+		if !e.lockWriteRefusalDisabled.Load() {
+			return func() {}, workerStartedAt, nil, false, err
+		}
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		lockAcquired = true
@@ -1096,7 +1119,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 					if e.lockIdentity() > competing {
 						e.logf(item.Number, "skip", "lock conflict with %q — yielding (lexicographic tie-break)\n", competing)
 						release()
-						return release, workerStartedAt, workerDone, false
+						return release, workerStartedAt, workerDone, false, nil
 					}
 					e.logf(item.Number, "info", "lock conflict with %q — proceeding as winner\n", competing)
 					break
@@ -1118,7 +1141,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		e.setStatusLine(item, statusLineStageRunning(stage.Name))
 	}
 
-	return release, workerStartedAt, workerDone, true
+	return release, workerStartedAt, workerDone, true, nil
 }
 
 // runInvocationWithExtension resolves invocation options (model/effort overrides,
