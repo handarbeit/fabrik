@@ -699,7 +699,7 @@ mutate "ClearBlanket leaves the blanket fault in place" \
 
 mutate "the result observer is never told" \
   'TestResultObserverSeesEveryOutcome' \
-  'fault.go::s{\tif obs != nil \{\n\t\tobs\(err\)\n\t\}\n}{}'
+  'fault.go::s{\t\tobs\(err\)\n}{\t\t_ = obs\n}'
 
 # --- R4: mutation log (#1457) -----------------------------------------------
 
