@@ -202,10 +202,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			return
 		}
 		alreadyAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
+		awaitingCIArmed := alreadyAwaitingCI
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
 			} else {
+				awaitingCIArmed = true
 				if c := e.cache(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-ci")
 				}
@@ -222,6 +224,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		// *feedback* is a separate matter: settleAwaitingCIScan's handler chain
 		// detects and dispatches it during the CI wait (#1953 R1), without
 		// writing that label.
+		// fabrik:awaiting-ci is the durable completion signal of this Validate stage
+		// run, so the forced re-run marker (#2378) can go. A comment pass never gets
+		// here while it is set (finalizeComments), so this is a real stage run.
+		if stage.Name == "Validate" && awaitingCIArmed {
+			e.clearValidateRerun(item, labelsLive)
+		}
 		e.logf(item.Number, "awaiting-ci", "deferring stage:%s:complete until CI gate clears\n", stage.Name)
 		return // catch-up loop adds stage:X:complete when checkCIGate clears
 	}
@@ -237,6 +245,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 		}
 		if stage.Name == "Validate" {
+			// The completion label is the durable signal of this Validate stage
+			// run: the forced re-run marker (#2378) can go.
+			e.clearValidateRerun(item, labelsLive)
 			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			wm := e.worktreesFor(item.Repo)
 			if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {

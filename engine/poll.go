@@ -955,6 +955,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:skill-unresolved",
 	"fabrik:tools-denied",
 	"fabrik:toolchain-stale",
+	"fabrik:validate-rerun",
 }
 
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
