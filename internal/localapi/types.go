@@ -449,6 +449,17 @@ type HealthResult struct {
 	// Draining is present only while the daemon drains for a SIGHUP restart
 	// (#2259, ADR 2259).
 	Draining *DrainHealth `json:"draining,omitempty"`
+	// ForgeHold is present only while the forge-unreachable hold is engaged
+	// (#2393, ADR 2393): GitHub calls keep failing on transport errors, so the
+	// daemon starts no new model work until one succeeds.
+	ForgeHold *ForgeHoldHealth `json:"forge_hold,omitempty"`
+}
+
+// ForgeHoldHealth describes the forge-unreachable hold.
+type ForgeHoldHealth struct {
+	Since     Known[time.Time] `json:"since"`
+	Failures  int              `json:"consecutive_failures"`
+	LastError string           `json:"last_error"`
 }
 
 // DrainHealth describes a SIGHUP drain: the first SIGHUP stops dispatch and polling
