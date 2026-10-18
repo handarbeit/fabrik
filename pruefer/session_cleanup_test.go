@@ -100,7 +100,10 @@ func TestRemoveReviewSessions_StagesToolResultsThenDeletes(t *testing.T) {
 	profile := t.TempDir()
 	_, dir := seedSession(t, profile, cwdPR7, sessA)
 	seedToolResult(t, dir, "toolu_01.txt", "full output")
-	seedToolResult(t, dir, "../evil name.txt", "x") // base name only: stays inside tool-results
+	// File names with unsafe characters (a space, a leading dot) are staged
+	// under a sanitised name.
+	seedToolResult(t, dir, "evil name.txt", "spaced")
+	seedToolResult(t, dir, ".hidden$file.txt", "dotted")
 	// A symlink in tool-results must not be followed out of the session.
 	secret := filepath.Join(t.TempDir(), "secret.txt")
 	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
@@ -116,6 +119,11 @@ func TestRemoveReviewSessions_StagesToolResultsThenDeletes(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(stage, "toolu_01.txt")); err != nil || string(got) != "full output" {
 		t.Errorf("tool result not staged: %q %v", got, err)
+	}
+	for name, want := range map[string]string{"evil-name.txt": "spaced", "hidden-file.txt": "dotted"} {
+		if got, err := os.ReadFile(filepath.Join(stage, name)); err != nil || string(got) != want {
+			t.Errorf("%s: sanitised tool result not staged: %q %v", name, got, err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(stage, "link.txt")); !os.IsNotExist(err) {
 		t.Errorf("a symlink was staged: %v", err)
