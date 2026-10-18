@@ -99,6 +99,7 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 	pf := e.unprocessedFeedback(item, alreadyLive)
 	if pf.empty() && pf.Live {
 		e.noteGateClear(item, gateFeedback)
+		e.resetFeedbackGapBudget(item)
 		return false
 	}
 	if pf.empty() {
@@ -117,6 +118,8 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 	})
 	if len(pf.DispatcherGap) > 0 {
 		e.repairDispatcherBlindness(item, pf.DispatcherGap)
+	} else if !pf.empty() {
+		e.resetFeedbackGapBudget(item) // held on feedback the dispatcher sees: the gap is gone (#2349)
 	}
 	return true
 }

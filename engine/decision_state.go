@@ -117,11 +117,11 @@ type ejectionRecord struct {
 
 // trainCapsFile is the persisted merge-train cap state.
 type trainCapsFile struct {
-	Version   int                         `json:"version"`
-	Ejections map[string]ejectionRecord   `json:"ejections,omitempty"`
-	Trials    map[string][]time.Time      `json:"trials,omitempty"`
-	Attempts  map[string][]repairAttempt  `json:"repair_attempts,omitempty"`
-	Requeued  map[string][]string         `json:"repair_requeued,omitempty"`
+	Version   int                        `json:"version"`
+	Ejections map[string]ejectionRecord  `json:"ejections,omitempty"`
+	Trials    map[string][]time.Time     `json:"trials,omitempty"`
+	Attempts  map[string][]repairAttempt `json:"repair_attempts,omitempty"`
+	Requeued  map[string][]string        `json:"repair_requeued,omitempty"`
 }
 
 // decisionPersist serialises the persist step so concurrent mutations converge on the

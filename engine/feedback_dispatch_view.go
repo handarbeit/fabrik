@@ -98,18 +98,28 @@ func (e *Engine) repairDispatcherBlindness(item gh.ProjectItem, gap []gh.Comment
 	}
 	sort.Strings(ids)
 	repo := itemOwnerRepoString(item, e.defaultRepo())
-	key := fmt.Sprintf("%s#%d:%s", repo, item.Number, strings.Join(ids, ","))
+	key := fmt.Sprintf("%s#%d", repo, item.Number)
+	sig := strings.Join(ids, ",")
+	head := item.LinkedPRHeadSHA
 
 	e.feedbackGapMu.Lock()
 	if e.feedbackGaps == nil {
-		e.feedbackGaps = make(map[string]int)
+		e.feedbackGaps = make(map[string]feedbackGapState)
 	}
-	n := e.feedbackGaps[key]
+	st := e.feedbackGaps[key]
+	if st.Sig != sig || st.Head != head {
+		// A different gap, or the same gap on a new PR head, is a new problem: it gets
+		// a fresh budget (#2349, R4). The same gap on the same head stays spent.
+		st = feedbackGapState{Sig: sig, Head: head}
+	}
+	n := st.N
 	if n >= feedbackGapRepairBudget {
+		e.feedbackGaps[key] = st
 		e.feedbackGapMu.Unlock()
 		return
 	}
-	e.feedbackGaps[key] = n + 1
+	st.N = n + 1
+	e.feedbackGaps[key] = st
 	e.feedbackGapMu.Unlock()
 
 	list := feedbackIDs(gap)
@@ -125,4 +135,26 @@ func (e *Engine) repairDispatcherBlindness(item gh.ProjectItem, gap []gh.Comment
 		Reason: "feedback-dispatcher-gap",
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
 	})
+}
+
+// feedbackGapState is one item's dispatcher-gap repair budget (#2349, R4): the gap it was
+// spent on (sorted feedback IDs), the PR head at the time, and the repairs used.
+type feedbackGapState struct {
+	Sig  string
+	Head string
+	N    int
+}
+
+// resetFeedbackGapBudget zeroes the item's spent budget when the feedback gate no longer
+// sees a dispatcher gap, so a gap that recurs later is repairable again without a restart.
+// The entry is kept (zeroed): len(feedbackGaps) > 0 stays a valid "a repair happened"
+// signal for MaskReviewFromCacheForTest.
+func (e *Engine) resetFeedbackGapBudget(item gh.ProjectItem) {
+	key := fmt.Sprintf("%s#%d", itemOwnerRepoString(item, e.defaultRepo()), item.Number)
+	e.feedbackGapMu.Lock()
+	if st, ok := e.feedbackGaps[key]; ok && st.N != 0 {
+		st.N = 0
+		e.feedbackGaps[key] = st
+	}
+	e.feedbackGapMu.Unlock()
 }

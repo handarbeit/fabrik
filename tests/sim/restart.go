@@ -109,6 +109,10 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 		// The persisted merge-train runs survive a restart; the in-memory state does not.
 		eng.EnableTrainRunsForTest(env.TrainStateDir)
 	}
+	if env.DecisionStateDir != "" {
+		// The merge-train caps and the usage-limit hold survive a restart (#2349).
+		eng.EnableDecisionStateForTest(env.DecisionStateDir)
+	}
 	// Deliberately does NOT call Engine.RegisterObservers (ADR-1592) — see
 	// NewEnv's own doc comment for why this package leaves it uncalled by
 	// default. A scenario needing reactive-observer behavior on a restarted
@@ -134,6 +138,15 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 		issueSeqNext:  nextIssue,
 		cfg:           env.cfg,
 
-		TrainStateDir: env.TrainStateDir,
+		TrainStateDir:    env.TrainStateDir,
+		DecisionStateDir: env.DecisionStateDir,
 	}
+}
+
+// EnableDecisionState switches env's Engine to persisted decision state (merge-train caps and
+// the usage-limit hold, #2349) under a fresh temp directory that RestartEnv carries across.
+func EnableDecisionState(t *testing.T, env *Env) {
+	t.Helper()
+	env.DecisionStateDir = t.TempDir()
+	env.Engine.EnableDecisionStateForTest(env.DecisionStateDir)
 }

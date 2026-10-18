@@ -426,3 +426,69 @@ func TestMarkCommentsProcessed_OnlyGivenBatch(t *testing.T) {
 		t.Error("a comment outside the batch must not be recorded")
 	}
 }
+
+func gapInvalidated(eng *Engine) bool {
+	snap, _ := eng.store.Get("owner/repo", 1)
+	return snap.State().LastDeepFetchAt.IsZero()
+}
+
+// R4 (#2349): a spent repair budget resets when the PR head changes — the same gap IDs on
+// a new head are a new problem — and stays spent while neither head nor gap changes.
+func TestFeedbackGate_SpentGapBudgetResetsOnHeadChange(t *testing.T) {
+	eng, _ := gapEngine(t)
+	round := func(head string) bool {
+		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+		item := gapItem()
+		item.LinkedPRHeadSHA = head
+		if !eng.feedbackGateBlocks(item, false, "advance") {
+			t.Fatal("the gate must keep holding")
+		}
+		return gapInvalidated(eng)
+	}
+	for i := 1; i <= feedbackGapRepairBudget; i++ {
+		if !round("aaa") {
+			t.Fatalf("round %d on head aaa should repair", i)
+		}
+	}
+	if round("aaa") {
+		t.Fatal("budget spent and nothing changed: no further repair (no repair loop)")
+	}
+	if !round("bbb") {
+		t.Fatal("a new PR head must reset the spent budget")
+	}
+}
+
+// R4 (#2349): once the gate no longer sees a dispatcher gap (here: it clears), the next gap
+// on the same head is repairable again.
+func TestFeedbackGate_SpentGapBudgetResetsWhenGateClears(t *testing.T) {
+	eng, _ := gapEngine(t)
+	client := eng.client.(*mockGitHubClient)
+	for i := 1; i <= feedbackGapRepairBudget; i++ {
+		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+		eng.feedbackGateBlocks(gapItem(), false, "advance")
+	}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	eng.feedbackGateBlocks(gapItem(), false, "advance")
+	if gapInvalidated(eng) {
+		t.Fatal("budget should be spent before the clear")
+	}
+
+	// The review is processed: the live read now finds nothing pending.
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error { item.LinkedPRReviews = nil; return nil }
+	clear := gapItem()
+	clear.LinkedPRReviews = nil
+	if eng.feedbackGateBlocks(clear, true, "advance") {
+		t.Fatal("the gate should clear with no feedback")
+	}
+
+	// The gap recurs on the same head: repairable again.
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		item.LinkedPRReviews = []gh.PRReview{bodyOnlyReview}
+		return nil
+	}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	eng.feedbackGateBlocks(gapItem(), false, "advance")
+	if !gapInvalidated(eng) {
+		t.Fatal("a gap that recurs after the gate cleared must get a fresh budget")
+	}
+}
