@@ -1347,6 +1347,13 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		}
 	}
 
+	// Forge-unreachable hold (#2393): do not stretch the idle interval while held,
+	// so recovery is noticed within about one poll.
+	if !e.backoffRateLimitLow && effectiveInterval > configuredInterval && e.forgeHeld() {
+		e.logf(0, "poll", "next poll capped to %v: GitHub unreachable, probing for recovery\n", configuredInterval)
+		effectiveInterval = configuredInterval
+	}
+
 	// Notify webhook manager of any new repos discovered during this poll.
 	if e.webhookMgr != nil && result.SeenRepos != nil {
 		e.webhookMgr.UpdateRepos(result.SeenRepos)
@@ -2218,6 +2225,28 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		procList        []procArgvEntry
 		procListErr     error
 	)
+
+	// Forge-unreachable hold (#2393): start nothing. Every candidate is handed
+	// back for re-admission like a slot-deferred one, with nothing recorded
+	// against it (no WorkerEntered, cooldown, label or counter), so it is picked
+	// up by the first poll after the hold lifts.
+	if e.forgeHeld() && board != nil && board.ProjectID != "" {
+		// Recovery probe: one cheap read per poll while held, so the hold lifts
+		// the moment the forge answers even when nothing else in this poll made a
+		// live call (a board served from the cache). Its outcome reaches the
+		// tracker through the client's result observer.
+		_, _ = e.client.FetchProjectUpdatedAt(board.ProjectID)
+	}
+	if e.forgeHeld() {
+		held := make([]string, 0, len(deepFetchCandidates))
+		for _, item := range deepFetchCandidates {
+			held = append(held, issueKey(item, e.defaultRepo()))
+		}
+		if len(held) > 0 {
+			e.logf(0, "forge-hold", "GitHub is unreachable; holding dispatch of %d candidate(s) until a GitHub call succeeds\n", len(held))
+		}
+		return 0, held
+	}
 
 	for _, item := range e.orderDispatchCandidates(deepFetchCandidates) {
 		if ctx.Err() != nil {

@@ -198,6 +198,16 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
+	// Forge-unreachable hold (#2393): no worker, no label write. The caller
+	// charged the cycle synchronously before this call, so refund it — nothing
+	// ran. The level-triggered handler that dispatched this re-evaluates it on a
+	// later poll, once the hold lifts.
+	if e.forgeHeld() {
+		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting %s re-invocation for stage %q\n", opts.tag, stage.Name)
+		e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, didNotRunForgeHeld, opts.cycle)
+		return
+	}
+
 	// Claim the item via the Store so the dispatch guard (snap.Worker() != nil) blocks
 	// double-dispatch before the goroutine starts — as a QUEUED worker: it holds no
 	// worker slot until the goroutine acquires e.sem, and until then status and

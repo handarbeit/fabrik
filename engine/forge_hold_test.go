@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/warnings"
 )
 
@@ -169,4 +172,121 @@ func TestForgeHold_ConcurrentObserve(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// engageForgeHold drives the tracker into the held state on the test clock.
+func engageForgeHold(e *Engine, clk *forgeClock) {
+	for i := 0; i < forgeHoldMinFailures; i++ {
+		e.ObserveForgeResult(errTimeout)
+	}
+	clk.Advance(forgeHoldWindow)
+	e.ObserveForgeResult(errTimeout)
+}
+
+func TestForgeHold_DispatchCandidatesStartsNothing(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	e := testEngine(t, client, claude)
+	clk := &forgeClock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	e.SetClock(clk)
+	prev := warnings.WarningsPathOverride
+	warnings.WarningsPathOverride = t.TempDir() + "/warnings.json"
+	t.Cleanup(func() { warnings.WarningsPathOverride = prev })
+	engageForgeHold(e, clk)
+	if !e.forgeHeld() {
+		t.Fatal("hold not engaged")
+	}
+
+	item := gh.ProjectItem{Number: 7, Title: "t", Status: "Research"}
+	dispatched, deferred := e.dispatchCandidates(context.Background(), &gh.ProjectBoard{}, []gh.ProjectItem{item})
+	e.wg.Wait()
+	if dispatched != 0 {
+		t.Errorf("dispatched = %d, want 0 while held", dispatched)
+	}
+	if len(deferred) != 1 {
+		t.Errorf("deferred = %v, want the candidate handed back for re-admission", deferred)
+	}
+	if len(claude.calls) != 0 || len(client.addLabelCalls) != 0 {
+		t.Errorf("held dispatch touched claude/labels: %d calls, %v", len(claude.calls), client.addLabelCalls)
+	}
+	snap, err := e.store.Get("owner/repo", 7)
+	if err == nil && snap.Worker() != nil {
+		t.Error("a worker handle was recorded while held")
+	}
+}
+
+func TestForgeHold_CommentReviewIsNoOp(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	e := testEngine(t, client, claude)
+	clk := &forgeClock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	e.SetClock(clk)
+	prev := warnings.WarningsPathOverride
+	warnings.WarningsPathOverride = t.TempDir() + "/warnings.json"
+	t.Cleanup(func() { warnings.WarningsPathOverride = prev })
+	engageForgeHold(e, clk)
+
+	item := gh.ProjectItem{Number: 8}
+	comments := []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "someone", Body: "hi"}}
+	kind, err := e.processCommentsClassified(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Review", Order: 1}, comments)
+	if err != nil || kind != didNotRunForgeHeld {
+		t.Fatalf("kind=%q err=%v, want didNotRunForgeHeld", kind, err)
+	}
+	if len(client.addLabelCalls) != 0 || len(client.addCommentReactionCalls) != 0 || len(claude.forCommentsCalls) != 0 {
+		t.Error("held comment review had side effects")
+	}
+	if got := e.commentBreakerCount(item); got != 0 {
+		t.Errorf("breaker charged: %d", got)
+	}
+}
+
+func TestForgeHold_ConflictResolutionNotAttemptedAndUncharged(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	e := testEngine(t, &mockGitHubClient{}, claude)
+	clk := &forgeClock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	e.SetClock(clk)
+	prev := warnings.WarningsPathOverride
+	warnings.WarningsPathOverride = t.TempDir() + "/warnings.json"
+	t.Cleanup(func() { warnings.WarningsPathOverride = prev })
+	engageForgeHold(e, clk)
+
+	_, _, err := e.resolveConflictWithClaude(context.Background(), "owner/repo", gh.ProjectItem{Number: 9}, t.TempDir(), &stages.Stage{Name: "Queued"}, "sha", nil, "", nil, InvokeOptions{})
+	if !errors.Is(err, errForgeHeldNotAttempted) {
+		t.Fatalf("err = %v, want errForgeHeldNotAttempted", err)
+	}
+	if !trainCancelled(context.Background(), err) {
+		t.Error("trainCancelled must read the forge hold as an uncharged not-attempted outcome")
+	}
+	if len(claude.forCommentsCalls) != 0 {
+		t.Error("claude invoked while held")
+	}
+}
+
+func TestForgeHold_ReinvokeRefundsAndSpawnsNothing(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	e := testEngine(t, &mockGitHubClient{}, claude)
+	clk := &forgeClock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	e.SetClock(clk)
+	prev := warnings.WarningsPathOverride
+	warnings.WarningsPathOverride = t.TempDir() + "/warnings.json"
+	t.Cleanup(func() { warnings.WarningsPathOverride = prev })
+	engageForgeHold(e, clk)
+
+	refunded := false
+	built := false
+	e.dispatchReinvoke(context.Background(), &gh.ProjectBoard{}, gh.ProjectItem{Number: 10}, &stages.Stage{Name: "Review"}, reinvokeOpts{
+		tag:   "test-reinvoke",
+		build: func(string) []gh.Comment { built = true; return nil },
+		cycle: cycleCharge{label: "test", refund: func(repo string, n int, stage string) []itemstate.Mutation {
+			refunded = true
+			return nil
+		}},
+	})
+	e.wg.Wait()
+	if !refunded {
+		t.Error("the pre-charged cycle was not refunded")
+	}
+	if built || len(claude.forCommentsCalls) != 0 {
+		t.Error("held reinvoke built comments or invoked claude")
+	}
 }
