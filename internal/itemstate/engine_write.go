@@ -74,8 +74,8 @@ type shallowView struct {
 // engineWriteProtected reports whether key's record at W shields a listing
 // fetched at fetchedAt: fetchedAt < W+grace.
 func engineWriteProtected(item *ItemState, key string, fetchedAt time.Time, grace time.Duration) bool {
-	w, ok := item.EngineWriteAt[key]
-	return ok && fetchedAt.Before(w.Add(grace))
+	w := recordedAt(item, key)
+	return !w.IsZero() && fetchedAt.Before(w.Add(grace))
 }
 
 // engineWriteConfirm marks key for dropping once a listing fetched at or after
@@ -108,15 +108,10 @@ func protectStatusClosed(item *ItemState, status string, isClosed bool, fetchedA
 			v.Drop = append(v.Drop, k)
 		}
 	}
-	if fetchedAt.IsZero() || len(item.EngineWriteAt) == 0 {
+	if fetchedAt.IsZero() || !hasRecords(item) {
 		return v
 	}
-	for _, w := range item.EngineWriteAt {
-		if fetchedAt.Before(w.Add(grace)) {
-			v.Active = true
-			break
-		}
-	}
+	v.Active = anyRecordActive(item, fetchedAt, grace)
 
 	if engineWriteProtected(item, engineWriteStatusKey, fetchedAt, grace) && status != item.Status {
 		v.Status = item.Status
@@ -181,7 +176,7 @@ func protectLabels(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grac
 // the two can never disagree.
 func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grace time.Duration, now time.Time) shallowView {
 	v := protectStatusClosed(item, pi.Status, pi.IsClosed, fetchedAt, grace, now)
-	if fetchedAt.IsZero() || len(item.EngineWriteAt) == 0 {
+	if fetchedAt.IsZero() || !hasRecords(item) {
 		return v
 	}
 	protectLabels(item, pi, fetchedAt, grace, &v)

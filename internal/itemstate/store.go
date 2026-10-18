@@ -41,6 +41,11 @@ type Store struct {
 	// freshness baselines). Test seam only (SetLegacyDeepFetchApplyForTest).
 	legacyDeepFetchApply atomic.Bool
 
+	// observedOrderingOff disables the observed-at ordering rule (#2348): no
+	// record is kept or consulted and Reconcile's removal guard is lifted. Test
+	// seam only (SetObservedOrderingDisabledForTest).
+	observedOrderingOff atomic.Bool
+
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
@@ -313,6 +318,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	// equal here (the map itself is kept either way).
 	unchanged := before
 	unchanged.EngineWriteAt = item.EngineWriteAt
+	unchanged.ObservedAt = item.ObservedAt
 	if reflect.DeepEqual(unchanged, *item) {
 		snap := newSnapshot(*item) // capture while lock held
 		s.mu.Unlock()
@@ -425,7 +431,7 @@ func (s *Store) getOrCreate(key string) *ItemState {
 	}
 	// Parse repo and number from the key "owner/repo#N".
 	repo, number := parseKey(key)
-	item := &ItemState{Repo: repo, Number: number}
+	item := &ItemState{Repo: repo, Number: number, AddedAt: time.Now()}
 	s.items[key] = item
 	return item
 }
@@ -436,6 +442,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	switch v := m.(type) {
 
 	case IssueOpened:
+		if v.Partial {
+			return s.applyPartialOpened(item, v)
+		}
 		// Merge labels: opened may arrive out-of-order, after labeled/unlabeled
 		// events have already been applied. Unioning preserves any labels added
 		// by subsequent delta events rather than overwriting them with the
@@ -451,19 +460,35 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return applyProjectItem(item, merged)
 
 	case IssueMilestoneUpdated:
+		if observedStale(item, observedMilestoneKey, v.At) {
+			return 0
+		}
+		s.observe(item, observedMilestoneKey, v.At)
 		return applyMilestone(item, v.Milestone, true)
 
 	case IssueLabeled:
+		if s.dropLabelEvent(item, v.Label, v.At, v.EchoOfEngine) {
+			return 0
+		}
+		s.observe(item, engineWriteLabelKey(v.Label), v.At)
 		if !containsString(item.Labels, v.Label) {
 			item.Labels = append(item.Labels, v.Label)
 		}
 		return LabelsChanged
 
 	case IssueUnlabeled:
+		if s.dropLabelEvent(item, v.Label, v.At, v.EchoOfEngine) {
+			return 0
+		}
+		s.observe(item, engineWriteLabelKey(v.Label), v.At)
 		item.Labels = removeString(item.Labels, v.Label)
 		return LabelsChanged
 
 	case IssueClosed:
+		if observedStale(item, observedClosedKey, v.At) {
+			return 0
+		}
+		s.observe(item, observedClosedKey, v.At)
 		item.State = "closed"
 		item.IsClosed = true
 		return StateChanged
@@ -471,10 +496,14 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case LocalIssueClosed:
 		item.State = "closed"
 		item.IsClosed = true
-		recordEngineWrite(item, engineWriteClosedKey, time.Now(), s.graceLocked())
+		s.recordEngine(item, engineWriteClosedKey, time.Now())
 		return StateChanged | EngineWriteRecordedChanged
 
 	case IssueReopened:
+		if observedStale(item, observedClosedKey, v.At) {
+			return 0
+		}
+		s.observe(item, observedClosedKey, v.At)
 		item.State = "open"
 		item.IsClosed = false
 		return StateChanged
@@ -513,7 +542,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return CommentsChanged
 
 	case LocalStatusUpdated:
-		recordEngineWrite(item, engineWriteStatusKey, time.Now(), s.graceLocked())
+		s.recordEngine(item, engineWriteStatusKey, time.Now())
 		if item.Status != v.NewStatus {
 			item.Status = v.NewStatus
 			item.Terminal = false
@@ -528,7 +557,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return TerminalChanged
 
 	case LocalLabelAdded:
-		recordEngineWrite(item, engineWriteLabelKey(v.Label), time.Now(), s.graceLocked())
+		s.recordEngine(item, engineWriteLabelKey(v.Label), time.Now())
 		if !containsString(item.Labels, v.Label) {
 			item.Labels = append(item.Labels, v.Label)
 			return LabelsChanged | EngineWriteRecordedChanged
@@ -536,7 +565,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return EngineWriteRecordedChanged
 
 	case LocalLabelRemoved:
-		recordEngineWrite(item, engineWriteLabelKey(v.Label), time.Now(), s.graceLocked())
+		s.recordEngine(item, engineWriteLabelKey(v.Label), time.Now())
 		if containsString(item.Labels, v.Label) {
 			item.Labels = removeString(item.Labels, v.Label)
 			return LabelsChanged | EngineWriteRecordedChanged
@@ -599,7 +628,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if legacy {
 			flags = applyProjectItem(item, fresh)
 		} else {
-			flags = applyDeepFetched(item, fresh, s.graceLocked(), time.Now())
+			flags = s.applyDeepFetchedOrdered(item, fresh)
 		}
 		item.LastDeepFetchAt = time.Now()
 		// The freshness baselines only ever move forward: a deep-fetch apply
@@ -623,11 +652,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case BlockedByEdgeAdded:
 		for _, d := range item.BlockedBy {
+<<<<<<< HEAD
 			if sameDependency(v.Repo, d, v.Dep) {
+=======
+			if d.Repo == v.Dep.Repo && d.Number == v.Dep.Number {
+				s.observe(item, observedBlockedByKey, time.Now())
+>>>>>>> f0403d55 (feat(itemstate): add observed-at ordering record and per-fact ordering in the Store)
 				return 0
 			}
 		}
 		item.BlockedBy = append(item.BlockedBy, v.Dep)
+		s.observe(item, observedBlockedByKey, time.Now())
 		return BlockedByChanged
 
 	case BlockedByEdgeRemoved:
@@ -1051,7 +1086,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return BaseBranchChanged
 
 	case PRReviewSubmitted:
+		if observedStale(item, observedReviewsKey, v.At) {
+			return 0
+		}
 		ensureLinkedPR(item, v.Number)
+		s.observe(item, observedReviewsKey, v.At)
+		// One shape whichever producer filled the list: the latest review per
+		// author, a re-review or an edit replacing the earlier entry (#2348, R5).
+		if s.ordering() {
+			item.LinkedPR.Reviews = mergeReviews(item.LinkedPR.Reviews, v.Review)
+			return LinkedPRChanged
+		}
 		// Upsert by DatabaseID so a re-review replaces the prior entry.
 		for i, r := range item.LinkedPR.Reviews {
 			if r.DatabaseID == v.Review.DatabaseID && v.Review.DatabaseID != 0 {
@@ -1088,7 +1133,21 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return 0
 
 	case PRHeadSHAUpdated:
+		auth := authorityOf(v.At, v.AtIsFetchStart, s.graceLocked())
+		if v.SHA == "" && s.ordering() {
+			// A link-only write (a payload that carries the PR but not its head)
+			// establishes the linkage and writes nothing else (#2348, R3).
+			ensureLinkedPR(item, v.LinkedPRNum)
+			if v.LinkedPRNum != 0 {
+				item.LinkedPR.Number = v.LinkedPRNum
+			}
+			return LinkedPRChanged
+		}
+		if observedStale(item, observedHeadKey, auth) {
+			return 0
+		}
 		ensureLinkedPR(item, v.LinkedPRNum)
+		s.observe(item, observedHeadKey, auth)
 		if v.LinkedPRNum != 0 {
 			item.LinkedPR.Number = v.LinkedPRNum
 		}
@@ -1139,7 +1198,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return flags
 
 	case PRDetailsUpdated:
+		auth := authorityOf(v.At, v.AtIsFetchStart, s.graceLocked())
+		if observedStale(item, observedLinkedPRKey, auth) {
+			return 0
+		}
 		ensureLinkedPR(item, v.PRNumber)
+		s.observe(item, observedLinkedPRKey, auth)
 		item.LinkedPR.Number = v.PRNumber
 		item.LinkedPR.Title = v.Title
 		item.LinkedPR.State = v.State
@@ -1219,13 +1283,31 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return CommentBreakerChanged
 
 	case ShallowBoardItemUpdated:
-		return applyShallowItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
+		flags := applyShallowItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
+		auth := authorityOf(v.FetchedAt, true, s.graceLocked())
+		s.observe(item, observedStatusKey, auth)
+		s.observe(item, observedClosedKey, auth)
+		if !v.Item.LabelsAbsent {
+			s.observe(item, observedLabelsKey, auth)
+		}
+		if v.Item.MilestoneKnown {
+			s.observe(item, observedMilestoneKey, auth)
+		}
+		return flags
 
 	case ProbeBoardItemUpdated:
-		return applyProbeItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
+		flags := applyProbeItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
+		auth := authorityOf(v.FetchedAt, true, s.graceLocked())
+		s.observe(item, observedStatusKey, auth)
+		s.observe(item, observedClosedKey, auth)
+		return flags
 
 	case StatusRefreshed:
-		return applyStatusRefresh(item, v.Status, v.FetchedAt, s.graceLocked(), time.Now())
+		flags := applyStatusRefresh(item, v.Status, v.FetchedAt, s.graceLocked(), time.Now())
+		if v.Status != "" {
+			s.observe(item, observedStatusKey, authorityOf(v.FetchedAt, true, s.graceLocked()))
+		}
+		return flags
 	}
 
 	return 0
@@ -1284,7 +1366,12 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		return Snapshot{}, nil, nil
 	}
 	item := s.items[key]
+	if observedStale(item, observedStatusKey, v.At) {
+		s.mu.Unlock()
+		return Snapshot{}, nil, nil // older than the recorded Status: dropped silently (#2348)
+	}
 	before := newSnapshot(*item).state
+	s.observe(item, observedStatusKey, v.At)
 	if item.Status != v.NewStatus {
 		item.Status = v.NewStatus
 		item.Terminal = false
@@ -1292,6 +1379,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		item.StatusAtGitHub = v.At // zero when the payload carried no updated_at
 		s.stampEligibility(item, before)
 	}
+	before.ObservedAt = item.ObservedAt // bookkeeping, not a change (#2348)
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)
 		s.mu.Unlock()

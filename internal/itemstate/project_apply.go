@@ -101,7 +101,7 @@ func applyProjectItemMode(item *ItemState, pi gh.ProjectItem, authoritativeItemI
 		flags |= CommentsChanged
 	}
 
-	flags |= applyLinkedPRFields(item, pi)
+	flags |= applyLinkedPRFields(item, pi, false, false)
 
 	if flags == 0 && item.Repo == "" {
 		// First-time population of identity fields.
@@ -134,7 +134,7 @@ func applyProjectItemMode(item *ItemState, pi gh.ProjectItem, authoritativeItemI
 // the grace window of the fetch's start keeps its local value, because the
 // response may predate it (or GitHub may still be serving the old read).
 // (#2344, ADR 2344)
-func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, now time.Time) ChangeFlags {
+func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, now time.Time, st deepStale) ChangeFlags {
 	var flags ChangeFlags
 	view := deepFetchLiveView(item, pi, grace, now)
 	if dropEngineWrites(item, view.Drop) {
@@ -202,11 +202,11 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 	}
 	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
-	if pi.MilestoneKnown {
+	if pi.MilestoneKnown && !st.milestone {
 		flags |= applyMilestone(item, pi.Milestone, true)
 	}
 
-	if !reflect.DeepEqual(item.BlockedBy, pi.BlockedBy) {
+	if !st.blockedBy && !reflect.DeepEqual(item.BlockedBy, pi.BlockedBy) {
 		item.BlockedBy = copyDeps(pi.BlockedBy)
 		flags |= BlockedByChanged
 	}
@@ -216,7 +216,7 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 		flags |= CommentsChanged
 	}
 
-	flags |= applyLinkedPRFields(item, pi)
+	flags |= applyLinkedPRFields(item, pi, st.linkedPR, st.reviews)
 
 	// No first-population shortcut as in applyProjectItem: getOrCreate pre-sets
 	// Repo/Number, so an empty Repo cannot be seen here, and a first population
@@ -250,67 +250,71 @@ func deepFetchLiveView(item *ItemState, pi gh.ProjectItem, grace time.Duration, 
 	return v
 }
 
+// deepStale says which facts of a live deep fetch are older than the Store's
+// record of them and must be left alone (#2348, FR-011).
+type deepStale struct {
+	blockedBy, milestone, linkedPR, reviews bool
+}
+
 // applyLinkedPRFields syncs the LinkedPR fields from pi into item and returns
 // the flags it raised. Shared by applyProjectItem and applyDeepFetched so there
-// is one copy of the field-by-field comparison.
-func applyLinkedPRFields(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+// is one copy of the field-by-field comparison. skipGroup leaves every field
+// except the reviews alone, skipReviews leaves the reviews alone (the observed-at
+// rule found them older than the Store's record). The reviews list is stored in
+// its one shape, the latest review per author (#2348, R5).
+func applyLinkedPRFields(item *ItemState, pi gh.ProjectItem, skipGroup, skipReviews bool) ChangeFlags {
 	var flags ChangeFlags
-	if pi.LinkedPRNumber != 0 {
-		if item.LinkedPR == nil {
-			item.LinkedPR = &LinkedPRState{}
-			flags |= LinkedPRChanged
-		}
-		lpr := item.LinkedPR
-		if lpr.Number != pi.LinkedPRNumber ||
-			lpr.HeadSHA != "" || // already set by richer fetch — don't overwrite
-			!reflect.DeepEqual(lpr.Reviews, pi.LinkedPRReviews) ||
-			!reflect.DeepEqual(lpr.ReviewRequests, pi.LinkedPRReviewRequests) ||
-			!reflect.DeepEqual(lpr.ThreadComments, pi.LinkedPRReviewThreadComments) ||
-			lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount ||
-			lpr.IsMergeQueueEnabled != pi.LinkedPRIsMergeQueueEnabled ||
-			lpr.IsInMergeQueue != pi.LinkedPRIsInMergeQueue ||
-			!reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
-			if lpr.Number != pi.LinkedPRNumber {
-				lpr.Number = pi.LinkedPRNumber
-				flags |= LinkedPRChanged
-			}
-			if !reflect.DeepEqual(lpr.Reviews, pi.LinkedPRReviews) {
-				lpr.Reviews = copyPRReviews(pi.LinkedPRReviews)
-				flags |= LinkedPRChanged
-			}
-			if !reflect.DeepEqual(lpr.ReviewRequests, pi.LinkedPRReviewRequests) {
-				lpr.ReviewRequests = copyReviewRequests(pi.LinkedPRReviewRequests)
-				flags |= LinkedPRChanged
-			}
-			if !reflect.DeepEqual(lpr.ThreadComments, pi.LinkedPRReviewThreadComments) {
-				lpr.ThreadComments = copyComments(pi.LinkedPRReviewThreadComments)
-				flags |= LinkedPRChanged | CommentsChanged
-			}
-			if lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount {
-				lpr.ResolvedThreadCount = pi.LinkedPRResolvedThreadCount
-				flags |= LinkedPRChanged
-			}
-			if lpr.IsMergeQueueEnabled != pi.LinkedPRIsMergeQueueEnabled {
-				lpr.IsMergeQueueEnabled = pi.LinkedPRIsMergeQueueEnabled
-				flags |= LinkedPRChanged
-			}
-			if lpr.IsInMergeQueue != pi.LinkedPRIsInMergeQueue {
-				lpr.IsInMergeQueue = pi.LinkedPRIsInMergeQueue
-				flags |= LinkedPRChanged
-			}
-			if !reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
-				if e := pi.LinkedPRMergeQueueEntry; e != nil {
-					c := *e
-					lpr.MergeQueueEntry = &c
-				} else {
-					lpr.MergeQueueEntry = nil
-				}
-				flags |= LinkedPRChanged
-			}
-		}
-	} else if item.LinkedPR != nil && item.LinkedPR.Number != 0 {
+	if pi.LinkedPRNumber == 0 {
 		// PR was delinked — only clear the number, preserve any richer state.
 		// (Full removal would need an explicit IssuePRDelinked mutation.)
+		return flags
+	}
+	if item.LinkedPR == nil {
+		item.LinkedPR = &LinkedPRState{}
+		flags |= LinkedPRChanged
+	}
+	lpr := item.LinkedPR
+	if !skipGroup {
+		if lpr.Number != pi.LinkedPRNumber {
+			lpr.Number = pi.LinkedPRNumber
+			flags |= LinkedPRChanged
+		}
+		if !reflect.DeepEqual(lpr.ReviewRequests, pi.LinkedPRReviewRequests) {
+			lpr.ReviewRequests = copyReviewRequests(pi.LinkedPRReviewRequests)
+			flags |= LinkedPRChanged
+		}
+		if !reflect.DeepEqual(lpr.ThreadComments, pi.LinkedPRReviewThreadComments) {
+			lpr.ThreadComments = copyComments(pi.LinkedPRReviewThreadComments)
+			flags |= LinkedPRChanged | CommentsChanged
+		}
+		if lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount {
+			lpr.ResolvedThreadCount = pi.LinkedPRResolvedThreadCount
+			flags |= LinkedPRChanged
+		}
+		if lpr.IsMergeQueueEnabled != pi.LinkedPRIsMergeQueueEnabled {
+			lpr.IsMergeQueueEnabled = pi.LinkedPRIsMergeQueueEnabled
+			flags |= LinkedPRChanged
+		}
+		if lpr.IsInMergeQueue != pi.LinkedPRIsInMergeQueue {
+			lpr.IsInMergeQueue = pi.LinkedPRIsInMergeQueue
+			flags |= LinkedPRChanged
+		}
+		if !reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
+			if e := pi.LinkedPRMergeQueueEntry; e != nil {
+				c := *e
+				lpr.MergeQueueEntry = &c
+			} else {
+				lpr.MergeQueueEntry = nil
+			}
+			flags |= LinkedPRChanged
+		}
+	}
+	if !skipReviews {
+		reviews := latestReviewPerAuthor(pi.LinkedPRReviews)
+		if !reflect.DeepEqual(lpr.Reviews, reviews) {
+			lpr.Reviews = copyPRReviews(reviews)
+			flags |= LinkedPRChanged
+		}
 	}
 	return flags
 }
@@ -382,7 +386,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 	}
 	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
-	if pi.MilestoneKnown {
+	if pi.MilestoneKnown && !observedStale(item, observedMilestoneKey, authorityOf(fetchedAt, true, grace)) {
 		flags |= applyMilestone(item, pi.Milestone, true)
 	}
 
