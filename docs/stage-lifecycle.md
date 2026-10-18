@@ -184,7 +184,7 @@ Which invocations resume the saved session is one decision, made above the invok
 
 The meta is removed wherever the pointer is (resume-failure abandonment, dead-session removal, the session janitor).
 
-**Stage dispatch**, with a saved session: `reset` set → fresh. Otherwise a session whose last run was **not** closed is a **continuation** and resumes whatever `resume_session` says (a time slice, incomplete or errored run, or a block on input — also after a daemon restart, because the signal is the record, not the in-memory `LastAttemptAt`). A closed session is a **re-entry** and is governed by the option. A saved session with no meta (it predates ADR 2300), or whose meta holds no stage-run outcome (created only by a comment-review pass over such a session), is a continuation iff the stage has run in this uptime, as before, until a stage run records its outcome. With no saved session there is nothing to decide.
+**Stage dispatch**, with a saved session: `reset` set → fresh. Then the **unchanged re-dispatch** case (#2395, ADR 2395): when the stage's inputs — worktree head SHA, issue body and the set of non-Fabrik comments — equal those the previous dispatch of this stage saw (kept in the dispatch record, `<stageName>.dispatches`, see `docs/state-machine.md` §7.21), and the saved session's measured size is known and above `resume_threshold_tokens`, the session is not resumed, in **every** `resume_session` mode and also for a continuation (the one exception to the continuation exemption below): resuming it only re-pays a large context for no new information. An unknown size, changed or unknown inputs (no record, or an empty head SHA on either side) and a size within the threshold fall through to the rules that follow. Otherwise a session whose last run was **not** closed is a **continuation** and resumes whatever `resume_session` says (a time slice, incomplete or errored run, or a block on input — also after a daemon restart, because the signal is the record, not the in-memory `LastAttemptAt`). A closed session is a **re-entry** and is governed by the option. A saved session with no meta (it predates ADR 2300), or whose meta holds no stage-run outcome (created only by a comment-review pass over such a session), is a continuation iff the stage has run in this uptime, as before, until a stage run records its outcome. With no saved session there is nothing to decide.
 
 **Comment review** with a saved session is always governed by the option.
 
@@ -202,6 +202,7 @@ The meta is removed wherever the pointer is (resume-failure abandonment, dead-se
 | `resuming session <id> (size unknown)` | `auto`, no usable size |
 | `resuming session <id> (continuation)` | stage dispatch continuing an open session |
 | `resuming session <id> (resume_session: resume)` | `resume` (default) |
+| `fresh session (unchanged re-dispatch, saved session <N>k > threshold <T>k)` | stage dispatch with inputs unchanged since the previous run and a saved session above the threshold (#2395) |
 | `fresh session (stage state was reset)` | a stage reset flag was consumed |
 | `fresh session (no prior run recorded)` | a pre-ADR-2300 session, first dispatch of this uptime |
 
