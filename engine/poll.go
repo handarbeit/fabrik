@@ -955,6 +955,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:skill-unresolved",
 	"fabrik:tools-denied",
 	"fabrik:toolchain-stale",
+	"fabrik:validate-rerun",
 }
 
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
@@ -2147,6 +2148,14 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		// Pause guard (#2341): the landing decision is taken only on labels that are
 		// live as of refreshAutonomyLabels; a failed refresh fails closed.
 		if e.refuseIfPausedOrUnread(item, labelsLive, "landing") {
+			return
+		}
+		// Forced Validate re-run guard (#2378, ADR 2378): fabrik:validate-rerun means no
+		// Validate stage run has verified the current head, whatever put the completion
+		// label back — defence in depth behind the comment-pass guards. Only here, not
+		// in attemptMergeOnValidate: handleStageComplete's own call is the Validate
+		// stage run that is about to clear the marker.
+		if e.refuseIfValidateRerun(item, "landing") {
 			return
 		}
 		_, _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)

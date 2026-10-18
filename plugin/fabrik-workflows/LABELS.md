@@ -219,6 +219,14 @@ except where noted.
   and the trigger label itself, then Validate dispatches on the next poll.
   Applied to a non-Validate issue: only the trigger label is removed, with
   a warning. Safe to apply mid-flight — held until the active worker exits.
+- **`fabrik:validate-rerun`** — Engine marker for a forced Validate re-run
+  (#2378): set when the engine strips `stage:Validate:complete` so Validate
+  runs again (no recoverable verified head after a restart, the head moved,
+  `fabrik:revalidate`, merge-train auto-repair). While it is present only a
+  Validate **stage** run can restore `stage:Validate:complete`; a Validate
+  comment-review pass still handles its comment but its completion marker is
+  ignored. Removed by the engine when the Validate stage run completes. Do
+  not remove it by hand.
 - **`fabrik:clear-claude-limit`** — One-shot operator command: clears an
   active account-wide Claude usage-limit hold without an engine
   restart. Consumed and removed from every carrying item in the same poll

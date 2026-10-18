@@ -79,6 +79,13 @@ const (
 // attempt) and opts.after is skipped.
 const commentRunBlockedOnInput didNotRunKind = "blocked-on-input"
 
+// commentRunCompletionSuppressed is the sentinel kind processCommentsClassified
+// returns when a Validate comment pass emitted FABRIK_STAGE_COMPLETE while a forced
+// Validate re-run was outstanding (#2378, ADR 2378) and the completion was ignored.
+// Like commentRunBlockedOnInput it is not a did-not-run: the comments were handled,
+// so dispatchReinvoke refunds the cycle and skips opts.after.
+const commentRunCompletionSuppressed didNotRunKind = "completion-suppressed"
+
 // classifyDidNotRun maps a processComments error to the did-not-run set the
 // stage-dispatch path already exempts from max_retries: claudeUsageLimitError,
 // claudeAPIErrorExit (whose classifier already refuses a run that consumed
@@ -268,7 +275,7 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		// converge: refund the pre-dispatch cycle charge and skip opts.after,
 		// whose HEAD-based logic (CI no-op-SHA debounce, rebase auto-merge
 		// re-enable, #1045 no-op refund) is meaningless when nothing ran.
-		if kind == commentRunBlockedOnInput {
+		if kind == commentRunBlockedOnInput || kind == commentRunCompletionSuppressed {
 			// The run executed and paused the item for a human answer (#2280).
 			// Refund the cycle so the bound is free once the human replies, record
 			// no did-not-run state, and skip opts.after: its HEAD-based hooks (CI
@@ -281,7 +288,7 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 					e.store.Apply(m)
 				}
 			}
-			e.logf(item.Number, opts.tag, "invocation blocked on input (%s) — refunding %s cycle counter for stage %q (#2280)\n", kind, opts.cycle.label, stage.Name)
+			e.logf(item.Number, opts.tag, "invocation ended without a stage run's outcome (%s) — refunding %s cycle counter for stage %q (#2280, #2378)\n", kind, opts.cycle.label, stage.Name)
 		} else if kind != "" {
 			e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, kind, opts.cycle)
 		} else {

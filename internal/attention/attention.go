@@ -442,6 +442,7 @@ var labelTable = map[string]labelInfo{
 	"fabrik:editing":                       {"a comment-review or reinvoke worker is editing this item's branch", false},
 	"fabrik:auto-merge-enabled":            {"auto-merge is enabled on the linked PR; GitHub merges it when its requirements are met", false},
 	"fabrik:revalidate":                    {"operator command: the engine re-enters Validate for this item and removes the label", false},
+	"fabrik:validate-rerun":                {"Validate was sent back to run again; only a Validate stage run (not a comment pass) can complete it, and the engine removes the label then", false},
 	"fabrik:clear-claude-limit":            {"operator command: the engine clears the account-wide Claude usage-limit hold and removes the label", false},
 	"fabrik:cruise":                        {"autonomy: advances through every stage by itself but never merges; a human merges", false},
 	"fabrik:yolo":                          {"autonomy: advances through every stage and merges by itself", false},
