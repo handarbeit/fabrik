@@ -359,10 +359,11 @@ func TestProjectsV2ItemFilterNeutralisationCorrupts(t *testing.T) {
 		if e.mc.fetchItemDetailsCount == 0 {
 			t.Fatal("neutralised filter should have fetched item details for the foreign created event")
 		}
-		// The item identity is kept even unfiltered; the Status blanking is the
-		// remaining damage the project filter prevents.
-		if got := e.status(t); got != "" {
-			t.Fatalf("Status = %q, want blanked (unfiltered behaviour)", got)
+		// The item identity is kept even unfiltered. Since #2348 (R3) the created
+		// event is a partial payload that never writes an empty Status over a known
+		// one, so the Status blanking this used to show is prevented there as well.
+		if got := e.status(t); got != "Validate" {
+			t.Fatalf("Status = %q, want kept: a partial payload carries no Status", got)
 		}
 	})
 	t.Run("non-Status edit changes Status", func(t *testing.T) {

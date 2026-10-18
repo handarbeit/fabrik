@@ -274,15 +274,8 @@ func (s *Store) applyPartialOpened(item *ItemState, v IssueOpened) ChangeFlags {
 			}
 			s.observe(item, engineWriteLabelKey(l), v.At)
 		}
-		// A removal needs ordering information: an untimed payload never removes.
-		if !v.At.IsZero() {
-			for _, l := range append([]string(nil), item.Labels...) {
-				if !containsString(pi.Labels, l) && !labelStale(item, l, v.At) {
-					item.Labels = removeString(item.Labels, l)
-					flags |= LabelsChanged
-				}
-			}
-		}
+		// An opened payload describes the issue at creation, so it can only ever
+		// add: a label removed since is the business of its unlabeled event.
 	}
 	if pi.MilestoneKnown && !observedStale(item, observedMilestoneKey, v.At) {
 		s.observe(item, observedMilestoneKey, v.At)

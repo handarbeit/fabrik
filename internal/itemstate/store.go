@@ -1366,12 +1366,16 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		return Snapshot{}, nil, nil
 	}
 	item := s.items[key]
-	if observedStale(item, observedStatusKey, v.At) {
+	obsAt := v.Observed
+	if obsAt.IsZero() {
+		obsAt = v.At
+	}
+	if observedStale(item, observedStatusKey, obsAt) {
 		s.mu.Unlock()
 		return Snapshot{}, nil, nil // older than the recorded Status: dropped silently (#2348)
 	}
 	before := newSnapshot(*item).state
-	s.observe(item, observedStatusKey, v.At)
+	s.observe(item, observedStatusKey, obsAt)
 	if item.Status != v.NewStatus {
 		item.Status = v.NewStatus
 		item.Terminal = false
@@ -1656,6 +1660,24 @@ func (s *Store) Remove(repo string, number int) {
 		delete(s.prToKey, prKeyFor(item.Repo, item.LinkedPR.Number))
 	}
 	delete(s.items, key)
+}
+
+// RemoveIfNotAddedAfter removes the item like Remove, unless the running Store
+// created its record after t, in which case the item is kept and kept=true is
+// returned (#2348, R4): a listing fetched before t cannot know about it, so its
+// absence says nothing. The decision is made under the write lock, so it cannot
+// race the webhook or spawn that added the item. A zero t, an unknown AddedAt or
+// the disabled ordering seam removes unconditionally. Absent items are a no-op.
+func (s *Store) RemoveIfNotAddedAfter(repo string, number int, t time.Time) (kept bool) {
+	key := itemKeyFor(repo, number)
+	s.mu.Lock()
+	if item, ok := s.items[key]; ok && s.ordering() && !t.IsZero() && item.AddedAt.After(t) {
+		s.mu.Unlock()
+		return true
+	}
+	s.mu.Unlock()
+	s.Remove(repo, number)
+	return false
 }
 
 // RemoveByItemID removes the item identified by its project ItemID (board-side ID).

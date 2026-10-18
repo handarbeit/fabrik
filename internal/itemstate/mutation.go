@@ -46,7 +46,7 @@ type IssueOpened struct {
 	// (#2348, R3). Listing callers leave it false.
 	Partial bool
 	// At is the payload's observation time for a Partial item (see IssueLabeled.At).
-	At time.Time
+	At   time.Time
 	Item gh.ProjectItem
 
 	// PreserveBlockedBy is set by callers whose Item.BlockedBy is known to be
@@ -75,7 +75,7 @@ type IssueMilestoneUpdated struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At        time.Time
 	Repo      string
 	Number    int
 	Milestone *gh.Milestone
@@ -89,7 +89,7 @@ type IssueLabeled struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At     time.Time
 	Repo   string
 	Number int
 	Label  string
@@ -112,7 +112,7 @@ type IssueUnlabeled struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At     time.Time
 	Repo   string
 	Number int
 	Label  string
@@ -135,7 +135,7 @@ type IssueClosed struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At     time.Time
 	Repo   string
 	Number int
 	// Sender is the GitHub login that closed the issue, from the webhook
@@ -154,7 +154,7 @@ type IssueReopened struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At     time.Time
 	Repo   string
 	Number int
 }
@@ -230,6 +230,10 @@ type ProjectV2ItemEdited struct {
 	Requester string
 	// At is the GitHub time of the move when known; zero otherwise.
 	At time.Time
+	// Observed is the ordering time (#2348): At when the payload carried one,
+	// otherwise the receipt time. Zero means no ordering information, and At is
+	// used for ordering instead.
+	Observed time.Time
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
@@ -243,7 +247,7 @@ type PRReviewSubmitted struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At time.Time
+	At     time.Time
 	Repo   string
 	Number int
 	Review gh.PRReview
@@ -507,10 +511,10 @@ type PRHeadSHAUpdated struct {
 	// an engine write). Zero means no ordering information (#2348).
 	At             time.Time
 	AtIsFetchStart bool
-	Repo        string
-	Number      int // issue number
-	LinkedPRNum int // PR number to set (0 = leave unchanged)
-	SHA         string
+	Repo           string
+	Number         int // issue number
+	LinkedPRNum    int // PR number to set (0 = leave unchanged)
+	SHA            string
 }
 
 func (PRHeadSHAUpdated) isMutation()       {}
@@ -527,13 +531,13 @@ type PRDetailsUpdated struct {
 	// an engine write). Zero means no ordering information (#2348).
 	At             time.Time
 	AtIsFetchStart bool
-	Repo     string
-	Number   int // issue number
-	PRNumber int
-	Title    string
-	State    string
-	Merged   bool
-	Draft    bool
+	Repo           string
+	Number         int // issue number
+	PRNumber       int
+	Title          string
+	State          string
+	Merged         bool
+	Draft          bool
 }
 
 func (PRDetailsUpdated) isMutation()       {}

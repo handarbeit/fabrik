@@ -142,6 +142,13 @@ func protectLabels(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grac
 		inLocal[l] = true
 	}
 	kept := false
+	// A full label set older than the one the Store last applied (the baseline
+	// every label-carrying listing or live read records) is ignored as a whole:
+	// the local set stands (#2348).
+	if base := item.ObservedAt[observedLabelsKey]; !base.IsZero() && fetchedAt.Before(base.Add(grace)) && !sameStringSet(item.Labels, pi.Labels) {
+		v.Labels = append([]string(nil), item.Labels...)
+		return
+	}
 	merged := make([]string, 0, len(pi.Labels)+len(item.Labels))
 	for _, l := range pi.Labels {
 		if !inLocal[l] && engineWriteProtected(item, engineWriteLabelKey(l), fetchedAt, grace) {

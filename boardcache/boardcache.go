@@ -462,6 +462,8 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 			// New item not in Store — add it fully.
 			drifted++
 			c.store.Apply(itemstate.IssueOpened{Item: *pi})
+			// Record the listing's observation of the new item's facts (#2348).
+			c.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: pi.Repo, Number: pi.Number, Item: *pi, FetchedAt: board.FetchedAt})
 			continue
 		}
 
@@ -492,6 +494,10 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 				Number:      pi.Number,
 				LinkedPRNum: pi.LinkedPRNumberShallow,
 				SHA:         pi.LinkedPRHeadSHA,
+				// The listing's fetch start orders the head against newer observations
+				// (a webhook push, a live read), #2348.
+				At:             board.FetchedAt,
+				AtIsFetchStart: true,
 			})
 		}
 
@@ -506,8 +512,12 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 	for _, snap := range c.store.All() {
 		key := itemKey(snap.Repo(), snap.Number())
 		if !newKeys[key] {
+			// An item added after this listing's fetch started (a webhook, a spawn)
+			// cannot be in it: its absence says nothing, so it stays (#2348, R4).
+			if c.store.RemoveIfNotAddedAfter(snap.Repo(), snap.Number(), board.FetchedAt) {
+				continue
+			}
 			drifted++
-			c.store.Remove(snap.Repo(), snap.Number())
 		}
 	}
 
@@ -978,6 +988,11 @@ func (c *CacheImpl) fetchItemDetails(item *gh.ProjectItem, fromProbe bool) error
 			Number:      item.Number,
 			LinkedPRNum: item.LinkedPRNumber,
 			SHA:         item.LinkedPRHeadSHA,
+			// The request's issue time orders this read against newer observations
+			// (a webhook push, a worker's push) that landed while it was in flight
+			// (#2348, FR-011). Zero when the fallback stamped none.
+			At:             item.DeepFetchStartedAt,
+			AtIsFetchStart: item.DeepFetchLive,
 		})
 	}
 	return nil
@@ -1118,6 +1133,7 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 	} else {
 		c.logFn("[cache] miss: FetchLinkedPR #%d — fetching from GitHub\n", issueNumber)
 	}
+	reqStart := time.Now()
 	pr, err := c.fallback.FetchLinkedPR(owner, repo, issueNumber)
 	if err != nil {
 		return nil, err
@@ -1133,16 +1149,22 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 			State:    pr.State,
 			Merged:   pr.Merged,
 			Draft:    pr.Draft,
+			// The time the read was issued orders it against newer observations
+			// (#2348).
+			At:             reqStart,
+			AtIsFetchStart: true,
 		})
 		// Always write the fresh HeadSHA from the REST response. This fires on every
 		// fallback (not just at link-establishment) so any prior empty-SHA state is
 		// repaired immediately. PRHeadSHAUpdated is idempotent; the REST-fresh SHA is
 		// always authoritative. prToKey is maintained by PRDetailsUpdated above.
 		c.store.Apply(itemstate.PRHeadSHAUpdated{
-			Repo:        fullRepo,
-			Number:      issueNumber,
-			LinkedPRNum: pr.Number,
-			SHA:         pr.HeadSHA,
+			Repo:           fullRepo,
+			Number:         issueNumber,
+			LinkedPRNum:    pr.Number,
+			SHA:            pr.HeadSHA,
+			At:             reqStart,
+			AtIsFetchStart: true,
 		})
 	}
 	// This is linkedPRFetchedAt's single writer, by design — see its doc
