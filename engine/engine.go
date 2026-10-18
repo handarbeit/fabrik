@@ -418,7 +418,7 @@ type Engine struct {
 	decisionStore         *decisionStore
 	decisionWrite         decisionPersist
 	usageLimitFileAtStart bool
-	usageLimitSeedChecked bool
+	usageLimitSeedChecked atomic.Bool
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See

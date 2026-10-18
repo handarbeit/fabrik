@@ -92,10 +92,9 @@ const usageLimitSeedMaxReads = 5
 // error counts as "applied now", failing closed), persists it, and reports true so the
 // sweep skips this poll. A usable file at startup is authoritative and nothing is seeded.
 func (e *Engine) seedUsageLimitFromLabels(board *gh.ProjectBoard) bool {
-	if e.usageLimitSeedChecked {
+	if e.usageLimitSeedChecked.Swap(true) {
 		return false
 	}
-	e.usageLimitSeedChecked = true
 	if e.decisionStore == nil || e.usageLimitFileAtStart {
 		return false
 	}

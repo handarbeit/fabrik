@@ -96,3 +96,21 @@ func TestUsageLimitHold_SeededFromLabelsWhenNoFile(t *testing.T) {
 	env.Clock.Advance(2 * time.Hour)
 	WaitForLabelAbsent(t, env, num, "fabrik:claude-limit", 20)
 }
+
+// TestUsageLimitHold_OperatorClearBeatsSeeding: an operator's fabrik:clear-claude-limit on
+// the first poll after an upgrade (labels, no persisted file) must not be undone by the
+// label-based seeding — the hold stays cleared and the sweep strips the label at once.
+func TestUsageLimitHold_OperatorClearBeatsSeeding(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
+	EnableDecisionState(t, env)
+
+	// Paused, so it never dispatches: only the sweep can remove its limit label.
+	num := FileIssue(t, env, "usage-limit operator clear", "body", "Specify",
+		"fabrik:paused", "fabrik:claude-limit", "fabrik:clear-claude-limit")
+
+	WaitForLabelAbsent(t, env, num, "fabrik:claude-limit", 6)
+	if hasLabel(IssueLabels(t, env, num), "fabrik:clear-claude-limit") {
+		t.Fatal("the one-shot fabrik:clear-claude-limit command label was not consumed")
+	}
+}
