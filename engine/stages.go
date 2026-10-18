@@ -847,8 +847,12 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 			hs.Name, mapKeys(e.statusField.Options), hs.Name)
 	}
 
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return fmt.Errorf("move to %s: %w", hs.Name, pidErr)
+	}
 	e.logf(item.Number, "merge-train", "advancing to %s for merge train batching\n", hs.Name)
-	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		return fmt.Errorf("move to %s: %w", hs.Name, err)
 	}
 	if c := e.cache(); c != nil {
@@ -898,9 +902,13 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return fmt.Errorf("moving to %s: %w", next.Name, pidErr)
+	}
 	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
 	// write-through: already covered by c.UpdateItemStatus call in the else block below
-	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
+	err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID)
 	if err == nil {
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), next.Name)

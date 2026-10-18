@@ -95,8 +95,12 @@ func (e *Engine) maybeArchiveDoneItem(board *gh.ProjectBoard, item gh.ProjectIte
 		return
 	}
 
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return // deferred: project ID unknown (#2396); logged once per episode
+	}
 	e.logf(item.Number, "archive", "Done item settled since %s — archiving\n", completeLabel)
-	if err := e.client.ArchiveProjectItem(board.ProjectID, item.ItemID); err != nil {
+	if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
 		e.logf(item.Number, "warn", "archive-done: could not archive item: %v — will retry next poll\n", err)
 		return
 	}

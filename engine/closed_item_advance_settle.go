@@ -113,8 +113,12 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 // landing at the cleanup column is sufficient to let the existing
 // CleanupWorktree dispatch path (engine/item.go) take over on the next poll.
 func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.ProjectItem, optionID, cleanupName string) {
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return // deferred: project ID unknown (#2396); logged once per episode
+	}
 	e.logf(item.Number, "closed-advance", "closed issue stranded outside %s — advancing\n", cleanupName)
-	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		e.logf(item.Number, "warn", "closed-item advance: could not move to %s: %v — will retry next poll\n", cleanupName, err)
 		return
 	}
