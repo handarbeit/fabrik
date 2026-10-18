@@ -90,13 +90,10 @@ func TestWriteProjectID_GuardNeutralised(t *testing.T) {
 func TestAdvanceToNextStage_EmptyBoardIDUsesEngineID(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.statusField = &gh.StatusField{FieldID: "F", Options: map[string]string{"Research": "OPT_R", "Specify": "OPT_S"}}
+	eng.statusField = &gh.StatusField{FieldID: "F", Options: map[string]string{"Research": "OPT_R", "Plan": "OPT_P"}}
 	eng.boardProjectID = "ENGINE_PID"
 	item := gh.ProjectItem{Number: 1, ItemID: "ITEM", Repo: "owner/repo"}
-	cur := stages.FindStage(eng.cfg.Stages, "Specify")
-	if cur == nil {
-		t.Skip("no Specify stage in test stages")
-	}
+	cur := &stages.Stage{Name: "Research"}
 	if err := eng.advanceToNextStage(&gh.ProjectBoard{}, item, cur); err != nil {
 		t.Fatal(err)
 	}
@@ -108,12 +105,9 @@ func TestAdvanceToNextStage_EmptyBoardIDUsesEngineID(t *testing.T) {
 func TestAdvanceToNextStage_BothEmptySendsNothingAndIsNotRetryCounted(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.statusField = &gh.StatusField{FieldID: "F", Options: map[string]string{"Research": "OPT_R", "Specify": "OPT_S"}}
+	eng.statusField = &gh.StatusField{FieldID: "F", Options: map[string]string{"Research": "OPT_R", "Plan": "OPT_P"}}
 	item := gh.ProjectItem{Number: 1, ItemID: "ITEM", Repo: "owner/repo"}
-	cur := stages.FindStage(eng.cfg.Stages, "Specify")
-	if cur == nil {
-		t.Skip("no Specify stage in test stages")
-	}
+	cur := &stages.Stage{Name: "Research"}
 	err := eng.recordAdvanceOutcome(&gh.ProjectBoard{}, item, cur)
 	if !errors.Is(err, errProjectIDUnknown) {
 		t.Fatalf("err = %v", err)
