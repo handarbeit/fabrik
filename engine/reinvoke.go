@@ -69,6 +69,12 @@ const (
 	// didNotRunBranchDiverged: the issue branch and its remote diverged (#2295), so the
 	// worktree sync refused to set it up and the item was paused before any work.
 	didNotRunBranchDiverged didNotRunKind = "branch-diverged"
+	// didNotRunEditingWrite: the fabrik:editing label could not be written
+	// (#2393, ADR 2393), so no worker was spawned. Uncharged for every cause.
+	didNotRunEditingWrite didNotRunKind = "editing-write-failed"
+	// didNotRunForgeHeld: the forge-unreachable hold is engaged (#2393), so no
+	// worker was spawned.
+	didNotRunForgeHeld didNotRunKind = "forge-held"
 )
 
 // commentRunBlockedOnInput is the sentinel kind processCommentsClassified returns

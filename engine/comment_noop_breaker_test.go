@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -281,16 +280,9 @@ func TestNoOpCommentBreaker_TripComment_NamesAuthorAndCount(t *testing.T) {
 // reached — regression guard for R5's "must not regress #1382."
 func TestNoOpCommentBreaker_OldBreakerStillTripsOnSetupFailure(t *testing.T) {
 	skipIfNoGit(t)
-	client := &mockGitHubClient{
-		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
-			if labelName == "fabrik:editing" {
-				return errors.New("simulated GraphQL budget exhaustion")
-			}
-			return nil
-		},
-	}
+	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngineWithRepo(t, client, claude)
+	eng := newBaseBranchFailureEngine(t, client, claude) // a charged setup failure (editing-label failures are uncharged since #2393)
 	eng.cfg.MaxCommentCyclesPerWindow = 3
 	eng.cfg.CommentCycleWindow = time.Hour
 	eng.cfg.MaxNoOpCommentCycles = 100 // must not be the one that trips
@@ -300,7 +292,7 @@ func TestNoOpCommentBreaker_OldBreakerStillTripsOnSetupFailure(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		if err := eng.processComments(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Review", Order: 1}, comments); err == nil {
-			t.Fatalf("processComments call %d: expected error from failing editing-label add, got nil", i)
+			t.Fatalf("processComments call %d: expected error from failing base-branch resolution, got nil", i)
 		}
 	}
 
