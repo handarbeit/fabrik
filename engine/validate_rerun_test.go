@@ -341,3 +341,48 @@ func TestValidateRerun_LandingGuardFailsClosedOnUnreadableLabels(t *testing.T) {
 		t.Error("landing not refused although a forced re-run could not be ruled out")
 	}
 }
+
+// A strip that fails before reaching stage:Validate:complete leaves the item
+// Validate-complete, so the marker is rolled back rather than left to refuse every
+// landing if the retry condition lapses; a failure on the completion label itself is
+// ambiguous (it may be gone), so the marker stays there.
+func TestValidateRerun_FailedStripRollsBackMarkerOnlyWhileCompleteLabelRemains(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		failOn     string
+		wantMarker bool
+	}{
+		{"earlier label fails", "fabrik:awaiting-ci", false},
+		{"completion label fails", "stage:Validate:complete", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := false
+			client := &mockGitHubClient{
+				addLabelToIssueFn: func(_, _ string, _ int, l string) error {
+					if l == validateRerunLabel {
+						marker = true
+					}
+					return nil
+				},
+				removeLabelFromIssueFn: func(_, _ string, _ int, l string) error {
+					if l == validateRerunLabel {
+						marker = false
+						return nil
+					}
+					if l == tc.failOn {
+						return errors.New("boom")
+					}
+					return nil
+				},
+			}
+			eng := testEngineWithStages(t, client, testStagesWithValidate())
+			item := gh.ProjectItem{Number: 7, Labels: []string{"stage:Validate:complete"}}
+			if eng.handleValidateSHAInvalidation(item, "owner", "repo") {
+				t.Fatal("handleValidateSHAInvalidation reported success despite a failed removal")
+			}
+			if marker != tc.wantMarker {
+				t.Errorf("marker present = %v, want %v", marker, tc.wantMarker)
+			}
+		})
+	}
+}

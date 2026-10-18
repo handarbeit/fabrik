@@ -2519,6 +2519,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 		"stage:Validate:complete",
 	}
 	hasError := false
+	failedLabel := ""
 	for _, lbl := range labelsToRemove {
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
 			if errors.Is(err, gh.ErrNotFound) {
@@ -2527,6 +2528,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 			}
 			e.logf(item.Number, "warn", "validate-sha: could not remove %s: %v\n", lbl, err)
 			hasError = true
+			failedLabel = lbl
 			break
 		}
 		e.logf(item.Number, "validate-sha", "removed label %s\n", lbl)
@@ -2535,6 +2537,16 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 
 	if hasError {
 		e.logf(item.Number, "warn", "validate-sha: some labels failed to remove; deferring store reset to next poll\n")
+		// The strip stopped before reaching stage:Validate:complete, so the item is
+		// still Validate-complete and the retry that would force the re-run is only
+		// as durable as the scan's own condition (the head can return to the verified
+		// SHA). Roll the marker back so a lapsed retry cannot leave it set with the
+		// label still on, which would refuse every landing with nothing to clear it.
+		// A failure on the completion label itself is ambiguous (the label may be
+		// gone), so there the marker stays.
+		if failedLabel != "stage:Validate:complete" {
+			e.clearValidateRerun(item, false)
+		}
 		return false
 	}
 
