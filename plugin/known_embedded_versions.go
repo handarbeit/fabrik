@@ -31,6 +31,7 @@ var KnownEmbeddedVersions = []string{
 	"6d2cdc3b00be1a07143c1ae309b16782a46ccf6b67c3643d8379f8c8ab5c2670", // v0.0.83
 	"4972b95197cbfdea9976f88e14a42d6cbd075b373433a0c92aa375ed5ba39964", // v0.0.84
 	"6e202baad630ef070f17594d784cec656088a80cee70d6c0da2dbc0d260b364d", // v0.0.86
+	"c4ba460ec99da0e819c36aa6b1579544acd55f461957b93307065b007936db9d", // v0.0.88
 }
 
 // VersionsBehind reports how many known-embedded releases separate installedVer
