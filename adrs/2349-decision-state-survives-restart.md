@@ -31,6 +31,11 @@ The 2026-10-15 engine state audit (§4) found four places where engine-private s
 - New files under `.fabrik/state/engine-decisions/` (`train-caps.json`, `usage-limit.json`). No new flag, environment variable, label or YAML key.
 - Existing tests that read `mergeTrainEjectionCounts` / `mergeTrainTrials` keep working: the map types are unchanged, `ejectMember` keeps its signature (it delegates to `ejectMemberAtHead` with the item's linked-PR head).
 
+## Known costs
+
+- **A restart after a successful invocation can re-create a short hold.** A successful Claude invocation clears the hold and deletes `usage-limit.json`, but it strips `fabrik:claude-limit` only from the item it ran for; the other items lose theirs at the next account-wide sweep. If the daemon restarts in between, there is no file and labelled items remain, so label seeding (decision 6) re-creates a hold of up to the 1 h fallback. That is the conservative direction — at most about an hour of held dispatch after a limit that had already lifted — and is accepted rather than tracking "cleared" state separately.
+- **Ejection counters follow "consecutive against one head", not "while Queued".** `pruneDecisionState` discards a member's counters only when its issue is closed or it is absent from the board. A member rerouted off Queued keeps its count until its PR head changes, a green trial verdict clears it, or it lands. This is the reading of FR-003 the implementation takes: an ejection is itself what moves a member off Queued, so resetting on departure would make the cap unreachable. A member that sits off Queued for a long time on an unchanged head is therefore still close to the cap when it returns.
+
 ## Alternatives rejected
 
 - **Fields on the train run record.** Matches R1's wording, but the record is deleted per episode and absent on synchronous engines, so it cannot carry a count across episodes.

@@ -1,10 +1,15 @@
 package sim
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/engine"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
+	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 )
 
@@ -27,11 +32,23 @@ func usageLimitComments(t *testing.T, env *Env, num int) int {
 // TestUsageLimitHold_SurvivesRestart: a restart during the hold dispatches nothing into the
 // limit, keeps the label and posts no duplicate comment; once the sim clock passes the
 // deadline the hold lifts and work resumes.
+//
+// The exit carries an exact structured reset 5h out, well beyond the 1h fallback that
+// label-based seeding would use. That is what makes the test prove the persisted file: with
+// persistence disabled the restart re-seeds a hold of at most one hour from the surviving
+// label, which has lifted by the 2h mark and fails the "still held" assertions below.
 func TestUsageLimitHold_SurvivesRestart(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: failureShapeStages()})
 	EnableDecisionState(t, env)
-	env.Claude.ForStage("Specify", simclaude.UsageLimitExit(), simclaude.DefaultScript)
+
+	deadline := env.Clock.Now().Add(5 * time.Hour)
+	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		if env.Clock.Now().Before(deadline) {
+			return "", false, engine.TokenUsage{}, &claudeerr.UsageLimitError{Message: `terminal_reason="blocking_limit"`, ResetAt: deadline}
+		}
+		return simclaude.DefaultScript(ctx, stage, issue, newComments, resume, workDir, opts)
+	})
 
 	num := FileIssue(t, env, "usage-limit restart", "body", "Specify")
 	WaitForIssueLabel(t, env, num, "fabrik:claude-limit", 80)
@@ -43,6 +60,8 @@ func TestUsageLimitHold_SurvivesRestart(t *testing.T) {
 	}
 
 	env2 := RestartEnv(t, env)
+	// Past the 1h fallback, inside the persisted 5h deadline.
+	env2.Clock.Advance(2 * time.Hour)
 	RunPolls(t, env2, 4)
 
 	if !hasLabel(IssueLabels(t, env2, num), "fabrik:claude-limit") {
@@ -55,9 +74,9 @@ func TestUsageLimitHold_SurvivesRestart(t *testing.T) {
 		t.Fatalf("usage-limit comment count went %d -> %d across the restart — no duplicate comment may be posted", commentsBefore, got)
 	}
 
-	// The hold ends on the sim clock (R5): past the fallback hour the label is swept and
-	// the stage runs.
-	env2.Clock.Advance(2 * time.Hour)
+	// The hold ends on the sim clock (R5): past the persisted deadline the label is swept
+	// and the stage runs.
+	env2.Clock.Advance(4 * time.Hour)
 	WaitForLabelAbsent(t, env2, num, "fabrik:claude-limit", 40)
 	AdvanceUntil(t, env2, func(e *Env) bool { return e.Claude.StageCallCount("Specify") > callsBefore }, retryCooldownPolls)
 }
