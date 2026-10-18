@@ -586,6 +586,24 @@ func TestFabrikWentDeaf_IssuesLabeledBeforeOpened(t *testing.T) {
 	}
 }
 
+// TestEnsureIssueInStore_CarriesIsPR: the fallback fetch now reports whether the
+// number is a pull request (#2385); the Store keeps that fact rather than
+// recording a PR as an issue.
+func TestEnsureIssueInStore_CarriesIsPR(t *testing.T) {
+	mc := &mockClient{
+		projectItemResult: &gh.ProjectItem{Number: 98, Title: "A PR", Repo: "owner/repo", IsPR: true},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
+
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 98, "fabrik:yolo"))
+
+	s := testGetState(t, c, "owner/repo", 98)
+	if !s.IsPR {
+		t.Errorf("want IsPR=true carried from the fallback fetch; got %+v", s.IsPR)
+	}
+}
+
 func TestOutOfOrderIssuesLabeledBeforeOpened(t *testing.T) {
 	mc := &mockClient{
 		projectItemResult: &gh.ProjectItem{

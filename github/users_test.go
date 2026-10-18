@@ -76,3 +76,32 @@ func TestFetchProjectItem_FillsAuthor(t *testing.T) {
 		t.Errorf("Assignees = %v", pi.Assignees)
 	}
 }
+
+// TestFetchProjectItem_IsPR: the REST issues endpoint serves pull requests too;
+// the pull_request key marks them (#2385).
+func TestFetchProjectItem_IsPR(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"issue", `{"number":7,"state":"open","node_id":"I_7"}`, false},
+		{"null pull_request", `{"number":7,"state":"open","node_id":"I_7","pull_request":null}`, false},
+		{"pull request", `{"number":7,"state":"open","node_id":"PR_7","pull_request":{"url":"u"}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := NewClientWithBaseURL("token", srv.URL)
+			pi, err := c.FetchProjectItem("o", "r", 7)
+			if err != nil {
+				t.Fatalf("FetchProjectItem: %v", err)
+			}
+			if pi.IsPR != tc.want {
+				t.Errorf("IsPR = %v, want %v", pi.IsPR, tc.want)
+			}
+		})
+	}
+}

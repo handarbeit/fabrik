@@ -1678,6 +1678,9 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 		User *struct {
 			Login string `json:"login"`
 		} `json:"user"`
+		// PullRequest is present exactly when the number is a pull request
+		// (#2385): the issues endpoint serves both.
+		PullRequest json.RawMessage `json:"pull_request"`
 	}
 
 	if err := c.restGetJSON(url, &raw); err != nil {
@@ -1690,6 +1693,7 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 		Title:    raw.Title,
 		Body:     raw.Body,
 		IsClosed: raw.State == "closed",
+		IsPR:     len(raw.PullRequest) > 0 && string(raw.PullRequest) != "null",
 		URL:      raw.HTMLURL,
 		Repo:     owner + "/" + repo,
 	}
@@ -1851,6 +1855,32 @@ func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 	var result struct{}
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
 		return fmt.Errorf("adding blocked-by edge %s -> %s: %w", issueNodeID, blockerNodeID, err)
+	}
+	return nil
+}
+
+// removeBlockedByMutation is the GraphQL mutation used by RemoveBlockedByIssue.
+// The write name is removeBlockedBy and its input carries the same two fields
+// as addBlockedBy (issueId, blockingIssueId); validated against the vendored
+// schema by github/wire_contract_test.go (#1453).
+const removeBlockedByMutation = `
+mutation($issueId: ID!, $blockingIssueId: ID!) {
+  removeBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
+    issue { id }
+  }
+}`
+
+// RemoveBlockedByIssue deletes the "blocked by" edge created by
+// AddBlockedByIssue: issueNodeID is no longer blocked by blockerNodeID (#2385).
+func (c *Client) RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	vars := map[string]interface{}{
+		"issueId":         issueNodeID,
+		"blockingIssueId": blockerNodeID,
+	}
+
+	var result struct{}
+	if err := c.graphqlRequest(removeBlockedByMutation, vars, &result); err != nil {
+		return fmt.Errorf("removing blocked-by edge %s -> %s: %w", issueNodeID, blockerNodeID, err)
 	}
 	return nil
 }
