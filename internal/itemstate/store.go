@@ -1644,9 +1644,13 @@ func (s *Store) HasInFlightWorker() bool {
 // updates the shaToKey, itemIDToKey, and prToKey indexes accordingly.
 // No-op when the item is not present.
 func (s *Store) Remove(repo string, number int) {
-	key := itemKeyFor(repo, number)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.removeLocked(itemKeyFor(repo, number))
+}
+
+// removeLocked deletes the item and its index entries. The caller holds s.mu.
+func (s *Store) removeLocked(key string) {
 	item, ok := s.items[key]
 	if !ok {
 		return
@@ -1666,18 +1670,18 @@ func (s *Store) Remove(repo string, number int) {
 // RemoveIfNotAddedAfter removes the item like Remove, unless the running Store
 // created its record after t, in which case the item is kept and kept=true is
 // returned (#2348, R4): a listing fetched before t cannot know about it, so its
-// absence says nothing. The decision is made under the write lock, so it cannot
-// race the webhook or spawn that added the item. A zero t, an unknown AddedAt or
-// the disabled ordering seam removes unconditionally. Absent items are a no-op.
+// absence says nothing. The decision and the removal happen under one write
+// lock, so it cannot race the webhook or spawn that added the item. A zero t, an
+// unknown AddedAt or the disabled ordering seam removes unconditionally. Absent
+// items are a no-op.
 func (s *Store) RemoveIfNotAddedAfter(repo string, number int, t time.Time) (kept bool) {
 	key := itemKeyFor(repo, number)
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if item, ok := s.items[key]; ok && s.ordering() && !t.IsZero() && item.AddedAt.After(t) {
-		s.mu.Unlock()
 		return true
 	}
-	s.mu.Unlock()
-	s.Remove(repo, number)
+	s.removeLocked(key)
 	return false
 }
 
