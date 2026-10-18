@@ -306,7 +306,8 @@ type Engine struct {
 	trainRunsLoadOnce                     sync.Once                                 // loads persisted run records on the first settleTrainRuns
 	mergeTrainInFlight                    sync.Map                                  // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                                // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", consecutive-ejection count per member against the PR head in mergeTrainEjectionHeads (#2349) — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time. Persisted under .fabrik/state/engine-decisions/ (decision_state.go)
+	mergeTrainEjectionHeads               map[string]string                         // key: "owner/repo#N", the PR head SHA the count was earned against (#2349); a different non-empty head restarts the count. Guarded by mergeTrainEjectionsMu
 	invalidate                            invalidateState                           // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
 	overlap                               overlapState                              // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
 	mergeTrainCIDeferredMu                sync.Mutex                                // guards mergeTrainCIDeferred
@@ -410,6 +411,14 @@ type Engine struct {
 	// autoRepair is the red-singleton auto-repair state (#2045): attempt counts, spent R3
 	// requeues and pending repair contexts, shared by the train worker and the poll goroutine.
 	autoRepair autoRepairState
+	// decisionStore persists the merge-train caps and the usage-limit hold (#2349); nil on
+	// NewWithDeps engines. decisionWrite serialises the persist step; usageLimitFileAtStart
+	// records that a usable hold file was found at startup (it is then authoritative and the
+	// label-based seeding never runs); usageLimitSeedChecked makes the seeding one-shot.
+	decisionStore         *decisionStore
+	decisionWrite         decisionPersist
+	usageLimitFileAtStart bool
+	usageLimitSeedChecked bool
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See
@@ -714,6 +723,7 @@ func New(cfg Config) (*Engine, error) {
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
 		trainSem:                  newTrainSlot(cfg),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainEjectionHeads:   make(map[string]string),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
@@ -729,6 +739,9 @@ func New(cfg Config) (*Engine, error) {
 	// #2051: the production engine runs the asynchronous merge-train driver — trial state
 	// is persisted under .fabrik/state/merge-train/ and evaluated per poll.
 	eng.trainRuns = newTrainRunStore(trainRunStateDir(fabrikDir))
+	// #2349: the merge-train caps and the usage-limit hold survive a restart.
+	eng.decisionStore = newDecisionStore(decisionStateDir(fabrikDir))
+	eng.loadDecisionState()
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API
@@ -831,6 +844,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainEjectionHeads:   make(map[string]string),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),

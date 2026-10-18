@@ -51,6 +51,7 @@ func (e *Engine) activateClaudeUsageLimit(issueNumber int, limitErr *claudeUsage
 	if !changed {
 		return
 	}
+	e.persistUsageLimit() // #2349: the hold survives a restart
 
 	switch source {
 	case usageLimitSourceExact:
@@ -75,6 +76,9 @@ func (e *Engine) clearClaudeUsageLimit(reason string) {
 	e.claudeUsageLimitedUntil = time.Time{}
 	e.claudeUsageLimitMu.Unlock()
 
+	// Every clear path deletes the persisted deadline (#2349), including a clear with no
+	// active in-memory hold, so a stale file can never hold dispatch after a manual clear.
+	e.persistUsageLimit()
 	if !wasActive {
 		return
 	}

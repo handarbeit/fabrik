@@ -264,7 +264,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		return m, false
 	case catchUpConflict:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: cannot resolve the conflict between pinned base %s and #%d — ejecting\n", p.baseSHA, m.item.Number)
-		e.ejectMember(p.owner, p.repo, m.item, out.reason, nil, nil, true)
+		e.ejectMemberAtHead(p.owner, p.repo, m.item, m.headSHA, out.reason, nil, nil, true)
 		e.noteTrainEjected(p.episode, p.repoKey(), m.item.Number, "unresolvable catch-up conflict", false)
 		e.resetCatchUpAttempts(p.trainKey, m.item.Number)
 		return m, true

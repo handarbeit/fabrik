@@ -1413,7 +1413,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// ejectMember's own diag/otherMembers parameters are for the unrelated
 		// trainCIDiagnostic (combined-Validate/CI failures, ADR-1420) — this
 		// conflict-resolution diagnostic is already folded into reason above.
-		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil, true)
+		e.ejectMemberAtHead(p.owner, p.repo, member.item, member.headSHA, reason, nil, nil, true)
 		e.noteTrainEjected(p.episode, p.repoKey(), member.item.Number, "unresolvable conflict", true)
 	}
 
@@ -2655,7 +2655,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		return false, nil, errDrainingNotAttempted
 	}
 	usageLimited := func() error {
-		if _, s := e.claudeUsageLimitedUntilTime(time.Now()); s {
+		if _, s := e.claudeUsageLimitedUntilTime(e.now()); s {
 			e.logf(memberItem.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
 			return &claudeUsageLimitError{Message: "account usage limit active"}
 		}
@@ -2699,7 +2699,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	release()
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
-		e.activateClaudeUsageLimit(memberItem.Number, limitErr, time.Now())
+		e.activateClaudeUsageLimit(memberItem.Number, limitErr, e.now())
 		return false, nil, err
 	}
 	var turnLimitErr *claudeTurnLimitError
@@ -3555,6 +3555,30 @@ func reentryInstruction(targetName, fixDescription string) string {
 // the other causes. Callers reroute the member's board Status themselves before calling
 // this with stayInQueue=false; this function only varies the comment's wording.
 func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string, diag *trainCIDiagnostic, otherMembers []trainMember, stayInQueue bool) {
+	e.ejectMemberAtHead(owner, repo, memberItem, memberItem.LinkedPRHeadSHA, reason, diag, otherMembers, stayInQueue)
+}
+
+// ejectMemberAtHead is ejectMember with the member's PR head SHA given explicitly (#2349).
+// The ejection count is "consecutive" in the sense the pause text states: it counts
+// ejections against one PR head with no break between them. A landing (resetEjectionCount),
+// a green trial verdict for the member (resetEjectionCountOnGreen), a new non-empty head, or
+// the item closing/leaving the board all start it again; an empty (unknown) head never
+// resets, which errs toward counting. The count is incremented and persisted before the
+// comment is posted, so a crash between the two cannot grant a free ejection.
+func (e *Engine) ejectMemberAtHead(owner, repo string, memberItem gh.ProjectItem, headSHA, reason string, diag *trainCIDiagnostic, otherMembers []trainMember, stayInQueue bool) {
+	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberItem.Number)
+	e.mergeTrainEjectionsMu.Lock()
+	if prev := e.mergeTrainEjectionHeads[counterKey]; headSHA != "" && prev != "" && prev != headSHA {
+		e.mergeTrainEjectionCounts[counterKey] = 0 // the PR head moved: earlier ejections were against other code
+	}
+	if headSHA != "" {
+		e.mergeTrainEjectionHeads[counterKey] = headSHA
+	}
+	e.mergeTrainEjectionCounts[counterKey]++
+	count := e.mergeTrainEjectionCounts[counterKey]
+	e.mergeTrainEjectionsMu.Unlock()
+	e.persistTrainCaps()
+
 	sections := []string{reason}
 	if diag != nil {
 		sections = append(sections, renderBatchContext(otherMembers, memberItem.Number))
@@ -3576,12 +3600,6 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		commentID = id
 	}
 
-	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberItem.Number)
-	e.mergeTrainEjectionsMu.Lock()
-	e.mergeTrainEjectionCounts[counterKey]++
-	count := e.mergeTrainEjectionCounts[counterKey]
-	e.mergeTrainEjectionsMu.Unlock()
-
 	maxEjections := e.cfg.MaxMergeTrainEjections
 	if maxEjections <= 0 {
 		maxEjections = 3
@@ -3592,6 +3610,7 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		e.mergeTrainEjectionsMu.Lock()
 		e.mergeTrainEjectionCounts[counterKey] = 0
 		e.mergeTrainEjectionsMu.Unlock()
+		e.persistTrainCaps()
 
 		e.logf(memberItem.Number, "merge-train", "#%d ejected %d time(s) — pausing\n", memberItem.Number, count)
 		pauseBody := fmt.Sprintf("This issue has been ejected from the merge-train %d consecutive times. "+
@@ -3663,8 +3682,25 @@ func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
 	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberNum)
 	e.mergeTrainEjectionsMu.Lock()
 	delete(e.mergeTrainEjectionCounts, counterKey)
+	delete(e.mergeTrainEjectionHeads, counterKey)
 	e.mergeTrainEjectionsMu.Unlock()
-	e.resetAutoRepair(owner, repo, memberNum) // #2045: a landed member starts fresh
+	e.resetAutoRepair(owner, repo, memberNum) // #2045: a landed member starts fresh (also persists)
+}
+
+// resetEjectionCountOnGreen breaks a member's run of consecutive ejections when a trial it
+// rode in came back green (#2349): a green verdict is progress, so earlier ejections no
+// longer count toward the pause cap. Unlike resetEjectionCount it leaves auto-repair
+// history alone (that is bounded per pinned base SHA, not by consecutiveness).
+func (e *Engine) resetEjectionCountOnGreen(owner, repo string, memberNum int) {
+	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberNum)
+	e.mergeTrainEjectionsMu.Lock()
+	_, had := e.mergeTrainEjectionCounts[counterKey]
+	delete(e.mergeTrainEjectionCounts, counterKey)
+	delete(e.mergeTrainEjectionHeads, counterKey)
+	e.mergeTrainEjectionsMu.Unlock()
+	if had {
+		e.persistTrainCaps()
+	}
 }
 
 // stageBeforeHolding returns the non-Unmanaged stage with the highest Order strictly
@@ -4052,7 +4088,7 @@ func (e *Engine) effectiveTrialWindow() (int, time.Duration) {
 // the guard exists to detect (#1528).
 func (e *Engine) recordTrial(repoKey string) int {
 	_, m := e.effectiveTrialWindow()
-	now := time.Now()
+	now := e.now()
 	cutoff := now.Add(-m)
 	e.mergeTrainTrialsMu.Lock()
 	ts := e.mergeTrainTrials[repoKey]
@@ -4066,6 +4102,7 @@ func (e *Engine) recordTrial(repoKey string) int {
 	e.mergeTrainTrials[repoKey] = pruned
 	count := len(pruned)
 	e.mergeTrainTrialsMu.Unlock()
+	e.persistTrainCaps()
 	return count
 }
 
@@ -4073,7 +4110,7 @@ func (e *Engine) recordTrial(repoKey string) int {
 // reached the threshold. Called after each trial-producing operation.
 func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 	n, m := e.effectiveTrialWindow()
-	cutoff := time.Now().Add(-m)
+	cutoff := e.now().Add(-m)
 	e.mergeTrainTrialsMu.Lock()
 	ts := e.mergeTrainTrials[repoKey]
 	pruned := ts[:0]
@@ -4103,8 +4140,12 @@ func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 // alert idempotency entries in the same repo.
 func (e *Engine) resetTrialCounter(trainKey string) {
 	e.mergeTrainTrialsMu.Lock()
+	_, hadTrials := e.mergeTrainTrials[trainKey]
 	delete(e.mergeTrainTrials, trainKey)
 	e.mergeTrainTrialsMu.Unlock()
+	if hadTrials {
+		e.persistTrainCaps()
+	}
 
 	prefix := trainKey + "#"
 	e.mergeTrainRunawayMu.Lock()
