@@ -1328,24 +1328,24 @@ func TestLoadConfig_CatchUpMarkerAuthorsRejectsMalformedLogin(t *testing.T) {
 	}
 }
 
-// #2303: keep_transcripts defaults to partial and follows flag > env > YAML.
+// #2303/#2363: keep_transcripts defaults to all and follows flag > env > YAML.
 func TestLoadConfig_KeepTranscripts(t *testing.T) {
 	dir := t.TempDir()
 	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.KeepTranscripts != KeepTranscriptsPartial || cfg.TranscriptDir != DefaultTranscriptDir {
-		t.Errorf("defaults = %q / %q, want %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir, KeepTranscriptsPartial, DefaultTranscriptDir)
+	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != DefaultTranscriptDir {
+		t.Errorf("defaults = %q / %q, want %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir, KeepTranscriptsAll, DefaultTranscriptDir)
 	}
 
 	tdir := filepath.Join(dir, "transcripts-x")
-	path := writeYAMLConfig(t, dir, "keep_transcripts: all\ntranscript_dir: "+strconv.Quote(tdir)+"\n")
+	path := writeYAMLConfig(t, dir, "keep_transcripts: partial\ntranscript_dir: "+strconv.Quote(tdir)+"\n")
 	cfg, err = LoadConfig([]string{"-config", path})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != tdir {
+	if cfg.KeepTranscripts != KeepTranscriptsPartial || cfg.TranscriptDir != tdir {
 		t.Errorf("YAML = %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir)
 	}
 
@@ -1358,11 +1358,11 @@ func TestLoadConfig_KeepTranscripts(t *testing.T) {
 		t.Errorf("env should override YAML, got %q", cfg.KeepTranscripts)
 	}
 
-	cfg, err = LoadConfig([]string{"-config", path, "-keep-transcripts", "partial"})
+	cfg, err = LoadConfig([]string{"-config", path, "-keep-transcripts", "all"})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.KeepTranscripts != KeepTranscriptsPartial {
+	if cfg.KeepTranscripts != KeepTranscriptsAll {
 		t.Errorf("flag should override env, got %q", cfg.KeepTranscripts)
 	}
 }
@@ -1432,5 +1432,90 @@ func TestLoadConfig_MaxCoveragePassesRefusesBadValues(t *testing.T) {
 func TestRepoConfig_CannotSetMaxCoveragePasses(t *testing.T) {
 	if _, ok := reflect.TypeOf(yamlRepoConfig{}).FieldByName("MaxCoveragePasses"); ok {
 		t.Fatal("yamlRepoConfig must not carry MaxCoveragePasses (operator-only, ADR 1642)")
+	}
+}
+
+// #2363: transcript_max_age / transcript_max_bytes default to 168h / 1 GiB,
+// follow flag > env > YAML, and refuse zero, negative and unparseable values.
+func TestLoadConfig_TranscriptRetention(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.yaml")
+	cfg, err := LoadConfig([]string{"-config", missing})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TranscriptMaxAge != 168*time.Hour || cfg.TranscriptMaxBytes != 1<<30 {
+		t.Errorf("defaults = %v / %d", cfg.TranscriptMaxAge, cfg.TranscriptMaxBytes)
+	}
+
+	path := writeYAMLConfig(t, dir, "transcript_max_age: 24h\ntranscript_max_bytes: 5000\n")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TranscriptMaxAge != 24*time.Hour || cfg.TranscriptMaxBytes != 5000 {
+		t.Errorf("YAML = %v / %d", cfg.TranscriptMaxAge, cfg.TranscriptMaxBytes)
+	}
+
+	t.Setenv("PRUEFER_TRANSCRIPT_MAX_AGE", "48h")
+	t.Setenv("PRUEFER_TRANSCRIPT_MAX_BYTES", "7000")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TranscriptMaxAge != 48*time.Hour || cfg.TranscriptMaxBytes != 7000 {
+		t.Errorf("env should override YAML, got %v / %d", cfg.TranscriptMaxAge, cfg.TranscriptMaxBytes)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-transcript-max-age", "1h", "-transcript-max-bytes", "9"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TranscriptMaxAge != time.Hour || cfg.TranscriptMaxBytes != 9 {
+		t.Errorf("flag should override env, got %v / %d", cfg.TranscriptMaxAge, cfg.TranscriptMaxBytes)
+	}
+}
+
+func TestLoadConfig_TranscriptRetentionRefusesInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"yaml zero age", "transcript_max_age: 0s", nil, nil, "transcript_max_age"},
+		{"yaml negative age", "transcript_max_age: -1h", nil, nil, "transcript_max_age"},
+		{"yaml bad age", "transcript_max_age: soon", nil, nil, "transcript_max_age"},
+		{"yaml zero bytes", "transcript_max_bytes: 0", nil, nil, "transcript_max_bytes"},
+		{"yaml negative bytes", "transcript_max_bytes: -5", nil, nil, "transcript_max_bytes"},
+		{"env bad age", "", map[string]string{"PRUEFER_TRANSCRIPT_MAX_AGE": "x"}, nil, "PRUEFER_TRANSCRIPT_MAX_AGE"},
+		{"env zero age", "", map[string]string{"PRUEFER_TRANSCRIPT_MAX_AGE": "0s"}, nil, "transcript_max_age"},
+		{"env bad bytes", "", map[string]string{"PRUEFER_TRANSCRIPT_MAX_BYTES": "1G"}, nil, "PRUEFER_TRANSCRIPT_MAX_BYTES"},
+		{"env zero bytes", "", map[string]string{"PRUEFER_TRANSCRIPT_MAX_BYTES": "0"}, nil, "transcript_max_bytes"},
+		{"flag zero age", "", nil, []string{"-transcript-max-age", "0"}, "transcript_max_age"},
+		{"flag bad age", "", nil, []string{"-transcript-max-age", "week"}, "transcript_max_age"},
+		{"flag zero bytes", "", nil, []string{"-transcript-max-bytes", "0"}, "transcript_max_bytes"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			path := writeYAMLConfig(t, t.TempDir(), c.yaml)
+			_, err := LoadConfig(append([]string{"-config", path}, c.args...))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want one naming %q", err, c.want)
+			}
+		})
+	}
+}
+
+// The repo-resident config cannot set the retention bounds (ADR 1642).
+func TestRepoConfig_CannotSetTranscriptRetention(t *testing.T) {
+	for _, f := range []string{"TranscriptMaxAge", "TranscriptMaxBytes", "KeepTranscripts"} {
+		if _, ok := reflect.TypeOf(yamlRepoConfig{}).FieldByName(f); ok {
+			t.Fatalf("yamlRepoConfig must not carry %s (operator-only, ADR 1642)", f)
+		}
 	}
 }

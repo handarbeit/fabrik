@@ -31,8 +31,13 @@ const (
 	// coverage loop: after a first pass that leaves staged entries unread,
 	// Pruefer resumes the session at most this many times. 0 disables.
 	DefaultMaxCoveragePasses = 2
-	DefaultMaxDiffBytes      = 500_000 // 500 KB
-	DefaultConfigPath        = ".pruefer/config.yaml"
+	// DefaultTranscriptMaxAge and DefaultTranscriptMaxBytes are #2363's
+	// retention bounds for .pruefer/transcripts: entries older than the age
+	// are deleted, and the oldest go first once the total passes the ceiling.
+	DefaultTranscriptMaxAge   = 168 * time.Hour
+	DefaultTranscriptMaxBytes = int64(1) << 30
+	DefaultMaxDiffBytes       = 500_000 // 500 KB
+	DefaultConfigPath         = ".pruefer/config.yaml"
 	// CadenceEveryPush, CadenceOnce, and CadenceOnRequest are the three
 	// recognized Config.Cadence/RepoCadence values (#1610) — see
 	// Config.Cadence's doc comment and adrs/1610-pruefer-review-cadence.md.
@@ -282,9 +287,9 @@ type Config struct {
 	RepoPluginMarketplaces []string `reload:"live"`
 
 	// KeepTranscripts is #2303's retention policy for a review invocation's
-	// raw stream-json transcript: KeepTranscriptsPartial (the default when
-	// empty) keeps it only when coverage is partial, KeepTranscriptsAll keeps
-	// every review's, KeepTranscriptsOff none. Operator-only: deliberately
+	// raw stream-json transcript: KeepTranscriptsAll (the default, and the meaning of an
+	// empty value, #2363) keeps every review's, KeepTranscriptsPartial only a
+	// partial-coverage review's, KeepTranscriptsOff none. Operator-only: deliberately
 	// absent from the repo-resident config, so a reviewed repo cannot change
 	// retention. LoadConfig fails loud on an unrecognized value.
 	KeepTranscripts string `reload:"live"`
@@ -299,6 +304,16 @@ type Config struct {
 	// TranscriptDir is the directory kept transcripts are written to
 	// (default DefaultTranscriptDir, cwd-relative). YAML-only.
 	TranscriptDir string `reload:"restart"`
+	// TranscriptMaxAge (#2363) is how long a kept transcript (and its
+	// .tool-results directory) lives, judged by the timestamp in its file
+	// name. Default DefaultTranscriptMaxAge; zero and negative are refused.
+	// Operator-only: absent from the repo-resident config (ADR 1642).
+	TranscriptMaxAge time.Duration `reload:"live"`
+	// TranscriptMaxBytes (#2363) is the size ceiling for Pruefer's own
+	// entries in the transcript directory; above it the oldest go first.
+	// Default DefaultTranscriptMaxBytes; zero and negative are refused.
+	// Operator-only, like TranscriptMaxAge.
+	TranscriptMaxBytes int64 `reload:"live"`
 
 	// Cadence governs how often Pruefer automatically reviews a PR (#1610).
 	// Operator-only, never settable from a reviewed repo's own resident
@@ -503,6 +518,11 @@ type yamlConfig struct {
 	// retention settings — see Config.KeepTranscripts.
 	KeepTranscripts string `yaml:"keep_transcripts"`
 	TranscriptDir   string `yaml:"transcript_dir"`
+	// TranscriptMaxAge is a Go duration string (e.g. "168h"); TranscriptMaxBytes
+	// a byte count. Pointers/strings so an explicit zero is told from absent and
+	// refused (#2363). Operator-only.
+	TranscriptMaxAge   *string `yaml:"transcript_max_age"`
+	TranscriptMaxBytes *int64  `yaml:"transcript_max_bytes"`
 	// MaxCoveragePasses is #2375's operator-only coverage-loop cap — see
 	// Config.MaxCoveragePasses. A pointer so an explicit 0 is distinguishable
 	// from absent.
@@ -592,6 +612,8 @@ type flagValues struct {
 	repoPluginMarketplaces  string
 	keepTranscripts         string
 	maxCoveragePasses       int
+	transcriptMaxAge        string
+	transcriptMaxBytes      int64
 	cadence                 string
 	appID                   int64
 	appPrivateKeyPath       string
@@ -653,7 +675,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.BoolVar(&fv.repoReviewSkill, "repo-review-skill", true, "Let a repo's base-ref .pruefer/config.yaml override -review-skill with its own review_skill; false ignores the repo's value")
 	fs.BoolVar(&fv.repoPlugins, "repo-plugins", false, "Load review plugins a repo's base-ref .pruefer/config.yaml names from its own marketplace declarations (#2366). Runs code from the reviewed repo on this host: default off")
 	fs.StringVar(&fv.repoPluginMarketplaces, "repo-plugin-marketplaces", "", "Comma-separated owner/repo (or owner/*) GitHub repositories repo plugins may be fetched from, besides the reviewed repo itself (#2366); default none")
-	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
+	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: all (default), partial (only partial-coverage reviews) or off")
+	fs.StringVar(&fv.transcriptMaxAge, "transcript-max-age", "", "How long kept transcripts live, as a Go duration (default 168h); older ones are deleted after each save and at startup (#2363)")
+	fs.Int64Var(&fv.transcriptMaxBytes, "transcript-max-bytes", DefaultTranscriptMaxBytes, "Size ceiling in bytes for the transcript directory (default 1073741824); the oldest transcripts go first above it (#2363)")
 	fs.IntVar(&fv.maxCoveragePasses, "max-coverage-passes", DefaultMaxCoveragePasses, "Extra passes a review may spend resuming its Claude session to open staged diff entries the first pass left unread (#2375); 0 disables the loop")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
@@ -720,7 +744,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		AppStatePath:           DefaultAppStatePath,
 		TUI:                    true,
 		LogFile:                DefaultLogPath,
-		KeepTranscripts:        KeepTranscriptsPartial,
+		KeepTranscripts:        KeepTranscriptsAll,
+		TranscriptMaxAge:       DefaultTranscriptMaxAge,
+		TranscriptMaxBytes:     DefaultTranscriptMaxBytes,
 		MaxCoveragePasses:      DefaultMaxCoveragePasses,
 		TranscriptDir:          DefaultTranscriptDir,
 		AutoUpgrade:            false,
@@ -760,6 +786,16 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if yc.TranscriptDir != "" {
 		cfg.TranscriptDir = yc.TranscriptDir
+	}
+	if yc.TranscriptMaxAge != nil {
+		d, err := time.ParseDuration(*yc.TranscriptMaxAge)
+		if err != nil {
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("transcript_max_age: parsing %q: %w", *yc.TranscriptMaxAge, err)
+		}
+		cfg.TranscriptMaxAge = d
+	}
+	if yc.TranscriptMaxBytes != nil {
+		cfg.TranscriptMaxBytes = *yc.TranscriptMaxBytes
 	}
 	if yc.Cadence != "" {
 		cfg.Cadence = yc.Cadence
@@ -861,6 +897,23 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 
 	applyEnv(&cfg)
+	// #2363: the transcript retention variables are refused when malformed
+	// rather than ignored, so a typo cannot silently change how long private
+	// review evidence lives.
+	if v := os.Getenv("PRUEFER_TRANSCRIPT_MAX_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("PRUEFER_TRANSCRIPT_MAX_AGE: parsing %q: %w", v, err)
+		}
+		cfg.TranscriptMaxAge = d
+	}
+	if v := os.Getenv("PRUEFER_TRANSCRIPT_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("PRUEFER_TRANSCRIPT_MAX_BYTES: %q is not an integer", v)
+		}
+		cfg.TranscriptMaxBytes = n
+	}
 	// A non-integer PRUEFER_MAX_COVERAGE_PASSES is refused rather than ignored
 	// like the older numeric variables: a typo must not silently leave a
 	// budget-bearing loop on (or off) (#2375).
@@ -941,6 +994,16 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	}
 	if explicit["max-coverage-passes"] {
 		cfg.MaxCoveragePasses = fv.maxCoveragePasses
+	}
+	if explicit["transcript-max-age"] {
+		d, err := time.ParseDuration(fv.transcriptMaxAge)
+		if err != nil {
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("transcript_max_age: parsing -transcript-max-age %q: %w", fv.transcriptMaxAge, err)
+		}
+		cfg.TranscriptMaxAge = d
+	}
+	if explicit["transcript-max-bytes"] {
+		cfg.TranscriptMaxBytes = fv.transcriptMaxBytes
 	}
 	if explicit["cadence"] {
 		cfg.Cadence = fv.cadence
@@ -1042,6 +1105,13 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	case KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff:
 	default:
 		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("keep_transcripts: %q is not recognized (must be %q, %q or %q)", cfg.KeepTranscripts, KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff)
+	}
+
+	if cfg.TranscriptMaxAge <= 0 {
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("transcript_max_age: %s must be positive", cfg.TranscriptMaxAge)
+	}
+	if cfg.TranscriptMaxBytes <= 0 {
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("transcript_max_bytes: %d must be positive", cfg.TranscriptMaxBytes)
 	}
 
 	if cfg.MaxCoveragePasses < 0 {
