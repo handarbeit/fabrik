@@ -102,7 +102,7 @@ func TestCIFixReinvoke(t *testing.T) {
 	// the failing condition) the whole CI-fix scenario is invalid. Checked here, once
 	// the only agent run before the reinvoke (Validate) is over.
 	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
-	baseCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
+	baseCommits := PRCommitCountExcludingCatchUp(t, env, env.RepoAlpha, prNumber)
 	t.Logf("fabrik:awaiting-ci on %s#%d; PR #%d has %d commits at the CI-gate baseline", env.RepoAlpha, num, prNumber, baseCommits)
 
 	// Precondition: the first CI run was genuinely red and carries the nonce.
@@ -203,7 +203,7 @@ func TestCIFixReinvoke(t *testing.T) {
 	// Rebase storm guard: expect exactly one CI-fix commit beyond the
 	// awaiting-ci baseline. (Not a count of log lines: ADR-1812 refunds a
 	// did-not-run reinvoke, so one log line is not one charged cycle.)
-	finalCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
+	finalCommits := PRCommitCountExcludingCatchUp(t, env, env.RepoAlpha, prNumber)
 	if finalCommits > baseCommits+1 {
 		t.Fatalf("rebase storm on PR #%d: expected %d commits, got %d",
 			prNumber, baseCommits+1, finalCommits)

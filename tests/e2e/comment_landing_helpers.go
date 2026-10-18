@@ -312,18 +312,21 @@ func prMergedAt(env *Env, repo string, prNumber int) (time.Time, error) {
 	return restTime(env, fmt.Sprintf("repos/%s/pulls/%d", repo, prNumber), ".merged_at")
 }
 
-// seedLandingCandidate files an issue carrying extraLabels, adds it to the
-// project WITHOUT a Status, opens a non-draft member PR on fabrik/issue-<N>,
-// confirms the engine can resolve it, and applies stage:Validate:complete (a thin
-// wrapper over seedAtStage, #1992, with the minimal labelling it always had). The
-// caller decides when to expose the item to the engine (SetIssueStatus): with no
-// Status the engine cannot act on it, so a comment posted first is deterministically
-// present at the engine's first landing evaluation — no timing luck.
+// seedLandingCandidate files an issue carrying extraLabels, opens a non-draft
+// member PR on fabrik/issue-<N> and places the item at Validate with every earlier
+// stage complete, so the engine runs Validate itself (a thin wrapper over
+// seedAtStage, #1992, with RunColumn). A bare stage:Validate:complete label is no
+// longer a landing candidate: with no Validate completion SHA the engine strips it
+// and re-runs Validate (#2343), and a harness-posted stage comment cannot stand in
+// for the engine's own (the rebuild trusts only the engine identity's, which is the
+// App's on the app legs). Once Validate is complete the caller hides the item with
+// clearIssueStatus and decides when to expose it again.
 func seedLandingCandidate(t *testing.T, env *Env, repo, baseBranch, marker, path string, extraLabels ...string) (issueNum, prNum int, itemID string) {
 	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
 	return seedAtStage(t, env, repo, seedspec.Spec{
 		Column:      "Validate",
+		RunColumn:   true,
 		BaseBranch:  baseBranch,
 		Title:       fmt.Sprintf("e2e comment-landing %s (%s)", marker, stamp),
 		IssueBody:   fmt.Sprintf("e2e unprocessed-comment landing scenario. marker=%s", marker),
@@ -331,9 +334,19 @@ func seedLandingCandidate(t *testing.T, env *Env, repo, baseBranch, marker, path
 		PathMode:    seedspec.PathUnique,
 		Content:     fmt.Sprintf("# e2e comment-landing marker\n\nmarker=%s\n", marker),
 		ExtraLabels: extraLabels,
-		Minimal:     true,
-		DeferStatus: true,
 	})
+}
+
+// clearIssueStatus removes the project item's Status, taking the card off the
+// board's columns so the engine cannot act on it until SetIssueStatus puts it back.
+func clearIssueStatus(t *testing.T, env *Env, itemID string) {
+	t.Helper()
+	projectID, statusFieldID, _ := resolveStatusOption(t, env, "Validate")
+	if out, err := ghOutput(env, "project", "item-edit",
+		"--id", itemID, "--project-id", projectID,
+		"--field-id", statusFieldID, "--clear"); err != nil {
+		t.Fatalf("clear Status of project item %s: %v: %s", itemID, err, strings.TrimSpace(out))
+	}
 }
 
 // waitForCommentRocket polls until the comment carries a 🚀, returning both

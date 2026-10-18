@@ -1922,6 +1922,31 @@ func PRCommitCount(t *testing.T, env *Env, repo string, prNumber int) int {
 	return n
 }
 
+// PRCommitCountExcludingCatchUp returns the number of commits on the PR, not
+// counting merge-train singleton catch-up merges (#2044): two-parent commits
+// carrying the engine's Fabrik-Train-Catch-Up trailer. The train adds one
+// whenever the base moves under a Queued member, which concurrent tests make
+// routine, so a test asserting an exact work-commit count must not count them.
+// Fails the test on error.
+func PRCommitCountExcludingCatchUp(t *testing.T, env *Env, repo string, prNumber int) int {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("PRCommitCountExcludingCatchUp: bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/commits", owner, name, prNumber),
+		"--jq", `[.[] | select((.parents | length) < 2 or (.commit.message | test("(?m)^Fabrik-Train-Catch-Up:") | not))] | length`)
+	if err != nil {
+		t.Fatalf("PRCommitCountExcludingCatchUp %s#%d: %v: %s", repo, prNumber, err, strings.TrimSpace(out))
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		t.Fatalf("PRCommitCountExcludingCatchUp %s#%d: parse %q: %v", repo, prNumber, out, err)
+	}
+	return n
+}
+
 // readEnvFileMaxCiFixCycles reads FABRIK_MAX_CI_FIX_CYCLES from the test bed's
 // .env file. Returns 5 (the engine default) if the key is absent. Fails the
 // test if the key is present but not a valid integer.
