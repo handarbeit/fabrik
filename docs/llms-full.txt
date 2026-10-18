@@ -4896,6 +4896,8 @@ Health transition log lines show the trigger reason:
 - `health state: unhealthy → healthy (drift reconciled)` — reconcile recovery
 - `health state: healthy → unhealthy (echo-check miss threshold)` — echo-check triggered
 
+With the Hookdeck event transport, a lost or failing connection also logs its cause on a separate line (tag `hookdeck` in the engine; Pruefer logs the same text under its `poll` tag), for example `connection error: dial tcp: lookup api.hookdeck.com: no such host`. The cause appears once per outage, so a long outage with an unchanging error does not fill the log: a different error is logged at once, and an unchanged one is repeated at most every 5 minutes as `connection still failing: <error> (N occurrences since last report)`. A successful reconnect ends the outage and logs no error line. The text is collapsed to a single line and capped at 300 characters.
+
 ### Push-Wake Gate Latency
 
 When `--webhooks` is enabled, gate clearance events (Copilot/Gemini review submission, CI check completion) wake the poll loop within ~2 seconds of the webhook arriving — rather than waiting for the next poll tick, which can be up to 60 minutes when the stream is healthy. This near-instant response is the expected behavior, not a symptom to troubleshoot. If gate clearance feels slow when webhooks are enabled, check that the stream is in a Healthy state (green indicator).

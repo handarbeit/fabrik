@@ -825,7 +825,11 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 // when the network is already unreliable.
 func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 	var connectedBefore atomic.Bool
+	var errLog events.HealthErrorLog
 	return func(ev events.HealthEvent) {
+		if line, ok := errLog.Observe(ev); ok {
+			logf(0, "poll", "event source %s\n", line)
+		}
 		if ev.State != events.HealthConnected {
 			return
 		}
