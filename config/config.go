@@ -64,6 +64,7 @@ type ProjectConfig struct {
 	MaxBisectValidations       *int     `yaml:"max_bisect_validations"`
 	MaxTrainRebaseCycles       *int     `yaml:"max_train_rebase_cycles"`
 	MaxTrainAutoRepairAttempts *int     `yaml:"max_train_auto_repair_attempts"`
+	MaxStageDispatches         *int     `yaml:"max_stage_dispatches"`
 	MaxTrainTrialsPerWindow    *int     `yaml:"max_train_trials_per_window"`
 	TrainTrialWindow           *int     `yaml:"train_trial_window"`
 	MaxCommentCyclesPerWindow  *int     `yaml:"max_comment_cycles_per_window"`

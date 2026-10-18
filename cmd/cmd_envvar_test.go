@@ -1060,6 +1060,80 @@ func TestExecute_MaxTrainAutoRepairAttempts(t *testing.T) {
 	}
 }
 
+// ---- Per-episode stage dispatch bound (#2395) ----
+
+// stageDispatchesRun runs Execute with the given config.yaml body (empty = no
+// file), env and extra args. It returns the resolved cap, or the Execute error
+// for an invalid value (which is refused, not defaulted).
+func stageDispatchesRun(t *testing.T, yaml string, env map[string]string, extra ...string) (int, error) {
+	t.Helper()
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	if yaml != "" {
+		os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+		os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+	}
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_STAGE_DISPATCHES", "")
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, extra...)
+	var captured Config
+	var called bool
+	testResolvedConfigHook = func(cfg Config) { captured, called = cfg, true }
+	defer func() { testResolvedConfigHook = nil }()
+	if err := Execute(); err != nil {
+		return 0, err
+	}
+	if !called {
+		t.Fatal("testResolvedConfigHook was not invoked")
+	}
+	return captured.MaxStageDispatches, nil
+}
+
+func TestExecute_MaxStageDispatches(t *testing.T) {
+	const envName = "FABRIK_MAX_STAGE_DISPATCHES"
+	cases := []struct {
+		name    string
+		yaml    string
+		env     map[string]string
+		extra   []string
+		want    int
+		wantErr bool
+	}{
+		{"default is 25", "", nil, nil, 25, false},
+		{"config only", "max_stage_dispatches: 7\n", nil, nil, 7, false},
+		{"config explicit 0 disables", "max_stage_dispatches: 0\n", nil, nil, 0, false},
+		{"env beats config", "max_stage_dispatches: 7\n", map[string]string{envName: "3"}, nil, 3, false},
+		{"env 0 disables over config", "max_stage_dispatches: 7\n", map[string]string{envName: "0"}, nil, 0, false},
+		{"flag beats env and config", "max_stage_dispatches: 7\n", map[string]string{envName: "3"}, []string{"--max-stage-dispatches", "4"}, 4, false},
+		{"flag 0 disables over env", "", map[string]string{envName: "3"}, []string{"--max-stage-dispatches", "0"}, 0, false},
+		{"config negative refused", "max_stage_dispatches: -1\n", nil, nil, 0, true},
+		{"env negative refused", "", map[string]string{envName: "-2"}, nil, 0, true},
+		{"env non-integer refused", "", map[string]string{envName: "abc"}, nil, 0, true},
+		{"flag negative refused", "", nil, []string{"--max-stage-dispatches", "-3"}, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := stageDispatchesRun(t, c.yaml, c.env, c.extra...)
+			if c.wantErr {
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), "max") {
+					t.Fatalf("want a refusal naming the setting, got err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("MaxStageDispatches = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
 func TestSplitGlobList(t *testing.T) {
 	for _, c := range []struct {
 		in   string

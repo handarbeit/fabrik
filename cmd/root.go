@@ -75,6 +75,7 @@ type Config struct {
 	MaxBisectValidations       int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
 	MaxTrainRebaseCycles       int    // 0 means use default (3)
 	MaxTrainAutoRepairAttempts int    // per member per base SHA; default 1; 0 disables red-singleton auto-repair (#2045)
+	MaxStageDispatches         int    // per item, per stage episode; default 25; 0 disables the dispatch bound (#2395)
 	MaxTrainTrialsPerWindow    int    // 0 means use default (20)
 	TrainTrialWindowMinutes    int    // 0 means use default (60)
 	MaxCommentCyclesPerWindow  int    // Comment-processing circuit breaker: 0 means use default (10)
@@ -203,6 +204,7 @@ func Execute() error {
 	flag.IntVar(&cfg.RetryBackoffSeconds, "retry-backoff", defaultRetryBackoffSeconds, "Seconds to wait before re-dispatching a stage after an incomplete attempt. Independent of --poll, which governs GitHub API cadence (#1831). Minimum 1. Also FABRIK_RETRY_BACKOFF / retry_backoff.")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.MaxStageDispatches, "max-stage-dispatches", defaultMaxStageDispatches, "Maximum number of times one stage of one item is dispatched in a single episode (every dispatch counts, whatever its outcome) before the item is paused for a human (0 = disable the bound; default 25; also FABRIK_MAX_STAGE_DISPATCHES; #2395)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
 	flag.IntVar(&cfg.MaxResumeFailures, "max-resume-failures", 0, "Maximum number of consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting — independent of max-retries, since a failed resume attempt is not charged against it (0 = use default of 2; also FABRIK_MAX_RESUME_FAILURES; #1414)")
 	flag.IntVar(&cfg.MaxToolsDeniedRetries, "max-tools-denied-retries", 0, "Maximum number of consecutive tool-permission-denial exits per stage before pausing — independent of max-retries, since a permission misconfiguration is not a stage failure (0 = use default of 3; also FABRIK_MAX_TOOLS_DENIED_RETRIES; #1523)")
@@ -597,6 +599,24 @@ func Execute() error {
 			}
 		}
 	}
+	if explicitFlags["max-stage-dispatches"] {
+		if cfg.MaxStageDispatches < 0 {
+			return fmt.Errorf("--max-stage-dispatches=%d is invalid (must be a non-negative integer; 0 disables)", cfg.MaxStageDispatches)
+		}
+	} else {
+		if v := os.Getenv("FABRIK_MAX_STAGE_DISPATCHES"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return fmt.Errorf("FABRIK_MAX_STAGE_DISPATCHES=%q is invalid (must be a non-negative integer; 0 disables)", v)
+			}
+			cfg.MaxStageDispatches = n
+		} else if pc.MaxStageDispatches != nil {
+			if *pc.MaxStageDispatches < 0 {
+				return fmt.Errorf("config.yaml max_stage_dispatches=%d is invalid (must be a non-negative integer; 0 disables)", *pc.MaxStageDispatches)
+			}
+			cfg.MaxStageDispatches = *pc.MaxStageDispatches
+		}
+	}
 	if !explicitFlags["max-train-trials-per-window"] {
 		if v := os.Getenv("FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -958,6 +978,11 @@ func Execute() error {
 			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
 		}
 		fmt.Printf("  max-slice-retries: %d\n", maxSliceRetries(cfg.MaxSliceRetries))
+		if cfg.MaxStageDispatches == 0 {
+			fmt.Printf("  max-stage-dispatches: disabled\n")
+		} else {
+			fmt.Printf("  max-stage-dispatches: %d\n", cfg.MaxStageDispatches)
+		}
 		fmt.Printf("  max-resume-failures: %d\n", maxResumeFailures(cfg.MaxResumeFailures))
 		fmt.Printf("  max-tools-denied-retries: %d\n", maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries))
 	}
@@ -1007,6 +1032,7 @@ func Execute() error {
 		MaxConcurrent:              cfg.MaxConcurrent,
 		MaxRetries:                 cfg.MaxRetries,
 		MaxSliceRetries:            maxSliceRetries(cfg.MaxSliceRetries),
+		MaxStageDispatches:         cfg.MaxStageDispatches, // 0 = bound disabled; default 25 applied by the flag (#2395)
 		MaxResumeFailures:          maxResumeFailures(cfg.MaxResumeFailures),
 		MaxToolsDeniedRetries:      maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),
 		ReviewWaitTimeout:          reviewWaitTimeout(cfg.ReviewWaitTimeout),
@@ -1912,6 +1938,13 @@ func resolveRetryBackoff(envVal string, yamlVal *int, current int) int {
 // cap (#2045). It is applied here rather than in the engine because the engine
 // cannot tell an explicit 0 ("disabled") from an unset field.
 const defaultMaxTrainAutoRepairAttempts = 1
+
+// defaultMaxStageDispatches is the default per-episode stage dispatch bound
+// (#2395, ADR 2395). It sits above the ~14 dispatches a healthy episode can
+// legitimately reach (max_slice_retries 10 + max_retries 3 + the final run) and
+// well below the ~150 of the #2388 loop. Applied here because the engine cannot
+// tell an explicit 0 ("disabled") from an unset field.
+const defaultMaxStageDispatches = 25
 
 // reportTokenWarning records (or clears) the fine-grained-PAT panel entry: such
 // a token cannot drive GitHub Projects v2. The check always completes, so
