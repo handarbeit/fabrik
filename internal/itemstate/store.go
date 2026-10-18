@@ -652,12 +652,8 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case BlockedByEdgeAdded:
 		for _, d := range item.BlockedBy {
-<<<<<<< HEAD
 			if sameDependency(v.Repo, d, v.Dep) {
-=======
-			if d.Repo == v.Dep.Repo && d.Number == v.Dep.Number {
 				s.observe(item, observedBlockedByKey, time.Now())
->>>>>>> f0403d55 (feat(itemstate): add observed-at ordering record and per-fact ordering in the Store)
 				return 0
 			}
 		}
@@ -674,6 +670,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 				next = append(next, item.BlockedBy[:i]...)
 				next = append(next, item.BlockedBy[i+1:]...)
 				item.BlockedBy = next
+				s.observe(item, observedBlockedByKey, time.Now())
 				return BlockedByChanged
 			}
 		}
