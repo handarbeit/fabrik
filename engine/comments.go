@@ -675,6 +675,12 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	if completed && stage.Name == "Validate" && e.validateRerunPending(item) {
 		suppressed = true
 		completed = false
+		// The rework bracket (when the poll-start snapshot still carried the label the
+		// strip had just removed) must not restore stage:Validate:complete on the way
+		// out: that label is exactly what the forced re-run withdrew. Only the
+		// reworking marker comes off.
+		e.endStageRework(item, stage, wasReworking, true)
+		wasReworking = false
 		e.logf(item.Number, "validate-rerun", "Validate comment pass emitted %s while a forced Validate re-run is outstanding — not completing the stage; the Validate stage run must do that (#2378)\n", "FABRIK_STAGE_COMPLETE")
 	}
 	blocked := !completed && !suppressed && !e.commentBlockedOnInputOff.Load() && CheckBlockedOnInput(output)
