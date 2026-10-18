@@ -49,7 +49,10 @@ func queuedOrder(t *testing.T, eng *Engine) []int {
 
 func newQueueOrderEngine() *Engine {
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
-	eng.readClient = boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	// A cached board is only served with a known project ID (#2396).
+	cache.NoteProjectID("PVT_test")
+	eng.readClient = cache
 	return eng
 }
 
