@@ -603,14 +603,23 @@ func TestReviewPR_PartialCoverageKeepsTranscript(t *testing.T) {
 	}
 }
 
-func TestReviewPR_CompleteCoverageKeepsNoTranscriptByDefault(t *testing.T) {
+// #2363: the default is now "all"; "partial" keeps its meaning when chosen.
+func TestReviewPR_CompleteCoverageKeepsNoTranscriptUnderPartial(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "transcripts")
-	outcome, _, _ := reviewWithTranscript(t, Config{TranscriptDir: dir}, "", `{"type":"result"}`)
+	outcome, _, _ := reviewWithTranscript(t, Config{TranscriptDir: dir, KeepTranscripts: KeepTranscriptsPartial}, "", `{"type":"result"}`)
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	if files := transcriptFiles(t, dir); len(files) != 0 {
 		t.Errorf("complete review left %v", files)
+	}
+}
+
+func TestReviewPR_CompleteCoverageKeepsTranscriptByDefault(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "transcripts")
+	reviewWithTranscript(t, Config{TranscriptDir: dir}, "", `{"type":"result"}`)
+	if files := transcriptFiles(t, dir); len(files) != 1 {
+		t.Errorf("default policy kept %v for a complete review, want one", files)
 	}
 }
 

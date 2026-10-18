@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
@@ -149,6 +150,9 @@ func Execute() error {
 	// above, before Reconcile) — its returned close func is discarded in
 	// favor of the one already captured, which is what actually owns the
 	// open log file.
+	// #2363: one startup prune of the transcript directory, so a daemon that
+	// was down past the age bound does not wait for its next save.
+	pruneTranscriptsAtStartup(cfg, time.Now())
 	daemon, _ := NewDaemon(cfg, clients, &RealClaudeInvoker{}, CloneForReview, auth.BotLogin())
 	daemon.Reconciler = auth
 	daemon.ApplyDerivedRepos(initialDerived, clients)

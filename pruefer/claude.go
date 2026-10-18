@@ -341,6 +341,11 @@ type ReviewRequest struct {
 	// that is already running. 0 disables the loop: the review is one pass,
 	// exactly as before the loop existed.
 	MaxCoveragePasses int
+	// ToolResultsStageDir (#2363), when not empty, is a private directory the
+	// end-of-review session removal moves each session's tool-results files
+	// into, so ReviewPR can keep them beside the transcript. Empty: they are
+	// deleted with the session.
+	ToolResultsStageDir string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -1051,16 +1056,15 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	if requested == "" {
 		requested = rp.Ref
 	}
-	// #2375: with the loop on, every session this review creates is removed
-	// from the Claude profile when it ends, on every return path.
+	// #2375/#2363: every session this review creates is removed from the
+	// Claude profile when it ends, on every return path and at every cap.
 	var sessions []string
-	if req.MaxCoveragePasses > 0 {
-		defer func() {
-			if n, err := removeReviewSessions(req.ClaudeConfigDir, sessions); err != nil {
-				logf(req.PRNumber, "warn", "removing review session(s) from the Claude profile: %v (removed %d)\n", err, n)
-			}
-		}()
-	}
+	defer func() {
+		opts := removeSessionsOpts{PRNumber: req.PRNumber, ToolResultsDest: req.ToolResultsStageDir}
+		if n, err := removeReviewSessions(req.ClaudeConfigDir, sessions, opts); err != nil {
+			logf(req.PRNumber, "warn", "removing review session(s) from the Claude profile: %v (removed %d)\n", err, n)
+		}
+	}()
 	ref, why := chooseReviewSkill(set, requested, rp.Ref)
 	var spentTurns int
 	var spentCost float64

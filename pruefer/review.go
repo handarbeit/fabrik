@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -541,6 +542,19 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		defer cleanupStaged()
 	}
 
+	// #2363: the hidden tool results of the review's sessions are staged here
+	// when the session is removed, and moved beside the transcript only if one
+	// is kept. Not created under keep_transcripts: off.
+	var toolResultsStage string
+	if cfg.KeepTranscripts != KeepTranscriptsOff {
+		if d, mkErr := os.MkdirTemp("", fmt.Sprintf("pruefer-toolresults-pr%d-*", pr.Number)); mkErr != nil {
+			logf(pr.Number, "warn", "creating tool-results staging dir: %v — hidden tool outputs will not be kept\n", mkErr)
+		} else {
+			toolResultsStage = d
+			defer func() { _ = os.RemoveAll(d) }() // best effort: a temp dir
+		}
+	}
+
 	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort, ClaudeConfigDir: cfg.ClaudeConfigDir,
@@ -553,7 +567,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		ReviewSkill: reviewSkill, OperatorPluginDirs: operatorPluginDirs,
 		RepoPlugins: repoPlugins.Plugins, RepoPluginNotes: repoPlugins.Notes(),
 		BaseSHA: baseSHA, Grant: grant,
-		MaxCoveragePasses: cfg.MaxCoveragePasses,
+		MaxCoveragePasses:   cfg.MaxCoveragePasses,
+		ToolResultsStageDir: toolResultsStage,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
@@ -572,7 +587,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	})
 	// #2303: keep the raw transcript while the temp dirs still exist (their
 	// removal is deferred above) and before the review is submitted.
-	transcriptPath := maybeKeepTranscript(cfg, pr.Number, owner, repo, pr.HeadSHA, cov, result.Transcript)
+	transcriptPath := maybeKeepTranscript(cfg, pr.Number, owner, repo, pr.HeadSHA, cov, result.Transcript, toolResultsStage)
 	logCoverage(pr.Number, cov, result.OpenedAuthoritative, transcriptPath)
 	logCoverageLoop(pr.Number, result.Loop, result.NumTurns, result.CostUSD)
 

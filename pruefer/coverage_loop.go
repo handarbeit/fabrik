@@ -3,6 +3,7 @@ package pruefer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -392,13 +393,30 @@ func logCoverageLoop(prNumber int, loop *CoverageLoop, turns int, cost float64) 
 // ever used to build a path.
 var sessionIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// removeSessionsOpts scopes removeReviewSessions to one review (#2363).
+type removeSessionsOpts struct {
+	// PRNumber is the review's PR. A positive value lets the encoded-cwd
+	// directory a session leaves empty be removed (R1b); zero never removes one.
+	PRNumber int
+	// ToolResultsDest, when not empty, is a directory the session's
+	// tool-results files are moved into before the session folder is deleted,
+	// so a kept transcript can take them (R2).
+	ToolResultsDest string
+}
+
 // removeReviewSessions deletes the sessions a review created from the Claude
 // profile (#2375, R4): each is <profile>/projects/<encoded cwd>/<id>.jsonl plus
 // an optional <id>/ directory of tool results and subagent transcripts. The
 // encoded cwd is a CLI detail, so the directory is globbed, and the id is
-// matched exactly and only after it passes sessionIDRE. Best effort: it returns
-// the first error but keeps going, and nothing found is not an error.
-func removeReviewSessions(profileDir string, ids []string) (removed int, err error) {
+// matched exactly and only after it passes sessionIDRE; nothing but an exact
+// <id>.jsonl or <id>/ is ever deleted. It runs at every max_coverage_passes
+// value (#2363). Before an <id>/ is deleted its tool-results files are staged
+// to opts.ToolResultsDest, and afterwards the encoded-cwd directory is removed
+// if (and only if) it is now empty, sits directly under <profile>/projects/
+// and carries this review's pruefer-pr-<N>- in its name. Best effort: it
+// returns the first error but keeps going (a failed staging never keeps the
+// session), and nothing found is not an error.
+func removeReviewSessions(profileDir string, ids []string, opts removeSessionsOpts) (removed int, err error) {
 	if profileDir == "" {
 		home, herr := os.UserHomeDir()
 		if herr != nil {
@@ -406,30 +424,64 @@ func removeReviewSessions(profileDir string, ids []string) (removed int, err err
 		}
 		profileDir = filepath.Join(home, ".claude")
 	}
+	note := func(e error) {
+		if err == nil {
+			err = e
+		}
+	}
+	projects := filepath.Join(profileDir, "projects")
 	seen := map[string]bool{}
+	parents := map[string]bool{}
 	for _, id := range ids {
 		if seen[id] || !sessionIDRE.MatchString(id) {
 			continue
 		}
 		seen[id] = true
 		for _, pattern := range []string{id + ".jsonl", id} {
-			matches, gerr := filepath.Glob(filepath.Join(profileDir, "projects", "*", pattern))
+			matches, gerr := filepath.Glob(filepath.Join(projects, "*", pattern))
 			if gerr != nil {
-				if err == nil {
-					err = gerr
-				}
+				note(gerr)
 				continue
 			}
 			for _, m := range matches {
-				if rerr := os.RemoveAll(m); rerr != nil {
-					if err == nil {
-						err = rerr
+				if pattern == id && opts.ToolResultsDest != "" {
+					if n, serr := stageSessionToolResults(m, opts.ToolResultsDest); serr != nil {
+						note(fmt.Errorf("staging tool results from %s (staged %d): %w", m, n, serr))
 					}
+				}
+				if rerr := os.RemoveAll(m); rerr != nil {
+					note(rerr)
 					continue
 				}
 				removed++
+				parents[filepath.Dir(m)] = true
 			}
 		}
 	}
+	for parent := range parents {
+		removeEmptyReviewDir(projects, parent, opts.PRNumber)
+	}
 	return removed, err
+}
+
+// removeEmptyReviewDir removes parent, the encoded-cwd directory a review's
+// session lived in, when it is a direct child of projects, its name carries
+// pruefer-pr-<pr>- and it is empty. os.Remove (never RemoveAll) fails on a
+// non-empty directory, so the emptiness check is the filesystem's. A skip is
+// logged, never an error.
+func removeEmptyReviewDir(projects, parent string, pr int) {
+	if pr <= 0 {
+		return
+	}
+	if filepath.Dir(parent) != projects {
+		logf(pr, "review", "leaving %s: not directly under %s\n", parent, projects)
+		return
+	}
+	if !strings.Contains(filepath.Base(parent), fmt.Sprintf("pruefer-pr-%d-", pr)) {
+		logf(pr, "review", "leaving %s: not named for this review's PR\n", parent)
+		return
+	}
+	if err := os.Remove(parent); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logf(pr, "review", "leaving %s: %v\n", parent, err)
+	}
 }
