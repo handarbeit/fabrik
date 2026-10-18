@@ -341,7 +341,7 @@ func TestMutationFlagMatchesTheInterfaceSemantics(t *testing.T) {
 		"DeleteForwardingHooks": true, "DeleteReviewRequest": true,
 		"DequeuePullRequest": true, "DisablePullRequestAutoMerge": true,
 		"EnablePullRequestAutoMerge": true, "EnqueuePullRequest": true,
-		"MarkPRReady": true, "MergePR": true, "MergePRAtHeadSHA": true, "RemoveLabelFromIssue": true,
+		"MarkPRReady": true, "MergePR": true, "MergePRAtHeadSHA": true, "RemoveBlockedByIssue": true, "RemoveLabelFromIssue": true,
 		"ReopenIssue": true, "RerunFailedJobs": true, "ResolveReviewThread": true, "SeedLabels": true, "UpdateComment": true,
 		"UpdateIssueBody": true, "UpdatePRBase": true, "UpdateProjectItemStatus": true,
 		"UpdateProjectItemTextField": true, "ClearProjectItemField": true,

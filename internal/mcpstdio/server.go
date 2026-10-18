@@ -290,7 +290,7 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
 			"Start with fabrik_situation for the one rolled-up answer to what needs you (merge decisions, gated items, items waiting for input, pending decisions, merge-train and poll health, anomalies), or fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
 			"When the poll loop itself is stalled, fabrik_health.poll.overdue says so, items that only need the poll read as waiting-for-poll rather than stalled, and a pipeline-stalled event is pushed. " +
-			"Six action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's subscriber name (--subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC, else the OS username); they refuse, with the current state, when a precondition does not hold. " +
+			"Seven action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_set_blocked_by, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's subscriber name (--subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC, else the OS username); they refuse, with the current state, when a precondition does not hold. " +
 			"There is no tool to lift a pause or to comment: answer a paused item with a comment on the issue itself." + channelInstructions,
 	}
 }

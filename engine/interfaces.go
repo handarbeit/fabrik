@@ -96,6 +96,8 @@ type GitHubClient interface {
 	CreateIssue(owner, repo, title, body string, assignees []string) (number int, nodeID string, err error)
 	AddProjectV2ItemById(projectID, contentNodeID string) (string, error)
 	AddBlockedByIssue(issueNodeID, blockerNodeID string) error
+	// RemoveBlockedByIssue deletes a blockedBy edge (#2385, fabrik_set_blocked_by).
+	RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error
 	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)

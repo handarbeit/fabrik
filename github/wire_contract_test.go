@@ -71,6 +71,7 @@ var wireContractRegistry = []wireOperation{
 	{"lookupIssueProjectItemQuery", []string{lookupIssueProjectItemQuery}},
 	{"addProjectV2ItemByIdMutation", []string{addProjectV2ItemByIdMutation}},
 	{"addBlockedByMutation", []string{addBlockedByMutation}},
+	{"removeBlockedByMutation", []string{removeBlockedByMutation}},
 
 	// prs.go
 	{"fetchPRReviewDecisionQuery", []string{fetchPRReviewDecisionQuery}},
@@ -275,6 +276,31 @@ func TestWireContract_NeutralizationCatchesBadArgumentName(t *testing.T) {
 	}
 	if !strings.Contains(errs.Error(), "blockedById") {
 		t.Fatalf("validation error did not name the bad argument blockedById: %v", errs)
+	}
+}
+
+// TestWireContract_NeutralizationCatchesBadRemoveBlockedByName proves the
+// removeBlockedBy mutation (#2385) is covered by the same operation-name and
+// argument-level validation as addBlockedBy: a wrong mutation name and a wrong
+// input field are each rejected, naming the bad identifier.
+func TestWireContract_NeutralizationCatchesBadRemoveBlockedByName(t *testing.T) {
+	schema := loadWireSchema(t)
+
+	for _, tc := range []struct{ marker, bad, want string }{
+		{"removeBlockedBy(input", "removeBlockedByIssue(input", "removeBlockedByIssue"},
+		{"blockingIssueId: $blockingIssueId", "blockedById: $blockingIssueId", "blockedById"},
+	} {
+		if !strings.Contains(removeBlockedByMutation, tc.marker) {
+			t.Fatalf("removeBlockedByMutation no longer contains %q — update this test's neutralization target", tc.marker)
+		}
+		bad := strings.Replace(removeBlockedByMutation, tc.marker, tc.bad, 1)
+		_, errs := gqlparser.LoadQuery(schema, bad)
+		if errs == nil {
+			t.Fatalf("expected schema validation to reject %s, but it passed", tc.want)
+		}
+		if !strings.Contains(errs.Error(), tc.want) {
+			t.Fatalf("validation error did not name %s: %v", tc.want, errs)
+		}
 	}
 }
 
