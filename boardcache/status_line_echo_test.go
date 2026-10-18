@@ -27,14 +27,14 @@ import (
 // them without an unmarshal error.
 func textEditPayloads(itemID string) map[string][]byte {
 	mk := func(to string) []byte {
-		return []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"id":%q,"project_node_id":"PID"},`+
+		return []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"node_id":%q,"project_node_id":"PID"},`+
 			`"changes":{"field_value":{"field_node_id":"SFID","field_type":"text","to":%s,"from":null}}}`, itemID, to))
 	}
 	return map[string][]byte{
 		"string to":  mk(`"queued · batch of 3"`),
 		"null to":    mk(`null`),
 		"object to":  mk(`{"id":"x","name":"landing"}`),
-		"absent to":  []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"id":%q,"project_node_id":"PID"},"changes":{"field_value":{"field_node_id":"SFID","field_type":"text"}}}`, itemID)),
+		"absent to":  []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"node_id":%q,"project_node_id":"PID"},"changes":{"field_value":{"field_node_id":"SFID","field_type":"text"}}}`, itemID)),
 		"number to":  mk(`42`),
 		"clear (to)": mk(`""`),
 	}
@@ -137,7 +137,7 @@ func TestDeltaProjectsV2ItemTextEditIsNoOp_NeutralisationFails(t *testing.T) {
 // the tolerant payload decode must not break a real Status edit.
 func TestDeltaProjectsV2ItemSingleSelectStillApplies(t *testing.T) {
 	c, changes, mu, _ := seededCacheWithObserver(t)
-	c.ApplyDelta("projects_v2_item", []byte(`{"action":"edited","projects_v2_item":{"id":"PVTI_001","project_node_id":"PID"},`+
+	c.ApplyDelta("projects_v2_item", []byte(`{"action":"edited","projects_v2_item":{"node_id":"PVTI_001","project_node_id":"PID"},`+
 		`"changes":{"field_value":{"field_node_id":"SFID","field_type":"single_select","to":{"id":"o1","name":"Plan"}}}}`))
 	if s := testGetState(t, c, "owner/repo", 1); s.Status != "Plan" {
 		t.Errorf("Status = %q, want Plan", s.Status)
@@ -247,7 +247,7 @@ func TestDeltaProjectsV2ItemDateEditIsNoOp(t *testing.T) {
 		"object to": `{"date":"2026-10-10"}`,
 	}
 	for name, to := range payloads {
-		p := []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"id":"PVTI_001","project_node_id":"PID"},`+
+		p := []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"node_id":"PVTI_001","project_node_id":"PID"},`+
 			`"changes":{"field_value":{"field_node_id":"SFID","field_type":"date","to":%s,"from":null}}}`, to))
 		c.ApplyDelta("projects_v2_item", p)
 		if s := testGetState(t, c, "owner/repo", 1); s.Status != before.Status {

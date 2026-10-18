@@ -940,8 +940,8 @@ const (
 )
 
 func projectsV2ItemPayloadJSON(action, itemID, statusName string) []byte {
-	p := projectsV2ItemPayload{Action: action}
-	p.ProjectsV2Item.ID = itemID
+	p := projectsV2ItemPayload{Action: lenientString(action)}
+	p.ProjectsV2Item.NodeID = lenientString(itemID)
 	p.ProjectsV2Item.ProjectNodeID = testProjectID
 	p.Changes.FieldValue.FieldNodeID = testStatusFieldID
 	p.Changes.FieldValue.FieldType = "single_select"
@@ -2428,21 +2428,22 @@ func issuesAssignedPayloadJSON(action, repo string, issNum int, assignees []stri
 }
 
 // projectsV2ItemCreatedPayloadJSON builds a projects_v2_item.created payload.
-// boardItemID is the PVTI_xxx board-side item ID stored in projects_v2_item.id.
+// boardItemID is the PVTI_xxx board-side item ID, delivered as
+// projects_v2_item.node_id (the numeric projects_v2_item.id is never read).
 func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType, boardItemID string) []byte {
 	p := projectsV2ItemPayload{Action: "created"}
-	p.ProjectsV2Item.ID = boardItemID
+	p.ProjectsV2Item.NodeID = lenientString(boardItemID)
 	p.ProjectsV2Item.ProjectNodeID = testProjectID
-	p.ProjectsV2Item.ContentNodeID = contentNodeID
-	p.ProjectsV2Item.ContentType = contentType
+	p.ProjectsV2Item.ContentNodeID = lenientString(contentNodeID)
+	p.ProjectsV2Item.ContentType = lenientString(contentType)
 	b, _ := json.Marshal(p)
 	return b
 }
 
 // projectsV2ItemRemovedPayloadJSON builds a projects_v2_item.deleted or .archived payload.
 func projectsV2ItemRemovedPayloadJSON(action, itemID string) []byte {
-	p := projectsV2ItemPayload{Action: action}
-	p.ProjectsV2Item.ID = itemID
+	p := projectsV2ItemPayload{Action: lenientString(action)}
+	p.ProjectsV2Item.NodeID = lenientString(itemID)
 	p.ProjectsV2Item.ProjectNodeID = testProjectID
 	b, _ := json.Marshal(p)
 	return b

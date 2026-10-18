@@ -8,6 +8,8 @@ Accepted. Narrows the `projects_v2_item` handling of ADR 034/036 and generalises
 
 `applyProjectsV2ItemDelta` applied every `projects_v2_item` event without asking which project or field it concerned. Org-level delivery carries events for every project in the org. Engine issues are also added to a public triage board by convention, so a `created` event from that board replaced our `ItemID` and blanked our Status, its later column edits became our Status, and `liveLandingState` could read the triage board's Status and skip a landing. An `edited` on any single-select field of our own board (Priority, Size) was read as a Status change. The damage self-healed at the next drift reconcile (about 3 minutes).
 
+> **Partially superseded by [ADR 2383](2383-projects-v2-item-decode-node-id.md):** only `projects_v2_item.project_node_id` is read (no real delivery carries a top-level one), the item ID is `projects_v2_item.node_id`, and the fixtures are now verbatim (scrubbed) captures.
+
 ## Decision
 
 - **Project filter first, every action.** The event's project node ID must equal the cache's project ID. A foreign, missing or not-yet-known ID ignores the event with one log line, before `FetchItemDetails` (which also spends no GraphQL budget on foreign traffic), the echo match and the removal.
