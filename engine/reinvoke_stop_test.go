@@ -91,3 +91,39 @@ func TestStopRequest_NoWorkerLeavesNoHandle(t *testing.T) {
 		t.Fatalf("%d handle(s) registered with no worker", n)
 	}
 }
+
+// A stop that reaches a reinvoke still queued for a worker slot cancels it and refunds the
+// cycle charged before dispatch, so repeated stop/resume cannot exhaust the cycle cap (#2349).
+func TestStopRequest_QueuedReinvokeRefundsCycle(t *testing.T) {
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}}
+	eng, _ := testEngineWithRepoAndStages(t, &mockGitHubClient{}, &mockClaudeInvoker{}, stgs)
+
+	// Occupy every worker slot so the reinvoke stays queued.
+	for i := 0; i < cap(eng.sem); i++ {
+		eng.sem <- struct{}{}
+	}
+	item := gh.ProjectItem{Number: 32, Repo: "owner/repo"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	eng.store.Apply(itemstate.CIFixCycleIncremented{Repo: "owner/repo", Number: 32, StageName: "Implement"})
+	eng.dispatchCIFixReinvoke(context.Background(), board, item, stgs[0], PRSettleResult{})
+
+	if _, ok := eng.issueCtxs.Load("owner/repo#32"); !ok {
+		t.Fatal("a queued reinvoke registered no cancel handle")
+	}
+	eng.handleStopRequest(context.Background(), tui.StopRequest{IssueNumber: 32, Repo: "owner/repo", StageName: "Implement"})
+
+	done := make(chan struct{})
+	go func() { eng.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the stop request did not cancel the queued reinvoke")
+	}
+	if _, ok := eng.issueCtxs.Load("owner/repo#32"); ok {
+		t.Error("a stale cancel handle remains after the queued reinvoke ended")
+	}
+	snap, _ := eng.store.Get("owner/repo", 32)
+	if got := snap.CIFixCycles("Implement"); got != 0 {
+		t.Errorf("cycle charge not refunded for a reinvoke stopped while queued: %d", got)
+	}
+}

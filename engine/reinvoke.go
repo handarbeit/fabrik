@@ -232,7 +232,14 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
-			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired\n")
+			// Stopped while queued: no pass ran, so refund the pre-dispatch charge
+			// (#2349). Repeated stop/resume must not exhaust the cycle cap.
+			if opts.cycle.refund != nil {
+				for _, m := range opts.cycle.refund(itemRepo, item.Number, stage.Name) {
+					e.store.Apply(m)
+				}
+			}
+			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired — refunded %s cycle counter\n", opts.cycle.label)
 			return
 		case <-e.drainGateCh():
 			// #2259: queued but not started — abandon; the new process re-dispatches.
