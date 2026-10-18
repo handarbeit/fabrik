@@ -460,7 +460,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return applyProjectItem(item, merged)
 
 	case IssueMilestoneUpdated:
-		if observedStale(item, observedMilestoneKey, v.At) {
+		if observedStaleWebhook(item, observedMilestoneKey, v.At) {
 			return 0
 		}
 		s.observe(item, observedMilestoneKey, v.At)
@@ -485,7 +485,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LabelsChanged
 
 	case IssueClosed:
-		if observedStale(item, observedClosedKey, v.At) {
+		if observedStaleWebhook(item, observedClosedKey, v.At) {
 			return 0
 		}
 		s.observe(item, observedClosedKey, v.At)
@@ -500,7 +500,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return StateChanged | EngineWriteRecordedChanged
 
 	case IssueReopened:
-		if observedStale(item, observedClosedKey, v.At) {
+		if observedStaleWebhook(item, observedClosedKey, v.At) {
 			return 0
 		}
 		s.observe(item, observedClosedKey, v.At)
@@ -1091,7 +1091,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// PR-wide record is only ever written by a whole-list read (a deep fetch)
 		// and still orders a webhook against it.
 		authorKey := observedReviewAuthorKey(v.Review.Author)
-		if observedStale(item, observedReviewsKey, v.At) || observedStale(item, authorKey, v.At) {
+		if observedStaleWebhook(item, observedReviewsKey, v.At) || observedStaleWebhook(item, authorKey, v.At) {
 			return 0
 		}
 		ensureLinkedPR(item, v.Number)
@@ -1139,7 +1139,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case PRHeadSHAUpdated:
 		auth := authorityOf(v.At, v.AtIsFetchStart, s.graceLocked())
-		if v.SHA == "" && s.ordering() {
+		if (v.SHA == "" || (v.FillOnly && item.LinkedPR != nil && item.LinkedPR.HeadSHA != "")) && s.ordering() {
 			// A link-only write (a payload that carries the PR but not its head)
 			// establishes the linkage and writes nothing else (#2348, R3).
 			ensureLinkedPR(item, v.LinkedPRNum)
@@ -1148,7 +1148,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			}
 			return LinkedPRChanged
 		}
-		if observedStale(item, observedHeadKey, auth) {
+		stale := observedStale
+		if !v.AtIsFetchStart {
+			stale = observedStaleWebhook
+		}
+		if stale(item, observedHeadKey, auth) {
 			return 0
 		}
 		ensureLinkedPR(item, v.LinkedPRNum)
@@ -1376,7 +1380,11 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		obsAt = v.At
 	}
 	obsAt = authorityOf(obsAt, v.ObservedIsFetchStart, s.graceLocked())
-	if observedStale(item, observedStatusKey, obsAt) {
+	stale := observedStale
+	if !v.ObservedIsFetchStart {
+		stale = observedStaleWebhook // a webhook's own second-resolution GitHub time
+	}
+	if stale(item, observedStatusKey, obsAt) {
 		s.mu.Unlock()
 		return Snapshot{}, nil, nil // older than the recorded Status: dropped silently (#2348)
 	}

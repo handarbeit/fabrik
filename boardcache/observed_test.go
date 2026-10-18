@@ -133,3 +133,38 @@ func TestReconcile_ZeroFetchedAtRemovesMissing(t *testing.T) {
 		t.Fatal("zero FetchedAt kept an item")
 	}
 }
+
+// A late check_run for a superseded commit must not move the head back through
+// the auto-heal path, and must not wipe the current head's check runs. The same
+// path still fills a head the Store does not have yet.
+func TestDeltaCheckRun_AutoHealDoesNotRegressHead(t *testing.T) {
+	mc := &mockClient{fetchPRsForSHAFn: func(owner, repo, sha string) ([]int, error) { return []int{5}, nil }}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items:     []gh.ProjectItem{{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Implement"}},
+	})
+	c.RecordPRLinkage("owner/repo", 5, 1)
+	now := time.Now()
+	c.ApplyDelta("pull_request", []byte(fmt.Sprintf(
+		`{"action":"synchronize","pull_request":{"number":5,"title":"t","state":"open","updated_at":%q,"head":{"sha":"sha-b"}},"repository":{"full_name":"owner/repo"}}`,
+		iso(now))))
+	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 11, "ci", "completed", "success", "sha-b"))
+	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 10, "ci", "completed", "success", "sha-a"))
+	st := testGetState(t, c, "owner/repo", 1)
+	if st.LinkedPR.HeadSHA != "sha-b" || len(st.LinkedPR.CheckRuns) != 1 {
+		t.Fatalf("head %q, check runs %v: a check_run for an old commit regressed the head", st.LinkedPR.HeadSHA, st.LinkedPR.CheckRuns)
+	}
+
+	// A PR with no recorded head is still filled by the heal.
+	c2 := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c2, &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items:     []gh.ProjectItem{{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Implement"}},
+	})
+	c2.RecordPRLinkage("owner/repo", 5, 1)
+	c2.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 12, "ci", "completed", "success", "sha-c"))
+	if got := testGetState(t, c2, "owner/repo", 1).LinkedPR.HeadSHA; got != "sha-c" {
+		t.Fatalf("head = %q, want sha-c filled by the heal", got)
+	}
+}

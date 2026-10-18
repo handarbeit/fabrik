@@ -1182,6 +1182,10 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 		SHA:         sha,
+		// A check_run says nothing about whether its commit is still the head: a
+		// run for a superseded commit completes after a newer push. The head is
+		// only filled when the Store has none (#2348, FR-008).
+		FillOnly: true,
 	})
 	c.bumpLocalDeltaAt(key)
 	if healed {

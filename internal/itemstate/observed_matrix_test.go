@@ -386,11 +386,13 @@ func TestObservedOrdering_PerLabelGranularity(t *testing.T) {
 // engine has since removed, and must not be shielded afterwards (S2, S4).
 func TestObservedOrdering_LateEchoDoesNotResurrectRemovedLabel(t *testing.T) {
 	s := orderedStore(t)
-	t0 := time.Now()
+	// GitHub times have one-second resolution, so a late event not flagged as an
+	// echo is older by at least a second; a same-second echo is the echo rule's.
+	t0 := time.Now().Add(-2 * time.Second).Truncate(time.Second)
 	s.Apply(LocalLabelAdded{Repo: orderRepo, Number: 1, Label: "fabrik:editing"})
 	s.Apply(LocalLabelRemoved{Repo: orderRepo, Number: 1, Label: "fabrik:editing"})
 	// The echo of the add arrives late, flagged as an engine echo and not.
-	s.Apply(IssueLabeled{Repo: orderRepo, Number: 1, Label: "fabrik:editing", At: t0, EchoOfEngine: true})
+	s.Apply(IssueLabeled{Repo: orderRepo, Number: 1, Label: "fabrik:editing", At: time.Now(), EchoOfEngine: true})
 	s.Apply(IssueLabeled{Repo: orderRepo, Number: 1, Label: "fabrik:editing", At: t0})
 	if hasLabel(stateOf(t, s).Labels, "fabrik:editing") {
 		t.Fatal("late echo resurrected the removed label")
@@ -625,5 +627,40 @@ func TestObservedOrdering_DeepFetchKeepsNewerWebhookReview(t *testing.T) {
 	got := stateOf(t, s).LinkedPR.Reviews
 	if len(got) != 2 {
 		t.Fatalf("want alice (fetch) and bob (webhook), got %+v", got)
+	}
+}
+
+// A head write that is FillOnly sets the head only while the Store has none; with
+// one recorded it links the PR and keeps the head and its check runs.
+func TestObservedOrdering_FillOnlyHeadKeepsRecordedHead(t *testing.T) {
+	s := orderedStore(t)
+	s.Apply(PRHeadSHAUpdated{Repo: orderRepo, Number: 1, LinkedPRNum: orderPR, SHA: "sha-b", At: time.Now()})
+	s.Apply(CheckRunCompleted{SHA: "sha-b", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "success"}})
+	s.Apply(PRHeadSHAUpdated{Repo: orderRepo, Number: 1, LinkedPRNum: orderPR, SHA: "sha-a", FillOnly: true})
+	st := stateOf(t, s)
+	if st.LinkedPR.HeadSHA != "sha-b" || len(st.LinkedPR.CheckRuns) != 1 {
+		t.Fatalf("head %q, check runs %v", st.LinkedPR.HeadSHA, st.LinkedPR.CheckRuns)
+	}
+}
+
+// A webhook's GitHub time has one-second resolution and an engine write is
+// recorded with sub-second precision: a human change in the same second as an
+// engine write must apply, not be dropped as older. One second earlier is still
+// older.
+func TestObservedOrdering_WebhookSameSecondAsEngineWriteApplies(t *testing.T) {
+	s := orderedStore(t)
+	s.Apply(LocalLabelAdded{Repo: orderRepo, Number: 1, Label: "x"})
+	s.Apply(LocalLabelRemoved{Repo: orderRepo, Number: 1, Label: "x"})
+	rec := stateOf(t, s).EngineWriteAt[engineWriteLabelKey("x")]
+	if rec.Equal(rec.Truncate(time.Second)) {
+		t.Skip("engine write landed exactly on a second boundary")
+	}
+	s.Apply(IssueLabeled{Repo: orderRepo, Number: 1, Label: "x", At: rec.Truncate(time.Second)})
+	if !hasLabel(stateOf(t, s).Labels, "x") {
+		t.Fatal("a webhook in the same second as an engine write was dropped")
+	}
+	s.Apply(IssueUnlabeled{Repo: orderRepo, Number: 1, Label: "x", At: rec.Truncate(time.Second).Add(-time.Second)})
+	if !hasLabel(stateOf(t, s).Labels, "x") {
+		t.Fatal("a webhook a second older than the record was applied")
 	}
 }

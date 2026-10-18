@@ -101,10 +101,25 @@ func observedStale(item *ItemState, key string, auth time.Time) bool {
 	return !rec.IsZero() && auth.Before(rec)
 }
 
-// labelStale is observedStale for one label: the per-label record and the
-// full-label-set baseline both count.
+// observedStaleWebhook is observedStale for a webhook's own GitHub time. GitHub
+// stamps payloads with one-second resolution while the daemon records its own
+// writes with sub-second precision, so a change made in the same second as a
+// recorded write would compare as older and be lost. The record is therefore
+// truncated to the second: a webhook in the same second applies (a tie), as ties
+// do everywhere else. The echo of the engine's own write is dropped by the echo
+// rule (dropLabelEvent), not by this comparison (#2348).
+func observedStaleWebhook(item *ItemState, key string, auth time.Time) bool {
+	if auth.IsZero() {
+		return false
+	}
+	rec := recordedAt(item, key)
+	return !rec.IsZero() && auth.Before(rec.Truncate(time.Second))
+}
+
+// labelStale is observedStaleWebhook for one label: the per-label record and the
+// full-label-set baseline both count. Only webhook label events call it.
 func labelStale(item *ItemState, label string, auth time.Time) bool {
-	return observedStale(item, engineWriteLabelKey(label), auth) || observedStale(item, observedLabelsKey, auth)
+	return observedStaleWebhook(item, engineWriteLabelKey(label), auth) || observedStaleWebhook(item, observedLabelsKey, auth)
 }
 
 // observe records that key was observed with authority time auth, keeping the
@@ -143,7 +158,10 @@ func (s *Store) ordering() bool { return !s.observedOrderingOff.Load() }
 // SetObservedOrderingDisabledForTest restores the pre-#2348 behaviour: no
 // observed-at record is kept or consulted, and Reconcile removes every item
 // missing from its listing. Engine-write protection (#2159) is unaffected. Test
-// seam only, used to show the sim twins are not vacuous.
+// seam only, used to show the sim twins are not vacuous. It does not revert
+// everything: engine-write records (#2159) are still kept and still shield Status,
+// closed and labels from listings, and head, Status and closed comparisons see
+// them through recordedAt.
 func (s *Store) SetObservedOrderingDisabledForTest(off bool) {
 	s.observedOrderingOff.Store(off)
 }

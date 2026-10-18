@@ -519,6 +519,11 @@ type PRHeadSHAUpdated struct {
 	Number         int // issue number
 	LinkedPRNum    int // PR number to set (0 = leave unchanged)
 	SHA            string
+	// FillOnly makes the write set the head only while the Store holds none: with
+	// a head already recorded it only links the PR. For a producer that learned
+	// the SHA from something that says nothing about whether it is still the
+	// head, such as a check_run for an old commit (#2348, FR-008).
+	FillOnly bool
 }
 
 func (PRHeadSHAUpdated) isMutation()       {}
