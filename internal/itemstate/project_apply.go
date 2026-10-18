@@ -234,7 +234,7 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 // closed and label records a live read can confirm are returned for dropping.
 func deepFetchLiveView(item *ItemState, pi gh.ProjectItem, grace time.Duration, now time.Time) shallowView {
 	var v shallowView
-	if !pi.DeepFetchLive || pi.DeepFetchStartedAt.IsZero() || len(item.EngineWriteAt) == 0 {
+	if !pi.DeepFetchLive || pi.DeepFetchStartedAt.IsZero() || !hasRecords(item) {
 		return v
 	}
 	sv := protectStatusClosed(item, item.Status, pi.IsClosed, pi.DeepFetchStartedAt, grace, now)
