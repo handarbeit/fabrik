@@ -50,8 +50,8 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.87: the overseer subscriber name now falls back to your OS username, so the PM plugin's actions work with no configuration, and the plugin's shared <em>Subscriber name</em> setting is gone so concurrent sessions no longer supersede each other. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">Install the Fabrik PM Plugin</a>.
+      New in v0.0.88: Pruefer reviews through plugins and keeps resuming a review until every diff entry is read, and the engine now guarantees that a paused item is never advanced or landed and that only the commit Validate verified is merged, even across a restart. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#sha-change-auto-revalidation">SHA-change Auto-Revalidation</a>.
     </p>
 
     <div class="hero-diagram">
