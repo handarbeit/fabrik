@@ -280,6 +280,12 @@ func (a *overseerActor) SetBlockedBy(p localapi.SetBlockedByParams) (*localapi.A
 			pl.noop = "already in the cached edges"
 			continue
 		case pl.op == localapi.EdgeRemove && !cached:
+			if !edgeKnown(&t.st) {
+				// An item the daemon never deep-fetched (a parked card) has an empty
+				// cache that means "unknown", not "no blockers": calling the removal a
+				// no-op would silently leave a real edge in place.
+				return nil, refuse("cannot tell whether %s is blocked by %s: the cached blockers of %s are unknown (it has not been fetched yet); retry once the daemon has fetched it", t.ref, pl.ref, t.ref)
+			}
 			pl.noop = "not in the cached edges"
 			continue
 		}

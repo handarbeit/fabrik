@@ -203,6 +203,8 @@ func TestOverseerSetBlockedBy_Refusals(t *testing.T) {
 			}, want: "cached blockers of owner/repo#7 are unknown"},
 		{name: "unknown edges of the blocker itself", items: []ovItem{{number: 5, status: "Backlog"}, {number: 6, status: "Backlog"}}, p: localapi.SetBlockedByParams{Add: []string{"6"}},
 			setup: func(t *testing.T, e *Engine, _ *mockGitHubClient) { ovDeepFetch(t, e, 5) }, want: "cached blockers of owner/repo#6 are unknown"},
+		{name: "remove from an item whose edges are unknown", items: []ovItem{{number: 5, status: "Backlog"}}, p: localapi.SetBlockedByParams{Remove: []string{"owner/repo#6"}},
+			want: "cached blockers of owner/repo#5 are unknown"},
 		{name: "uncached open cross-repo blocker", items: []ovItem{{number: 5, status: "Backlog"}}, p: localapi.SetBlockedByParams{Add: []string{"other/lib#3"}},
 			setup: func(t *testing.T, e *Engine, c *mockGitHubClient) {
 				ovDeepFetch(t, e, 5)
