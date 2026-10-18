@@ -465,6 +465,22 @@ func TestObservedOrdering_PartialOpenedRespectsNewerLabelRemoval(t *testing.T) {
 	}
 }
 
+// A stub left by an earlier label event (no populating write yet) keeps that
+// event's newer removal against a late creation-time payload.
+func TestObservedOrdering_PartialOpenedOnStubRespectsNewerLabelRemoval(t *testing.T) {
+	s := NewStore(nil)
+	t0 := time.Now()
+	s.Apply(IssueUnlabeled{Repo: orderRepo, Number: 1, Label: "x", At: t0})
+	s.Apply(IssueOpened{Partial: true, At: t0.Add(-2 * time.Minute), Item: gh.ProjectItem{Repo: orderRepo, Number: 1, ID: "I_1", Title: "T", Labels: []string{"x", "y"}}})
+	st := stateOf(t, s)
+	if hasLabel(st.Labels, "x") {
+		t.Fatal("older opened payload re-added a label removed on a stub")
+	}
+	if !hasLabel(st.Labels, "y") {
+		t.Fatalf("unrelated payload label missing: %v", st.Labels)
+	}
+}
+
 // Reconcile's removal never drops an item added after its listing's fetch began.
 func TestObservedOrdering_RemoveIfNotAddedAfter(t *testing.T) {
 	s := orderedStore(t)

@@ -282,12 +282,17 @@ func (s *Store) applyPartialOpened(item *ItemState, v IssueOpened) ChangeFlags {
 		flags |= StateChanged
 		s.observe(item, observedClosedKey, v.At)
 		if !pi.LabelsAbsent {
-			item.Labels = unionStrings(item.Labels, pi.Labels)
-			item.LabelsKnown = true
-			flags |= LabelsChanged
+			// A stub (created by an earlier label event, before any populating
+			// write) can already hold a newer record for a label: such a label is
+			// the business of that event, not of this creation-time payload.
 			for _, l := range pi.Labels {
+				if !labelStale(item, l, v.At) && !containsString(item.Labels, l) {
+					item.Labels = append(item.Labels, l)
+				}
 				s.observe(item, engineWriteLabelKey(l), v.At)
 			}
+			item.LabelsKnown = true
+			flags |= LabelsChanged
 		}
 	} else if !pi.LabelsAbsent {
 		for _, l := range pi.Labels {
