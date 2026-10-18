@@ -896,7 +896,14 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		return
 	}
 
-	reviewAt := observedTime(p.Review.SubmittedAt)
+	// submitted_at is the time of the original submission. It orders a "submitted"
+	// event, but an "edited" or "dismissed" one happens later and carries no time
+	// of its own, so it is ordered by receipt: stamped with the old submission time
+	// it would look older than any read made since, and be dropped.
+	reviewAt := time.Now()
+	if p.Action == "submitted" {
+		reviewAt = observedTime(p.Review.SubmittedAt)
+	}
 	review := gh.PRReview{
 		Author:     p.Review.User.Login,
 		State:      strings.ToUpper(p.Review.State),

@@ -40,6 +40,11 @@ const (
 	observedBlockedByKey = "blockedBy"
 )
 
+// observedReviewAuthorKey is the record key of one reviewer's review. Webhook
+// review events are ordered against it, a whole-list deep fetch against both it
+// and observedReviewsKey. The set is bounded by the PR's reviewers.
+func observedReviewAuthorKey(author string) string { return observedReviewsKey + ":" + author }
+
 // observedLabelRetention is how long a per-label record is kept. Single-valued
 // records are bounded by the number of facts and never expire.
 const observedLabelRetention = 10 * time.Minute
@@ -301,6 +306,9 @@ func (s *Store) applyDeepFetchedOrdered(item *ItemState, fresh gh.ProjectItem) C
 			reviews:   observedStale(item, observedReviewsKey, auth),
 		}
 	}
+	if !auth.IsZero() && !st.reviews && item.LinkedPR != nil {
+		fresh.LinkedPRReviews = keepNewerReviews(item, fresh.LinkedPRReviews, auth)
+	}
 	flags := applyDeepFetched(item, fresh, grace, time.Now(), st)
 	if !auth.IsZero() {
 		if !st.blockedBy {
@@ -323,4 +331,32 @@ func (s *Store) applyDeepFetchedOrdered(item *ItemState, fresh gh.ProjectItem) C
 		}
 	}
 	return flags
+}
+
+// keepNewerReviews returns incoming with every author whose recorded review
+// observation is newer than auth (a webhook delivery that landed while the fetch
+// was in flight) replaced by the review the Store already holds for them, so a
+// whole-list read cannot undo or wipe one reviewer's newer review (#2348).
+func keepNewerReviews(item *ItemState, incoming []gh.PRReview, auth time.Time) []gh.PRReview {
+	newer := make(map[string]bool)
+	for _, r := range item.LinkedPR.Reviews {
+		if observedStale(item, observedReviewAuthorKey(r.Author), auth) {
+			newer[r.Author] = true
+		}
+	}
+	if len(newer) == 0 {
+		return incoming
+	}
+	out := make([]gh.PRReview, 0, len(incoming)+len(newer))
+	for _, r := range incoming {
+		if !newer[r.Author] {
+			out = append(out, r)
+		}
+	}
+	for _, r := range item.LinkedPR.Reviews {
+		if newer[r.Author] {
+			out = append(out, r)
+		}
+	}
+	return out
 }

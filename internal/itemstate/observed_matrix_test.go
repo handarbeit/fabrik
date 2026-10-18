@@ -568,3 +568,62 @@ func TestObservedOrdering_DismissedReviewUpdatesInPlace(t *testing.T) {
 		t.Fatalf("reviews = %v", got)
 	}
 }
+
+// Reviews are ordered per author: a newer review by one reviewer must not drop a
+// delivery that is older but belongs to another, whichever order they arrive in
+// (the Pruefer finding on PRReviewSubmitted).
+func TestObservedOrdering_ReviewsAreOrderedPerAuthor(t *testing.T) {
+	now := time.Now()
+	alice := gh.PRReview{Author: "alice", DatabaseID: 1, State: "CHANGES_REQUESTED", SubmittedAt: now}
+	bob := gh.PRReview{Author: "bob", DatabaseID: 2, State: "APPROVED", SubmittedAt: now.Add(time.Minute)}
+
+	s := orderedStore(t)
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: bob, At: bob.SubmittedAt})
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: alice, At: alice.SubmittedAt})
+	if got := stateOf(t, s).LinkedPR.Reviews; len(got) != 2 {
+		t.Fatalf("alice's older review was dropped by bob's newer one: %+v", got)
+	}
+
+	// A dismissal of alice's review, ordered by receipt, clears her verdict even
+	// though bob reviewed after she did.
+	dismissed := alice
+	dismissed.State = "DISMISSED"
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: dismissed, At: time.Now()})
+	for _, r := range stateOf(t, s).LinkedPR.Reviews {
+		if r.Author == "alice" && r.State != "DISMISSED" {
+			t.Fatalf("dismissal not applied: %+v", r)
+		}
+	}
+
+	// The same author's older review is still dropped behind her newer one.
+	s2 := orderedStore(t)
+	newer := gh.PRReview{Author: "alice", DatabaseID: 3, State: "APPROVED", SubmittedAt: now.Add(time.Minute)}
+	s2.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: newer, At: newer.SubmittedAt})
+	s2.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: alice, At: alice.SubmittedAt})
+	if got := stateOf(t, s2).LinkedPR.Reviews; len(got) != 1 || got[0].State != "APPROVED" {
+		t.Fatalf("older review of the same author overwrote the newer one: %+v", got)
+	}
+}
+
+// A live deep fetch issued before a webhook review landed must not wipe or undo
+// that author's review, while still applying the other authors' reads.
+func TestObservedOrdering_DeepFetchKeepsNewerWebhookReview(t *testing.T) {
+	s := orderedStore(t)
+	now := time.Now()
+	started := now.Add(-time.Minute) // the fetch was issued before the webhook
+	bob := gh.PRReview{Author: "bob", DatabaseID: 2, State: "APPROVED", SubmittedAt: now}
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: bob, At: now.Add(2 * testGrace)})
+
+	fresh := testProjectItem(orderRepo, 1)
+	fresh.Status = "Plan"
+	fresh.LabelsAbsent = true
+	fresh.LinkedPRNumber = orderPR
+	fresh.LinkedPRReviews = []gh.PRReview{{Author: "alice", DatabaseID: 1, State: "COMMENTED", SubmittedAt: started}}
+	fresh.DeepFetchLive, fresh.DeepFetchStartedAt = true, started
+	s.Apply(ItemDeepFetched{Repo: orderRepo, Number: 1, FreshState: fresh})
+
+	got := stateOf(t, s).LinkedPR.Reviews
+	if len(got) != 2 {
+		t.Fatalf("want alice (fetch) and bob (webhook), got %+v", got)
+	}
+}

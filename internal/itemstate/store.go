@@ -1086,11 +1086,16 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return BaseBranchChanged
 
 	case PRReviewSubmitted:
-		if observedStale(item, observedReviewsKey, v.At) {
+		// Reviews are ordered per author: one reviewer's newer review says nothing
+		// about another's older one, and webhook deliveries arrive out of order. The
+		// PR-wide record is only ever written by a whole-list read (a deep fetch)
+		// and still orders a webhook against it.
+		authorKey := observedReviewAuthorKey(v.Review.Author)
+		if observedStale(item, observedReviewsKey, v.At) || observedStale(item, authorKey, v.At) {
 			return 0
 		}
 		ensureLinkedPR(item, v.Number)
-		s.observe(item, observedReviewsKey, v.At)
+		s.observe(item, authorKey, v.At)
 		// One shape whichever producer filled the list: the latest review per
 		// author, a re-review or an edit replacing the earlier entry (#2348, R5).
 		if s.ordering() {
