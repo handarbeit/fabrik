@@ -251,10 +251,16 @@ type PRReviewSubmitted struct {
 	// At is the observation time of the fact: the payload's GitHub time where
 	// one exists, otherwise the receipt time (#2348). Zero means no ordering
 	// information: the write applies and records nothing.
-	At     time.Time
-	Repo   string
-	Number int
-	Review gh.PRReview
+	At time.Time
+	// Revision marks an "edited" or "dismissed" delivery: it concerns an earlier
+	// submission and carries no submission time of its own, so At is its receipt
+	// time. It is not ordered against, and does not advance, the author's record
+	// of submissions, so a later-processed "submitted" event for a newer review
+	// by the same author is never dropped behind it (#2348).
+	Revision bool
+	Repo     string
+	Number   int
+	Review   gh.PRReview
 }
 
 func (PRReviewSubmitted) isMutation()       {}

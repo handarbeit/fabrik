@@ -1088,11 +1088,19 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// PR-wide record is only ever written by a whole-list read (a deep fetch)
 		// and still orders a webhook against it.
 		authorKey := observedReviewAuthorKey(v.Review.Author)
-		if observedStaleWebhook(item, observedReviewsKey, v.At) || observedStaleWebhook(item, authorKey, v.At) {
+		submitKey := observedReviewSubmitKey(v.Review.Author)
+		// An edit or dismissal is stamped with its receipt time, so it is judged
+		// against the PR-wide record only; a submission is judged against the
+		// author's last submission, never against a revision's receipt time (a late
+		// dismissal must not make a newer re-review look old).
+		if observedStaleWebhook(item, observedReviewsKey, v.At) || (!v.Revision && observedStaleWebhook(item, submitKey, v.At)) {
 			return 0
 		}
 		ensureLinkedPR(item, v.Number)
 		s.observe(item, authorKey, v.At)
+		if !v.Revision {
+			s.observe(item, submitKey, v.At)
+		}
 		// One shape whichever producer filled the list: the latest review per
 		// author, a re-review or an edit replacing the earlier entry (#2348, R5).
 		if s.ordering() {

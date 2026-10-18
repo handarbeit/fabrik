@@ -922,10 +922,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		issRepo, issNum, parseOK := parseItemKey(issKey)
 		if parseOK {
 			c.store.Apply(itemstate.PRReviewSubmitted{
-				Repo:   issRepo,
-				Number: issNum,
-				Review: review,
-				At:     reviewAt,
+				Repo:     issRepo,
+				Number:   issNum,
+				Review:   review,
+				At:       reviewAt,
+				Revision: p.Action != "submitted",
 			})
 			// Side effect: remove reviewer from LinkedPRReviewRequests. GitHub does not
 			// reliably fire review_request_removed for bot reviewers (e.g. Copilot edited
@@ -966,10 +967,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		LinkedPRNum: prNum,
 	})
 	c.store.Apply(itemstate.PRReviewSubmitted{
-		Repo:   repo,
-		Number: resolvedIssNum,
-		Review: review,
-		At:     reviewAt,
+		Repo:     repo,
+		Number:   resolvedIssNum,
+		Review:   review,
+		At:       reviewAt,
+		Revision: p.Action != "submitted",
 	})
 	// Side effect: remove reviewer from LinkedPRReviewRequests (same rationale as normal path).
 	c.store.Apply(itemstate.PRReviewRequestRemoved{

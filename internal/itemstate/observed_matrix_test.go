@@ -606,7 +606,7 @@ func TestObservedOrdering_ReviewsAreOrderedPerAuthor(t *testing.T) {
 	// though bob reviewed after she did.
 	dismissed := alice
 	dismissed.State = "DISMISSED"
-	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: dismissed, At: time.Now()})
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: dismissed, At: time.Now(), Revision: true})
 	for _, r := range stateOf(t, s).LinkedPR.Reviews {
 		if r.Author == "alice" && r.State != "DISMISSED" {
 			t.Fatalf("dismissal not applied: %+v", r)
@@ -620,6 +620,27 @@ func TestObservedOrdering_ReviewsAreOrderedPerAuthor(t *testing.T) {
 	s2.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: alice, At: alice.SubmittedAt})
 	if got := stateOf(t, s2).LinkedPR.Reviews; len(got) != 1 || got[0].State != "APPROVED" {
 		t.Fatalf("older review of the same author overwrote the newer one: %+v", got)
+	}
+}
+
+// A dismissal processed late (its receipt time is after a newer re-review's
+// submitted_at) must not make that re-review look old: revisions are ordered by
+// receipt and never advance the author's submission record.
+func TestObservedOrdering_LateDismissalDoesNotDropReReview(t *testing.T) {
+	s := orderedStore(t)
+	now := time.Now()
+	old := gh.PRReview{Author: "alice", DatabaseID: 1, State: "CHANGES_REQUESTED", SubmittedAt: now.Add(-time.Hour)}
+	rereview := gh.PRReview{Author: "alice", DatabaseID: 2, State: "APPROVED", SubmittedAt: now.Add(-time.Minute)}
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: old, At: old.SubmittedAt})
+	// The dismissal of the old review (GitHub time before the re-review) is
+	// delivered and processed late, after the re-review happened.
+	dismissed := old
+	dismissed.State = "DISMISSED"
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: dismissed, At: now, Revision: true})
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, Review: rereview, At: rereview.SubmittedAt})
+	got := stateOf(t, s).LinkedPR.Reviews
+	if len(got) != 1 || got[0].State != "APPROVED" || got[0].DatabaseID != 2 {
+		t.Fatalf("late dismissal dropped the newer re-review: %+v", got)
 	}
 }
 

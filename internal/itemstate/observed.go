@@ -45,6 +45,13 @@ const (
 // and observedReviewsKey. The set is bounded by the PR's reviewers.
 func observedReviewAuthorKey(author string) string { return observedReviewsKey + ":" + author }
 
+// observedReviewSubmitKey is the record key of one reviewer's latest submission,
+// written only by "submitted" deliveries (ordered by submitted_at). Edits and
+// dismissals, which carry a receipt time, never touch it.
+func observedReviewSubmitKey(author string) string {
+	return observedReviewsKey + ":submitted:" + author
+}
+
 // observedLabelRetention is how long a per-label record is kept. Single-valued
 // records are bounded by the number of facts and never expire.
 const observedLabelRetention = 10 * time.Minute
