@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,5 +142,49 @@ func TestBoardWritesTakeProjectIDFromTheGuard(t *testing.T) {
 			line := strings.Count(string(src[:loc[0]]), "\n") + 1
 			t.Errorf("%s:%d passes board.ProjectID to a board mutation; resolve it with Engine.writeProjectID", f, line)
 		}
+	}
+}
+
+// A Review/Validate stage may declare a mid-flight spawn, which needs a project
+// ID. With none known the dispatch is deferred before Claude runs, so the
+// stage's output is never generated and then dropped (#2396).
+func TestProcessItem_ReviewDefersBeforeClaudeWhenProjectIDUnknown(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	invoked := 0
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			invoked++
+			return "", false, TokenUsage{}, nil
+		},
+	}
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: []*stages.Stage{
+				{Name: "Review", Order: 1, Prompt: "Review it", PostToPR: true, Completion: stages.CompletionCriteria{Type: "claude"}},
+			}},
+		client, claude, wm,
+	)
+
+	item := gh.ProjectItem{Number: 301, Title: "review defer", Status: "Review", ItemID: "PVTI_301"}
+	if err := eng.processItem(context.Background(), &gh.ProjectBoard{}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if invoked != 0 {
+		t.Fatalf("Claude was invoked %d time(s) with no project ID known; its output could be dropped", invoked)
+	}
+
+	// Non-vacuity: with a project ID the same dispatch does invoke Claude.
+	eng.boardProjectID = "ENGINE_PID"
+	item.Number = 302
+	item.ItemID = "PVTI_302"
+	if err := eng.processItem(context.Background(), &gh.ProjectBoard{}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if invoked == 0 {
+		t.Fatal("Claude was not invoked even with a known project ID: the test would pass vacuously")
 	}
 }
