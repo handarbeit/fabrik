@@ -199,6 +199,12 @@ type EnvOptions struct {
 	// for every engine.Config field a future scenario might need.
 	ConfigureCfg func(*engine.Config)
 
+	// AllowEmptyProjectIDWrites exempts the Env from the suite-wide cleanup check
+	// that no UpdateProjectItemStatus call carried an empty project ID (#2396).
+	// Only the scenario that neutralises the fix to reproduce the old behaviour
+	// sets it.
+	AllowEmptyProjectIDWrites bool
+
 	// BoardCache, when true, wires a real boardcache.CacheImpl into the engine
 	// (Engine.UseBoardCacheForTest) so poll() runs the probe-driven refresh, and
 	// makes simgh's board reads omit closed unmerged PRs as GitHub's
@@ -426,6 +432,16 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	var wake <-chan struct{}
 	if opts.BoardCache {
 		boardCache, wake = eng.UseBoardCacheForTest()
+	}
+
+	if !opts.AllowEmptyProjectIDWrites {
+		t.Cleanup(func() {
+			for _, e := range inst.Log().ByMethod("UpdateProjectItemStatus") {
+				if e.Args.ID == "" {
+					t.Errorf("UpdateProjectItemStatus #%d was sent with an empty project ID (#2396)", e.Seq)
+				}
+			}
+		})
 	}
 
 	return &Env{
