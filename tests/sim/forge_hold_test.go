@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 	"github.com/handarbeit/fabrik/tests/sim/simgh"
@@ -37,7 +38,7 @@ func forgeHoldEnv(t *testing.T, cache bool) *Env {
 	t.Helper()
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
 	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
-	return NewEnv(t, EnvOptions{
+	env := NewEnv(t, EnvOptions{
 		Stages:     forgeHoldStages(),
 		ForgeHold:  true,
 		BoardCache: cache,
@@ -46,6 +47,11 @@ func forgeHoldEnv(t *testing.T, cache bool) *Env {
 			cfg.RetryBackoff = time.Millisecond // let a (wrongly) unlocked run re-dispatch quickly
 		},
 	})
+	if cache {
+		// A cache-served poll keeps dispatching while GitHub is down — the #2388 shape.
+		t.Cleanup(env.Engine.RegisterObservers())
+	}
+	return env
 }
 
 // pollTolerant is RunPoll for an outage: the poll may legitimately report an
@@ -135,9 +141,10 @@ func TestForgeHold_Sim_NeutralisedRefusalRedispatches(t *testing.T) {
 // runForgeOutage lets the first run start normally and takes GitHub away while it
 // works (the model API stays up), so nothing the run produces can be recorded.
 // R1 is neutralised so that only the account-wide hold (R3) stands between the
-// item and a re-dispatch. Returns the model calls made before and after the hold
-// engaged (or, neutralised, after the same number of polls).
-func runForgeOutage(t *testing.T, neutraliseHold bool) (before, after int, env *Env) {
+// item and a re-dispatch. A first phase of polls spans well over the hold window;
+// the returned count is the model calls started in a second phase, after the
+// hold has had every chance to engage.
+func runForgeOutage(t *testing.T, neutraliseHold bool) (phase2 int, env *Env) {
 	t.Helper()
 	env = forgeHoldEnv(t, true)
 	env.Engine.SetLockWriteRefusalDisabledForTest(true)
@@ -161,44 +168,78 @@ func runForgeOutage(t *testing.T, neutraliseHold bool) (before, after int, env *
 	if !down.Load() {
 		t.Fatalf("setup: the first run never started\n\n%s", diagnostics(env))
 	}
-	before = env.Claude.StageCallCount("Specify")
 
-	// Several polls spanning well over the hold window, all failing on transport errors.
+	// Phase 1: 12 polls, 30 s apart, all failing on transport errors.
 	for i := 0; i < 12; i++ {
 		pollTolerant(t, env, 30*time.Second)
 	}
-	return before, env.Claude.StageCallCount("Specify") - before, env
+	before := env.Claude.StageCallCount("Specify")
+	// Phase 2: the hold is engaged by now (unless neutralised).
+	for i := 0; i < 8; i++ {
+		pollTolerant(t, env, 30*time.Second)
+	}
+	return env.Claude.StageCallCount("Specify") - before, env
 }
 
 // R3 + R4: a sustained transport outage engages the account-wide hold; no model
-// call starts after it, the operator warning and health block appear once, and
-// everything resolves when the forge answers again.
+// call starts once it is engaged, the operator warning appears, and everything
+// resolves when the forge answers again.
 func TestForgeHold_Sim_HoldStopsRedispatchAndResumes(t *testing.T) {
-	before, after, env := runForgeOutage(t, false)
-	if before != 1 {
-		t.Fatalf("setup: %d model call(s) before the outage, want 1", before)
-	}
+	after, env := runForgeOutage(t, false)
 	if !env.Engine.ForgeHeldForTest() {
 		t.Fatalf("the forge hold never engaged after a sustained outage\n\n%s", diagnostics(env))
 	}
 	if after != 0 {
-		t.Fatalf("%d model call(s) started after the outage began, want 0 — the hold must stop re-dispatch\n\n%s", after, diagnostics(env))
+		t.Fatalf("%d model call(s) started after the hold engaged, want 0\n\n%s", after, diagnostics(env))
 	}
 	if !panelHas(t, "forge_unreachable:github") {
 		t.Error("no forge_unreachable operator warning recorded")
 	}
 
+	callsBefore := env.Claude.StageCallCount("Specify")
 	env.Sim.Faults().ClearBlanket()
 	AdvanceUntil(t, env, func(env *Env) bool { return !env.Engine.ForgeHeldForTest() }, 10)
 	if panelHas(t, "forge_unreachable:github") {
 		t.Error("forge_unreachable warning not resolved after the forge answered")
 	}
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") > callsBefore }, 40)
 }
 
-// Neutralised, the same outage re-dispatches (the #2388 loop).
+// Neutralised, the same outage keeps re-dispatching (the #2388 loop).
 func TestForgeHold_Sim_NeutralisedHoldRedispatches(t *testing.T) {
-	_, after, env := runForgeOutage(t, true)
+	after, env := runForgeOutage(t, true)
 	if after < 1 {
 		t.Fatalf("with the hold neutralised no re-dispatch happened during the outage — the scenario does not reproduce #2388\n\n%s", diagnostics(env))
+	}
+}
+
+// R3 / FR-008: a 4xx proves the forge answered, so it never counts toward the hold,
+// however long it keeps coming.
+func TestForgeHold_Sim_ClientErrorsNeverEngage(t *testing.T) {
+	env := forgeHoldEnv(t, false)
+	env.Sim.Faults().FailAll(simgh.ErrNotFound())
+	for i := 0; i < 12; i++ {
+		pollTolerant(t, env, 30*time.Second)
+	}
+	if env.Engine.ForgeHeldForTest() {
+		t.Fatal("4xx responses engaged the forge hold")
+	}
+}
+
+// R4: the hold is visible in fabrik_health while engaged and gone after it lifts.
+func TestForgeHold_Sim_ReportedInHealth(t *testing.T) {
+	_, env := runForgeOutage(t, false)
+	h, err := env.Engine.LocalAPIBackend().Health(localapi.HealthParams{})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if h.ForgeHold == nil || h.ForgeHold.Failures < 5 || h.ForgeHold.LastError == "" {
+		t.Fatalf("fabrik_health does not report the hold: %+v", h.ForgeHold)
+	}
+	env.Sim.Faults().ClearBlanket()
+	AdvanceUntil(t, env, func(env *Env) bool { return !env.Engine.ForgeHeldForTest() }, 10)
+	h, err = env.Engine.LocalAPIBackend().Health(localapi.HealthParams{})
+	if err != nil || h.ForgeHold != nil {
+		t.Fatalf("hold still reported after the forge answered: %+v (err %v)", h.ForgeHold, err)
 	}
 }

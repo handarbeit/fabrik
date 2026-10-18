@@ -104,7 +104,7 @@ type channelEvents struct {
 	pollEp stallEpisode
 	// forgeEp is the open forge-unreachable stall episode (#2393).
 	forgeEp stallEpisode
-	partEp map[string]*stallEpisode
+	partEp  map[string]*stallEpisode
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 
