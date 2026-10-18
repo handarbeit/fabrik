@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ type stageResumeHarness struct {
 	board  *gh.ProjectBoard
 	mu     sync.Mutex
 	resume []bool
+	runs   int
 	script func(call int) (completed bool, err error)
 }
 
@@ -62,8 +64,14 @@ func newStageResumeHarness(t *testing.T, mode string, tokens int) *stageResumeHa
 	return h
 }
 
+// run dispatches the stage once. Every run sees a new issue body: these tests
+// exercise the #2300 rule, which an unchanged re-dispatch of an oversized
+// session deliberately bypasses (#2395 R4; see stage_dispatch_test.go and the
+// sim twin for that case).
 func (h *stageResumeHarness) run(t *testing.T) {
 	t.Helper()
+	h.runs++
+	h.item.Body = fmt.Sprintf("spec revision %d", h.runs)
 	if err := h.eng.processItem(context.Background(), h.board, h.item); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
