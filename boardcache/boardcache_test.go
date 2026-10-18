@@ -2428,7 +2428,8 @@ func issuesAssignedPayloadJSON(action, repo string, issNum int, assignees []stri
 }
 
 // projectsV2ItemCreatedPayloadJSON builds a projects_v2_item.created payload.
-// boardItemID is the PVTI_xxx board-side item ID stored in projects_v2_item.id.
+// boardItemID is the PVTI_xxx board-side item ID, delivered as
+// projects_v2_item.node_id (the numeric projects_v2_item.id is never read).
 func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType, boardItemID string) []byte {
 	p := projectsV2ItemPayload{Action: "created"}
 	p.ProjectsV2Item.NodeID = lenientString(boardItemID)
