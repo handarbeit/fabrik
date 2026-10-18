@@ -254,6 +254,9 @@ type Engine struct {
 	// stay single-goroutine; their write sites also publish here. Zero-value
 	// ready.
 	health daemonHealth
+	// forge tracks the unbroken run of GitHub transport failures behind the
+	// account-wide forge-unreachable hold (#2393, forge_hold.go). Zero-value ready.
+	forge forgeHealth
 	// localAPI is the local read API server (#1967); nil until Run() binds it
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex
@@ -805,6 +808,11 @@ func New(cfg Config) (*Engine, error) {
 	// builds many engines concurrently in tests, where writing this package
 	// global would race.
 	claudeLogf = eng.logf
+
+	// Every HTTP outcome of the engine's client feeds the forge-unreachable
+	// hold tracker (#2393). NewWithDeps engines have no github.Client; the sim
+	// wires its fault table to ObserveForgeResult instead.
+	ghClient.SetResultObserver(eng.ObserveForgeResult)
 
 	return eng, nil
 }
