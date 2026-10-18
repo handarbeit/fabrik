@@ -201,6 +201,18 @@ func TestOverseerSetBlockedBy_Refusals(t *testing.T) {
 				ovDeepFetch(t, e, 6, dep(7))
 				// #7 was never deep-fetched: its edges are unknown, not "none".
 			}, want: "cached blockers of owner/repo#7 are unknown"},
+		// A write-through add (this action's or spawn's) leaves a never-fetched item
+		// with one cached edge; that partial list must not read as complete, or a
+		// removal of an unseen real edge would be reported as a no-op.
+		{name: "remove from a never-fetched item holding a write-through edge", items: []ovItem{{number: 5, status: "Backlog"}}, p: localapi.SetBlockedByParams{Remove: []string{"owner/repo#6"}},
+			setup: func(t *testing.T, e *Engine, _ *mockGitHubClient) {
+				e.store.Apply(itemstate.BlockedByEdgeAdded{Repo: "owner/repo", Number: 5, Dep: gh.Dependency{Repo: "owner/repo", Number: 9, State: "OPEN"}})
+			}, want: "cached blockers of owner/repo#5 are unknown"},
+		{name: "cycle walk through a never-fetched item holding a write-through edge", items: []ovItem{{number: 5, status: "Backlog"}, {number: 6, status: "Backlog"}}, p: localapi.SetBlockedByParams{Add: []string{"6"}},
+			setup: func(t *testing.T, e *Engine, _ *mockGitHubClient) {
+				ovDeepFetch(t, e, 5)
+				e.store.Apply(itemstate.BlockedByEdgeAdded{Repo: "owner/repo", Number: 6, Dep: gh.Dependency{Repo: "owner/repo", Number: 9, State: "OPEN"}})
+			}, want: "cached blockers of owner/repo#6 are unknown"},
 		{name: "unknown edges of the blocker itself", items: []ovItem{{number: 5, status: "Backlog"}, {number: 6, status: "Backlog"}}, p: localapi.SetBlockedByParams{Add: []string{"6"}},
 			setup: func(t *testing.T, e *Engine, _ *mockGitHubClient) { ovDeepFetch(t, e, 5) }, want: "cached blockers of owner/repo#6 are unknown"},
 		{name: "remove from an item whose edges are unknown", items: []ovItem{{number: 5, status: "Backlog"}}, p: localapi.SetBlockedByParams{Remove: []string{"owner/repo#6"}},

@@ -76,10 +76,16 @@ func edgeCached(st *itemstate.ItemState, ref blockerRef) bool {
 }
 
 // edgeKnown reports whether an item's cached edges can be trusted as the
-// complete list. It is the predicate fabrik_status already uses for its blockers
-// "unknown" state (localapi.go blockers): never deep-fetched with nothing cached.
+// complete list: only a deep fetch makes them authoritative. A write-through add
+// (this action's, or spawn's) puts one edge into the cache of a never-fetched
+// item, which would make a "len(BlockedBy) > 0" test call a partial list
+// complete, so a removal of an unseen real edge would be reported as a no-op and
+// a cycle through unseen edges as "no cycle". This is deliberately stricter than
+// fabrik_status's blockers "unknown" display (localapi.go blockers), which also
+// reads a non-empty list as known: here a wrong answer would skip a write or
+// miss a cycle, there it only labels a display.
 func edgeKnown(st *itemstate.ItemState) bool {
-	return !(st.LastDeepFetchAt.IsZero() && len(st.BlockedBy) == 0)
+	return !st.LastDeepFetchAt.IsZero()
 }
 
 // blockerCycle walks the cached blockedBy edges transitively from start looking

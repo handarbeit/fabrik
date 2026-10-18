@@ -2,6 +2,7 @@ package itemstate
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -437,9 +438,11 @@ func (m BlockedByEdgeRemoved) itemKey() string { return itemKeyFor(m.Repo, m.Num
 // blocker. gh.Dependency.Repo is empty for a same-repo blocker (as the GraphQL
 // fetch reports it), while writers such as spawnChildren and
 // fabrik_set_blocked_by record the full "owner/repo"; both must compare equal
-// or the list would hold a duplicate.
+// or the list would hold a duplicate. Repository names are case-insensitive on
+// GitHub, so the comparison is too: a blocker typed "Owner/Repo#N" must match the
+// edge GitHub reports under its canonical casing.
 func sameDependency(itemRepo string, a, b gh.Dependency) bool {
-	return a.Number == b.Number && depRepo(itemRepo, a) == depRepo(itemRepo, b)
+	return a.Number == b.Number && strings.EqualFold(depRepo(itemRepo, a), depRepo(itemRepo, b))
 }
 
 func depRepo(itemRepo string, d gh.Dependency) string {

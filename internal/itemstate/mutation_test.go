@@ -2,6 +2,7 @@ package itemstate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,6 +361,26 @@ func TestBlockedByEdges_SameRepoEmptyEqualsFull(t *testing.T) {
 	applyExpect(t, s, BlockedByEdgeRemoved{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: testRepo, Number: 7}}, BlockedByChanged)
 	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 0 {
 		t.Errorf("BlockedBy = %+v; want empty after removing by the full-Repo form", st.BlockedBy)
+	}
+}
+
+// TestBlockedByEdges_RepoCaseInsensitive: repository names are case-insensitive
+// on GitHub, so a blocker typed "Owner/Repo" names the edge GitHub reports under
+// its canonical casing: no duplicate on add, and the remove finds it.
+func TestBlockedByEdges_RepoCaseInsensitive(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: gh.Dependency{Repo: testRepo, Number: 7}}, BlockedByChanged)
+
+	upper := gh.Dependency{Repo: strings.ToUpper(testRepo), Number: 7}
+	if _, changes, err := s.Apply(BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: upper}); err != nil || len(changes) != 0 {
+		t.Fatalf("re-adding with different casing: changes=%v err=%v; want a no-op", changes, err)
+	}
+	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %+v; want a single edge, no duplicate", st.BlockedBy)
+	}
+	applyExpect(t, s, BlockedByEdgeRemoved{Repo: testRepo, Number: 1, Dep: upper}, BlockedByChanged)
+	if st := getItem(t, s, testRepo, 1); len(st.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %+v; want empty after removing with different casing", st.BlockedBy)
 	}
 }
 
