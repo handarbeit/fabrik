@@ -36,11 +36,12 @@ const (
 	ToolClearClaudeLimit = "fabrik_clear_claude_limit"
 	ToolAdvance          = "fabrik_advance"
 	ToolMoveParked       = "fabrik_move_parked"
+	ToolSetBlockedBy     = "fabrik_set_blocked_by"
 )
 
 // ActionTools lists the tools that make the daemon write to GitHub.
 func ActionTools() []string {
-	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked}
+	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked, ToolSetBlockedBy}
 }
 
 // IsActionTool reports whether name is one of ActionTools.
@@ -260,6 +261,20 @@ func toolDefs() []map[string]any {
 			"annotations": action(false),
 		},
 		{
+			"name": ToolSetBlockedBy,
+			"description": "Order work: add and/or remove blockedBy edges on one issue (the target), so it waits on other issues. Set the edges BEFORE giving the target an autonomy label or moving it into a pipeline column, or Fabrik may run ahead of the intended order. " +
+				"`add` and `remove` list blockers as owner/repo#N, or a bare N meaning the TARGET's repo; blockers may be in another repo and may already be closed. " +
+				"All guards are checked for every edge before anything is written, and each edge is reported individually as applied or noop (an edge already present, or absent from the daemon's cached edges, is a no-op, not an error). " +
+				"Refused, with the current state and writing nothing, when the target is closed, a pull request or not on the board, a blocker does not resolve to an issue (a PR is refused), an issue would block itself, an add would close a cycle among the cached edges, a cycle check would need an edge the daemon does not know (the refusal names the issue), a blocker is in both lists, or both lists are empty. " +
+				"It starts no work, moves no column and never adds or removes fabrik:blocked: the engine's own dependency check decides that, so an item that loses its last blocker is released on a following poll. Posts one Fabrik audit comment naming the requesting subscriber and the edges changed (none when nothing was written). Needs a subscriber name (defaults to the OS username).",
+			"inputSchema": obj(map[string]any{
+				"issue":  issueSchema(),
+				"add":    map[string]any{"type": "array", "items": issueSchema(), "description": "blockers to add: owner/repo#N, or a bare N meaning the target's repo"},
+				"remove": map[string]any{"type": "array", "items": issueSchema(), "description": "blockers to remove, in the same form"},
+			}, "issue"),
+			"annotations": action(true),
+		},
+		{
 			"name": ToolClearClaudeLimit,
 			"description": "Clear an active account-wide Claude usage-limit hold without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
 				"Refused when no usage limit is active. The hold is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
@@ -459,6 +474,39 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			return "", nil, fmt.Errorf("issue and to are required")
 		}
 		return localapi.MethodMoveParked, localapi.MoveParkedParams{Subscriber: who, Issue: string(a.Issue), To: a.To}, nil
+	case ToolSetBlockedBy:
+		var a struct {
+			Issue  issueArg   `json:"issue"`
+			Add    []issueArg `json:"add"`
+			Remove []issueArg `json:"remove"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" {
+			return "", nil, fmt.Errorf("issue is required")
+		}
+		if len(a.Add) == 0 && len(a.Remove) == 0 {
+			return "", nil, fmt.Errorf("add or remove must name at least one blocker")
+		}
+		p := localapi.SetBlockedByParams{Subscriber: who, Issue: string(a.Issue)}
+		for _, b := range a.Add {
+			if b == "" {
+				return "", nil, fmt.Errorf("add contains an empty blocker reference")
+			}
+			p.Add = append(p.Add, string(b))
+		}
+		for _, b := range a.Remove {
+			if b == "" {
+				return "", nil, fmt.Errorf("remove contains an empty blocker reference")
+			}
+			p.Remove = append(p.Remove, string(b))
+		}
+		return localapi.MethodSetBlockedBy, p, nil
 	case ToolAdvance:
 		var a struct {
 			Issue issueArg `json:"issue"`

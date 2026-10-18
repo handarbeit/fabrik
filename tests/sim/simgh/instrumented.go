@@ -347,6 +347,11 @@ func (in *Instrumented) AddBlockedByIssue(issueNodeID, blockerNodeID string) err
 		func() error { return in.sim.AddBlockedByIssue(issueNodeID, blockerNodeID) })
 }
 
+func (in *Instrumented) RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	return do0(in, "RemoveBlockedByIssue", true, Args{ID: issueNodeID, Values: []string{blockerNodeID}},
+		func() error { return in.sim.RemoveBlockedByIssue(issueNodeID, blockerNodeID) })
+}
+
 // --- pull requests ---------------------------------------------------------
 
 func (in *Instrumented) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {

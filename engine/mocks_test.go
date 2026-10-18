@@ -70,6 +70,7 @@ type mockGitHubClient struct {
 	createIssueFn                 func(owner, repo, title, body string, assignees []string) (int, string, error)
 	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
 	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
+	removeBlockedByIssueFn        func(issueNodeID, blockerNodeID string) error
 	noHeadBackfill                bool // disable the head backfill in FetchItemDetails / FetchPRDetails (#2342)
 	enablePullRequestAutoMergeFn  func(owner, repo string, prNumber int, strategy string) error
 	disablePullRequestAutoMergeFn func(owner, repo string, prNumber int) error
@@ -148,6 +149,7 @@ type mockGitHubClient struct {
 	createIssueCalls                 []createIssueCall
 	addProjectV2ItemCalls            []addProjectV2ItemCall
 	addBlockedByIssueCalls           []addBlockedByIssueCall
+	removeBlockedByIssueCalls        []addBlockedByIssueCall
 	enablePullRequestAutoMergeCalls  []enablePullRequestAutoMergeCall
 	disablePullRequestAutoMergeCalls []disablePullRequestAutoMergeCall
 	enqueuePullRequestCalls          []enqueuePullRequestCall
@@ -1135,6 +1137,17 @@ func (m *mockGitHubClient) AddProjectV2ItemById(projectID, contentNodeID string)
 		return fn(projectID, contentNodeID)
 	}
 	return "PVTI_" + contentNodeID, nil
+}
+
+func (m *mockGitHubClient) RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	m.mu.Lock()
+	m.removeBlockedByIssueCalls = append(m.removeBlockedByIssueCalls, addBlockedByIssueCall{issueNodeID, blockerNodeID})
+	fn := m.removeBlockedByIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(issueNodeID, blockerNodeID)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {

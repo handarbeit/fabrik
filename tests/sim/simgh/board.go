@@ -525,8 +525,25 @@ func (s *Sim) FetchProjectItem(owner, repo string, issueNumber int) (*gh.Project
 		}
 		iss, ok := r.issues[issueNumber]
 		if !ok {
+			// The REST issues endpoint also serves pull requests, flagged by a
+			// pull_request key (#2385). A PR number resolves to a PR item with
+			// its own node ID; anything else is absent.
+			pr, isPR := r.prs[issueNumber]
+			if !isPR {
+				s.mu.Unlock()
+				return nil, nil
+			}
+			item := &gh.ProjectItem{
+				ID:     fmt.Sprintf("pr:%s#%d", ownerRepo, pr.number),
+				Number: pr.number,
+				Title:  pr.title,
+				Body:   pr.body,
+				URL:    fmt.Sprintf("https://github.com/%s/pull/%d", ownerRepo, pr.number),
+				Repo:   ownerRepo,
+				IsPR:   true,
+			}
 			s.mu.Unlock()
-			return nil, nil
+			return item, nil
 		}
 		item := &gh.ProjectItem{
 			ID:        iss.nodeID(ownerRepo),

@@ -2,6 +2,7 @@ package itemstate
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -413,6 +414,43 @@ type BlockedByEdgeAdded struct {
 
 func (BlockedByEdgeAdded) isMutation()       {}
 func (m BlockedByEdgeAdded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// BlockedByEdgeRemoved deletes a single dependency edge from an item's
+// BlockedBy list — a no-op (returns ChangeFlags(0)) if no edge to that blocker
+// is present. Applied synchronously by the fabrik_set_blocked_by overseer
+// action (#2385) the instant RemoveBlockedByIssue succeeds. GitHub's removal
+// does not bump the issue's updatedAt (#977), so this write-through is the only
+// thing that keeps the cached list right until the next live read.
+//
+// Dep.Repo equality ignores the "empty means the item's own repo" convention
+// (see sameDependency): a fetched same-repo edge and a full "owner/repo" one
+// name the same blocker.
+type BlockedByEdgeRemoved struct {
+	Repo   string // dependent's "owner/repo"
+	Number int    // dependent's issue number
+	Dep    gh.Dependency
+}
+
+func (BlockedByEdgeRemoved) isMutation()       {}
+func (m BlockedByEdgeRemoved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// sameDependency reports whether two edges of an item in itemRepo name the same
+// blocker. gh.Dependency.Repo is empty for a same-repo blocker (as the GraphQL
+// fetch reports it), while writers such as spawnChildren and
+// fabrik_set_blocked_by record the full "owner/repo"; both must compare equal
+// or the list would hold a duplicate. Repository names are case-insensitive on
+// GitHub, so the comparison is too: a blocker typed "Owner/Repo#N" must match the
+// edge GitHub reports under its canonical casing.
+func sameDependency(itemRepo string, a, b gh.Dependency) bool {
+	return a.Number == b.Number && strings.EqualFold(depRepo(itemRepo, a), depRepo(itemRepo, b))
+}
+
+func depRepo(itemRepo string, d gh.Dependency) string {
+	if d.Repo == "" {
+		return itemRepo
+	}
+	return d.Repo
+}
 
 // DeepFetchInvalidated clears LastDeepFetchAt so the next FetchItemDetails call
 // re-fetches deep fields from GitHub. Used by delta handlers that detect stale

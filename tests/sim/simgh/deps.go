@@ -79,6 +79,56 @@ func (s *Sim) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 	return nil
 }
 
+// RemoveBlockedByIssue deletes the blockedBy edge from issueNodeID to
+// blockerNodeID (#2385).
+//
+// Removal does NOT bump the dependent's updatedAt, exactly like
+// SeedRemoveBlockedBy and for the same reason (#977): real GitHub's removal
+// leaves the issue's updatedAt alone, so the cache stays right only through
+// the engine's own write-through. An edge that is absent is a silent no-op: the
+// real mutation's behaviour on an absent edge is unconfirmed, so the engine
+// never depends on it (FR-007) and the model takes the lenient reading. Node
+// IDs that resolve to nothing fail, as AddBlockedByIssue does.
+func (s *Sim) RemoveBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	blockerRepo, blockerNum, err := parseIssueNodeID(blockerNodeID)
+	if err != nil {
+		return fmt.Errorf("simgh: RemoveBlockedByIssue blocker: %w", err)
+	}
+	targetRepo, targetNum, err := parseIssueNodeID(issueNodeID)
+	if err != nil {
+		return fmt.Errorf("simgh: RemoveBlockedByIssue target: %w", err)
+	}
+	r, ok := s.repos[targetRepo]
+	if !ok {
+		return fmt.Errorf("simgh: repo %s not seeded", targetRepo)
+	}
+	iss, ok := r.issues[targetNum]
+	if !ok {
+		return fmt.Errorf("simgh: issue %s#%d not found", targetRepo, targetNum)
+	}
+	br, ok := s.repos[blockerRepo]
+	if !ok {
+		return fmt.Errorf("simgh: blocker repo %s not seeded", blockerRepo)
+	}
+	if _, ok := br.issues[blockerNum]; !ok {
+		return fmt.Errorf("simgh: blocker issue %s#%d not found", blockerRepo, blockerNum)
+	}
+	for i, dep := range iss.blockedBy {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = targetRepo
+		}
+		if dep.Number == blockerNum && depRepo == blockerRepo {
+			iss.blockedBy = append(iss.blockedBy[:i], iss.blockedBy[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
 // parseIssueNodeID splits a synthesised issue node ID ("issue:owner/repo#N")
 // back into its parts. Sim node IDs are readable rather than opaque because
 // production never parses a node ID it receives — it only round-trips them —

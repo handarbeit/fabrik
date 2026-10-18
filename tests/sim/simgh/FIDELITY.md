@@ -1289,7 +1289,20 @@ graph traversal the model does not perform, and GitHub does reject them.
 rather than a refusal, which is visible as a stuck scenario rather than a green
 one; but do not use this layer to test cycle *rejection*.
 
-### `SeedRemoveBlockedBy` — **Fixture-only, no production analogue**
+### `RemoveBlockedByIssue` — **Modelled (#2385), no `updatedAt` bump**
+
+`RemoveBlockedByIssue` is the interface counterpart of `AddBlockedByIssue` used by
+`fabrik_set_blocked_by`. It requires both node IDs to resolve to seeded issues,
+removes the edge, and does **not** bump the dependent's `updatedAt` — the same
+#977 rule as `SeedRemoveBlockedBy` below, so the cache stays right only through
+the engine's own write-through. Removing an absent edge is a silent no-op: real
+GitHub's behaviour there is unconfirmed, the engine never relies on it
+(it detects an absent edge from its cached edges and writes nothing), and the
+model takes the lenient reading. `FetchProjectItem`'s non-board fallback now
+returns a PR number as `IsPR: true` with a `pr:owner/repo#N` node ID, mirroring
+the REST `pull_request` key.
+
+### `SeedRemoveBlockedBy` — **Fixture-only, simulates an out-of-band removal**
 
 Unlike every other Seed\* method that mirrors a real `GitHubClient` mutation
 (`SeedBlockedBy` mirrors `AddBlockedByIssue`), `SeedRemoveBlockedBy` has no

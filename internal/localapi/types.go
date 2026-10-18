@@ -690,6 +690,16 @@ type MoveParkedParams struct {
 	To         string `json:"to"`
 }
 
+// SetBlockedByParams adds and removes blockedBy edges on one target issue
+// (#2385). Blockers are written "owner/repo#N", or a bare "N" meaning the
+// target's own repo (not the daemon's). One issue per call.
+type SetBlockedByParams struct {
+	Subscriber string   `json:"subscriber"`
+	Issue      string   `json:"issue"`
+	Add        []string `json:"add,omitempty"`
+	Remove     []string `json:"remove,omitempty"`
+}
+
 // ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
 type ClearClaudeLimitParams struct {
 	Subscriber string `json:"subscriber"`
@@ -717,6 +727,31 @@ type ActionResult struct {
 	// Notes carry caveats: will auto-advance, yolo may auto-merge, deferred
 	// while a worker is in flight, which item carried a clear-claude-limit.
 	Notes []string `json:"notes,omitempty"`
+	// Edges reports each requested edge of a set_blocked_by call individually
+	// (#2385). Empty for every other action.
+	Edges []EdgeResult `json:"edges,omitempty"`
+}
+
+// Edge operations and outcomes in EdgeResult.
+const (
+	EdgeAdd     = "add"
+	EdgeRemove  = "remove"
+	EdgeApplied = "applied"
+	// EdgeNoop means the edge was already in the requested state: an add of an
+	// existing edge, or a remove of one absent from the cached edges.
+	EdgeNoop = "noop"
+	// EdgeNotApplied means the call stopped before this edge was written (a
+	// GitHub failure part-way through).
+	EdgeNotApplied = "not_applied"
+)
+
+// EdgeResult is the outcome for one requested blockedBy edge. Blocker is
+// always written "owner/repo#N".
+type EdgeResult struct {
+	Blocker string `json:"blocker"`
+	Op      string `json:"op"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // RefusalState is the Error.Data payload of a refused action: the item's

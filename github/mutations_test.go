@@ -655,3 +655,68 @@ func TestAddBlockedByIssue_Error(t *testing.T) {
 		t.Fatal("expected error for GraphQL error response")
 	}
 }
+
+// TestRemoveBlockedByIssue_QueryShape verifies the request uses the real
+// mutation name (removeBlockedBy) and input field names (#2385).
+func TestRemoveBlockedByIssue_QueryShape(t *testing.T) {
+	var mu sync.Mutex
+	var capturedQuery string
+	var capturedVars map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
+		mu.Lock()
+		capturedQuery, _ = body["query"].(string)
+		if v, ok := body["variables"].(map[string]interface{}); ok {
+			capturedVars = v
+		}
+		mu.Unlock()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{"removeBlockedBy":{"issue":{"id":"I_1"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.RemoveBlockedByIssue("I_issue", "I_blocker"); err != nil {
+		t.Fatalf("RemoveBlockedByIssue: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedQuery, "removeBlockedBy(") {
+		t.Errorf("query does not contain removeBlockedBy; got: %s", capturedQuery)
+	}
+	if strings.Contains(capturedQuery, "removeBlockedByIssue") {
+		t.Errorf("query contains nonexistent mutation removeBlockedByIssue; got: %s", capturedQuery)
+	}
+	if !strings.Contains(capturedQuery, "blockingIssueId") {
+		t.Errorf("query does not contain blockingIssueId; got: %s", capturedQuery)
+	}
+	if capturedVars["issueId"] != "I_issue" {
+		t.Errorf("issueId = %v, want I_issue", capturedVars["issueId"])
+	}
+	if capturedVars["blockingIssueId"] != "I_blocker" {
+		t.Errorf("blockingIssueId = %v, want I_blocker", capturedVars["blockingIssueId"])
+	}
+}
+
+func TestRemoveBlockedByIssue_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"errors":[{"message":"Could not resolve to an Issue"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.RemoveBlockedByIssue("I_bad", "I_blocker")
+	if err == nil {
+		t.Fatal("expected error for GraphQL error response")
+	}
+	if !strings.Contains(err.Error(), "removing blocked-by edge") {
+		t.Errorf("error %q lacks the removing blocked-by context", err)
+	}
+}

@@ -626,6 +626,12 @@ func (s *Server) handleAction(req Frame) Frame {
 			return Frame{ID: req.ID, Error: e}
 		}
 		result, err = s.Actor.MoveParked(p)
+	case MethodSetBlockedBy:
+		var p SetBlockedByParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Actor.SetBlockedBy(p)
 	default:
 		return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}
 	}
