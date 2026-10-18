@@ -1,0 +1,38 @@
+{
+  "action": "edited",
+  "changes": {
+    "field_value": {
+      "field_name": "Labels",
+      "field_node_id": "PVTF_lADOENB0Ac4BW0n_zhSF0w0",
+      "field_type": "labels",
+      "project_number": 1
+    }
+  },
+  "organization": {
+    "login": "example-org",
+    "id": 1,
+    "node_id": "MDEyOk9yZ2FuaXphdGlvbjE="
+  },
+  "projects_v2_item": {
+    "archived_at": null,
+    "content_node_id": "I_kwDOR2bN_c8AAAABYFXmtw",
+    "content_type": "Issue",
+    "created_at": "2026-10-18T15:39:45Z",
+    "creator": {
+      "login": "octocat",
+      "id": 1,
+      "node_id": "MDQ6VXNlcjE=",
+      "type": "User"
+    },
+    "id": 275284868,
+    "node_id": "PVTI_lADOENB0Ac4BW0n_zhBog4Q",
+    "project_node_id": "PVT_kwDOENB0Ac4BW0n_",
+    "updated_at": "2026-10-18T15:50:00Z"
+  },
+  "sender": {
+    "login": "octocat",
+    "id": 1,
+    "node_id": "MDQ6VXNlcjE=",
+    "type": "User"
+  }
+}

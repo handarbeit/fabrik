@@ -938,7 +938,7 @@ func TestProjectsV2ItemRestoredNoOp(t *testing.T) {
 
 	// restored must not crash or duplicate items.
 	p := projectsV2ItemPayload{Action: "restored"}
-	p.ProjectsV2Item.ID = "PVTI_001"
+	p.ProjectsV2Item.NodeID = lenientString("PVTI_001")
 	payload, _ := json.Marshal(p)
 	c.ApplyDelta("projects_v2_item", payload)
 
@@ -1223,7 +1223,7 @@ func TestStatusEditWebhookCarriesSenderTimeAndEcho(t *testing.T) {
 	}))
 	p := projectsV2ItemPayload{Action: "edited"}
 	p.Sender.Login = "alice"
-	p.ProjectsV2Item.ID = "PVTI_001"
+	p.ProjectsV2Item.NodeID = lenientString("PVTI_001")
 	p.ProjectsV2Item.ProjectNodeID = testProjectID
 	p.Changes.FieldValue.FieldNodeID = testStatusFieldID
 	p.ProjectsV2Item.UpdatedAt = "2026-10-11T12:00:00Z"

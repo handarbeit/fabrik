@@ -1,6 +1,7 @@
 package boardcache
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -216,48 +217,61 @@ func editedStatusName(to json.RawMessage) string {
 	return t.Name
 }
 
+// lenientString decodes a JSON string and yields "" for any other JSON type
+// (number, bool, null, object, array) instead of failing the enclosing
+// Unmarshal. The projects_v2_item payload is declared field by field, so one
+// mistyped field would otherwise discard the whole delivery: that is how the
+// numeric projects_v2_item.id, once read as a string, dropped every real
+// delivery for five months (#2383). A mistyped field a delta relies on becomes
+// "" and falls into that field's existing missing-value path.
+type lenientString string
+
+// UnmarshalJSON never returns an error.
+func (s *lenientString) UnmarshalJSON(b []byte) error {
+	var v string
+	if json.Unmarshal(b, &v) != nil {
+		*s = ""
+		return nil
+	}
+	*s = lenientString(v)
+	return nil
+}
+
+// projectsV2ItemPayload declares only the fields applyProjectsV2ItemDelta
+// reads. Every scalar is a lenientString so an unexpected type cannot drop the
+// event (#2383). The shape is that of real deliveries: the board item's ID
+// (PVTI_…) is projects_v2_item.node_id, projects_v2_item.id is a different
+// numeric value that is deliberately not declared, and the project ID is only
+// ever nested under projects_v2_item — no real delivery carries a top-level
+// project_node_id.
 type projectsV2ItemPayload struct {
-	Action string `json:"action"`
-	// ProjectNodeID is accepted at the top level as well as under
-	// projects_v2_item: the delivery shape was not confirmed from GitHub's
-	// docs, and a wrong nesting would make every event look ID-less and drop
-	// every Status webhook (#2345). effectiveProjectNodeID reads both.
-	ProjectNodeID string `json:"project_node_id"`
-	Changes       struct {
+	Action  lenientString `json:"action"`
+	Changes struct {
 		FieldValue struct {
 			// FieldNodeID names the project field the edit changed; compared
 			// with the board's Status field ID so that edits to Priority, Size
 			// and other single-select fields are not read as Status (#2345).
-			FieldNodeID string `json:"field_node_id"`
-			FieldType   string `json:"field_type"`
+			FieldNodeID lenientString `json:"field_node_id"`
+			FieldType   lenientString `json:"field_type"`
 			// To is raw because its JSON type depends on field_type: an object
 			// ({id, name}) for single_select, but a plain string or null for a
 			// text field (#2048). Decoding it as an object up front would turn
 			// every display-field echo into an unmarshal error before the echo
-			// match runs. It is only decoded for a single_select edit.
+			// match runs. It is only decoded for a single_select edit. A Status
+			// clear carries no "to" key at all.
 			To json.RawMessage `json:"to"`
 		} `json:"field_value"`
 	} `json:"changes"`
 	Sender struct {
-		Login string `json:"login"`
+		Login lenientString `json:"login"`
 	} `json:"sender"`
 	ProjectsV2Item struct {
-		ID            string `json:"id"`
-		ProjectNodeID string `json:"project_node_id"`
-		ContentNodeID string `json:"content_node_id"`
-		ContentType   string `json:"content_type"`
-		UpdatedAt     string `json:"updated_at"`
+		NodeID        lenientString `json:"node_id"`
+		ProjectNodeID lenientString `json:"project_node_id"`
+		ContentNodeID lenientString `json:"content_node_id"`
+		ContentType   lenientString `json:"content_type"`
+		UpdatedAt     lenientString `json:"updated_at"`
 	} `json:"projects_v2_item"`
-}
-
-// effectiveProjectNodeID returns the project the event belongs to: the first
-// non-empty of projects_v2_item.project_node_id and the top-level
-// project_node_id. "" means the payload carries no project identity.
-func (p *projectsV2ItemPayload) effectiveProjectNodeID() string {
-	if p.ProjectsV2Item.ProjectNodeID != "" {
-		return p.ProjectsV2Item.ProjectNodeID
-	}
-	return p.ProjectNodeID
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1158,9 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		return
 	}
 
+	action := string(p.Action)
+	itemID := string(p.ProjectsV2Item.NodeID)
+
 	filtered := !c.projectFieldFilterDisabledForTest.Load()
 	if filtered {
 		// Project filter (#2345, R1/R3): org-level delivery carries events for
@@ -1154,25 +1171,34 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// this instance knows its own project, is never trusted: reconcile
 		// corrects the cache.
 		own := c.ProjectID()
-		ev := p.effectiveProjectNodeID()
+		ev := string(p.ProjectsV2Item.ProjectNodeID)
 		switch {
 		case ev == "":
-			c.logFn("[cache] projects_v2_item %s ignored: payload has no project_node_id\n", p.Action)
+			c.logFn("[cache] projects_v2_item %s ignored: payload has no project_node_id\n", action)
 			return
 		case own == "":
-			c.logFn("[cache] projects_v2_item %s ignored: own project ID not yet known\n", p.Action)
+			c.logFn("[cache] projects_v2_item %s ignored: own project ID not yet known\n", action)
 			return
 		case ev != own:
-			c.logFn("[cache] projects_v2_item %s ignored: foreign project %s\n", p.Action, ev)
+			c.logFn("[cache] projects_v2_item %s ignored: foreign project %s\n", action, ev)
 			return
 		}
 	}
 
-	switch p.Action {
+	// The board item ID is projects_v2_item.node_id (PVTI_…), the value the
+	// Store, itemIDToKey and the echo registry key on. The numeric
+	// projects_v2_item.id is a different identifier and is never a fallback
+	// (#2383).
+	if itemID == "" {
+		c.logFn("[cache] projects_v2_item %s ignored: payload has no node_id\n", action)
+		return
+	}
+
+	switch action {
 	case "created":
 		// An existing issue was added to the project board. The payload provides only
 		// content_node_id; fetch full item details from GraphQL to get number and repo.
-		nodeID := p.ProjectsV2Item.ContentNodeID
+		nodeID := string(p.ProjectsV2Item.ContentNodeID)
 		if nodeID == "" || p.ProjectsV2Item.ContentType != "Issue" {
 			return
 		}
@@ -1187,7 +1213,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		}
 		// Record the board-side item ID (PVTI_xxx) so that subsequent
 		// projects_v2_item.edited/deleted/archived events can resolve via itemIDToKey.
-		pi.ItemID = p.ProjectsV2Item.ID
+		pi.ItemID = itemID
 		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi})
 		if len(changes) == 0 {
 			return
@@ -1198,7 +1224,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// Field filter (#2345, R2/R3): only an edit of this board's Status field
 		// is a Status change. Like the project filter it precedes matchEcho.
 		if filtered {
-			evField := p.Changes.FieldValue.FieldNodeID
+			evField := string(p.Changes.FieldValue.FieldNodeID)
 			if evField == "" {
 				c.logFn("[cache] projects_v2_item edited ignored: payload has no field_node_id\n")
 				return
@@ -1213,7 +1239,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 				return
 			}
 		}
-		echoed, via := c.matchEcho("projects_v2_item", "edited", p.ProjectsV2Item.ID)
+		echoed, via := c.matchEcho("projects_v2_item", "edited", itemID)
 		// Only a Status (single_select) edit changes anything the cache holds.
 		// A text-field edit — in particular the engine's own display-only
 		// status-line write echoing back (#2048), or a human editing it — is a
@@ -1235,18 +1261,30 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 			}
 		}
 		if newStatus == "" {
+			// A Status clear arrives as a Status-field edit with no from/to
+			// keys at all (#2383). An empty Status means "unknown" to the
+			// Store, which several admission rules key on, so a webhook never
+			// writes one: the cached Status stays and the next reconcile
+			// corrects it. Deliberately worded without "ignored": it is not a
+			// filter drop. matchEcho already ran, so an engine-caused clear
+			// consumed its echo entry.
+			if isAbsentJSON(p.Changes.FieldValue.To) {
+				c.logFn("[cache] projects_v2_item edited: Status clear received for %s; left to reconcile\n", itemID)
+			} else {
+				c.logFn("[cache] projects_v2_item edited: Status edit for %s carries an unreadable new value; left to reconcile\n", itemID)
+			}
 			return
 		}
 		edit := itemstate.ProjectV2ItemEdited{
-			ItemID:       p.ProjectsV2Item.ID,
+			ItemID:       itemID,
 			NewStatus:    newStatus,
-			Sender:       p.Sender.Login,
+			Sender:       string(p.Sender.Login),
 			EchoOfEngine: echoed,
 		}
 		if echoed {
 			edit.Requester = via
 		}
-		if t, err := time.Parse(time.RFC3339, p.ProjectsV2Item.UpdatedAt); err == nil {
+		if t, err := time.Parse(time.RFC3339, string(p.ProjectsV2Item.UpdatedAt)); err == nil {
 			edit.At = t
 		}
 		snap, changes, _ := c.store.Apply(edit)
@@ -1257,7 +1295,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 
 	case "deleted", "archived":
 		// Remove the item from the Store. Store.RemoveByItemID handles prToKey index cleanup.
-		_, _, ok := c.store.RemoveByItemID(p.ProjectsV2Item.ID)
+		_, _, ok := c.store.RemoveByItemID(itemID)
 		if !ok {
 			return
 		}
@@ -1265,6 +1303,12 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// restored: item is back on the board; the next poll reconcile will re-add it.
 		// reordered: no position state in the engine.
 	}
+}
+
+// isAbsentJSON reports whether a raw JSON value is missing or the literal null.
+func isAbsentJSON(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) == 0 || string(t) == "null"
 }
 
 // resolveStatusFieldID returns this board's Status field node ID. When it is
