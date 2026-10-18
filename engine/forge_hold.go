@@ -73,6 +73,9 @@ func (e *Engine) SetForgeHoldThresholdsForTest(minFailures int, window time.Dura
 	e.forge.mu.Unlock()
 }
 
+// ForgeHeldForTest reports whether the forge-unreachable hold is engaged.
+func (e *Engine) ForgeHeldForTest() bool { return e.forgeHeld() }
+
 // ObserveForgeResult feeds one GitHub call outcome (nil = success) to the
 // tracker. It is the result observer of the production *github.Client and of
 // the sim's fault table. Safe for concurrent use.
