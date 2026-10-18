@@ -5106,8 +5106,10 @@ the sim wires `simgh.FaultTable.SetResultObserver` to the same `Engine.ObserveFo
 *transport error* is a timeout or `context.DeadlineExceeded`, a dial/connection error, a truncated
 response or a 5xx (`github.IsTransportError`); 4xx, rate limits and `context.Canceled` are not. The
 hold **engages** after an unbroken run of ≥ 5 transport failures spanning ≥ 2 minutes on `e.now()`
-(a run with no failure for 10 minutes lapses) and **lifts** at the first non-transport outcome, a
-success or a 4xx. While held: `dispatchCandidates` starts nothing and hands every candidate back for
+(a run with no failure for 10 minutes lapses) and **lifts** at the first outcome that proves the
+forge answered: a success, a 4xx, a rate limit or a GraphQL error (`github.IsForgeAnswer`). An error
+that never reached the forge (`context.Canceled`, a local request-build failure) is ignored: it
+neither lifts an engaged hold nor resets a run in progress. While held: `dispatchCandidates` starts nothing and hands every candidate back for
 re-admission with nothing recorded; `dispatchReinvoke` refunds its pre-charged cycle and returns;
 `processItem`, `processCommentsClassified` (`didNotRunForgeHeld`) and `resolveConflictWithClaude`
 (`errForgeHeldNotAttempted`, read by `trainCancelled` as an uncharged "not attempted") re-check as

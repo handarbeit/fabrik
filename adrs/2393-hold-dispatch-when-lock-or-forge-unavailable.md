@@ -34,8 +34,10 @@ feedback read failed`); nothing turned that into a decision.
    charge.
 3. **An account-wide forge-unreachable hold (R3).** `forgeHealth` (`engine/forge_hold.go`) tracks
    the unbroken run of transport failures. It engages at ≥ 5 consecutive failures spanning ≥ 2 min
-   on `e.now()`; a run with no further failure for 10 min lapses. Any non-transport outcome —
-   success or 4xx, either proves the server answered — resets the run and lifts the hold.
+   on `e.now()`; a run with no further failure for 10 min lapses. Any outcome that proves the
+   server answered (`github.IsForgeAnswer`: a success, a 4xx, a rate limit or a GraphQL error) resets
+   the run and lifts the hold. An error that never reached the forge (`context.Canceled`, a local
+   request-build failure) is ignored: it neither lifts the hold nor resets a run in progress.
    Transport errors (`github.IsTransportError`): timeouts and `context.DeadlineExceeded`,
    `*url.Error`, `net.Error`/`*net.OpError`, `io.ErrUnexpectedEOF`, a typed `*StatusError` ≥ 500
    and the text `GitHub API returned 5xx`. Never: 4xx, rate limits, `forbiddenError`,
