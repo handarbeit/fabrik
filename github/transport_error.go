@@ -63,6 +63,46 @@ func IsTransportError(err error) bool {
 	return serverErrorText.MatchString(err.Error())
 }
 
+// answerText matches the text form of a response the server actually sent: a
+// 1xx-4xx status or a GraphQL error. It covers errors built outside this
+// package (ghfault in the sim) and errors that crossed a string boundary.
+var answerText = regexp.MustCompile(`GitHub API returned [1-4]\d\d|GraphQL error: `)
+
+// IsForgeAnswer reports whether err is evidence that the forge answered: nil
+// (a success), or a response with a non-5xx status (a 4xx, a rate limit, a
+// GraphQL error). A transport error is not an answer, and neither is an error
+// that never reached the forge or says nothing about it — a cancelled context
+// (the engine's own shutdown) or a local request-build failure. Callers that
+// track reachability ignore outcomes that are neither a transport error nor an
+// answer (#2393).
+func IsForgeAnswer(err error) bool {
+	if err == nil {
+		return true
+	}
+	if IsTransportError(err) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var rl *RateLimitError
+	var se *StatusError
+	var fe *forbiddenError
+	var ge *GraphQLError
+	switch {
+	case errors.As(err, &rl), errors.As(err, &fe), errors.As(err, &ge):
+		return true
+	case errors.As(err, &se):
+		return se.Code < 500
+	}
+	for _, sentinel := range []error{
+		ErrNotFound, ErrForbidden, ErrMethodNotAllowed, ErrConflict,
+		ErrUnprocessableEntity, ErrDiffTooLarge, ErrRateLimited,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	return answerText.MatchString(err.Error())
+}
+
 // ResultObserver is told the final outcome of every HTTP request a Client
 // issues (nil on success). The engine uses it to track forge reachability.
 type ResultObserver func(err error)

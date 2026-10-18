@@ -728,9 +728,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// retries so other instances don't pick it up.
 	if e.forgeHeld() {
 		// Backstop for the dispatch-site gate (#2393): the forge went unreachable
-		// between admission and here. Nothing recorded; the item is re-admitted
-		// when the hold lifts.
+		// between admission and here. Admission already consumed the item's
+		// expired cooldowns (ADR 2096), so record the short cooldown that
+		// re-admits it after the hold lifts. Nothing else is recorded.
 		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting stage %q\n", stage.Name)
+		e.recordLockWriteCooldown(item)
 		return nil
 	}
 	releaseLock, workerStartedAt, workerDone, ok, lockErr := e.acquireLockAndVerify(ctx, item, stage, owner, repo, repoStr, lockLabel)

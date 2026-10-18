@@ -154,6 +154,48 @@ func TestForgeHold_DisabledAndCanceled(t *testing.T) {
 	}
 }
 
+// A call that never reached the forge (cancelled context at shutdown, a local
+// request-build failure) says nothing about reachability: it must not lift an
+// engaged hold nor reset the failure run (#2393 review).
+func TestForgeHold_UnrelatedErrorsNeitherLiftNorReset(t *testing.T) {
+	unrelated := map[string]error{
+		"canceled":       fmt.Errorf("executing request: %w", &url.Error{Op: "Get", URL: "u", Err: context.Canceled}),
+		"marshal":        errors.New("marshaling request: json: unsupported type"),
+		"create-request": errors.New("creating request: invalid method"),
+	}
+	for name, uerr := range unrelated {
+		t.Run(name, func(t *testing.T) {
+			e, clk := newForgeTestEngine(t)
+			for i := 0; i < forgeHoldMinFailures; i++ {
+				e.ObserveForgeResult(errTimeout)
+			}
+			clk.Advance(forgeHoldWindow)
+			e.ObserveForgeResult(errTimeout)
+			if !e.forgeHeld() {
+				t.Fatal("hold did not engage")
+			}
+			e.ObserveForgeResult(uerr)
+			if !e.forgeHeld() {
+				t.Fatalf("%s lifted an engaged hold", name)
+			}
+			if !e.health.snapshot().ForgeHeld {
+				t.Error("health mirror cleared by an unrelated error")
+			}
+			// And an unrelated error mid-run does not reset it either.
+			e2, clk2 := newForgeTestEngine(t)
+			for i := 0; i < forgeHoldMinFailures-1; i++ {
+				e2.ObserveForgeResult(errTimeout)
+			}
+			e2.ObserveForgeResult(uerr)
+			clk2.Advance(forgeHoldWindow)
+			e2.ObserveForgeResult(errTimeout)
+			if !e2.forgeHeld() {
+				t.Fatalf("%s reset the failure run", name)
+			}
+		})
+	}
+}
+
 func TestForgeHold_ConcurrentObserve(t *testing.T) {
 	e, _ := newForgeTestEngine(t)
 	var wg sync.WaitGroup

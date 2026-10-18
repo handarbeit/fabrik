@@ -43,6 +43,34 @@ func TestIsTransportError(t *testing.T) {
 	}
 }
 
+func TestIsForgeAnswer(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, true},
+		{"404 sentinel", fmt.Errorf("GitHub API returned 404: x: %w", ErrNotFound), true},
+		{"422 sentinel", fmt.Errorf("GitHub API returned 422: x: %w", ErrUnprocessableEntity), true},
+		{"400 typed", &StatusError{Code: 400, msg: "GitHub API returned 400: x"}, true},
+		{"403", &forbiddenError{msg: "GitHub API returned 403: x"}, true},
+		{"rate limit", &RateLimitError{}, true},
+		{"graphql", &GraphQLError{Message: "boom"}, true},
+		{"404 text", errors.New("GitHub API returned 404: Not Found"), true},
+		{"graphql text", errors.New("GraphQL error: API rate limit already exceeded"), true},
+		{"502 typed", &StatusError{Code: 502, msg: "GitHub API returned 502: bad"}, false},
+		{"timeout", &url.Error{Op: "Post", URL: "u", Err: context.DeadlineExceeded}, false},
+		{"canceled", fmt.Errorf("executing request: %w", &url.Error{Op: "Get", Err: context.Canceled}), false},
+		{"marshal", errors.New("marshaling request: bad"), false},
+		{"create request", errors.New("creating request: bad"), false},
+	}
+	for _, tc := range cases {
+		if got := IsForgeAnswer(tc.err); got != tc.want {
+			t.Errorf("%s: IsForgeAnswer = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestStatusErrorKeepsText(t *testing.T) {
 	err := apiStatusError(502, http.Header{}, []byte("oops"))
 	var se *StatusError

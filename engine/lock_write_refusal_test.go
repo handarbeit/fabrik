@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -53,5 +54,47 @@ func TestProcessItem_LockWriteFailure_SpawnsNoWorker(t *testing.T) {
 	}
 	if snap.Worker() != nil {
 		t.Error("worker handle left behind")
+	}
+}
+
+// The processItem hold backstop must leave a short admission cooldown: the
+// dispatch goroutine was already admitted and had its expired cooldowns
+// consumed (ADR 2096), so without one nothing re-admits the item (#2393 review).
+func TestProcessItem_ForgeHeldBackstop_RecordsCooldown(t *testing.T) {
+	skipIfNoGit(t)
+	wm := NewWorktreeManager(initBareRepo(t))
+	claude := &mockClaudeInvoker{}
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, PollSeconds: 30, Stages: testStages()},
+		client, claude, wm,
+	)
+	eng.SetPauseGuardUnreadFailOpenForTest(true)
+	clk := &forgeClock{t: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
+	eng.SetClock(clk)
+	eng.SetForgeHoldThresholdsForTest(1, time.Nanosecond)
+	eng.ObserveForgeResult(errTimeout)
+	clk.Advance(time.Second)
+	eng.ObserveForgeResult(errTimeout)
+	if !eng.forgeHeld() {
+		t.Fatal("hold did not engage")
+	}
+	item := gh.ProjectItem{Number: 302, Title: "held", Status: "Research", ItemID: "PVTI_302"}
+	if err := eng.processItem(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 || len(client.addLabelCalls) != 0 {
+		t.Fatalf("held backstop started work: claude=%d labels=%d", len(claude.calls), len(client.addLabelCalls))
+	}
+	snap, err := eng.store.Get("owner/repo", 302)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CooldownAt(lockWriteRetryReason).IsZero() {
+		t.Error("no admission cooldown recorded by the forge-hold backstop")
+	}
+	if !snap.LastAttemptAt("Research").IsZero() || snap.Attempts("Research") != 0 {
+		t.Error("backstop recorded an attempt")
 	}
 }

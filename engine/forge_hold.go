@@ -81,6 +81,12 @@ func (e *Engine) ForgeHeldForTest() bool { return e.forgeHeld() }
 // the sim's fault table. Safe for concurrent use.
 func (e *Engine) ObserveForgeResult(err error) {
 	transport := gh.IsTransportError(err)
+	if !transport && !gh.IsForgeAnswer(err) {
+		// Neither a transport failure nor an answer from the forge: a cancelled
+		// context (shutdown) or a local request-build error says nothing about
+		// reachability, so it neither extends the failure run nor lifts a hold.
+		return
+	}
 	now := e.now()
 
 	f := &e.forge
