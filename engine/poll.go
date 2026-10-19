@@ -1880,6 +1880,11 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// would never appear in deepFetchCandidates (#1220).
 	e.settleNoWorkNeededScan(board)
 
+	// Recorded stage outcomes (#2394): publishes, without re-running Claude, the result of a
+	// stage that finished but whose comment, push or completion signal could not be written.
+	// Board-sourced for the same reason: a live record makes the item fail admission.
+	e.settleStageOutcomes(ctx, board)
+
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	e.settleRevalidateScan(deepFetchCandidates)
 

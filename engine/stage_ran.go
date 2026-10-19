@@ -51,6 +51,10 @@ func (e *Engine) stageRanOnEntry(item gh.ProjectItem, stage *stages.Stage, engin
 			return true
 		}
 	}
+	// A recorded outcome waiting to be published (#2394) is a finished run too.
+	if e.stageOutcomePending(item, stage) {
+		return true
+	}
 	// A forced Validate re-run (#2378, ADR 2378): the earlier run's stage comment is
 	// still there, but it verified a head nobody trusts any more. The stage runs
 	// first, and the pending comment follows it under the normal rework bracket.

@@ -92,7 +92,16 @@ func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) (live bool) {
 	return true
 }
 
-func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+// handleStageComplete applies a finished stage's completion: the completion label (or
+// fabrik:awaiting-ci), then the autonomy-driven merge and advance.
+//
+// It returns nil once the stage's durable completion signal is in place (the completion
+// label, fabrik:awaiting-ci for a wait_for_ci stage, or a terminal path that already
+// settled the item), and the failing write's error otherwise — the signal a recorded
+// stage outcome (#2394, ADR 2394) needs to know whether publication finished. The advance
+// that follows the signal is recoverable from the signal by the catch-up loop, so a
+// failure there does not change the result. Callers that do not record an outcome ignore it.
+func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (completionErr error) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
 	// Circuit breaker (#1089): a stage:*:complete transition is forward progress —
@@ -185,6 +194,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			autoMergeEnabled, landingDeferred, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
 			if mergeErr != nil {
 				e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
+				// An outage is not a verdict on the merge: report it so a recorded
+				// outcome (#2394) keeps its record and the merge is retried, instead of
+				// the stage re-running. Any other failure keeps its historical effect
+				// (no label, Validate runs again).
+				if gh.IsTransportError(mergeErr) {
+					completionErr = fmt.Errorf("landing the Validate PR: %w", mergeErr)
+				}
 				return
 			}
 		}
@@ -209,6 +225,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
+				// awaiting-ci is this stage's completion signal: report its loss so a
+				// recorded outcome (#2394) is retried rather than dropped as published.
+				completionErr = fmt.Errorf("adding fabrik:awaiting-ci: %w", err)
 			} else {
 				awaitingCIArmed = true
 				if c := e.cache(); c != nil {
@@ -244,6 +263,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		completionErr = fmt.Errorf("adding %s: %w", completeLabel, err)
 	} else {
 		// The completion is durable: the dispatch count of the episode ends (#2395).
 		e.resetStageDispatches(item, stage.Name)
@@ -357,6 +377,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	} else {
 		e.logf(item.Number, "wait", "waiting for human to advance\n")
 	}
+	return completionErr
 }
 
 // attemptMergeOnValidate enables GitHub native auto-merge for the linked PR

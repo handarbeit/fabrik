@@ -1633,7 +1633,7 @@ An existing worktree's local `fabrik/issue-N` branch is never synced from `origi
 | `item.go` post-stage push (every stage that ran Claude) | Guarded. On refusal `processItem` releases the lock and returns before the completion/blocked/retry chain, so `handleStageComplete` cannot strip `fabrik:awaiting-input` or advance/auto-merge a paused item; the stage stays incomplete. |
 | `item.go` cancellation WIP push | Guarded through `pushBranchOnCancel`: the push is refused (remote untouched) and logged, but the item is **not** paused or commented from here — the daemon-stop / TUI-stop interruption that cancelled the worker already pauses it under `pauseIssueMu`, and a second pause would race it. The lock is released as before. |
 | `comments.go` `publishCommentOutput` spec push (#2034) | Guarded; a refusal is logged. |
-| `pr.go` `markPRReady` | Guarded; on refusal it returns before `MarkPRReady` (a stale PR is not flipped to ready-for-review) and returns `true` so its callers can act on it. All three callers (`item.go` post-stage completion, `item.go` R5 PR-creation retry, `comments.go` comment-path completion) skip `handleStageComplete` on `true`, so the paused item is neither advanced nor auto-merged; the comment path also restores the rework marker state via `endStageRework(…, false)`. `TestPushGuard_MarkPRReadyCallersActOnRefusal` pins that every call site uses the result. |
+| `pr.go` `markPRReady` | Guarded; on refusal it returns before `MarkPRReady` (a stale PR is not flipped to ready-for-review) and returns `true` so its callers can act on it. All four callers (`item.go` post-stage completion, `item.go` R5 PR-creation retry, `comments.go` comment-path completion, `stage_outcome_publish.go` recorded-outcome publication retry, §7.22) skip `handleStageComplete` on `true`, so the paused item is neither advanced nor auto-merged; the comment path also restores the rework marker state via `endStageRework(…, false)`. `TestPushGuard_MarkPRReadyCallersActOnRefusal` pins that every call site uses the result. |
 | `pr.go` `ensureDraftPR`, `prcreate.go` `processPRCreateMarker` | **Exempt** (`pushBranchForNewPR`, in-queue skip only). They push because no open PR exists yet, so a zero-ahead push (for example a coordinator parent) is legitimate and there is no PR for the overwrite to close. |
 
 **Former known gap (closed by #2295).** The guard catches only the zero-ahead shape; a stale local branch that carried commits of its own could still overwrite out-of-band work. The issue-branch sync and the verified-lease push below close that gap. The guard stays in front of them, unchanged, and still pauses a zero-ahead branch before any classification runs.
@@ -5142,6 +5142,82 @@ stable fingerprint and resolved on lift; `fabrik_health.forge_hold {since, conse
 last_error}` while held (§7.13); `pipeline-stalled` / `pipeline-resumed` with `scope=forge`,
 `cause=forge-unreachable`, one pair per episode, derived from the health mirror only, included in
 catch-up (§7.14). Sim twin: `tests/sim/forge_hold_test.go` over `simgh` `FailAllWrites` / `FailAll`.
+
+### 7.22 Recorded Stage Outcome and Its Publication Retry (#2394, ADR 2394)
+
+**Why.** A stage run that finished (`FABRIK_STAGE_COMPLETE`) published its result through independent
+GitHub writes — issue-body update, stage comment, push, completion label — each of which swallowed its own
+failure. When the completion label could not be written, GitHub and the Store still showed the stage as not
+complete, `LastAttemptAt` expired, and the next poll ran Claude again on the same inputs (#2388: ~150 runs in
+21 hours, each resuming a ~13 MB session), losing the comment and push every time.
+
+**The record.** `finalizeStageOutcome` writes a `stageOutcomeRecord` (`engine/stage_outcome.go`) before its first
+GitHub write for a run that completed without error, without `FABRIK_NO_WORK_NEEDED` and without
+`FABRIK_BLOCKED_ON_INPUT` (and not an Implement coordinator carrying `fabrik:children-spawned`). One JSON file per
+item under `.fabrik/state/stage-outcomes/` (a sibling of `engine-decisions/` and `merge-train/`), mode 0600, atomic
+write, loaded at startup; an unreadable, wrong-version or mismatched file is renamed `.corrupt` and treated as
+absent. The store is nil on `NewWithDeps` engines (`EnableStageOutcomesForTest` opts in). It holds the stage, the
+worktree head, a nonce, the raw output, the issue-body update and the body it replaces, and — from the *ready*
+checkpoint, just before the comment is posted — the comment payload and the head re-read after any spec commit.
+Step flags (`body_done`, `pr_comment_done`, `issue_comment_done`, `push_done`) and the persisted `attempts` counter
+record progress. A record still in phase `recorded` after a restart is discarded (the PR-create and spawn calls it
+may have interrupted cannot be replayed safely).
+
+**Admission.** While a record exists for the item's current stage, `itemMayNeedWork` and `itemNeedsWorkRetryAt`
+return false (next to the `fabrik:awaiting-done` gate) and `stageRanOnEntry` counts it as "stage ran" (ADR 2220 stage-first routing). The
+gate is on the record, not on the in-memory `LastAttemptAt` backoff.
+
+**First attempt.** Publication runs inline in the same order as before, but the completion signal goes last: if
+the stage comment or the push failed, the record is kept and `handleStageComplete` is not called. If
+`handleStageComplete` returns an error — it now returns nil once the completion label, `fabrik:awaiting-ci` or a
+terminal path is in place, and the failing write's error otherwise (a non-transport `attemptMergeOnValidate`
+failure still returns nil: no label, Validate runs again as before) — the record is kept. Every other exit of the
+function (pause, malformed marker, spawn failure, PR-creation escalation, success) removes it.
+
+**Retry — `settleStageOutcomes`** (board-sourced, beside `settleNoWorkNeededScan`, so independent of the admission
+it refuses). Per record, in order:
+
+0. skip the poll while a worker for the item is in flight or `fabrik:editing` is present — first, before any rule
+   below, because a `finalizeStageOutcome` still running has not reached its `ready` checkpoint and its record
+   would otherwise be judged (and discarded) as interrupted;
+1. completion signal already on the item → remove (`published`);
+2. discard, with one `[outcome]` log line naming the reason (R3): the item is closed or left the board, carries
+   `fabrik:paused`, moved to another column, the record is not `ready`, or the worktree is missing/unreadable or its
+   `HEAD` differs from the recorded SHA; for a Validate record also `fabrik:revalidate` on the item, or
+   `fabrik:validate-rerun` on it when the record is not the forced re-run's own (see *Forced re-runs* below);
+3. skip the poll while `forgeHeld()` (§7.21);
+4. otherwise `publishStageOutcome` (never calls `EnsureWorktree`): issue body (written only if the live body still
+   equals the body it replaces — a human edit made during the outage is never overwritten), stage comment(s)
+   (hidden `<!-- fabrik:outcome=<nonce>:pr|issue -->` marker; the thread is read first so a comment whose flag was
+   lost is not posted twice), push, draft PR/verification/linkage, mark-ready, then `handleStageComplete`.
+
+**The bound (R4).** A failed retry counts against `MaxRetries` (persisted `attempts`) unless it is a transport
+failure (`gh.IsTransportError`, or `isTransientError` for git/exec errors) or a GitHub rate limit (primary or
+secondary: `gh.ErrRateLimited`, or `isTransientAPIError` for text-only errors), which never counts — so an outage or
+a rate-limit episode cannot exhaust it and discard a finished outcome. At `MaxRetries` the item is paused (`fabrik:paused` + `fabrik:awaiting-input`, a comment naming the
+error and saying the stage re-runs on resume) and the record is discarded.
+
+**Forced re-runs (ADR 2394 decision 11, ADR 2378).** A recorded outcome never completes a forced Validate
+re-run. `outcomeDiscardReason` discards a Validate record when `fabrik:revalidate` is on the item (this rule is
+load-bearing: a live record keeps the item out of the dispatch candidates, so `settleRevalidateScan` would not see
+the label otherwise) or when `fabrik:validate-rerun` is on it and the record is not the re-run's own
+(`stageOutcomeRecord.Rerun`, set from a live label read when the run finished; the re-run's own record
+legitimately outlives the marker because `handleStageComplete` clears it). `reenterValidate` (operator label and
+merge-train auto-repair) and `handleValidateSHAInvalidation` drop the item's record next to `markValidateRerun`,
+and `clearFailedStage` / `unblockAwaitingInput` drop it when the stage is deliberately run again
+(`discardOutcomeForFreshStart`), so the order of the settle scan and the strip never matters.
+A drop that lands while a publication attempt is in flight is final: only `createOutcome` (a run recording its
+outcome) may insert a record; every later write of the attempt (`persistOutcome`, `stageOutcomeStore.update`)
+rewrites a record only while its key is still live, checked under the store lock, and a failure note on a dropped
+record escalates nothing.
+
+**Comment-review audit (FR-011).** (a) A comment pass that completes the stage but whose `handleStageComplete`
+fails: `finalizeComments` writes a `completion` record (stage and head only) and the scan retries just
+`handleStageComplete`. (b) A failed 🚀 reaction followed by a restart repeats one capped comment pass; this is a
+reaction, not a stage outcome, and is deliberately not fixed here.
+
+Seams: `SetStageOutcomeRecordDisabledForTest`, `SetOutcomeFreshStartDiscardDisabledForTest`, `EnableStageOutcomesForTest`. Sim twins:
+`tests/sim/stage_outcome_test.go` (`Env.StageOutcomeDir`, carried by `RestartEnv`).
 
 ## 8. Invalid / Unexpected States
 

@@ -1207,7 +1207,13 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 			e.endStageRework(item, stage, wasReworking, false)
 			return
 		}
-		e.handleStageComplete(ctx, board, item, stage)
+		completeErr := e.handleStageComplete(ctx, board, item, stage)
+		if completeErr != nil {
+			// The pass completed the stage but the completion signal did not land. The
+			// comments are marked processed, so without a record the next poll would run
+			// the whole stage again (#2394, audit finding a).
+			e.recordCompletionOutcome(item, stage, e.worktreesFor(item.Repo).WorktreeDir(item.Number), completeErr)
+		}
 		// Only now — after handleStageComplete has durably written
 		// stage:<Stage>:complete, deferred to fabrik:awaiting-ci, or (a
 		// Validate yolo-merge failure) written neither, all outcomes the

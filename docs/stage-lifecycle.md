@@ -678,6 +678,17 @@ This does not change or duplicate `recoverMissingPlanComment` (#982): that recov
 
 See ADR-1782.
 
+### Recorded Outcome and Publication Retry (#2394)
+
+After the output is parsed and before the first write to GitHub, a run that completed (`FABRIK_STAGE_COMPLETE`, no
+error, no `FABRIK_NO_WORK_NEEDED`) is recorded under `.fabrik/state/stage-outcomes/`. The issue-body update, stage
+comment, push and finally the completion label (or `fabrik:awaiting-ci`) are then published in that order; if the
+comment or the push fails, the completion label is not written and the record stays. While it stays the stage is not
+dispatched again: each poll `settleStageOutcomes` retries the missing steps without calling Claude, bounded by
+`MaxRetries` (transport errors do not count), and discards the record if the item is paused, closed, moved column or
+the worktree head changed. A record that is published, discarded or escalated is removed. See `docs/state-machine.md`
+§7.22 and ADR 2394.
+
 ### Issue Body Update
 
 Before posting output, checks for `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers:
