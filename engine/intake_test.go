@@ -477,6 +477,13 @@ func TestIntake_QuiesceTimeoutForgetsPendingIDs(t *testing.T) {
 	}
 
 	in.Resume()
+	// The deliveries kept running in this process, so Resume records their IDs
+	// again: a redelivery after a failed exec must not be applied a second time.
+	for _, id := range []string{"applying", "queued"} {
+		if in.ledger.Accept(id, time.Now()) {
+			t.Fatalf("%s was not recorded again by Resume; its redelivery would be applied twice", id)
+		}
+	}
 	close(release)
 	in.Drain()
 	if got := len(rec.list()); got != 2 {

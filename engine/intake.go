@@ -97,7 +97,11 @@ type intake struct {
 	// quiesced refuses new work like closed, but reversibly (Resume): it is the
 	// state of a process about to exec, which must survive a failed exec.
 	quiesced bool
-	wg       sync.WaitGroup
+	// quiesceForgot holds the IDs a timed-out Quiesce forgot in the ledger, so
+	// Resume can record them again: those deliveries keep running, so a redelivery
+	// must stay suppressed once the process carries on after a failed exec.
+	quiesceForgot []string
+	wg            sync.WaitGroup
 	// idle is signalled whenever total drops to zero (drain).
 	idle *sync.Cond
 }
@@ -315,8 +319,9 @@ func (in *intake) Quiesce(grace time.Duration) bool {
 		// caller flushes the ledger next: forget those IDs so the flush does not
 		// persist deliveries the new process never applied (their redelivery is
 		// then accepted, as after a Close drop). The deliveries themselves keep
-		// running, so a failed exec that Resumes loses nothing.
-		in.forgetPendingLocked()
+		// running, so a failed exec that Resumes loses nothing, and Resume records
+		// the forgotten IDs again.
+		in.quiesceForgot = in.forgetPendingLocked()
 	}
 	in.mu.Unlock()
 	timer.Stop()
@@ -327,10 +332,22 @@ func (in *intake) Quiesce(grace time.Duration) bool {
 	return true
 }
 
-// Resume accepts deliveries again after a Quiesce whose exec did not happen.
+// Resume accepts deliveries again after a Quiesce whose exec did not happen. The
+// IDs a timed-out Quiesce forgot belong to deliveries that kept running in this
+// process, so they are recorded again first: a redelivery of one of them must not
+// be applied a second time. Submit refuses new work while quiesced, so nothing can
+// race the re-recording.
 func (in *intake) Resume() {
 	if in == nil {
 		return
+	}
+	in.mu.Lock()
+	forgot := in.quiesceForgot
+	in.quiesceForgot = nil
+	in.mu.Unlock()
+	now := in.now()
+	for _, id := range forgot {
+		in.ledger.Accept(id, now)
 	}
 	in.mu.Lock()
 	in.quiesced = false
@@ -338,16 +355,24 @@ func (in *intake) Resume() {
 }
 
 // forgetPendingLocked forgets in the ledger the ID of every queued and applying
-// delivery. in.mu must be held.
-func (in *intake) forgetPendingLocked() {
+// delivery and returns the forgotten IDs. in.mu must be held.
+func (in *intake) forgetPendingLocked() []string {
+	var ids []string
 	for _, q := range in.queues {
 		for _, d := range q {
+			if d.ID != "" {
+				ids = append(ids, d.ID)
+			}
 			in.ledger.Forget(d.ID)
 		}
 	}
 	for _, id := range in.applying {
+		if id != "" {
+			ids = append(ids, id)
+		}
 		in.ledger.Forget(id)
 	}
+	return ids
 }
 
 // dropQueued discards every delivery that has not started applying, forgetting
