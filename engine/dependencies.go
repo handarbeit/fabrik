@@ -220,7 +220,9 @@ func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectIt
 	// (engine/item.go's itemMayNeedWork), which already throttles how often
 	// this live read fires.
 	blockedByList := item.BlockedBy
-	if alreadyBlocked || (mode == depDecisionPoint && !e.depLiveReadOff.Load()) {
+	// A cleanup-stage item (worktree reaping) is never deep-fetched.
+	decisionRead := mode == depDecisionPoint && !e.depLiveReadOff.Load() && (stage == nil || !stage.CleanupWorktree)
+	if alreadyBlocked || decisionRead {
 		fresh := item
 		if err := e.liveItem(&fresh); err != nil {
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)

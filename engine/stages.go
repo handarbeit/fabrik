@@ -652,7 +652,7 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		// immediately before the point of no return, instead of trusting the
 		// stale snapshot guard 1 already checked.
 		fresh := item
-		if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+		if ferr := e.liveItem(&fresh); ferr != nil {
 			return false, false, fmt.Errorf("direct-merge fallback: live re-read of review threads for PR #%d: %w", pr.Number, ferr)
 		}
 		// Pause guard (#2341): the last live read before the irreversible merge.

@@ -188,19 +188,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// snapshot, indexing lag, or GitHub not creating it at all (#1962).
 	var fetchFailed bool
 	if prNumber > 0 && (itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) {
-		restReviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
-		restRequests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-		fetchFailed = reviewsErr != nil || requestsErr != nil
+		restReviews, restRequests, readErr := e.liveReviews(owner, repo, item.Number, prNumber)
+		fetchFailed = readErr != nil
 		if fetchFailed {
 			// Conservative: treat a partial failure as no-data rather than trusting
 			// whichever call succeeded — a false len(outstanding)==0 read could
 			// falsely clear the gate while real outstanding reviewers are unknown.
-			if reviewsErr != nil {
-				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviews failed: %v\n", reviewsErr)
-			}
-			if requestsErr != nil {
-				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewRequests failed: %v\n", requestsErr)
-			}
+			e.logf(item.Number, "warn", "checkReviewGate: live review read failed: %v\n", readErr)
 			reviewRequests, reviews = nil, nil
 		} else {
 			reviewRequests, reviews = restRequests, restReviews
