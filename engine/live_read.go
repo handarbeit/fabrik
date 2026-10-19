@@ -108,7 +108,8 @@ func (e *Engine) liveLabels(owner, repo string, number int) ([]string, error) {
 
 // liveItem reads the whole item (FetchItemDetails) into item and applies the
 // deep-owned facts to the Store (comments, blockedBy, linked PR, reviews, and
-// the labels and closed state a live read carries). It is applyDeepFetched
+// the labels and closed state a live read carries) when the Store tracks the
+// item; a read of an untracked item is not turned into a record. It is applyDeepFetched
 // without the cacheless listing step: item is a copy captured earlier, so its
 // Status is not a fresh listing and must not be written back.
 func (e *Engine) liveItem(item *gh.ProjectItem) error {
@@ -116,7 +117,7 @@ func (e *Engine) liveItem(item *gh.ProjectItem) error {
 		return err
 	}
 	repo := itemOwnerRepoString(*item, e.defaultRepo())
-	if !e.liveApplyOff.Load() {
+	if !e.liveApplyOff.Load() && e.storeHolds(repo, item.Number) {
 		e.applyLive(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: *item})
 	}
 	item.DeepFetchLive = false

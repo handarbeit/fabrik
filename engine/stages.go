@@ -466,7 +466,11 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			return false, true, nil
 		}
 	}
-	if e.checkDependencies(board, item, stage) {
+	depMode := depAlreadyLive
+	if !liveRead {
+		depMode = depCacheOnly // the re-read just failed; do not repeat it
+	}
+	if e.checkDependenciesMode(board, item, stage, depMode) {
 		e.logf(item.Number, "yolo-merge-guard", "not merging: dependencies are open (live re-check)\n")
 		return false, false, nil
 	}

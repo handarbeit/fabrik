@@ -160,7 +160,7 @@ func (e *Engine) handleEngineUnpause(pctx *phase1Ctx) bool {
 // handleDependencies claims the item when it has unresolved blocking
 // dependencies. checkDependencies handles label mutation and comment posting.
 func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
-	return e.checkDependencies(pctx.board, pctx.item, pctx.stage)
+	return e.checkDependenciesMode(pctx.board, pctx.item, pctx.stage, depCacheOnly)
 }
 
 // handleReviewGate runs the review gate and review reinvoke dispatch.

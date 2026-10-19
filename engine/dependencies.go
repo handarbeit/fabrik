@@ -145,6 +145,35 @@ func (e *Engine) openDependencies(itemRepo string, deps []gh.Dependency) []gh.De
 // blockedBy edge, they assert that the blocker's merged state matters to how
 // this issue should be processed — even at specification time. (#473)
 func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) bool {
+	return e.checkDependenciesMode(board, item, stage, depDecisionPoint)
+}
+
+// depMode says how fresh the blockedBy edge list must be for one checkDependencies
+// call (#2350, R4, ADR 2350).
+type depMode int
+
+const (
+	// depDecisionPoint is a call that gates real work: a stage dispatch
+	// (processItem) or a stage advance. The edge list is read live, applied to
+	// the Store, and decided on, so a blocker added to an unblocked item after
+	// the cache filled stops the dispatch even though no webhook carries the
+	// edge yet (#1995). The cost is one read per dispatch or advance — never one
+	// per item per poll.
+	depDecisionPoint depMode = iota
+	// depCacheOnly is the per-poll Phase 1 call: it decides on the cached edge
+	// list (and re-reads live only for an item already marked fabrik:blocked, as
+	// ADR 1419 requires), so the poll makes no extra read for an unblocked item.
+	depCacheOnly
+	// depAlreadyLive is a call whose caller has just read the item live and
+	// applied it; reading again would only repeat that read.
+	depAlreadyLive
+)
+
+// SetDependencyLiveReadDisabledForTest restores the pre-#2350 dependency check,
+// which reads live only for an item already marked blocked. Test seam only.
+func (e *Engine) SetDependencyLiveReadDisabledForTest(off bool) { e.depLiveReadOff.Store(off) }
+
+func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, mode depMode) bool {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
@@ -191,13 +220,12 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	// (engine/item.go's itemMayNeedWork), which already throttles how often
 	// this live read fires.
 	blockedByList := item.BlockedBy
-	if alreadyBlocked {
+	if alreadyBlocked || (mode == depDecisionPoint && !e.depLiveReadOff.Load()) {
 		fresh := item
-		if err := e.client.FetchItemDetails(&fresh); err != nil {
+		if err := e.liveItem(&fresh); err != nil {
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
 		} else {
 			blockedByList = fresh.BlockedBy
-			e.applyDeepFetched(itemRepo, &fresh)
 		}
 	}
 

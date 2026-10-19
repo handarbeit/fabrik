@@ -902,13 +902,42 @@ func TestCheckDependencies_FirstTimeBlock_NoLiveReadAttempted(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Research"}
 
-	blocked := eng.checkDependencies(board, item, stage)
+	// The per-poll Phase 1 call decides on the cached edge list (#2350): an
+	// unblocked item costs no read.
+	blocked := eng.checkDependenciesMode(board, item, stage, depCacheOnly)
 
 	if !blocked {
 		t.Error("expected blocked on first-time block with an open dependency")
 	}
 	if fetchCalls != 0 {
 		t.Errorf("expected no live re-read on first-time block, got %d calls", fetchCalls)
+	}
+}
+
+// A blocker added on GitHub after the cache filled stops the dispatch (#2350, R4,
+// SC-004): at a decision point the edge list is read live, applied to the Store
+// and decided on, though the cached list is empty and the item is not marked
+// blocked. With the live read disabled (the pre-#2350 check) it is missed.
+func TestCheckDependencies_DecisionPoint_NewBlockerStopsDispatch(t *testing.T) {
+	run := func(liveOff bool) (blocked bool, reads int) {
+		client := &mockGitHubClient{
+			fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+				reads++
+				item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+				return nil
+			},
+		}
+		eng := depTestEngine(t, client)
+		eng.SetDependencyLiveReadDisabledForTest(liveOff)
+		item := gh.ProjectItem{Number: 979, Repo: "owner/repo"} // cached: no blockers, not blocked
+		blocked = eng.checkDependencies(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Research"})
+		return blocked, reads
+	}
+	if blocked, reads := run(false); !blocked || reads != 1 {
+		t.Fatalf("blocked=%v reads=%d, want a block from exactly one live read", blocked, reads)
+	}
+	if blocked, _ := run(true); blocked {
+		t.Fatal("non-vacuity: without the live read the cached empty list lets the dispatch through")
 	}
 }
 
