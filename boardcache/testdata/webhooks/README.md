@@ -27,9 +27,12 @@ none is stored here.
 Verbatim deliveries from temporary webhooks pointing at an unroutable address:
 a repository hook on `handarbeit/fabrik-test-alpha` and an org hook limited to
 `projects_v2` against a throwaway project (#8, deleted afterwards). They are
-scrubbed the same way as above: `sender`, `organization`, `projects_v2.creator`
-and `projects_v2.deleted_by`. Issue, comment and PR authors are the public bot
-account and are left as captured.
+scrubbed to the standard `TestWebhookFixturesAreScrubbedCaptures` enforces:
+`sender`, `organization`, `projects_v2.creator` and `projects_v2.deleted_by` are
+replaced as above, every string field holding an `api.github.com` or avatar URL
+is removed, and the org login is rewritten to `example-org` (so repository
+`full_name` reads `example-org/fabrik-test-alpha`). Numeric IDs, node IDs,
+actions, `changes` blocks and every other field are as captured.
 
 | Fixture | Event / action | Trigger |
 |---|---|---|
