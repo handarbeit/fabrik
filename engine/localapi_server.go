@@ -37,7 +37,7 @@ func localAPIUnavailableCondition(path string, err error) warnings.Condition {
 // It must run only once Run() holds the instance lock: that is what makes a
 // socket file already at the path stale (left by a previous exec or crash)
 // rather than owned by a live daemon, and so safe to replace. It must also run
-// after e.webhookMgr is assigned, because the health view reads that field
+// after e.transports is assigned, because the health view reads that field
 // from the socket goroutines.
 //
 // Failure to bind is non-fatal, like the webhook manager: the API is a
