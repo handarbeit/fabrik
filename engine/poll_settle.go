@@ -44,6 +44,7 @@ func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard) {
 		// already-working "Done move succeeded, only CloseIssue failed" sub-case.
 		if item.Status != "Done" {
 			repo := itemOwnerRepoString(item, e.defaultRepo())
+			// live-read-audited: board-cache-backed deep fetch, applied by applyDeepFetched right after
 			if err := e.readClient.FetchItemDetails(&item); err != nil {
 				e.logf(item.Number, "warn", "no-work-needed settle: could not deep-fetch item details: %v — will retry next poll\n", err)
 				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})

@@ -109,6 +109,28 @@ func TestLinkedPRStateObserved_LaggingListCannotRevert(t *testing.T) {
 	}
 }
 
+// A listing read that starts AFTER the confirmation but still lags the merge (the
+// list endpoint trails by up to ~45 s, longer than the 30 s grace the ordering rule
+// shifts by) passes the ordering check; the recorded merge must still hold (#2350).
+func TestLinkedPRStateObserved_LaggingListStartingAfterTheConfirmationCannotRevert(t *testing.T) {
+	s := liveReadStore(t)
+	now := time.Now()
+	s.Apply(LinkedPRStateObserved{Repo: orderRepo, Number: 1, PRNumber: orderPR, State: "closed", Merged: true, At: now})
+	snap, _, _ := s.Apply(PRDetailsUpdated{Repo: orderRepo, Number: 1, PRNumber: orderPR, Title: "T2", State: "open", Merged: false, At: now.Add(5 * time.Second), AtIsFetchStart: true})
+	lpr := snap.LinkedPR()
+	if !lpr.Merged || lpr.State != "closed" {
+		t.Fatalf("a lagging listing that started after the confirmation reverted the merge: %+v", lpr)
+	}
+	if lpr.Title != "T2" {
+		t.Fatalf("the rest of the listing read was not applied: %+v", lpr)
+	}
+	// A different PR replacing the linked one is a new fact, not a revert.
+	snap, _, _ = s.Apply(PRDetailsUpdated{Repo: orderRepo, Number: 1, PRNumber: orderPR + 1, State: "open", Merged: false, At: now.Add(6 * time.Second), AtIsFetchStart: true})
+	if lpr := snap.LinkedPR(); lpr.Merged || lpr.Number != orderPR+1 {
+		t.Fatalf("a different PR inherited the old PR's merge: %+v", lpr)
+	}
+}
+
 // A merge just confirmed by a single-PR read is not dropped because a webhook or PR
 // update was recorded in the 30 s before the read began (#2350, FR-006): the read is
 // a direct GET, judged by its own start.

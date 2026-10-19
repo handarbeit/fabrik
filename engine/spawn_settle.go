@@ -145,6 +145,7 @@ func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo stri
 // already completed by the time this is called and must not be affected by
 // this function's outcome.
 func (e *Engine) notifyParentOfStalledChild(childOwner, childRepo string, childItem gh.ProjectItem) {
+	// live-read-audited: reads only the child body to recover the parent link; no Store-held fact is decided from it
 	if err := e.readClient.FetchItemDetails(&childItem); err != nil {
 		e.logf(childItem.Number, "warn", "could not fetch child body to notify parent: %v\n", err)
 		return

@@ -32,7 +32,11 @@ newer fact.
    never a loop). Channel events built from a live-read change are marked unverified like a
    reconcile's or a probe's (`unattributed()`), since no known write or webhook backs them. A scan test forbids the raw client calls elsewhere; each remaining raw call
    is audited per call site with a `// live-read-audited: <reason>` marker (only `live_read.go` is
-   exempt as a file), so a new raw read in a file that already has an audited one still fails.
+   exempt as a file), so a new raw read in a file that already has an audited one still fails. The
+   scan matches the method on any receiver chain ending in `client` or `readClient` (`e.client`,
+   `e.readClient`, a local `client`, ...), not only `e.client`; the board-cache-backed
+   `readClient.FetchItemDetails` admission reads are audited as such (the cache writes a miss back
+   to the Store itself), and the dispatcher-view read in `dispatcherGap` is deliberately not applied.
 2. **Comments** carry no observed-at record, so a live deep fetch keeps a Store comment the read
    lacks when it was created at or after the read began (matched by node or database ID), rather than
    adding a comment record kind.
@@ -67,7 +71,13 @@ just after the read began can carry a time before its start, and a read that pre
 not wipe it. **Deviation from ADR 2348:** `LinkedPRStateObserved` is judged by the raw request start.
 It applies only `merged=true`, a merge is monotonic, and the single-PR GET does not lag, so a record
 from the previous grace window must not drop a merge just confirmed; the baseline it records is still
-the shifted lower bound. (ADR 2348 carries a matching amendment line.)
+the shifted lower bound. (ADR 2348 carries a matching amendment line.) Because that baseline is
+the shifted one, a listing read that starts shortly *after* the confirmation (authority `T-25s` against
+a baseline of `T-30s`) is not stale to the ordering rule, yet the list endpoint can trail a merge by
+longer than the grace window. So `PRDetailsUpdated` makes a recorded merge monotonic for the same PR
+number: an open/unmerged write for PR N never clears `Merged`/`State` of a PR the Store holds as
+merged (the rest of the read, Title and Draft, still applies); a different PR number replaces the
+linked PR as before. Recording the unshifted start instead would only narrow the window, not close it.
 
 **Deciding from the Store at the feedback and landing re-reads (item 5).** After `liveItem`,
 `feedbackGateBlocks` (`unprocessedFeedback`) and `attemptMergeOnValidate` decide on the read overlaid

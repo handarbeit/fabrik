@@ -148,6 +148,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		} else {
 			e.logf(item.Number, "awaiting-ci-settle", "deep-fetching details from GitHub\n")
 		}
+		// live-read-audited: board-cache-backed admission read: CacheImpl.FetchItemDetails writes a miss back to the Store itself, and the engine applies the result via applyDeepFetched below
 		if err := e.readClient.FetchItemDetails(&item); err != nil {
 			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
 			if isTransientAPIError(err) {

@@ -2532,6 +2532,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		} else {
 			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
 		}
+		// live-read-audited: board-cache-backed admission deep fetch: the cache writes a miss back itself and applyDeepFetched applies the rest
 		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 			e.store.Apply(itemstate.DeepFetchFailed{

@@ -3277,6 +3277,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 			return true, nil
 		}
 		// No new commits — re-fetch to check resolved reviewer threads.
+		// live-read-audited: extend-turns progress measurement on the caller's item copy; compares against a baseline, decides nothing about Store state
 		if err := client.FetchItemDetails(item); err != nil {
 			logfFn("extend-turns", "progress check: HEAD %s (unchanged), re-fetch failed: %v, has_progress=false — no extension\n", sha, err)
 			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
@@ -3291,6 +3292,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 		}
 		return progress, nil
 	case "Validate":
+		// live-read-audited: extend-turns progress measurement on the caller's item copy; compares against a baseline, decides nothing about Store state
 		if err := client.FetchItemDetails(item); err != nil {
 			fetchErr := fmt.Errorf("re-fetching item for progress check: %w", err)
 			logfFn("extend-turns", "progress check: comments %d (fetch failed), has_progress=false, err=%v\n", baseline.commentCount, fetchErr)

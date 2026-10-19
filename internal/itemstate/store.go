@@ -1283,13 +1283,22 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if observedStale(item, observedLinkedPRKey, auth) {
 			return 0
 		}
+		// A merge is irreversible: once the Store holds PR N as merged, a later
+		// write for the same PR that says open/unmerged is a lagging read (the list
+		// endpoint trails a merge by up to ~45 s, longer than the grace window the
+		// ordering rule shifts by), never a revert. Ordering alone cannot tell them
+		// apart, so the recorded merge is monotonic for that PR number (#2350).
+		keepMerged := s.ordering() && item.LinkedPR != nil && item.LinkedPR.Merged &&
+			item.LinkedPR.Number == v.PRNumber && !v.Merged
 		ensureLinkedPR(item, v.PRNumber)
 		s.observe(item, observedLinkedPRKey, auth)
 		item.LinkedPR.Number = v.PRNumber
 		item.LinkedPR.Title = v.Title
-		item.LinkedPR.State = v.State
-		item.LinkedPR.Merged = v.Merged
 		item.LinkedPR.Draft = v.Draft
+		if !keepMerged {
+			item.LinkedPR.State = v.State
+			item.LinkedPR.Merged = v.Merged
+		}
 		return LinkedPRChanged | PRStateChanged
 
 	case PRFactsObserved:
