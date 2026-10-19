@@ -412,7 +412,8 @@ type removeSessionsOpts struct {
 // <id>.jsonl or <id>/ is ever deleted. It runs at every max_coverage_passes
 // value (#2363). Before an <id>/ is deleted its tool-results files are staged
 // to opts.ToolResultsDest, and afterwards the encoded-cwd directory is removed
-// if (and only if) it is now empty, sits directly under <profile>/projects/
+// if (and only if) it is now empty (bar the empty memory/ the CLI creates,
+// #2406), sits directly under <profile>/projects/
 // and carries this review's pruefer-pr-<N>- in its name. Best effort: it
 // returns the first error but keeps going (a failed staging never keeps the
 // session), and nothing found is not an error.
@@ -466,7 +467,9 @@ func removeReviewSessions(profileDir string, ids []string, opts removeSessionsOp
 
 // removeEmptyReviewDir removes parent, the encoded-cwd directory a review's
 // session lived in, when it is a direct child of projects, its name carries
-// pruefer-pr-<pr>- and it is empty. os.Remove (never RemoveAll) fails on a
+// pruefer-pr-<pr>- and it is empty. The CLI also leaves an empty memory/
+// directory there (#2406), so a real, empty memory/ is removed first, after
+// both checks and never anything else. os.Remove (never RemoveAll) fails on a
 // non-empty directory, so the emptiness check is the filesystem's. A skip is
 // logged, never an error.
 func removeEmptyReviewDir(projects, parent string, pr int) {
@@ -480,6 +483,20 @@ func removeEmptyReviewDir(projects, parent string, pr int) {
 	if !strings.Contains(filepath.Base(parent), fmt.Sprintf("pruefer-pr-%d-", pr)) {
 		logf(pr, "review", "leaving %s: not named for this review's PR\n", parent)
 		return
+	}
+	// Lstat does not follow a symlink; only a real directory named memory is
+	// ever removed, and os.Remove fails if it holds anything.
+	mem := filepath.Join(parent, "memory")
+	if fi, err := os.Lstat(mem); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logf(pr, "review", "leaving %s: %v\n", parent, err)
+			return
+		}
+	} else if fi.IsDir() {
+		if err := os.Remove(mem); err != nil && !errors.Is(err, os.ErrNotExist) {
+			logf(pr, "review", "leaving %s: %v\n", parent, err)
+			return
+		}
 	}
 	if err := os.Remove(parent); err != nil && !errors.Is(err, os.ErrNotExist) {
 		logf(pr, "review", "leaving %s: %v\n", parent, err)

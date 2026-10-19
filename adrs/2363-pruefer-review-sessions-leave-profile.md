@@ -38,3 +38,9 @@ Whether Pruefer's stream-json transcript already contains everything in the prof
 - A callback into `Review()` to place the files: it still cannot know the coverage verdict.
 - Sweeping the profile for old folders: Pruefer must not delete anything it did not create in this review.
 - Pruning by mtime: perturbed by copying and restoring (ADR 2303).
+
+## Amendment (#2406): the CLI also leaves an empty `memory/`
+
+Observed live on the dev daemon on 2026-10-19 with Claude Code `2.1.303` (the version `claude --version` reports on the maintainer's machine; the daemon's own CLI was not queried separately): besides `<id>.jsonl` and `<id>/`, the CLI creates an empty `memory/` directory in the session's encoded-cwd folder. It survives the session removal, so `os.Remove` of the folder failed with "directory not empty" and one empty folder was left per review.
+
+`removeEmptyReviewDir` therefore removes `<folder>/memory` first, and only after the direct-child-of-`<profile>/projects/` and `pruefer-pr-<N>-` checks have passed. The removal is `os.Remove` (never `RemoveAll`) and only of a real directory (`Lstat`, so a `memory` file or symlink is left alone): a `memory/` holding any entry stays, and so does its folder. Nothing else in the folder is removed; any other entry keeps the folder and is logged as before. Failures remain non-fatal and logged. If the CLI later creates other directories, the folder is kept and logged, which is the safe failure. Folders left by earlier versions are still deleted by hand.
