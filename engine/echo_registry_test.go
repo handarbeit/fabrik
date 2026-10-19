@@ -388,3 +388,39 @@ func TestEngineWrites_PollOnlyEngineReservesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A failed write's Cancel must not take an earlier write's pending echo with it:
+// write A reserves, write B of the same key reserves and fails.
+func TestEchoRegistry_CancelOfALaterReservationRestoresTheEarlierOne(t *testing.T) {
+	r := newEchoRegistry()
+	r.ReserveVia("issues", "labeled", "k", "alice")
+	r.Reserve("issues", "labeled", "k").Cancel()
+	ok, via := r.MatchEchoVia("issues", "labeled", "k")
+	if !ok || via != "alice" {
+		t.Fatalf("A's echo after B's failed write: matched=%v via=%q, want matched by alice", ok, via)
+	}
+}
+
+// Same, when the failing reservation is not the newest: C displaced B, then B's
+// write fails. B must be unlinked from behind C and A's echo must still match
+// once C's has gone.
+func TestEchoRegistry_CancelOfAnInnerReservationLeavesTheOthers(t *testing.T) {
+	r := newEchoRegistry()
+	r.ReserveVia("issues", "labeled", "k", "alice") // A
+	b := r.Reserve("issues", "labeled", "k")        // B
+	r.Reserve("issues", "labeled", "k")             // C (current)
+	b.Cancel()
+	// C is still the current entry.
+	if !r.has(echoKey("issues", "labeled", "k")) {
+		t.Fatal("cancelling an inner reservation removed the current entry")
+	}
+	// Cancel C: A (not B) must come back.
+	r.mu.Lock()
+	cur := r.pending[echoKey("issues", "labeled", "k")]
+	r.mu.Unlock()
+	(&echoReservation{r: r, key: echoKey("issues", "labeled", "k"), gen: cur.gen}).Cancel()
+	ok, via := r.MatchEchoVia("issues", "labeled", "k")
+	if !ok || via != "alice" {
+		t.Fatalf("after cancelling B and C: matched=%v via=%q, want A (alice)", ok, via)
+	}
+}

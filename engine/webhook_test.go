@@ -1217,3 +1217,35 @@ func TestCheckWebhookHookCoverage_SetsNoteOnMissing(t *testing.T) {
 		t.Errorf("hookNote = %q, want %q", note, want)
 	}
 }
+
+// R7: projects_v2_item dropped from the live gh-forward subscription means the
+// manager no longer subscribes to it, so ReserveIfSubscribed reserves nothing
+// (an unreceivable echo would otherwise expire as a miss and count toward the
+// Unhealthy threshold).
+func TestWebhookManager_SubscribesToFollowsTheLiveSubscription(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.events = []string{"issues", "projects_v2_item"}
+	wm.mu.Unlock()
+	if !wm.SubscribesTo("projects_v2_item") || wm.SubscribesTo("check_run") {
+		t.Fatal("SubscribesTo must be true exactly for events in the live subscription")
+	}
+
+	wm.mu.Lock()
+	wm.events = []string{"issues"} // projects_v2_item dropped at runtime
+	wm.mu.Unlock()
+	if wm.SubscribesTo("projects_v2_item") {
+		t.Fatal("a dropped projects_v2_item must no longer be subscribed")
+	}
+
+	set := &transportSet{}
+	set.Add(wm)
+	r := newEchoRegistry()
+	r.setSubscribed(set.SubscribesTo)
+	if res := r.ReserveIfSubscribed("projects_v2_item", "edited", "k"); res != nil || r.len() != 0 {
+		t.Fatal("ReserveIfSubscribed reserved an echo for an event the transport does not receive")
+	}
+	if res := r.ReserveIfSubscribed("issues", "labeled", "k"); res == nil || r.len() != 1 {
+		t.Fatal("ReserveIfSubscribed must still reserve for a subscribed event")
+	}
+}

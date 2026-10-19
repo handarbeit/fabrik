@@ -131,7 +131,7 @@ A delivery as large as GitHub is allowed to send is accepted rather than rejecte
 - A delivery that concerns no single item (for example a project-level or repository-level event) is still deduplicated and applied in a defined order relative to itself.
 - The persisted dedupe record is missing or corrupt at startup: the engine starts with an empty window rather than failing.
 - Two transports deliver the same event nearly simultaneously: exactly one application occurs.
-- A transport fails to start while others succeed: the others keep running and the failed one is reported unhealthy.
+- A transport fails to start while others succeed: the others keep running and the failed one is logged and left out of the active set (it is not attached, so it contributes no health or coverage; if it was the only transport the engine stays poll-only).
 
 ## Requirements *(mandatory)*
 

@@ -118,17 +118,20 @@ func TestEchoReservationsAreBoundForCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call := regexp.MustCompile(`\be\.(echo\.Reserve\w*|reserveLabel\w*|reserveComment)\(`)
+	call := regexp.MustCompile(`\b\w+\.(echo\.Reserve\w*|reserveLabel\w*|reserveComment)\(`)
 	bound := regexp.MustCompile(`^\s*(\w+(, \w+)* :?= |return )`)
-	// A reservation assigned to a single variable must reach that variable's
-	// Cancel() on the failure path (a helper that returns the reservation, or the
-	// post-create PR echoes, are exempt).
-	boundVar := regexp.MustCompile(`^\s*(\w+) :?= e\.(echo\.Reserve|reserveLabel|reserveComment)`)
-	// file:substring of the call, for the post-create PR echoes.
+	// A reservation assigned to variables (the reservation is the first one, as in
+	// `res, x := ...`) must reach that variable's Cancel() on the failure path (a
+	// helper that returns the reservation, or the post-create PR echoes, are
+	// exempt).
+	boundVar := regexp.MustCompile(`^\s*(\w+)(?:, \w+)* :?= \w+\.(echo\.Reserve|reserveLabel|reserveComment)`)
+	// file:substring of the call, for the post-create PR echoes; each file may
+	// have exactly one such site, so a second unbound reservation there is caught.
 	exempt := map[string]string{
 		"pr.go":       `"pull_request", "opened"`,
 		"prcreate.go": `"pull_request", "opened"`,
 	}
+	exemptUsed := map[string]int{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") || f == "echo_registry.go" {
 			continue
@@ -151,7 +154,8 @@ func TestEchoReservationsAreBoundForCancel(t *testing.T) {
 			if bound.MatchString(line) {
 				continue
 			}
-			if sub, ok := exempt[f]; ok && strings.Contains(line, sub) {
+			if sub, ok := exempt[f]; ok && strings.Contains(line, sub) && exemptUsed[f] == 0 {
+				exemptUsed[f]++
 				continue
 			}
 			t.Errorf("%s:%d: echo reservation result is not bound, so a failed write cannot cancel it: %s", f, i+1, strings.TrimSpace(line))

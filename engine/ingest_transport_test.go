@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,6 +231,7 @@ func TestReconcileTick_DrivesAnyTransport(t *testing.T) {
 // TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne.)
 func TestSetUpIngestion_NoTransportConfiguredIsPollOnly(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.fabrikDir = t.TempDir()
 	cleanup := eng.setUpIngestion(context.Background(), nil)
 	defer cleanup()
 	if eng.transports != nil && !eng.transports.Empty() {
@@ -245,6 +247,7 @@ func TestSetUpIngestion_HookdeckWithoutCredentialsIsPollOnly(t *testing.T) {
 	t.Setenv(DefaultHookdeckWebhookSecretEnv, "")
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.EventSource = EventSourceHookdeck
+	eng.fabrikDir = t.TempDir()
 	cleanup := eng.setUpIngestion(context.Background(), nil)
 	defer cleanup()
 	if !eng.transports.Empty() {
@@ -263,6 +266,10 @@ func TestSetUpIngestion_HookdeckWithoutCredentialsIsPollOnly(t *testing.T) {
 // setUpIngestion breaks this test.
 func TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	// NewWithDeps leaves fabrikDir empty, which would put the delivery ledger at a
+	// relative path inside the source tree; a fresh directory keeps every run
+	// starting from an empty ledger.
+	eng.fabrikDir = t.TempDir()
 	a, b, c := newFakeTransport("a"), newFakeTransport("broken"), newFakeTransport("c")
 	b.startErr = errors.New("cannot bind")
 	eng.extraTransports = []ingestTransport{a, b, c}
@@ -299,10 +306,15 @@ func TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne(t *testing.T) {
 	if a.sink == nil || c.sink == nil {
 		t.Fatal("a started transport was not given the intake sink")
 	}
+	var applied atomic.Int32
+	eng.intake.applyAt = func(string, []byte, time.Time) { applied.Add(1) }
 	payload := []byte(`{"action":"opened","repository":{"full_name":"o/r"},"issue":{"number":1}}`)
 	a.sink(delivery{ID: "same", EventType: "issues", Payload: payload, Transport: "a"})
 	c.sink(delivery{ID: "same", EventType: "issues", Payload: payload, Transport: "c"})
 	eng.intake.Drain()
+	if n := applied.Load(); n != 1 {
+		t.Fatalf("one delivery ID carried by two transports was applied %d times, want 1", n)
+	}
 	if n := eng.intake.ledger.Len(); n != 1 {
 		t.Fatalf("ledger holds %d entries for one delivery ID carried by two transports, want 1", n)
 	}

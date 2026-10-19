@@ -51,7 +51,15 @@ type echoEntry struct {
 	at  time.Time
 	gen uint64
 	via string // overseer requester behind the write (#2125), "" when none
+	// prev is the entry this reservation displaced for the same key (nil when
+	// none), so a Cancel of the NEWER reservation can put it back: a failed write
+	// must not take an earlier, successful write's pending echo with it. A match
+	// still consumes the whole key (see MatchEchoVia).
+	prev *echoEntry
 }
+
+// echoChainMax bounds the displaced-entry chain behind one key.
+const echoChainMax = 8
 
 func newEchoRegistry() *echoRegistry {
 	return &echoRegistry{pending: make(map[string]echoEntry), nowFn: time.Now}
@@ -65,19 +73,36 @@ type echoReservation struct {
 	gen uint64
 }
 
-// Cancel removes the reserved entry when the write it described failed. It
-// removes the entry only if it is still this reservation's: a later reservation
-// of the same key (a newer write) is left alone, and an entry already consumed
-// by a match is already gone.
+// Cancel removes the reserved entry when the write it described failed. Only
+// this reservation's own entry goes: if a newer reservation of the same key has
+// since displaced it, it is unlinked from behind that one; if it is still the
+// current entry, the entry it displaced (an earlier write whose echo is still
+// expected) is put back. An entry already consumed by a match is already gone.
 func (res *echoReservation) Cancel() {
 	if res == nil || res.r == nil {
 		return
 	}
 	res.r.mu.Lock()
 	defer res.r.mu.Unlock()
-	if e, ok := res.r.pending[res.key]; ok && e.gen == res.gen {
-		delete(res.r.pending, res.key)
+	cur, ok := res.r.pending[res.key]
+	if !ok {
+		return
 	}
+	if cur.gen == res.gen {
+		if cur.prev != nil {
+			res.r.pending[res.key] = *cur.prev
+		} else {
+			delete(res.r.pending, res.key)
+		}
+		return
+	}
+	for l := &cur; l.prev != nil; l = l.prev {
+		if l.prev.gen == res.gen {
+			l.prev = l.prev.prev
+			break
+		}
+	}
+	res.r.pending[res.key] = cur
 }
 
 // echoKey builds the composite key used in the registry:
@@ -101,7 +126,20 @@ func (r *echoRegistry) reserve(eventType, action, key, requester string) *echoRe
 	// An engine-autonomous reservation (empty requester) supersedes any overseer
 	// requester still pending for the same key, so its echo is never attributed
 	// to the overseer.
-	r.pending[k] = echoEntry{at: r.now(), gen: r.gen, via: requester}
+	e := echoEntry{at: r.now(), gen: r.gen, via: requester}
+	if old, ok := r.pending[k]; ok {
+		o := old
+		e.prev = &o
+		// Bound the chain: drop everything beyond echoChainMax links.
+		n := 1
+		for l := e.prev; l != nil; l = l.prev {
+			if n++; n >= echoChainMax {
+				l.prev = nil
+				break
+			}
+		}
+	}
+	r.pending[k] = e
 	return &echoReservation{r: r, key: k, gen: r.gen}
 }
 
