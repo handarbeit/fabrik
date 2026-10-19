@@ -60,6 +60,12 @@ func TestFeedbackGate_SecondReviewBodyBehindStaleCacheIsDispatched(t *testing.T)
 	}
 	env.Claude.ForStageComments("Validate", probe.script(env))
 	env.Claude.ForStage("Validate", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, nc []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		// A stage run takes time: the review lands strictly after the deep fetch
+		// that preceded the run. The sim's scripted run is instantaneous, and a
+		// PR-side review stamped in the same GitHub-second as that fetch is the
+		// documented same-second tie (#1945, ADR 1945) — not what this scenario
+		// is about.
+		env.Clock.Advance(time.Second)
 		if prs, _ := env.Sim.FetchLinkedPR(env.Owner, env.Repo, issue.Number); prs != nil {
 			env.Sim.Sim().SeedReview(env.OwnerRepo, prs.Number, gh.PRReview{
 				Author: "handarbeit-pruefer", State: "COMMENTED", Body: feedbackReviewBody, DatabaseID: feedbackReviewID,
