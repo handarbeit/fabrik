@@ -50,6 +50,8 @@ func TestDeliveryKey(t *testing.T) {
 		{"check_run without a PR keys on the head sha", "check_run", `{"repository":{"full_name":"o/r"},"check_run":{"head_sha":"abc","pull_requests":[]}}`, "o/r@abc"},
 		{"projects_v2_item keys on the item node", "projects_v2_item", `{"repository":{"full_name":"o/r"},"projects_v2_item":{"node_id":"PVTI_1"}}`, "item:PVTI_1"},
 		{"projects_v2_item with no node id falls back to the repo", "projects_v2_item", `{"repository":{"full_name":"o/r"},"projects_v2_item":{}}`, "repo:o/r"},
+		{"issue_dependencies keys on the blocked issue", "issue_dependencies", `{"repository":{"full_name":"o/r"},"blocked_issue":{"number":7},"blocking_issue":{"number":8}}`, "o/r#7"},
+		{"issue_dependencies without a blocked issue falls back to the repo", "issue_dependencies", `{"repository":{"full_name":"o/r"}}`, "repo:o/r"},
 		{"installation event falls back to the repo", "installation", `{"repository":{"full_name":"o/r"}}`, "repo:o/r"},
 		{"no repository falls back to global", "installation", `{"action":"created"}`, "global"},
 		{"unparseable payload is global", "issues", `not json`, "global"},

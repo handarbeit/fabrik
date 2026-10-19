@@ -420,6 +420,8 @@ type keyPayload struct {
 	PullRequest *struct{ Number int } `json:"pull_request"`
 	CheckRun    *keyCheck             `json:"check_run"`
 	CheckSuite  *keyCheck             `json:"check_suite"`
+	// BlockedIssue is the issue_dependencies payload's blocked side (#1995).
+	BlockedIssue *struct{ Number int } `json:"blocked_issue"`
 	ProjectItem *struct {
 		NodeID string `json:"node_id"`
 	} `json:"projects_v2_item"`
@@ -440,6 +442,10 @@ type keyCheck struct {
 //   - check_run / check_suite: the linked PR number when present
 //     ("<repo>#<n>", the same key as the PR itself), else "<repo>@<head sha>".
 //   - projects_v2_item: "item:<node id>".
+//   - issue_dependencies: "<repo>#<blocked issue number>", so a dependency change
+//     serialises with the blocked issue's other deliveries (#1995). The blocking
+//     side's own queue is not shared; ordering is safe because invalidation is
+//     idempotent and the live read decides.
 //   - everything else (installation, project, repository, unparseable): the
 //     repository, or "global" — so such events are still ordered relative to
 //     themselves.
@@ -471,6 +477,10 @@ func deliveryKey(eventType string, payload []byte) string {
 	case strings.HasPrefix(eventType, "pull_request"):
 		if p.PullRequest != nil && p.PullRequest.Number > 0 && repo != "" {
 			return num(p.PullRequest.Number)
+		}
+	case eventType == "issue_dependencies":
+		if p.BlockedIssue != nil && p.BlockedIssue.Number > 0 && repo != "" {
+			return num(p.BlockedIssue.Number)
 		}
 	case eventType == "issues" || eventType == "issue_comment":
 		if p.Issue != nil && p.Issue.Number > 0 && repo != "" {
