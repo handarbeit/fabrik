@@ -814,6 +814,11 @@ func (s *Sim) SeedReview(ownerRepo string, prNumber int, review gh.PRReview) *Si
 	ensureReviewNodeID(pr, &review, 0)
 	pr.reviews = append(pr.reviews, review)
 	removeReviewRequestFor(pr, review.Author)
+	// A submitted review bumps the PR's updatedAt on GitHub. Without this the
+	// cache freshness rule's PR layer (#2180) can never see a seeded review: the
+	// scenarios that seed one only passed because a daemon-clock baseline
+	// (#1945) happened to force a refetch after the next engine write.
+	pr.updatedAt = laterOf(pr.updatedAt, review.SubmittedAt)
 	return s
 }
 
