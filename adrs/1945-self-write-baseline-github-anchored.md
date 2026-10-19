@@ -1,0 +1,39 @@
+# ADR 1945: The self-write staleness baseline is anchored to GitHub's clock
+
+## Status
+
+Accepted. Amends ADR 2180 (its "`SelfWriteObserved` stays wall-clock" consequence) and ADR-044 Addendum 4 (#1090). Builds on ADR 2348 (observed-at ordering) and ADR 2344 (baselines only move forward). Keeps ADR 2180's three-part freshness rule, including the comment-total check, and its removal of the #1944 backstop.
+
+## Context
+
+`SelfWriteObserved` moved the issue-layer baseline `LastSeenSourceUpdatedAt` to the daemon's `time.Now()` after each engine write so that the write's own `updatedAt` bump was not read back as an external change (#1083, #1090). `cacheIsStale` and the probe then compared that value with GitHub's one-second-granular `updatedAt`: two clocks. A daemon clock ahead of GitHub's, or an external write in the same second as the engine's, gave `evidence <= baseline` and the external write was absorbed as "already seen". The masking was persistent for any fact no webhook carries and the comment total cannot see (label changes, body and comment edits, blockedBy, sub-issues).
+
+The same flaw sat in a second place: the board cache stamped `localDeltaAt` with `time.Now()` on every engine write-through and folded it into the board evidence. Beside a GitHub-anchored baseline it reads as newer after every self-write and brings the #1083 refetch back.
+
+## Decision
+
+1. **The baseline is raised to a time GitHub reported, never to the host clock.** `SelfWriteObserved` gained `At`; the apply raises `LastSeenSourceUpdatedAt` to `At` only when it is non-zero and later. Zero means "this write yielded no GitHub timestamp": nothing advances. A later GitHub-observed value from a deep fetch wins, `DeepFetchInvalidated` still wins, a failed write never reaches the apply (ADR 2348's authority-time rules). `LastSeenPRUpdatedAt` is still never self-write anchored.
+2. **The client records the stamp; the engine reads it through an optional interface.** `github.Client` keeps a raise-only, mutex-guarded map of the latest GitHub time of each completed engine write, per issue and per project item. Sources, in order of preference: the comment's `created_at`/`updated_at` (`AddComment`), the issue's `updated_at` from the PATCH response (`UpdateIssueBody`), the `Date` response header (label add and remove — their bodies carry none), and the `projectV2Item { updatedAt }` now selected by `UpdateProjectItemStatus` (a payload without it records nothing; the GraphQL helper does not expose headers and the host clock is no substitute). Display-field writes record nothing (#2180). `engine.WriteStampSource` (`IssueWriteStamp`, `ProjectItemWriteStamp`) is optional, so the `GitHubClient` method signatures and their five implementers are unchanged; `Engine.observeSelfWrite` / `observeStatusMoveWrite` are the only places that apply `SelfWriteObserved`. The map holds only completed engine writes' stamps and only rises, so a reader racing another engine write to the same item can at worst see that write's stamp — a self-write anchor by definition.
+3. **Engine write-through no longer stamps `localDeltaAt`.** `CacheImpl.applyKeyedMutation` (label add/remove, Status, close, body, comment write-through) stops recording a daemon-clock time. `localDeltaAt` now means only "a webhook touched this item"; it can only raise the evidence, so it can cost an extra fetch but never mask one.
+4. **Tests assert GitHub-anchored values.** The #1090 tests asserted `LastSeenSourceUpdatedAt >= time.Now()-before`, a daemon-clock property that is the defect. They now assert equality with the stamp the mock client reports (`githubWriteAt`, deliberately far from the host clock), and the no-refetch assertions of `terminal_selfwrite_test.go` are unchanged. `boardcache` tests that asserted a `localDeltaAt` bump after an engine write-through now assert there is none. The sim now models the stamps (`simgh/writestamp.go`), a submitted review bumps the PR's `updatedAt` (`SeedReview`; previously the scenarios that seeded one passed only because the daemon-clock baseline forced a refetch), and external label, body and comment edits are seedable.
+5. **Source scans pin SC-005.** `TestSelfWriteObservedApplyNeverReadsHostClock` and `TestEngineSelfWriteSitesNeverUseHostClock` fail if the apply reads the clock outside the legacy seam (`Store.SetLegacyLocalClockSelfWriteForTest`) or an engine file applies `SelfWriteObserved` directly.
+
+## Limits (recorded in `docs/state-machine.md` §7.9)
+
+- **Same-second ties.** A non-comment external write GitHub stamps in the same second as the engine's write is indistinguishable by `updatedAt`. Treating `evidence == baseline` as stale would force a deep fetch after every self-write. Same-second comments are caught by ADR 2180's comment-total rule.
+- **The `Date` fallback** can read up to about a second later than the write's own stamp, widening that window for label writes. It is GitHub's clock but not a documented update-time contract; GHES is unverified.
+- **Writes that predate the engine's write** are absorbed when the baseline rises past them; only comments are caught.
+- **Unwired writes** (`CloseIssue`/`ReopenIssue`, `AddBlockedByIssue`/`RemoveBlockedByIssue`, `UpdateComment`, PR-body edits) stay unwired; their `updatedAt` bump costs one deep fetch.
+- **Which external writes move `updatedAt`** (comment edits, blockedBy, sub-issues) is GitHub's behaviour and is not verified here; a live probe is the follow-up. The guarantee is stated as: any external write that moves `updatedAt` to a later second is detected.
+- A write with no stamp (client without the interface, missing `Date`, payload without `updatedAt`) or a stamp not after the cached baseline costs one deep fetch — never a masked write.
+
+## FR-009 / R3: no backstop
+
+No periodic or paused-item re-validation is added. With the baseline on GitHub's clock there is no skew masking left to bound; the residue is the limits above, which no timestamp rule can see, and any periodic re-check would spend GitHub calls on every long-parked item. The #1944 backstop stays removed; the ADR 2160 gate repair and the comment-total rule stay.
+
+## Consequences
+
+- An external write GitHub stamps after an engine write is seen at the next probe whichever way the daemon's clock is skewed, on poll-only and webhook-fed daemons alike (the apply is a direct Store write independent of `webhookMgr`).
+- Label and Status writes cost no refetch when the `Date` header or payload stamp is present. A deployment whose proxy strips `Date` pays one fetch per write burst.
+- A new engine self-write that bumps the issue's `updatedAt` must go through `observeSelfWrite` and record a stamp in its client method, and must never read the host clock.
+- Tests: `internal/itemstate` (`TestApplySelfWriteObserved*`, the source scans), `github/writestamp_test.go`, `engine/mutate_test.go` and `terminal_selfwrite_test.go`, `boardcache/freshness_test.go`, and `tests/sim/self_write_baseline_test.go` (body edit, label change, comment edit and new comment one GitHub-second after the engine's pause with the daemon clock ahead, level and behind; legacy-seam non-vacuity run; zero-fetch run). The webhook-fed variant shares the Store apply and is not separately simulated.

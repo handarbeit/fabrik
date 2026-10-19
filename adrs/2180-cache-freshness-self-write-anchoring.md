@@ -63,6 +63,6 @@ The behavioural cost is refetches: an engine write on the PR side (`pr.go`, `prc
 
 - An external issue comment, PR review, thread comment or PR comment whose `updatedAt` precedes an engine self-write is seen at the next probe, with no restart. Completed CI is seen by the next `readClient.FetchCheckRuns`.
 - Rule 3 relies on the cached issue comment list matching GitHub's count. A path that posts an issue comment without writing it through the cache causes one refetch, which rebuilds the list, never a loop.
-- `SelfWriteObserved` stays wall-clock (`time.Now()`) and issue-layer only. Future self-writes must not anchor the PR layer.
-- Clock skew no longer matters for the PR layer; for the issue layer a skewed-ahead local clock can still hide an external change within the skew, which rule 3 now catches for comments.
+- `SelfWriteObserved` stays issue-layer only. (Its "stays wall-clock" half is superseded by ADR 1945: the baseline is now anchored to GitHub's own stamp of the write.) Future self-writes must not anchor the PR layer.
+- Clock skew no longer matters for the PR layer; for the issue layer a skewed-ahead local clock could hide an external change within the skew, which rule 3 catches for comments (superseded by ADR 1945: the issue-layer baseline no longer uses the local clock).
 - Tests: `boardcache/freshness_test.go` (rule table, no-loop, settle), `engine/cache_freshness_test.go` (human comment, PR thread comment and completed CI each fail on the single-baseline rule; self-writes alone cause no refetch), `internal/itemstate` (`LastSeenPRUpdatedAt` is never self-write anchored), `tests/sim/cache_freshness_test.go` (end-to-end plumbing).
