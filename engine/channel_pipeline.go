@@ -50,6 +50,7 @@ func (ce *channelEvents) checkPipeline() {
 	h := e.health.snapshot()
 	var out []channelevents.Event
 	out = append(out, ce.checkPollStall(now, h)...)
+	out = append(out, ce.checkForgeStall(now, h)...)
 	out = append(out, ce.checkPartitionStalls(now, h)...)
 	ce.enqueueDerived(out)
 }
@@ -76,6 +77,52 @@ func (ce *channelEvents) checkPollStall(now time.Time, h healthSnapshot) []chann
 		out = append(out, ce.pollStalledEvent(ep, v, h, now))
 	}
 	return out
+}
+
+// checkForgeStall opens a pipeline-stalled (scope=forge) episode when the
+// forge-unreachable hold engages and closes it with pipeline-resumed when the
+// hold lifts (#2393, ADR 2393). It reads only the health mirror.
+func (ce *channelEvents) checkForgeStall(now time.Time, h healthSnapshot) []channelevents.Event {
+	ep := &ce.forgeEp
+	var out []channelevents.Event
+	if ep.active && (!h.ForgeHeld || !h.ForgeSince.Equal(ep.anchor)) {
+		out = append(out, forgeResumedEvent(ep, now))
+		ep.active = false
+	}
+	if !ep.active && h.ForgeHeld {
+		ce.episodeSeq++
+		*ep = stallEpisode{active: true, anchor: h.ForgeSince, seq: ce.episodeSeq}
+		out = append(out, forgeStalledEvent(ep, h, now))
+	}
+	return out
+}
+
+func forgeStalledEvent(ep *stallEpisode, h healthSnapshot, now time.Time) channelevents.Event {
+	return finishEvent(channelevents.Event{
+		Type:     channelevents.PipelineStalled,
+		At:       now,
+		DedupKey: "pipeline-stalled:" + ep.key("forge"),
+		Content: fmt.Sprintf("GitHub has been unreachable since %s (%d consecutive transport failures, last: %s); no new model work starts until a GitHub call succeeds",
+			h.ForgeSince.UTC().Format(time.RFC3339), h.ForgeFailures, h.ForgeLastError),
+		Meta: map[string]string{
+			"scope":    "forge",
+			"cause":    "forge-unreachable",
+			"failures": strconv.Itoa(h.ForgeFailures),
+		},
+	})
+}
+
+func forgeResumedEvent(ep *stallEpisode, now time.Time) channelevents.Event {
+	return finishEvent(channelevents.Event{
+		Type:     channelevents.PipelineResumed,
+		At:       now,
+		DedupKey: "pipeline-resumed:" + ep.key("forge"),
+		Content:  fmt.Sprintf("GitHub answered again, %d s after dispatch was held; new model work resumes", int64(now.Sub(ep.anchor).Seconds())),
+		Meta: map[string]string{
+			"scope":           "forge",
+			"blocked_seconds": strconv.FormatInt(int64(now.Sub(ep.anchor).Seconds()), 10),
+		},
+	})
 }
 
 func (ce *channelEvents) pollStalledEvent(ep *stallEpisode, v pollVerdict, h healthSnapshot, now time.Time) channelevents.Event {
@@ -201,6 +248,13 @@ func (e *Engine) pipelineCatchUpEvents(now time.Time) []channelevents.Event {
 	if v.Overdue {
 		ce := &channelEvents{e: e}
 		ev := ce.pollStalledEvent(&stallEpisode{anchor: now}, v, h, now)
+		ev.DedupKey = ""
+		ev.Content = "(catch-up) " + ev.Content
+		ev.Meta["catch_up"] = "true"
+		out = append(out, ev)
+	}
+	if h.ForgeHeld {
+		ev := forgeStalledEvent(&stallEpisode{anchor: h.ForgeSince}, h, now)
 		ev.DedupKey = ""
 		ev.Content = "(catch-up) " + ev.Content
 		ev.Meta["catch_up"] = "true"

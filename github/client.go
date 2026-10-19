@@ -62,6 +62,10 @@ type Client struct {
 	// cond is the opt-in conditional-request cache (#1952); nil (the default)
 	// means no If-None-Match is ever sent. See EnableConditionalRequests.
 	cond *condCache
+
+	// observer is told every request's final outcome (#2393); see
+	// SetResultObserver. Guarded by mu.
+	observer ResultObserver
 }
 
 // RequestStats is a cumulative count of the HTTP requests a Client has issued.
@@ -223,6 +227,12 @@ func (e *GraphQLError) Error() string {
 
 // graphqlRequest performs a GraphQL query and unmarshals the response.
 func (c *Client) graphqlRequest(query string, variables map[string]interface{}, result interface{}) error {
+	err := c.graphqlRequestInner(query, variables, result)
+	c.observe(err)
+	return err
+}
+
+func (c *Client) graphqlRequestInner(query string, variables map[string]interface{}, result interface{}) error {
 	body := map[string]interface{}{
 		"query":     query,
 		"variables": variables,

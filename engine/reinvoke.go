@@ -69,6 +69,12 @@ const (
 	// didNotRunBranchDiverged: the issue branch and its remote diverged (#2295), so the
 	// worktree sync refused to set it up and the item was paused before any work.
 	didNotRunBranchDiverged didNotRunKind = "branch-diverged"
+	// didNotRunEditingWrite: the fabrik:editing label could not be written
+	// (#2393, ADR 2393), so no worker was spawned. Uncharged for every cause.
+	didNotRunEditingWrite didNotRunKind = "editing-write-failed"
+	// didNotRunForgeHeld: the forge-unreachable hold is engaged (#2393), so no
+	// worker was spawned.
+	didNotRunForgeHeld didNotRunKind = "forge-held"
 )
 
 // commentRunBlockedOnInput is the sentinel kind processCommentsClassified returns
@@ -191,6 +197,16 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 	}
 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+
+	// Forge-unreachable hold (#2393): no worker, no label write. The caller
+	// charged the cycle synchronously before this call, so refund it — nothing
+	// ran. The level-triggered handler that dispatched this re-evaluates it on a
+	// later poll, once the hold lifts.
+	if e.forgeHeld() {
+		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting %s re-invocation for stage %q\n", opts.tag, stage.Name)
+		e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, didNotRunForgeHeld, opts.cycle)
+		return
+	}
 
 	// Claim the item via the Store so the dispatch guard (snap.Worker() != nil) blocks
 	// double-dispatch before the goroutine starts — as a QUEUED worker: it holds no

@@ -5080,6 +5080,53 @@ SIGHUP is the graceful restart, and it drains before it restarts (amends ADR-139
 
 **Unchanged:** the idle-only self-upgrade re-exec, SIGINT/SIGTERM behaviour and Windows (no SIGHUP; the drain state is untagged). Seams (per-Engine): `SetSighupDrainDisabledForTest`, `SetDrainDispatchGateDisabledForTest`, `SetDrainLogIntervalForTest`, `SetDrainPollIntervalForTest`, `SetRunCtxHookForTest`. Tests: `engine/sighup_drain_test.go`.
 
+### 7.21 Lock-Write Refusal and the Forge-Unreachable Hold (#2393, ADR 2393)
+
+**Why.** A worker spawned while GitHub cannot be written has no lock, no worker record and no
+`in_progress` label, and its results cannot be recorded, so the next poll dispatches the item again
+(#2388: ~150 runs of one stage in ~21 hours). Two independent rules close this at dispatch admission.
+
+**Lock-write refusal.** `acquireLockAndVerify` returns the lock-label write error instead of
+carrying on. `processItem` then spawns nothing: no worker handle, no heartbeat, no `in_progress`
+write, no `StageAttempted`, no retry or failure counter. It logs one `[lock] could not add lock
+label …` line and records the admission cooldown `lock-write-failed` (one `PollSeconds`; consumed on
+admission, ADR 2096; in `shortAdmissionCooldownReasons`, so the idle interval never sleeps past it).
+It applies to any cause, including a 4xx; a persistent failure retries once per poll. The
+comment-review path takes `fabrik:editing` first, before the comment breaker is charged and before the
+👀 reactions: a failed write returns `didNotRunEditingWrite` (uncharged for every cause, superseding
+ADR 1413 for this write; `dispatchReinvoke` refunds the pre-charged cycle; the comments stay
+unprocessed) and records the same cooldown. The base-branch and worktree setup failures keep the
+ADR 1413 breaker charge. Neutralisation seam: `SetLockWriteRefusalDisabledForTest`.
+
+**Dispatch-site audit.** Exactly three sites call the model: stage dispatch (`processItem`, takes the
+lock label), the comment-review family (`processCommentsClassified`, takes `fabrik:editing`) and
+merge-train `resolveConflictWithClaude` (takes no label: its claim is the in-memory
+`ConflictResolutionSet` plus a worker slot, so only the hold gates it).
+
+**Forge-unreachable hold.** `forgeHealth` (`engine/forge_hold.go`) is told the outcome of every
+GitHub call through `github.Client.SetResultObserver` (the two HTTP choke points) wired in `New()`;
+the sim wires `simgh.FaultTable.SetResultObserver` to the same `Engine.ObserveForgeResult`. A
+*transport error* is a timeout or `context.DeadlineExceeded`, a dial/connection error, a truncated
+response or a 5xx (`github.IsTransportError`); 4xx, rate limits and `context.Canceled` are not. The
+hold **engages** after an unbroken run of ≥ 5 transport failures spanning ≥ 2 minutes on `e.now()`
+(a run with no failure for 10 minutes lapses) and **lifts** at the first outcome that proves the
+forge answered: a success, a 4xx, a rate limit or a GraphQL error (`github.IsForgeAnswer`). An error
+that never reached the forge (`context.Canceled`, a local request-build failure) is ignored: it
+neither lifts an engaged hold nor resets a run in progress. While held: `dispatchCandidates` starts nothing and hands every candidate back for
+re-admission with nothing recorded; `dispatchReinvoke` refunds its pre-charged cycle and returns;
+`processItem`, `processCommentsClassified` (`didNotRunForgeHeld`) and `resolveConflictWithClaude`
+(`errForgeHeldNotAttempted`, read by `trainCancelled` as an uncharged "not attempted") re-check as
+backstops. Running workers are untouched. Recovery: one `FetchProjectUpdatedAt` probe per poll while
+held, and the idle poll interval is capped at the configured interval. A forge where only *writes*
+fail never engages the hold (reads succeed); the lock-write refusal covers that. In memory only.
+Seams: `SetForgeHoldDisabledForTest`, `SetForgeHoldThresholdsForTest`.
+
+**Visibility.** Warnings panel entry `forge_unreachable:github` (§7.11) reported once on engage with a
+stable fingerprint and resolved on lift; `fabrik_health.forge_hold {since, consecutive_failures,
+last_error}` while held (§7.13); `pipeline-stalled` / `pipeline-resumed` with `scope=forge`,
+`cause=forge-unreachable`, one pair per episode, derived from the health mirror only, included in
+catch-up (§7.14). Sim twin: `tests/sim/forge_hold_test.go` over `simgh` `FailAllWrites` / `FailAll`.
+
 ## 8. Invalid / Unexpected States
 
 The engine handles unexpected label combinations (from manual human manipulation) through its guard chain. The behavior is defined by the order of checks in `itemMayNeedWork()`, `itemNeedsWork()`, and `processItem()`.

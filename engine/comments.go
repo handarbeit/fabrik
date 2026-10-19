@@ -252,6 +252,15 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		return didNotRunAccountUsageLimited, nil
 	}
 
+	// Forge-unreachable hold (#2393): same position and effect as the usage-limit
+	// hold above — a full no-op, the comment stays new. The short admission
+	// cooldown re-admits the item once the hold lifts.
+	if e.forgeHeld() {
+		e.logf(item.Number, "forge-hold", "GitHub is unreachable; holding comment review\n")
+		e.recordLockWriteCooldown(item)
+		return didNotRunForgeHeld, nil
+	}
+
 	// ADR 2137: qualify the comment skill against the loaded plugins, or refuse
 	// before any side effect when it cannot resolve (the stage variants for
 	// ci_fix_skill and rebase_skill have already been swapped into
@@ -343,14 +352,34 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
+	// Step 1: take the editing label (#2393, ADR 2393; supersedes ADR 1413 for
+	// this one write). It comes first so a refused pass leaves no side effect —
+	// no breaker charge, no 👀 reactions, no worker. When the label cannot be
+	// written no worker is spawned, for every cause: the comments stay new, the
+	// reinvoke cycle is refunded by the caller and a short admission cooldown
+	// re-admits the item. The loop that ADR 1413's charge bounded is now bounded
+	// by that cooldown (one failed write per poll, no model run).
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil && !e.lockWriteRefusalDisabled.Load() {
+		e.logf(item.Number, "lock", "could not add fabrik:editing: %v — not starting comment review; retrying after a short cooldown\n", err)
+		e.recordLockWriteCooldown(item)
+		return didNotRunEditingWrite, nil
+	} else if err != nil {
+		// Neutralised seam: the pre-#2393 charged-failure path (ADR 1413).
+		e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
+		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
+			e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
+		}
+		return "", fmt.Errorf("adding editing label: %w", err)
+	} else {
+		e.syncLabelAdd(item, "fabrik:editing", true)
+	}
+
 	// Circuit breaker (#1089, moved earlier by #1413): record this invocation
-	// now that the working comment slice is final, before any setup side
-	// effect (👀 reactions, editing label, worktree setup) runs. Recording
-	// here — rather than just before the Claude invocation — means a setup
-	// failure (e.g. an editing-label API failure) DOES count as a cycle: the
-	// three setup-failure early-returns below each also call
-	// checkCommentBreaker so a persistently failing setup step trips the
-	// breaker instead of looping unbounded (see #1382/#1386).
+	// now that the working comment slice is final and the editing label is held,
+	// before the remaining setup side effects (👀 reactions, worktree setup).
+	// The worktree-setup early-returns below still call checkCommentBreaker so a
+	// persistently failing setup step trips the breaker instead of looping
+	// unbounded (see #1382/#1386).
 	e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
@@ -373,21 +402,8 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		Skipped:     true,
 	})
 
-	// Step 1: React with 👀 to all new comments.
+	// Step 2: React with 👀 to all new comments.
 	e.acknowledgeComments(owner, repo, item.Number, comments)
-
-	// Step 2: Add editing label
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
-		// New breaker checked first (R5): if it trips, the issue is already
-		// paused and the old breaker's check is skipped for this cycle — at
-		// most one pause comment per cycle.
-		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
-			e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
-		}
-		return "", fmt.Errorf("adding editing label: %w", err)
-	} else {
-		e.syncLabelAdd(item, "fabrik:editing", true)
-	}
 
 	// #1802: clear stage's stale completion claim for the duration of this
 	// rework, strictly inside the fabrik:editing bracket just opened above

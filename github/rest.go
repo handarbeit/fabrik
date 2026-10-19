@@ -119,7 +119,7 @@ func apiStatusError(status int, header http.Header, body []byte) error {
 	if status == http.StatusForbidden {
 		return &forbiddenError{msg: msg}
 	}
-	return errors.New(msg)
+	return &StatusError{Code: status, msg: msg}
 }
 
 // do is the shared REST request core, using GitHub's standard JSON media
@@ -149,6 +149,12 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 // that send a conditional header own its handling; doWithAccept never sends
 // one, so existing callers never see a 304.
 func (c *Client) doWithHeaders(method, url, accept string, extra http.Header, body interface{}) (*http.Response, []byte, error) {
+	resp, respBody, err := c.doWithHeadersInner(method, url, accept, extra, body)
+	c.observe(err)
+	return resp, respBody, err
+}
+
+func (c *Client) doWithHeadersInner(method, url, accept string, extra http.Header, body interface{}) (*http.Response, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)

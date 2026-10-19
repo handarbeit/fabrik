@@ -36,6 +36,7 @@ import (
 var parallelExempt = map[string]string{
 	"advance_until_test.go":          "re-execs the test binary as a subprocess and asserts on its captured output; the inner half must run alone in that subprocess",
 	"main_guard_test.go":             "re-exec probe for the TestMain testlife guard (#2128): the inner half idles until the 1s ceiling kills the process, so it must be the only thing running in it",
+	"forge_hold_test.go":             "redirects the process-global warnings.WarningsPathOverride to read the forge_unreachable panel entry back; parallel tests would write theirs into it (same constraint as display_field_warnings_test.go)",
 	"display_field_warnings_test.go": "redirects the process-global warnings.WarningsPathOverride to read the panel file back; parallel tests would write theirs into it (see github_app_auth_test.go for the same constraint)",
 
 	"github_app_auth_test.go:TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns": "points the process-global warnings.WarningsPathOverride at a temp file to read the panel back; every parallel sibling's first poll writes to that global (a -race-flagged data race), see the comment on the test",

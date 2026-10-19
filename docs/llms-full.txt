@@ -4145,6 +4145,8 @@ Daemon version and uptime; time since the last poll attempt and the last success
 | `next_due_at`, `backing_off`, `backoff_reason` | when the engine itself expects the next poll. It is later than the interval when the engine is deliberately slowing down: `idle` (idle back-off, up to 5 min, or 60 min while webhooks are healthy), `graphql` (low GraphQL budget) or `rest` (REST budget exhausted until its reset) |
 | `overdue`, `overdue_after_seconds`, `overdue_cause`, `blocked_seconds` | the verdict. **Overdue** means a poll has been in progress for longer than **2 × `interval_seconds`** (`poll-in-progress`), or no poll has started within 2 × `interval_seconds` of `next_due_at` (`no-poll-started`). The multiplier K = 2 is fixed, not configurable. Measuring from `next_due_at` means a deliberate back-off is not reported as a stall. `"unknown"`, never `false`, when the interval or the baseline is unknown |
 
+**`forge_hold`** is present only while GitHub is unreachable: GitHub calls have failed on timeouts, connection errors or 5xx responses for a sustained stretch (at least 5 in a row spanning 2 minutes, with no call answered in between; a 4xx counts as answered). It carries `since`, `consecutive_failures` and `last_error`. While it is present Fabrik starts no new model work (stage runs, comment passes, review/CI-fix/rebase re-invocations, merge-train conflict resolution); workers already running are left alone. The hold lifts as soon as any GitHub call gets an answer (a success, a 4xx, a rate limit or a GraphQL error; a cancelled or locally failed request is not an answer and is ignored), and the Warnings panel entry `forge_unreachable` is resolved. A stage whose lock label cannot be written is likewise not started: it is retried on the next poll without counting against `max_retries`.
+
 `graphql_backoff.as_of` (and `rest_paused_as_of`) say when a poll last refreshed that gauge. The value is only updated by the poll, so a stale `as_of` next to a stalled poll tells you the number is old; it is `"unknown"` until the first refresh and never moves with time alone.
 
 Per merge-train partition: `oldest_queued_since` / `oldest_queued_seconds` (daemon-observed, restarts with the daemon), `run_active` and `phase` (`trial-ci`, `bisect`, `one-at-a-time`, `landing`, or `none`) from the durable run state, and, when members are queued with no run, an `idle_reason`: `poll-overdue` (with the cause), `infra-abandon-cooldown` (an intentional hold after a CI infrastructure failure), or `unknown`. Any other hold is reported as `unknown` rather than guessed. `stalled` is true when the partition meets the stall condition below.
@@ -4298,7 +4300,7 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
 | `claude-usage-limited`, `claude-usage-limit-lifted` | the account-wide Claude usage-limit hold began or ended | `until` |
 | `daemon-unreachable`, `daemon-reachable` | emitted by `fabrik mcp` itself when the daemon connection stays down more than 10 s and when it recovers | `error` / `down_for_seconds` |
-| `pipeline-stalled`, `pipeline-resumed` | the pipeline stopped moving, and recovered. Account-wide and immediate, one pair per episode. **Poll scope** (`scope` = `poll`): the poll is overdue (see `fabrik_health` above) — the poll loop is judged on its own goroutine, so a blocked poll is still detected — and `pipeline-resumed` fires when the poll completes or starts again. **Merge-train scope** (`scope` = `merge-train`): a (repo, base) partition has queued members, no run, no intentional hold and has been queued for longer than 2 × the poll interval; resolved when a run starts or the members leave Queued. Not raised inside the infra-abandon cooldown, while merge_train is off, or while the engine is deliberately backing off. Each carries its own cause, so the poll cause is stated once here and not repeated on every affected item. Detection latency is at most 2 × interval plus the 30 s deriver tick. A stall episode is in memory only: a restarted daemon that is still stalled raises a fresh `pipeline-stalled` | `scope`, `cause` (`poll-in-progress`, `no-poll-started`, or for a partition `poll-overdue`, `infra-abandon-cooldown`, `merge-train-idle`), `interval_seconds`, `blocked_seconds`, `overdue_after_seconds`, `step` (poll scope, when known); `partition`, `members`, `oldest_queued_seconds`, `idle_reason` (merge-train scope) |
+| `pipeline-stalled`, `pipeline-resumed` | the pipeline stopped moving, and recovered. Account-wide and immediate, one pair per episode. **Poll scope** (`scope` = `poll`): the poll is overdue (see `fabrik_health` above) — the poll loop is judged on its own goroutine, so a blocked poll is still detected — and `pipeline-resumed` fires when the poll completes or starts again. **Forge scope** (`scope` = `forge`, `cause` = `forge-unreachable`): the forge-unreachable hold in `fabrik_health` engaged; `pipeline-resumed` fires when a GitHub call is answered again. **Merge-train scope** (`scope` = `merge-train`): a (repo, base) partition has queued members, no run, no intentional hold and has been queued for longer than 2 × the poll interval; resolved when a run starts or the members leave Queued. Not raised inside the infra-abandon cooldown, while merge_train is off, or while the engine is deliberately backing off. Each carries its own cause, so the poll cause is stated once here and not repeated on every affected item. Detection latency is at most 2 × interval plus the 30 s deriver tick. A stall episode is in memory only: a restarted daemon that is still stalled raises a fresh `pipeline-stalled` | `scope`, `cause` (`poll-in-progress`, `no-poll-started`, or for a partition `poll-overdue`, `infra-abandon-cooldown`, `merge-train-idle`), `interval_seconds`, `blocked_seconds`, `overdue_after_seconds`, `step` (poll scope, when known); `partition`, `members`, `oldest_queued_seconds`, `idle_reason` (merge-train scope) |
 | `retry-starved`, `retry-resumed` | a stage retry the engine scheduled (after a kill, an incomplete run, or a Claude usage-limit hold) became due and has not been dispatched `--retry-starved-threshold` minutes later (default 5, never below 2 × the poll interval; measured from the later of the due time and the usage-limit lift). One `retry-starved` per episode, and one `retry-resumed` when the item is finally dispatched, or when it stops waiting without a dispatch (`how` says which: `dispatched`, `closed`, `advanced`, `held` for a paused or blocked item, `gone`). A paused, blocked or awaiting-input item is not reported. Item-scoped and immediate. An episode is in memory only | `cause` (`wall-time-kill`, `inactivity-kill`, `max-turns`, `api-error`, `resume-failure`, `tools-denied`, `incomplete`, `claude-usage-limit`, `error`), `due_at`, `starved_seconds`, `reason` (`no worker slot`, `poll overdue`, `unknown`), `slots_in_use` and `slots_max` (for `no worker slot`) |
 | `item-wedged`, `item-unwedged` | a gate the engine applies (`feedback`, `review`, `ci`, `merge`) has held an item's advance or landing for longer than `--item-wedged-threshold` minutes (default 10; never below 2 × the poll interval) and no worker has been dispatched or queued for the item since the hold began. The feedback gate uses the threshold directly; the review, CI and merge gates wait on people or machines and already have their own timeout pauses, so they count only once the hold has outlived that backstop plus two poll intervals. One `item-wedged` per episode; `item-unwedged` when a worker is dispatched, the item changes column, or the gate clears or stops being re-confirmed. Not raised while the poll itself is overdue (`pipeline-stalled` explains it). It is a liveness report and changes no gate or dispatch behaviour. Item-scoped and immediate | `gate`, `reason` (the holding reason as the engine logs it), `feedback_ids` (feedback gate), `held_seconds` |
 | `cache-divergence` | a reconcile, deep fetch or probe changed an item's cached labels or column in a way that reverts an engine write made within the last `--cache-divergence-window` minutes (default 5). Names the write, the reverting path and both values. Every event built from that change (label events, `merged`, `blocker-cleared`, `landing-verification-failed`, `column-changed`, `closed`) carries `unverified` = `true`: the cache and GitHub disagreed, so the change may be a phantom that is reverted shortly after. A point event with no recovery. Item-scoped, ordinary (digest-eligible) | `what` (`label:<name>` or `column`), `written`, `observed`, `path` (`reconcile`, `deep-fetch`, `probe`), `age_seconds` |
@@ -10408,6 +10410,53 @@ SIGHUP is the graceful restart, and it drains before it restarts (amends ADR-139
 **Visibility.** `[signal]` log lines list `#issue stage kind elapsed` per worker, repeated every minute (`drainLogInterval`) until the set is empty. `daemonHealth.setDraining` feeds `fabrik_health.draining` (`since`, `workers_remaining`; absent when not draining); `tui.WorkerSlotsEvent` carries `Draining`/`DrainLeft` for the title (`draining for restart (N left)`). While draining, `pollVerdictFor` returns the unknown verdict, so the stopped poll is never reported as a `pipeline-stalled`/`item-wedged` stall.
 
 **Unchanged:** the idle-only self-upgrade re-exec, SIGINT/SIGTERM behaviour and Windows (no SIGHUP; the drain state is untagged). Seams (per-Engine): `SetSighupDrainDisabledForTest`, `SetDrainDispatchGateDisabledForTest`, `SetDrainLogIntervalForTest`, `SetDrainPollIntervalForTest`, `SetRunCtxHookForTest`. Tests: `engine/sighup_drain_test.go`.
+
+### 7.21 Lock-Write Refusal and the Forge-Unreachable Hold (#2393, ADR 2393)
+
+**Why.** A worker spawned while GitHub cannot be written has no lock, no worker record and no
+`in_progress` label, and its results cannot be recorded, so the next poll dispatches the item again
+(#2388: ~150 runs of one stage in ~21 hours). Two independent rules close this at dispatch admission.
+
+**Lock-write refusal.** `acquireLockAndVerify` returns the lock-label write error instead of
+carrying on. `processItem` then spawns nothing: no worker handle, no heartbeat, no `in_progress`
+write, no `StageAttempted`, no retry or failure counter. It logs one `[lock] could not add lock
+label …` line and records the admission cooldown `lock-write-failed` (one `PollSeconds`; consumed on
+admission, ADR 2096; in `shortAdmissionCooldownReasons`, so the idle interval never sleeps past it).
+It applies to any cause, including a 4xx; a persistent failure retries once per poll. The
+comment-review path takes `fabrik:editing` first, before the comment breaker is charged and before the
+👀 reactions: a failed write returns `didNotRunEditingWrite` (uncharged for every cause, superseding
+ADR 1413 for this write; `dispatchReinvoke` refunds the pre-charged cycle; the comments stay
+unprocessed) and records the same cooldown. The base-branch and worktree setup failures keep the
+ADR 1413 breaker charge. Neutralisation seam: `SetLockWriteRefusalDisabledForTest`.
+
+**Dispatch-site audit.** Exactly three sites call the model: stage dispatch (`processItem`, takes the
+lock label), the comment-review family (`processCommentsClassified`, takes `fabrik:editing`) and
+merge-train `resolveConflictWithClaude` (takes no label: its claim is the in-memory
+`ConflictResolutionSet` plus a worker slot, so only the hold gates it).
+
+**Forge-unreachable hold.** `forgeHealth` (`engine/forge_hold.go`) is told the outcome of every
+GitHub call through `github.Client.SetResultObserver` (the two HTTP choke points) wired in `New()`;
+the sim wires `simgh.FaultTable.SetResultObserver` to the same `Engine.ObserveForgeResult`. A
+*transport error* is a timeout or `context.DeadlineExceeded`, a dial/connection error, a truncated
+response or a 5xx (`github.IsTransportError`); 4xx, rate limits and `context.Canceled` are not. The
+hold **engages** after an unbroken run of ≥ 5 transport failures spanning ≥ 2 minutes on `e.now()`
+(a run with no failure for 10 minutes lapses) and **lifts** at the first outcome that proves the
+forge answered: a success, a 4xx, a rate limit or a GraphQL error (`github.IsForgeAnswer`). An error
+that never reached the forge (`context.Canceled`, a local request-build failure) is ignored: it
+neither lifts an engaged hold nor resets a run in progress. While held: `dispatchCandidates` starts nothing and hands every candidate back for
+re-admission with nothing recorded; `dispatchReinvoke` refunds its pre-charged cycle and returns;
+`processItem`, `processCommentsClassified` (`didNotRunForgeHeld`) and `resolveConflictWithClaude`
+(`errForgeHeldNotAttempted`, read by `trainCancelled` as an uncharged "not attempted") re-check as
+backstops. Running workers are untouched. Recovery: one `FetchProjectUpdatedAt` probe per poll while
+held, and the idle poll interval is capped at the configured interval. A forge where only *writes*
+fail never engages the hold (reads succeed); the lock-write refusal covers that. In memory only.
+Seams: `SetForgeHoldDisabledForTest`, `SetForgeHoldThresholdsForTest`.
+
+**Visibility.** Warnings panel entry `forge_unreachable:github` (§7.11) reported once on engage with a
+stable fingerprint and resolved on lift; `fabrik_health.forge_hold {since, consecutive_failures,
+last_error}` while held (§7.13); `pipeline-stalled` / `pipeline-resumed` with `scope=forge`,
+`cause=forge-unreachable`, one pair per episode, derived from the health mirror only, included in
+catch-up (§7.14). Sim twin: `tests/sim/forge_hold_test.go` over `simgh` `FailAllWrites` / `FailAll`.
 
 ## 8. Invalid / Unexpected States
 

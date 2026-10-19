@@ -1731,3 +1731,23 @@ is how a scenario commits to a PR branch between the gates clearing and the
 engine's merge request; a scenario that could only push between polls would pass
 against unpinned code, because the next poll's gates would read the new head.
 Hooks are not carried through Sim snapshots (they close over live test state).
+
+### Blanket faults and the result observer — forge-unreachable scenarios (#2393)
+
+`FaultTable.FailAllWrites(err)` fails every call the instrumented layer flags as a
+mutation, and `FailAll(err)` fails every intercepted call; both sit ahead of the
+per-method rules and last until `ClearBlanket()`. They model "GitHub is
+unreachable" at the `engine.GitHubClient` boundary, which is where the sim bypasses
+`github.Client`'s HTTP layer entirely. `SetResultObserver(fn)` is told the outcome of
+every intercepted call (the injected error, or nil for one let through) — the sim's
+stand-in for the production client's HTTP result observer. Both feed the engine's
+forge-unreachable hold tracker through the one shared classifier
+(`github.IsTransportError`), so the sim exercises the tracker, the gates and the
+classifier; the HTTP observer itself is covered by an `httptest` test in `github`.
+
+**Not modelled:** a call that times out *after* reaching the forge (the write landed
+but the client saw an error). A faulted call never reaches the model. Blanket faults
+and the observer are not carried through Sim snapshots. `ghfault.DeadlineExceeded()`
+builds the #2388 error as a real `*url.Error` wrapping `context.DeadlineExceeded`
+(not a string), because the transient classifiers match by substring and that error
+matches none of them.

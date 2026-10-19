@@ -2654,6 +2654,20 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: daemon draining for restart\n", memberItem.Number)
 		return false, nil, errDrainingNotAttempted
 	}
+	// #2393: the forge-unreachable hold is the same uncharged "not attempted"
+	// outcome. Conflict resolution writes no lock or editing label (its claim is
+	// the in-memory ConflictResolutionSet plus a worker slot), so the hold is the
+	// only gate this site has.
+	forgeHeld := func() error {
+		if e.forgeHeld() {
+			e.logf(memberItem.Number, "forge-hold", "GitHub is unreachable; conflict resolution not attempted for #%d\n", memberItem.Number)
+			return errForgeHeldNotAttempted
+		}
+		return nil
+	}
+	if err := forgeHeld(); err != nil {
+		return false, nil, err
+	}
 	usageLimited := func() error {
 		if _, s := e.claudeUsageLimitedUntilTime(e.now()); s {
 			e.logf(memberItem.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
@@ -2694,6 +2708,10 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	if serr := usageLimited(); serr != nil {
 		release()
 		return false, nil, serr
+	}
+	if ferr := forgeHeld(); ferr != nil {
+		release()
+		return false, nil, ferr
 	}
 	_, _, _, err = e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	release()
@@ -2824,7 +2842,8 @@ func (e *Engine) acquireTrainSlotIn(ctx context.Context, ep *trainEpisode, repoK
 func trainCancelled(ctx context.Context, err error) bool {
 	// errDrainingNotAttempted (#2259): the SIGHUP drain refused a new conflict
 	// resolution with ctx still live; it is the same "could not attempt" verdict.
-	return err != nil && (ctx.Err() != nil || errors.Is(err, errDrainingNotAttempted))
+	// errForgeHeldNotAttempted (#2393): the forge-unreachable hold, same verdict.
+	return err != nil && (ctx.Err() != nil || errors.Is(err, errDrainingNotAttempted) || errors.Is(err, errForgeHeldNotAttempted))
 }
 
 // finalizeConflictResolution inspects trainWorkDir after a conflict-resolution
