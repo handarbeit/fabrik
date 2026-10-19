@@ -32,7 +32,7 @@ func TestWebhookChangeSurvivesReconcile(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	if !bedWebhooksEnabled(env) {
-		t.Skip("bed has webhooks disabled — a column move would reach the daemon only through a listing, so there is no webhook-applied change to protect")
+		t.Skip("bed has webhooks disabled — a column move would reach the daemon only through a listing, so there is no webhook-applied change to protect (bed webhook delivery: #2408)")
 	}
 	repo := env.RepoAlpha
 
