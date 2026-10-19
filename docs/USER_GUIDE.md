@@ -4914,7 +4914,21 @@ webhooks: true
 | Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
 | Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 s) |
 
-By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
+By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, `projects_v2_item` (board column changes — see note below), `sub_issues`, `pull_request_review_thread`, `label`, and `milestone`.
+
+What each event feeds, so you can judge whether to subscribe a webhook you configured yourself:
+
+| Event | What Fabrik learns without a refetch |
+|-------|--------------------------------------|
+| `issue_comment`, `pull_request_review_comment` | A new comment, and — when it is edited or deleted — the new text, or that it is gone. An edit never resets a comment's processed (🚀) state. |
+| `pull_request_review_thread` | A review thread resolved or reopened, so unresolved feedback stops (or starts) holding an advance or landing as soon as the delivery arrives. A reopened thread makes Fabrik re-read the PR once. |
+| `label` | A repository label renamed or deleted: every item that carries it is updated in one step. |
+| `milestone` | A milestone retitled or deleted: items in it follow. |
+| `sub_issues` | Sub-issue links (parent and child). Recorded for display only; nothing is dispatched on them. |
+
+`projects_v2` is not subscribed: it covers project-level changes (title, description, closing) that Fabrik does not use, and GitHub sends no event when a Status option is renamed — Fabrik learns renamed options from its periodic reconcile.
+
+**Upgrading an existing webhook.** `gh webhook forward` (`--webhooks`) recreates its hook with the current event list every time Fabrik starts, so it picks the new events up on restart. A webhook you created yourself — an organisation or repository hook, a GitHub App's event subscription, or a Hookdeck source — keeps the events it was given. To benefit from the four newer events, add `sub_issues`, `pull_request_review_thread`, `label` and `milestone` to it. Until you do, Fabrik works as before: those facts are learned from its normal fetches and reconciles. If a hook refuses one of the new events, Fabrik logs it, drops only that event and continues with the rest.
 
 `issue_dependencies` (a "blocked by" / "blocking" link added or removed) is **not** in the default list: whether `gh webhook forward` accepts it has not been confirmed against a live forwarding session, so by default dependency changes stay poll-driven in PAT mode and reach Fabrik within one poll interval. You can opt in with `--webhook-events` (or `FABRIK_WEBHOOK_EVENTS`, or `webhook_events:`), listing the default events plus `issue_dependencies`; a supported event then makes the change take effect on the next wake. The event is only a trigger — see [Dependency changes](#dependency-changes-issue_dependencies) below.
 

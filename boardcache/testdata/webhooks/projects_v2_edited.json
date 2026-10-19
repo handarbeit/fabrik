@@ -1,0 +1,50 @@
+{
+  "action": "edited",
+  "changes": {
+    "short_description": {
+      "from": null,
+      "to": "probe edit"
+    }
+  },
+  "organization": {
+    "login": "example-org",
+    "id": 1,
+    "node_id": "MDEyOk9yZ2FuaXphdGlvbjE="
+  },
+  "projects_v2": {
+    "closed_at": null,
+    "created_at": "2026-10-19T04:59:12Z",
+    "creator": {
+      "login": "octocat",
+      "id": 1,
+      "node_id": "MDQ6VXNlcjE=",
+      "type": "User"
+    },
+    "deleted_at": null,
+    "deleted_by": null,
+    "description": null,
+    "id": 27179869,
+    "node_id": "PVT_kwDOENB0Ac4Bnrtd",
+    "number": 8,
+    "owner": {
+      "gravatar_id": "",
+      "html_url": "https://github.com/example-org",
+      "id": 282096641,
+      "login": "example-org",
+      "node_id": "O_kgDOENB0AQ",
+      "site_admin": false,
+      "type": "Organization",
+      "user_view_type": "public"
+    },
+    "public": false,
+    "short_description": "probe edit",
+    "title": "probe-2352 (temporary)",
+    "updated_at": "2026-10-19T04:59:32Z"
+  },
+  "sender": {
+    "login": "octocat",
+    "id": 1,
+    "node_id": "MDQ6VXNlcjE=",
+    "type": "User"
+  }
+}

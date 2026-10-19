@@ -90,7 +90,7 @@ var logOnlyExceptions = []logOnly{
 	{"engine/webhook.go", `projects_v2_item may have caused subprocess crash`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},
 	{"engine/webhook.go", `webhook subscription permanently failed`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},
 	{"engine/webhook.go", `webhook subscription for repo`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},
-	{"engine/webhook.go", `projects_v2_item event not supported`, "informational capability note; the board is polled regardless"},
+	{"engine/webhook.go", `event not supported by gh webhook forward`, "informational capability note for an optional event (projects_v2_item or a #2352 state-fact event); the board is polled and fetched regardless"},
 	{"engine/hookdeck.go", `installation-repo-coverage check failed`, "transient read failure; the prior coverage entry is deliberately left in place"},
 }
 
