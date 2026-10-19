@@ -38,6 +38,10 @@ func runBodyWriteThroughScenario(t *testing.T, writeThroughDisabled bool) string
 	// The cache path admits items through the reactive mayNeedWork observer.
 	t.Cleanup(env.Engine.RegisterObservers())
 	env.Engine.SetIssueBodyWriteThroughDisabledForTest(writeThroughDisabled)
+	// #2350: the feedback gate and the dependency decision point now apply their
+	// live item reads to the Store, which heals the stale body this scenario needs
+	// to observe; the #2346 defect is only visible with those applies off.
+	env.Engine.SetLiveReadApplyDisabledForTest(writeThroughDisabled)
 
 	var mu sync.Mutex
 	researchSaw := ""
@@ -98,6 +102,10 @@ func runStageOutputBodyScenario(t *testing.T, writeThroughDisabled bool) string 
 	}})
 	t.Cleanup(env.Engine.RegisterObservers())
 	env.Engine.SetIssueBodyWriteThroughDisabledForTest(writeThroughDisabled)
+	// #2350: the feedback gate and the dependency decision point now apply their
+	// live item reads to the Store, which heals the stale body this scenario needs
+	// to observe; the #2346 defect is only visible with those applies off.
+	env.Engine.SetLiveReadApplyDisabledForTest(writeThroughDisabled)
 
 	var mu sync.Mutex
 	researchSaw := ""
