@@ -78,7 +78,11 @@ type issuesPayload struct {
 		Title  string `json:"title"`
 		Body   string `json:"body"`
 		State  string `json:"state"`
-		Labels []struct {
+		// UpdatedAt is the GitHub time of the issue's last change: for a labeled,
+		// unlabeled, closed or reopened event, the event's own time. It orders the
+		// delivery against every other observation (#2348).
+		UpdatedAt lenientString `json:"updated_at"`
+		Labels    []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		Assignees []struct {
@@ -121,7 +125,9 @@ type pullRequestPayload struct {
 		State  string `json:"state"`
 		Merged bool   `json:"merged"`
 		Draft  bool   `json:"draft"`
-		Head   struct {
+		// UpdatedAt is the GitHub time of the PR's last change (#2348).
+		UpdatedAt lenientString `json:"updated_at"`
+		Head      struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
@@ -150,7 +156,10 @@ type pullRequestReviewPayload struct {
 		// CommitID is the SHA the review was submitted against (#2127 R5): without
 		// it a review that arrived by webhook cannot be placed at the PR head.
 		CommitID string `json:"commit_id"`
-		User     struct {
+		// SubmittedAt is when the review was submitted (#2348); absent on some
+		// deliveries, in which case receipt order applies.
+		SubmittedAt lenientString `json:"submitted_at"`
+		User        struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"review"`
@@ -215,6 +224,20 @@ func editedStatusName(to json.RawMessage) string {
 		return ""
 	}
 	return t.Name
+}
+
+// observedTime is the observation time of a webhook delivery (#2348, R1): the
+// GitHub time the payload carries, or the daemon's receipt time when it carries
+// none or an unparseable one. Receipt order is never allowed to look older than a
+// real GitHub time, because the daemon's clock is compared with GitHub's only
+// through the Store's rule (see itemstate/observed.go).
+func observedTime(ts lenientString) time.Time {
+	if ts != "" {
+		if t, err := time.Parse(time.RFC3339, string(ts)); err == nil {
+			return t
+		}
+	}
+	return time.Now()
 }
 
 // lenientString decodes a JSON string and yields "" for any other JSON type
@@ -465,7 +488,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		// BlockedByEdgeAdded write (spawnChildren, #1783) — e.g. for a child
 		// issue this same engine just created — must not wipe it back to
 		// empty (#1783 follow-up).
-		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi, PreserveBlockedBy: true})
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi, PreserveBlockedBy: true, Partial: true, At: observedTime(p.Issue.UpdatedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -476,7 +499,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login})
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -487,7 +510,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(reopened): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueReopened{Repo: fullRepo, Number: issNum})
+		_, changes, _ := c.store.Apply(itemstate.IssueReopened{Repo: fullRepo, Number: issNum, At: observedTime(p.Issue.UpdatedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -537,11 +560,11 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 
 	case "labeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "labeled", p.Label.Name,
-			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login})
+			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
 
 	case "unlabeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "unlabeled", p.Label.Name,
-			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login})
+			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
 
 	case "milestoned", "demilestoned":
 		// issue.milestone is the post-event value: the new milestone on
@@ -563,7 +586,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(%s): #%d not in store; skipping (next reconcile captures its milestone)\n", p.Action, issNum)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms})
+		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms, At: observedTime(p.Issue.UpdatedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -671,6 +694,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 			State:    lpr.State,
 			Merged:   lpr.Merged,
 			Draft:    false,
+			At:       observedTime(p.PullRequest.UpdatedAt),
 		})
 		c.bumpLocalDeltaAt(issKey)
 		return
@@ -703,6 +727,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 			State:    lpr.State,
 			Merged:   lpr.Merged,
 			Draft:    true,
+			At:       observedTime(p.PullRequest.UpdatedAt),
 		})
 		c.bumpLocalDeltaAt(issKey)
 		return
@@ -773,6 +798,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		c.matchEchoFn("pull_request", p.Action, prKey(repo, prNum))
 	}
 	sha := p.PullRequest.Head.SHA
+	prAt := observedTime(p.PullRequest.UpdatedAt)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -794,11 +820,13 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 				State:    p.PullRequest.State,
 				Merged:   p.PullRequest.Merged,
 				Draft:    p.PullRequest.Draft,
+				At:       prAt,
 			})
 			c.store.Apply(itemstate.PRHeadSHAUpdated{
 				Repo:   issRepo,
 				Number: issNum2,
 				SHA:    sha,
+				At:     prAt,
 			})
 			c.bumpLocalDeltaAt(issKey)
 		}
@@ -829,6 +857,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		State:    p.PullRequest.State,
 		Merged:   p.PullRequest.Merged,
 		Draft:    p.PullRequest.Draft,
+		At:       prAt,
 	})
 	// Same non-stamping of linkedPRFetchedAt, and the same reason, as the
 	// normal-path PRHeadSHAUpdated call above — see that comment.
@@ -837,6 +866,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 		SHA:         sha,
+		At:          prAt,
 	})
 	c.bumpLocalDeltaAt(key)
 	if healed {
@@ -866,12 +896,23 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		return
 	}
 
+	// submitted_at is the time of the original submission. It orders a "submitted"
+	// event, but an "edited" or "dismissed" one happens later and carries no time
+	// of its own, so it is ordered by receipt: stamped with the old submission time
+	// it would look older than any read made since, and be dropped.
+	reviewAt := time.Now()
+	if p.Action == "submitted" {
+		reviewAt = observedTime(p.Review.SubmittedAt)
+	}
 	review := gh.PRReview{
 		Author:     p.Review.User.Login,
 		State:      strings.ToUpper(p.Review.State),
 		Body:       p.Review.Body,
 		DatabaseID: p.Review.DatabaseID,
 		CommitID:   p.Review.CommitID,
+	}
+	if p.Review.SubmittedAt != "" {
+		review.SubmittedAt, _ = time.Parse(time.RFC3339, string(p.Review.SubmittedAt))
 	}
 
 	// Normal path: look up issue via Store's prToKey index (no c.mu held).
@@ -881,9 +922,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		issRepo, issNum, parseOK := parseItemKey(issKey)
 		if parseOK {
 			c.store.Apply(itemstate.PRReviewSubmitted{
-				Repo:   issRepo,
-				Number: issNum,
-				Review: review,
+				Repo:     issRepo,
+				Number:   issNum,
+				Review:   review,
+				At:       reviewAt,
+				Revision: p.Action != "submitted",
 			})
 			// Side effect: remove reviewer from LinkedPRReviewRequests. GitHub does not
 			// reliably fire review_request_removed for bot reviewers (e.g. Copilot edited
@@ -924,9 +967,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		LinkedPRNum: prNum,
 	})
 	c.store.Apply(itemstate.PRReviewSubmitted{
-		Repo:   repo,
-		Number: resolvedIssNum,
-		Review: review,
+		Repo:     repo,
+		Number:   resolvedIssNum,
+		Review:   review,
+		At:       reviewAt,
+		Revision: p.Action != "submitted",
 	})
 	// Side effect: remove reviewer from LinkedPRReviewRequests (same rationale as normal path).
 	c.store.Apply(itemstate.PRReviewRequestRemoved{
@@ -1139,6 +1184,10 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 		SHA:         sha,
+		// A check_run says nothing about whether its commit is still the head: a
+		// run for a superseded commit completes after a newer push. The head is
+		// only filled when the Store has none (#2348, FR-008).
+		FillOnly: true,
 	})
 	c.bumpLocalDeltaAt(key)
 	if healed {
@@ -1214,7 +1263,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// Record the board-side item ID (PVTI_xxx) so that subsequent
 		// projects_v2_item.edited/deleted/archived events can resolve via itemIDToKey.
 		pi.ItemID = itemID
-		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi})
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi, Partial: true, At: observedTime(p.ProjectsV2Item.UpdatedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -1287,6 +1336,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		if t, err := time.Parse(time.RFC3339, string(p.ProjectsV2Item.UpdatedAt)); err == nil {
 			edit.At = t
 		}
+		edit.Observed = observedTime(p.ProjectsV2Item.UpdatedAt)
 		snap, changes, _ := c.store.Apply(edit)
 		if len(changes) == 0 {
 			return

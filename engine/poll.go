@@ -1484,11 +1484,12 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v; running batch as fallback\n", gateErr)
 		}
 		if gateErr != nil || updatedAt.After(e.lastProjectUpdatedAt) {
+			sweepStart := time.Now()
 			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
 			if err != nil {
 				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
 			} else {
-				c.ApplyStatusBatch(updates)
+				c.ApplyStatusBatchAt(updates, sweepStart)
 				if gateErr == nil {
 					e.lastProjectUpdatedAt = updatedAt
 				}

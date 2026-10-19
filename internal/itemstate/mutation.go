@@ -39,6 +39,14 @@ func (m FromProbe) itemKey() string { return m.Inner.itemKey() }
 // Item is a gh.ProjectItem because there is no separate gh.Issue type; ProjectItem
 // is the full per-item representation used throughout Fabrik.
 type IssueOpened struct {
+	// Partial is set for a payload that does not carry the whole item (an
+	// issues.opened or projects_v2_item.created webhook): only the fields it
+	// carries are written, labels and milestone are ordered against their
+	// records, and an item that is already populated keeps everything else
+	// (#2348, R3). Listing callers leave it false.
+	Partial bool
+	// At is the payload's observation time for a Partial item (see IssueLabeled.At).
+	At   time.Time
 	Item gh.ProjectItem
 
 	// PreserveBlockedBy is set by callers whose Item.BlockedBy is known to be
@@ -64,6 +72,10 @@ func (m IssueOpened) itemKey() string {
 // now has no milestone (demilestoned); either way the value is authoritative,
 // so the item's MilestoneKnown becomes true.
 type IssueMilestoneUpdated struct {
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At        time.Time
 	Repo      string
 	Number    int
 	Milestone *gh.Milestone
@@ -74,6 +86,10 @@ func (m IssueMilestoneUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Nu
 
 // IssueLabeled is emitted when a label is added to an issue.
 type IssueLabeled struct {
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At     time.Time
 	Repo   string
 	Number int
 	Label  string
@@ -93,6 +109,10 @@ func (m IssueLabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueUnlabeled is emitted when a label is removed from an issue.
 type IssueUnlabeled struct {
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At     time.Time
 	Repo   string
 	Number int
 	Label  string
@@ -112,6 +132,10 @@ func (m IssueUnlabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueClosed is emitted when an issue is closed.
 type IssueClosed struct {
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At     time.Time
 	Repo   string
 	Number int
 	// Sender is the GitHub login that closed the issue, from the webhook
@@ -127,6 +151,10 @@ func (m IssueClosed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueReopened is emitted when a previously closed issue is reopened.
 type IssueReopened struct {
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At     time.Time
 	Repo   string
 	Number int
 }
@@ -202,6 +230,14 @@ type ProjectV2ItemEdited struct {
 	Requester string
 	// At is the GitHub time of the move when known; zero otherwise.
 	At time.Time
+	// Observed is the ordering time (#2348): At when the payload carried one,
+	// otherwise the receipt time. Zero means no ordering information, and At is
+	// used for ordering instead.
+	Observed time.Time
+	// ObservedIsFetchStart marks Observed as the start of a bulk read (the Layer 2
+	// status sweep) rather than a webhook's own time: the listing-lag allowance
+	// applies to it like any other read (#2348).
+	ObservedIsFetchStart bool
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
@@ -212,9 +248,19 @@ func (m ProjectV2ItemEdited) itemKey() string {
 
 // PRReviewSubmitted is emitted when a reviewer submits a review on the linked PR.
 type PRReviewSubmitted struct {
-	Repo   string
-	Number int
-	Review gh.PRReview
+	// At is the observation time of the fact: the payload's GitHub time where
+	// one exists, otherwise the receipt time (#2348). Zero means no ordering
+	// information: the write applies and records nothing.
+	At time.Time
+	// Revision marks an "edited" or "dismissed" delivery: it concerns an earlier
+	// submission and carries no submission time of its own, so At is its receipt
+	// time. It is not ordered against, and does not advance, the author's record
+	// of submissions, so a later-processed "submitted" event for a newer review
+	// by the same author is never dropped behind it (#2348).
+	Revision bool
+	Repo     string
+	Number   int
+	Review   gh.PRReview
 }
 
 func (PRReviewSubmitted) isMutation()       {}
@@ -469,10 +515,21 @@ func (m DeepFetchInvalidated) itemKey() string { return itemKeyFor(m.Repo, m.Num
 // LinkedPRNum, if non-zero, also sets LinkedPR.Number (used in auto-heal paths
 // where the PR↔issue linkage is being established for the first time).
 type PRHeadSHAUpdated struct {
-	Repo        string
-	Number      int // issue number
-	LinkedPRNum int // PR number to set (0 = leave unchanged)
-	SHA         string
+	// At is the observation time of the head or PR read. AtIsFetchStart marks it
+	// as the start of a read (a fetch, a listing), which gets the listing-lag
+	// allowance; otherwise it is the fact's own time (a webhook's GitHub time or
+	// an engine write). Zero means no ordering information (#2348).
+	At             time.Time
+	AtIsFetchStart bool
+	Repo           string
+	Number         int // issue number
+	LinkedPRNum    int // PR number to set (0 = leave unchanged)
+	SHA            string
+	// FillOnly makes the write set the head only while the Store holds none: with
+	// a head already recorded it only links the PR. For a producer that learned
+	// the SHA from something that says nothing about whether it is still the
+	// head, such as a check_run for an old commit (#2348, FR-008).
+	FillOnly bool
 }
 
 func (PRHeadSHAUpdated) isMutation()       {}
@@ -483,13 +540,19 @@ func (m PRHeadSHAUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number)
 // moves them into the Store so PR-detail changes are observable via LinkedPRChanged.
 // PRNumber also ensures the prToKey reverse index is current.
 type PRDetailsUpdated struct {
-	Repo     string
-	Number   int // issue number
-	PRNumber int
-	Title    string
-	State    string
-	Merged   bool
-	Draft    bool
+	// At is the observation time of the head or PR read. AtIsFetchStart marks it
+	// as the start of a read (a fetch, a listing), which gets the listing-lag
+	// allowance; otherwise it is the fact's own time (a webhook's GitHub time or
+	// an engine write). Zero means no ordering information (#2348).
+	At             time.Time
+	AtIsFetchStart bool
+	Repo           string
+	Number         int // issue number
+	PRNumber       int
+	Title          string
+	State          string
+	Merged         bool
+	Draft          bool
 }
 
 func (PRDetailsUpdated) isMutation()       {}
