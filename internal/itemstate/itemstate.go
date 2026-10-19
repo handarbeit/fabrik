@@ -150,6 +150,20 @@ type ItemState struct {
 	// keep-first and read by gates — this map is read only by the reconcile
 	// protection. In memory only; entries expire after the grace period.
 	EngineWriteAt map[string]time.Time
+	// ObservedAt records, per fact, the authority time of the last applied
+	// observation of any producer (#2348, ADR 2348): keys "status", "closed",
+	// "label:<name>", "labels" (the baseline of a full label set), "head",
+	// "linkedpr", "reviews" (whole-list reads), "reviews:<author>" (webhook review
+	// events), "reviews:submitted:<author>" (submitted events only), "milestone"
+	// and "blockedBy". A write whose authority
+	// time is older than the recorded one (the later of this and EngineWriteAt) is
+	// dropped; see observed.go. In memory only; bookkeeping, excluded from no-op
+	// detection. Label entries expire after observedLabelRetention.
+	ObservedAt map[string]time.Time
+	// AddedAt is when this running Store first created the record. Reconcile
+	// never removes an item added after its listing's fetch started (#2348, R4).
+	// Zero for records predating the field.
+	AddedAt time.Time
 	// Worker is present when a worker is in-flight for this item — or queued
 	// for a worker slot (Worker.Queued, #2121): the handle is the claim on the
 	// item, and the dispatch guards rely on it being non-nil from dispatch.
