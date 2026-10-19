@@ -18,11 +18,13 @@ import (
 // implementing ingestTransport alongside webhookManager (PAT mode) —
 // see engine/ingestion.go. It wraps a *hookdeck.Source (internal/events/
 // hookdeck, extracted from Pruefer's already-tested implementation, R1) and
-// feeds normalized events into the exact same deltaFn closure poll.go
-// already builds for the PAT-mode transport (Handle implements
-// events.EventSink directly on hm — no separate sink type is needed, since
-// boardcache/delta.go's seven typed handlers are the unchanged consumer for
-// both transports, R2).
+// hands each normalized event, with its delivery ID, to the engine's shared
+// delivery intake through the sink installed by setUpIngestion
+// (engine/intake_wire.go, #2351), the same sink the PAT-mode transport uses
+// (Handle implements events.EventSink directly on hm — no separate sink type
+// is needed; the intake's apply function runs boardcache/delta.go's typed
+// handlers, the unchanged consumer for every transport, R2). deltaFn is only
+// the fallback when no sink is installed (tests).
 //
 // Unlike webhookManager, hookdeckManager owns no per-repo subscription
 // state: a GitHub App's webhook is one URL/secret covering every repo the
@@ -255,8 +257,10 @@ func (hm *hookdeckManager) ManagedRepos() []string {
 	return out
 }
 
-// Handle implements events.EventSink, feeding normalized events into the
-// exact same deltaFn closure the PAT-mode transport uses (poll.go).
+// Handle implements events.EventSink: it hands the normalized event, with its
+// delivery ID, to the engine's delivery intake through the sink installed by
+// setUpIngestion (engine/intake_wire.go). Only when no sink is installed
+// (tests) does it call deltaFn directly.
 func (hm *hookdeckManager) Handle(ctx context.Context, ev events.GitHubEvent) {
 	hm.mu.Lock()
 	hm.eventCounts[ev.EventType]++
