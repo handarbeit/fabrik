@@ -93,10 +93,11 @@ type Config struct {
 	// EventSource selects the ingestion transport: EventSourcePoll (default,
 	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
 	// separate axis from Webhooks above — event_source: hookdeck is an
-	// App-auth-only opt-in that can never be combined with Webhooks (refused
-	// at startup by RefuseHookdeckWithWebhooks) or used without App auth
-	// (refused by RefuseHookdeckWithoutGitHubApp), and #1752's
-	// RefuseWebhooksWithGitHubApp never has to know this field exists. See
+	// App-auth-only opt-in that cannot be used without App auth (refused by
+	// RefuseHookdeckWithoutGitHubApp). Webhooks cannot run under App auth either
+	// (#1752's RefuseWebhooksWithGitHubApp, ADR 1752), which is why the two
+	// existing transports cannot be combined in practice; the engine itself
+	// supports several transports at once (ingestTransport, #2351). See
 	// engine/github_app_auth.go and adrs/1142-hookdeck-ingestion-for-app-auth.md.
 	EventSource string
 	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment

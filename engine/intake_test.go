@@ -308,3 +308,44 @@ func TestIntake_NilIsInert(t *testing.T) {
 	in.Close(time.Second)
 	in.Flush()
 }
+
+// The byte cap bounds memory held by queued payloads, not just their count: a
+// delivery that would push the held bytes over the cap is dropped and forgotten
+// (reconcile heals it), a lone delivery is always admitted, and the bytes are
+// released once applied.
+func TestIntake_ByteCapDropsForgetsAndReleases(t *testing.T) {
+	oldBytes := intakeMaxBytes
+	intakeMaxBytes = 1000
+	t.Cleanup(func() { intakeMaxBytes = oldBytes })
+
+	release := make(chan struct{})
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) { <-release; rec.apply(et, p) })
+
+	pad := func(repo string, n int) []byte {
+		return append(payloadFor(repo, n), make([]byte, 600)...) // ~600+ bytes each
+	}
+	// A lone delivery above the cap is still admitted (nothing else is held).
+	big := append(payloadFor("o/r", 1), make([]byte, 5000)...)
+	if !in.Submit(delivery{ID: "big", EventType: "issues", Payload: big}) {
+		t.Fatal("a lone oversized-for-the-cap delivery must still be admitted")
+	}
+	// While it is held, anything further would exceed the cap.
+	if in.Submit(delivery{ID: "next", EventType: "issues", Payload: pad("o/r", 2)}) {
+		t.Fatal("a delivery over the byte cap was queued")
+	}
+	close(release)
+	in.Drain()
+
+	in.mu.Lock()
+	held := in.bytes
+	in.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d payload bytes still counted after every delivery was applied", held)
+	}
+	// The dropped delivery was forgotten, so its redelivery is accepted.
+	if !in.Submit(delivery{ID: "next", EventType: "issues", Payload: pad("o/r", 2)}) {
+		t.Fatal("a byte-cap drop stayed in the ledger and its redelivery was suppressed")
+	}
+	in.Drain()
+}

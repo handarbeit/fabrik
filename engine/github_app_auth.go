@@ -274,9 +274,8 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 // EventSourceHookdeck (#1142 PR review finding). Without this check, a typo
 // like "Hookdeck" or "hook-deck" would silently fail every equality check
 // this package and poll.go make against the exact string EventSourceHookdeck
-// — RefuseHookdeckWithoutGitHubApp/RefuseHookdeckWithWebhooks would both
-// treat it as compatible (since neither refusal fires for a value that
-// isn't EventSourceHookdeck), and poll.go's own `else if e.cfg.EventSource
+// — RefuseHookdeckWithoutGitHubApp would treat it as compatible (since
+// that refusal does not fire for a value that isn't EventSourceHookdeck), and poll.go's own `else if e.cfg.EventSource
 // == EventSourceHookdeck` dispatch would silently fall through to plain
 // polling — an operator who explicitly opted into event-driven ingestion
 // would get no error and no log message, only silent poll-only delivery.

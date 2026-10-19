@@ -220,21 +220,21 @@ func (hm *hookdeckManager) Stop() {
 	})
 }
 
-// IsHealthyOrStartingUp implements eventIngestionManager.
+// IsHealthyOrStartingUp implements ingestTransport.
 func (hm *hookdeckManager) IsHealthyOrStartingUp() bool {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 	return hm.state == WebhookStreamStartingUp || hm.state == WebhookStreamHealthy
 }
 
-// IsDisabled implements eventIngestionManager. Always false: there is no
+// IsDisabled implements ingestTransport. Always false: there is no
 // per-repo circuit-breaker analogue for an App-level webhook (see the type
 // doc comment above).
 func (hm *hookdeckManager) IsDisabled() bool {
 	return false
 }
 
-// UpdateRepos implements eventIngestionManager. Unlike webhookManager, this
+// UpdateRepos implements ingestTransport. Unlike webhookManager, this
 // never triggers a subscription restart — it only records the current
 // managed-repo set for the R5 installation-coverage check to compare
 // against (checkHookdeckInstallationCoverage).

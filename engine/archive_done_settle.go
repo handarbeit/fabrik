@@ -110,7 +110,7 @@ func (e *Engine) maybeArchiveDoneItem(board *gh.ProjectBoard, item gh.ProjectIte
 	// No webhook echo registered: applyProjectsV2ItemDelta's "deleted"/"archived"
 	// case (boardcache/delta.go) never calls matchEchoFn — only "edited" does. An
 	// echo registered here would simply expire unmatched, and enough concurrent
-	// archivals would trip doEchoSweep's WebhookStreamUnhealthy threshold for no
+	// archivals would trip the echo-miss observer's (webhookManager.noteEchoMisses) WebhookStreamUnhealthy threshold for no
 	// reason. The RemoveItem write-through above already gives cache coherence
 	// immediately; there is nothing for an echo to protect. Mirrors the identical
 	// no-echo rationale for issue-close in engine/no_work_needed_settle.go.

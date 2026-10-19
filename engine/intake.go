@@ -29,6 +29,13 @@ var (
 	// intake never blocks a transport's ack.
 	intakeMaxPerKey = 256
 	intakeMaxTotal  = 4096
+	// intakeMaxBytes caps the payload bytes held by queued and in-flight
+	// deliveries. The count caps alone would allow gigabytes if applies stall,
+	// because a body may be up to webhookMaxBodyBytes (25 MiB). A delivery that
+	// would push the total over the cap is dropped like a depth overflow, except
+	// that one is always admitted when nothing else is held, so a single maximum
+	// size delivery can never be refused for size alone.
+	intakeMaxBytes = 256 << 20
 	// intakeConcurrency bounds how many items apply at once. Waiting for a slot
 	// preserves each item's order.
 	intakeConcurrency = 8
@@ -62,6 +69,8 @@ type intake struct {
 	mu     sync.Mutex
 	queues map[string][]delivery
 	total  int
+	// bytes is the payload bytes of every delivery counted in total.
+	bytes  int
 	closed bool
 	wg     sync.WaitGroup
 	// idle is signalled whenever total drops to zero (drain).
@@ -116,7 +125,8 @@ func (in *intake) Submit(d delivery) bool {
 		in.ledger.Forget(d.ID)
 		return false
 	}
-	if in.total >= intakeMaxTotal || len(in.queues[key]) >= intakeMaxPerKey {
+	if in.total >= intakeMaxTotal || len(in.queues[key]) >= intakeMaxPerKey ||
+		(in.total > 0 && in.bytes+len(d.Payload) > intakeMaxBytes) {
 		in.mu.Unlock()
 		in.ledger.Forget(d.ID)
 		in.log("intake queue full for %s — dropping %s delivery %s; reconcile will heal it\n", key, d.EventType, d.ID)
@@ -125,6 +135,7 @@ func (in *intake) Submit(d delivery) bool {
 	q, running := in.queues[key]
 	in.queues[key] = append(q, d)
 	in.total++
+	in.bytes += len(d.Payload)
 	if !running {
 		in.wg.Add(1)
 		go in.work(key)
@@ -156,6 +167,7 @@ func (in *intake) work(key string) {
 
 		in.mu.Lock()
 		in.total--
+		in.bytes -= len(d.Payload)
 		if in.total == 0 {
 			in.idle.Broadcast()
 		}

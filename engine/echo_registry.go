@@ -22,7 +22,7 @@ import (
 //     later identical human event could consume.
 //   - Registration is unconditional while the registry exists. The engine
 //     creates it only when at least one transport is attached, so a poll-only
-//     engine still reserves nothing (the old `if e.webhookMgr != nil` guards).
+//     engine still reserves nothing (the old per-manager nil guards).
 //     The old "suppress while the gh-forward subprocess is starting up" rule
 //     moved to the one consumer of echo misses that cares about it
 //     (webhookManager.noteEchoMisses).
