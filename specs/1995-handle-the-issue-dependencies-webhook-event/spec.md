@@ -100,7 +100,7 @@ GitHub sends two deliveries per change (one from each side). The daemon does the
 
 ### User Story 4 - Closing a blocker promptly prompts re-evaluation of the items it blocks (Priority: P2)
 
-Because closing a blocker sends no `issue_dependencies` delivery, the daemon uses the `issues` `closed` delivery for the blocker to prompt prompt re-evaluation of items whose cached dependencies name it.
+Because closing a blocker sends no `issue_dependencies` delivery, the daemon uses the `issues` `closed` delivery for the blocker to prompt re-evaluation of items whose cached dependencies name it.
 
 **Why this priority**: Closes the "unblocking" gap the original problem statement described, which the new event alone cannot.
 
