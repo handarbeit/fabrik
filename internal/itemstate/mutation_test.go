@@ -522,11 +522,57 @@ func TestApplyIssueOpened_WithoutPreserveBlockedBy_StillOverwrites(t *testing.T)
 
 func TestApplySelfWriteObserved(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	before := time.Now()
-	applyExpect(t, s, SelfWriteObserved{Repo: testRepo, Number: 1}, SelfWriteBaselineChanged)
+	at := time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC)
+	applyExpect(t, s, SelfWriteObserved{Repo: testRepo, Number: 1, At: at}, SelfWriteBaselineChanged)
 	st := getItem(t, s, testRepo, 1)
-	if st.LastSeenSourceUpdatedAt.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want >= %v", st.LastSeenSourceUpdatedAt, before)
+	if !st.LastSeenSourceUpdatedAt.Equal(at) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want the GitHub time %v exactly", st.LastSeenSourceUpdatedAt, at)
+	}
+}
+
+// A write that yielded no GitHub timestamp must not advance the baseline, and in
+// particular must never fall back to the host clock (#1945, FR-003).
+func TestApplySelfWriteObservedZeroAtIsNoOp(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	snap, changes, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 && changes[0].Fields&SelfWriteBaselineChanged != 0 {
+		t.Error("a zero At advanced the baseline")
+	}
+	if st := snap.State(); !st.LastSeenSourceUpdatedAt.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want zero", st.LastSeenSourceUpdatedAt)
+	}
+}
+
+// The baseline is the GitHub time, regardless of how far the daemon clock is
+// from it, and an earlier self-write never lowers a later one (#1945, FR-005/6).
+func TestApplySelfWriteObservedIgnoresHostClock(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	past := time.Unix(1000, 0)
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: past})
+	if got := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt; !got.Equal(past) {
+		t.Fatalf("baseline = %v; want %v (a far-past GitHub time, not time.Now)", got, past)
+	}
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: past.Add(-time.Hour)})
+	if got := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt; !got.Equal(past) {
+		t.Errorf("an earlier self-write lowered the baseline to %v", got)
+	}
+	s.Apply(DeepFetchInvalidated{Repo: testRepo, Number: 1})
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: past})
+	if got := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt; !got.Equal(past) {
+		t.Errorf("baseline after invalidation + self-write = %v", got)
+	}
+}
+
+// Non-vacuity: with the legacy switch the host clock replaces At.
+func TestApplySelfWriteObservedLegacyLocalClock(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.SetLegacyLocalClockSelfWriteForTest(true)
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: time.Unix(1000, 0)})
+	if got := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt; got.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("legacy seam did not use the host clock: %v", got)
 	}
 }
 
@@ -544,7 +590,7 @@ func TestApplySelfWriteObservedMonotonic(t *testing.T) {
 		t.Fatalf("seed ItemDeepFetched: %v", err)
 	}
 
-	snap, changes, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	snap, changes, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: future.Add(-time.Minute)})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -561,7 +607,7 @@ func TestApplySelfWriteObservedMonotonic(t *testing.T) {
 func TestApplySelfWriteObservedTouchesOnlyBaseline(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	before := getItem(t, s, testRepo, 1)
-	if _, _, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1}); err != nil {
+	if _, _, err := s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: time.Unix(5000, 0)}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	after := getItem(t, s, testRepo, 1)
@@ -1231,7 +1277,7 @@ func TestPRLayerBaseline_NeverSelfWriteAnchored(t *testing.T) {
 	if got := getItem(t, s, testRepo, 1).LastSeenPRUpdatedAt; !got.Equal(prAt) {
 		t.Fatalf("LastSeenPRUpdatedAt = %v; want %v", got, prAt)
 	}
-	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: prAt.Add(time.Minute)})
 	it := getItem(t, s, testRepo, 1)
 	if !it.LastSeenPRUpdatedAt.Equal(prAt) {
 		t.Errorf("SelfWriteObserved moved LastSeenPRUpdatedAt to %v; it must stay %v", it.LastSeenPRUpdatedAt, prAt)

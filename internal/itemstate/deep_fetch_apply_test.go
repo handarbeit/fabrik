@@ -161,7 +161,7 @@ func TestDeepFetchApply_BaselinesNeverMovedBackByCacheHit(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		s := newStoreWithItem(t, testRepo, 1)
 		s.SetLegacyDeepFetchApplyForTest(legacy)
-		s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+		s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: time.Unix(5000, 0)})
 		before := getItem(t, s, testRepo, 1)
 		late := before.LastSeenSourceUpdatedAt
 		if !late.After(early) {
@@ -190,7 +190,7 @@ func TestDeepFetchApply_LiveRefetchNeverLowersBaselines(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		s := newStoreWithItem(t, testRepo, 1)
 		s.SetLegacyDeepFetchApplyForTest(legacy)
-		s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+		s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: time.Unix(5000, 0)})
 		late := getItem(t, s, testRepo, 1).LastSeenSourceUpdatedAt
 		pi := staleListing()
 		pi.UpdatedAt = early
@@ -207,7 +207,7 @@ func TestDeepFetchApply_LiveRefetchNeverLowersBaselines(t *testing.T) {
 
 func TestDeepFetchApply_LiveRefetchRaisesBaselines(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1, At: time.Unix(5000, 0)})
 	future := time.Now().Add(time.Hour)
 	pi := staleListing()
 	pi.UpdatedAt = future

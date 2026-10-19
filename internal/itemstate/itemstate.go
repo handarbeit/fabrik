@@ -209,13 +209,13 @@ type ItemState struct {
 	// between polls but never replace the polling refresh path.
 	//
 	// Has a second writer besides ItemDeepFetched: SelfWriteObserved (#1090)
-	// advances it to time.Now() at each of Fabrik's own self-write call sites
+	// raises it to the GitHub timestamp of each of Fabrik's own self-writes
 	// (label add/remove, comment post, issue body edit, board status move) so a
 	// self-caused GitHub updatedAt bump isn't mistaken for external staleness on
-	// the next probe cycle. Only SelfWriteObserved is monotonic: ItemDeepFetched
-	// assigns the fetched value unconditionally (it may lower a clock-anchored
-	// baseline, which is how a real refetch cures both masking and clock skew),
-	// and DeepFetchInvalidated's zero-reset always wins against a stale
+	// the next probe cycle. The value is always a time GitHub reported (#1945,
+	// ADR 1945) — never the daemon's clock — and a write that yielded none leaves
+	// the baseline alone. Both writers only raise it (ItemDeepFetched since
+	// #2344), and DeepFetchInvalidated's zero-reset always wins against a stale
 	// SelfWriteObserved racing behind it.
 	//
 	// This is the ISSUE-layer baseline (#2180): the engine writes the issue and
