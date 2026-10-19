@@ -1380,29 +1380,7 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// right permissions). The Layer 2 status sweep above must continue running
 	// regardless of webhook state — it is the only delivery path for Status.
 	if c := e.cache(); c != nil {
-		switch {
-		case c.IsPaused():
-			// Paused: FetchProjectBoard below falls through to GitHub directly.
-		case c.IsBootstrapped() || c.ProjectID() != "":
-			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
-			e.setPollStep("probe and deep fetch")
-			e.runProbeAndDeepFetch(c)
-		default:
-			// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
-			probeItems, projectID, refreshErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-			if refreshErr != nil {
-				e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
-			} else if projectID != "" && len(probeItems) > 0 {
-				c.BootstrapFromProbe(probeItems, projectID)
-				e.seedTerminalFromProbeItems(probeItems)
-			} else if projectID != "" {
-				// Probe succeeded but returned 0 items — possible transient indexer hiccup.
-				// Leave cache virgin and retry on the next poll rather than bootstrapping
-				// with an empty store (which would cause every real item to be treated as
-				// "new" and deep-fetched on the next cycle).
-				e.logf(0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
-			}
-		}
+		e.refreshCacheForPoll(c)
 	}
 
 	e.setPollStep("fetching the project board")
@@ -2957,4 +2935,38 @@ func gitRevParse(dir, ref string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// refreshCacheForPoll is the poll's per-cycle cache refresh: a paused cache is
+// left to FetchProjectBoard's GitHub fall-through, a bootstrapped one is
+// refreshed by the probe loop, and a virgin one is seeded by BootstrapFromProbe.
+func (e *Engine) refreshCacheForPoll(c *boardcache.CacheImpl) {
+	switch {
+	case c.IsPaused():
+		// Paused: FetchProjectBoard below falls through to GitHub directly.
+	case c.IsBootstrapped():
+		// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
+		// A known project ID alone is not "bootstrapped" (#2411): since #2396 the
+		// startup board fetch records it even from an empty board, and treating
+		// that as bootstrapped skipped BootstrapFromProbe for good, so every item
+		// was deep-fetched one by one as the probe discovered it. With an empty
+		// Store, BootstrapFromProbe (Store.Reset) has nothing to wipe.
+		e.setPollStep("probe and deep fetch")
+		e.runProbeAndDeepFetch(c)
+	default:
+		// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
+		probeItems, projectID, refreshErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+		if refreshErr != nil {
+			e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
+		} else if projectID != "" && len(probeItems) > 0 {
+			c.BootstrapFromProbe(probeItems, projectID)
+			e.seedTerminalFromProbeItems(probeItems)
+		} else if projectID != "" {
+			// Probe succeeded but returned 0 items — possible transient indexer hiccup.
+			// Leave cache virgin and retry on the next poll rather than bootstrapping
+			// with an empty store (which would cause every real item to be treated as
+			// "new" and deep-fetched on the next cycle).
+			e.logfThrottled("cache-bootstrap-deferred", 0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
+		}
+	}
 }

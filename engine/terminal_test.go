@@ -1453,3 +1453,58 @@ func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshCacheForPoll_KnownProjectIDOnEmptyStoreStillBootstraps is the #2411
+// regression. A daemon whose startup board fetch saw an empty board records the
+// project ID (#2396) with an empty Store. The next poll's refresh must still take
+// the virgin branch and BootstrapFromProbe — cheap, no per-item deep fetch — not
+// the bootstrapped branch, whose probe loop treats every item as newly discovered
+// and deep-fetches each one (and so never leaves a cold cache for the merge-train
+// hydration guard, #1772). Non-vacuity: with the pre-fix condition
+// (IsBootstrapped() || ProjectID() != "") this test deep-fetches both items.
+func TestRefreshCacheForPoll_KnownProjectIDOnEmptyStoreStillBootstraps(t *testing.T) {
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+	probeItems := []gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Queued", EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Queued", EffectiveUpdatedAt: probeTime},
+	}
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return probeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	// The startup board fetch saw an empty board but recorded its ID (#2396).
+	cache.NoteProjectID("PVT_1")
+	if cache.IsBootstrapped() {
+		t.Fatal("precondition: the Store must be empty")
+	}
+
+	eng.refreshCacheForPoll(cache)
+
+	if !cache.IsBootstrapped() {
+		t.Fatal("the refresh did not bootstrap the cache from the probe")
+	}
+	if deepFetchCalls != 0 {
+		t.Errorf("%d deep fetch(es) on the bootstrap poll, want 0 (BootstrapFromProbe seeds without deep-fetching)", deepFetchCalls)
+	}
+	for _, n := range []int{1, 2} {
+		if cache.IsItemDeepFetched("owner/repo", n) {
+			t.Errorf("item #%d is deep-fetched after the bootstrap poll; the merge train's cold-cache window (#1772) would never exist", n)
+		}
+	}
+}
