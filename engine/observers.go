@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +27,8 @@ const wakeChFlags = itemstate.StatusChanged |
 	itemstate.LockChanged |
 	itemstate.LinkedPRChanged |
 	itemstate.AssigneesChanged |
-	itemstate.WorkerLifecycleChanged
+	itemstate.WorkerLifecycleChanged |
+	itemstate.DependenciesInvalidatedChanged
 
 // cycleSetFlags is the subset of wakeChFlags used by newMayNeedWorkObserver to
 // populate the cycleSet (pre-filter bypass set). WorkerLifecycleChanged is
@@ -220,6 +222,44 @@ func (o *CommentBreakerObserver) OnChange(change itemstate.Change, _ itemstate.S
 		return
 	}
 	o.Store.Apply(itemstate.CommentBreakerReset{Repo: change.Repo, Number: change.Number})
+}
+
+// DependentRefreshObserver re-evaluates the items that list a blocker when that
+// blocker closes (#1995, ADR 1995, FR-007). GitHub sends no issue_dependencies
+// delivery when a blocking issue closes — only issues/closed for the blocker —
+// and PushUnblockObserver acts solely on dependents already labelled
+// fabrik:blocked whose cached BlockedBy names the blocker. This observer covers
+// the rest: any open dependent whose cached BlockedBy names the closed issue
+// gets DependenciesInvalidated (deep cache invalidated, woken, dep-blocked
+// cooldown dropped), so its next evaluation re-reads its blockers live. It uses
+// cache data only (no GitHub call) and writes no label: checkDependencies'
+// live BlockedBy read (ADR 1419) still decides. Dependents that do not list the
+// closed issue are untouched.
+type DependentRefreshObserver struct {
+	Store *itemstate.Store
+}
+
+// OnChange implements itemstate.Observer.
+func (o *DependentRefreshObserver) OnChange(change itemstate.Change, snap itemstate.Snapshot) {
+	if o.Store == nil || change.Fields&itemstate.StateChanged == 0 || !snap.IsClosed() {
+		return
+	}
+	for _, x := range o.Store.All() {
+		xState := x.State()
+		if xState.IsClosed || (xState.Repo == change.Repo && xState.Number == change.Number) {
+			continue
+		}
+		for _, dep := range xState.BlockedBy {
+			depRepo := dep.Repo
+			if depRepo == "" {
+				depRepo = xState.Repo
+			}
+			if dep.Number == change.Number && strings.EqualFold(depRepo, change.Repo) {
+				o.Store.Apply(itemstate.DependenciesInvalidated{Repo: xState.Repo, Number: xState.Number})
+				break
+			}
+		}
+	}
 }
 
 // OnChange implements itemstate.Observer.
