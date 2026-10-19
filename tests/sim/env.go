@@ -88,6 +88,11 @@ type Env struct {
 	// bisection. Empty = the synchronous driver. Set by mergeTrainEnv.
 	TrainStateDir string
 
+	// DecisionStateDir, when non-empty, persists the engine's decision state (merge-train
+	// caps, usage-limit hold; #2349) there; RestartEnv hands the same directory to the rebuilt
+	// Engine so the caps and the hold survive the restart. Set by EnableDecisionState.
+	DecisionStateDir string
+
 	// PollInterval is how far RunPoll advances Clock before each poll cycle
 	// — the engine-local mirror of R3's GitHub-anchored gates: dispatch
 	// cooldowns (itemstate.CooldownAt) are stamped as e.now()+duration, so a

@@ -25,16 +25,11 @@ import (
 //     consequence of handleUsageLimitExit's own doc comment
 //     ("StageRetryIncremented is deliberately never called").
 //
-// Neither test needs the account-wide usage-limit hold's real 1-hour fallback
-// backoff to actually elapse — activateClaudeUsageLimit/
-// claudeUsageLimitedUntilTime are anchored to real time.Now(), not the
-// injected Clock (see restart_recovery_test.go's sibling comment on the
-// same asymmetry; ADR-1449's engine-seam minimalism deliberately did not
-// extend the Clock seam to this path), so fast-forwarding it is not
-// available to this harness without a new production seam. Both scenarios
-// instead use fabrik:clear-claude-limit — the same deterministic,
-// real-time-independent lever CLAUDE.md documents as the operator escape
-// hatch for exactly this situation — to end the usage-limit hold on demand.
+// Since #2349 the usage-limit hold is anchored to the engine clock (e.now()), so the sim
+// Clock can fast-forward it (decision_state_usage_limit_test.go does). These two scenarios
+// still use fabrik:clear-claude-limit — the deterministic operator lever CLAUDE.md documents
+// — to end the hold on demand, which keeps them independent of the retry cooldown's
+// real-time component (retryCooldownPolls).
 //
 // The contrasting positive case ("a genuine repeated stage failure DOES
 // reach stage:<name>:failed/fabrik:paused at MaxRetries") is not

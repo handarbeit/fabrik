@@ -1949,6 +1949,8 @@ Both engines drain the same `Queued` column and advance their members to **Done*
 
 **Multiple base branches.** A `Queued` item carrying a `base:<branch>` label (§"Advanced: `base:<branch>` timing" below) is batched into its own train, forked from and landing onto that branch — never mixed into the default-branch batch, and never touching `main`. This lets a release-line branch (`maint/*`, `release/*`) get the same serialization and combined-validation protection the default branch does.
 
+**The train's safety caps survive a restart.** Each member's ejection count (counted against its current PR head — a new push starts it again, and a landing or a green trial breaks it), the trial-rate window behind the runaway guard, and the auto-repair attempts are saved in `.fabrik/state/engine-decisions/train-caps.json`, so restarting often cannot grant a fresh budget. Unreadable files are set aside as `*.corrupt` and the counters start from zero.
+
 **A restart resumes the train.** While a trial waits for CI the merge train holds no worker goroutine and no `max_concurrent` slot: it records the trial (and, during a bisection, how far it has got) under `.fabrik/state/merge-train/` and every poll checks that trial's CI. If you restart or upgrade Fabrik mid-trial, the same trial PR is picked up and landed when its CI goes green — and a restart mid-bisection continues with the next half rather than starting over, with the validations already spent still counting against `max_bisect_validations`. If the saved state is unreadable or no longer matches GitHub (the trial PR was closed, a member was paused or moved while Fabrik was down), it is discarded and the train re-forms as it always did. A trial that has been open longer than the CI backstop (`--ci-backstop-timeout`, 4 hours by default, counted from when the trial PR opened — there is no CI-progress signal for trial PRs) without a CI verdict is released within one poll; its CI is read first, so a trial that finished while Fabrik was down is never abandoned for age alone. Nothing to configure.
 
 **Single-member fast path.** When exactly one item is Queued for a `(repo, base)` partition, the train skips the trial entirely and lands that item's own PR directly — no trial branch, no draft CI PR, no second combined-Validate CI run — **whenever** the base branch hasn't moved since the item entered Queued, the PR is mergeable, and its own CI is already green and complete. This is the common case: Validate rebases onto base before signalling completion, so a lone Queued item is typically already up to date. If any of those conditions doesn't hold (most notably, another PR merged onto the base branch after this one entered Queued), Fabrik falls back to the ordinary trial cycle automatically — you don't need to configure anything for either path.
@@ -2168,7 +2170,12 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > it immediately without restarting the engine by applying `fabrik:clear-claude-limit` to
 > any open board item (see *Claude Usage-Limit Hold* below). Once the account-wide
 > usage-limit hold lifts, `fabrik:claude-limit` clears on every open issue that carries it, not
-> only on this one's next invocation.
+> only on this one's next invocation. The hold survives a restart or upgrade: its end
+> time is saved in `.fabrik/state/engine-decisions/usage-limit.json`, so restarting during an
+> outage dispatches nothing into the limit, keeps `fabrik:claude-limit` on the affected issues
+> and does not post the explanatory comment a second time. (If you upgrade from a version that
+> did not save the hold while issues still carry the label, Fabrik holds dispatch for up to an
+> hour from when the label was applied before sweeping it.)
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
