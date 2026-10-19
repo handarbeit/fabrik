@@ -162,9 +162,12 @@ func (e *Engine) settleStageOutcome(ctx context.Context, board *gh.ProjectBoard,
 }
 
 // countsAgainstBound reports whether a failed publication step counts against MaxRetries
-// (R4). A transport failure is an outage, not a fault of the publication, and never counts.
+// (R4). A transport failure or a rate limit (primary or secondary) is an outage, not a fault
+// of the publication, and never counts: pausing for it would discard the record and re-run
+// finished work. Both the typed gh.ErrRateLimited and the text classifier isTransientAPIError
+// are consulted, since errors from git/exec and older call sites carry only text.
 func countsAgainstBound(err error) bool {
-	return err != nil && !gh.IsTransportError(err) && !isTransientError(err)
+	return err != nil && !gh.IsTransportError(err) && !errors.Is(err, gh.ErrRateLimited) && !isTransientAPIError(err)
 }
 
 // noteOutcomeFailure records a failed attempt on rec and escalates at MaxRetries.
@@ -183,7 +186,7 @@ func (e *Engine) noteOutcomeFailure(item gh.ProjectItem, rec *stageOutcomeRecord
 		return
 	}
 	e.logf(item.Number, "outcome", "publishing the recorded outcome of stage %q failed (attempt %d, %s): %v\n",
-		rec.Stage, rec.Attempts, map[bool]string{true: "counted", false: "not counted — GitHub unreachable"}[counted], err)
+		rec.Stage, rec.Attempts, map[bool]string{true: "counted", false: "not counted — GitHub unreachable or rate limited"}[counted], err)
 	if !counted || e.cfg.MaxRetries <= 0 || rec.Attempts < e.cfg.MaxRetries {
 		return
 	}

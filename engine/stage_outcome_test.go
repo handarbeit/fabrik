@@ -162,6 +162,11 @@ func TestCountsAgainstBound(t *testing.T) {
 		{"nil", nil, false},
 		{"deadline exceeded (transport)", fmt.Errorf("executing request: %w", &net.OpError{Op: "dial", Err: errors.New("i/o timeout")}), false},
 		{"git push network failure", errors.New("fatal: unable to access: connection reset by peer"), false},
+		{"typed rate limit", fmt.Errorf("adding label: %w", &gh.RateLimitError{}), false},
+		{"REST primary rate limit text", errors.New("GitHub API returned 403: API rate limit exceeded for user ID 1"), false},
+		{"GraphQL rate limit text", errors.New("GraphQL error: API rate limit already exceeded for user ID 1"), false},
+		{"secondary rate limit text", errors.New("GitHub API returned 403: You have exceeded a secondary rate limit"), false},
+		{"429 with unknown wording", errors.New("GitHub API returned 429: slow down"), false},
 		{"permission failure", errors.New("Resource not accessible by integration"), true},
 	}
 	for _, tc := range cases {

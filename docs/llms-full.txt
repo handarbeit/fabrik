@@ -10556,8 +10556,9 @@ it refuses). Per record, in order:
    lost is not posted twice), push, draft PR/verification/linkage, mark-ready, then `handleStageComplete`.
 
 **The bound (R4).** A failed retry counts against `MaxRetries` (persisted `attempts`) unless it is a transport
-failure (`gh.IsTransportError`, or `isTransientError` for git/exec errors), which never counts — so an outage cannot
-exhaust it. At `MaxRetries` the item is paused (`fabrik:paused` + `fabrik:awaiting-input`, a comment naming the
+failure (`gh.IsTransportError`, or `isTransientError` for git/exec errors) or a GitHub rate limit (primary or
+secondary: `gh.ErrRateLimited`, or `isTransientAPIError` for text-only errors), which never counts — so an outage or
+a rate-limit episode cannot exhaust it and discard a finished outcome. At `MaxRetries` the item is paused (`fabrik:paused` + `fabrik:awaiting-input`, a comment naming the
 error and saying the stage re-runs on resume) and the record is discarded.
 
 **Forced re-runs (ADR 2394 decision 11, ADR 2378).** A recorded outcome never completes a forced Validate

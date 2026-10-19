@@ -59,8 +59,10 @@ push were lost every time.
    recoverable from the signal by the catch-up loop. An `attemptMergeOnValidate` failure keeps its
    historical effect (no label, Validate runs again) unless it is a transport error, which is an outage and
    is retried as a publication.
-7. **The bound (R4).** Each failed retry is classified: `gh.IsTransportError` or `isTransientError` never
-   counts; anything else increments `Attempts`, which is persisted so a restart cannot reset it. At
+7. **The bound (R4).** Each failed retry is classified: `gh.IsTransportError`, `isTransientError` or a
+   rate limit (`gh.ErrRateLimited`, `isTransientAPIError`: primary and secondary limits, 429) never
+   counts — a rate limit is a temporary outage, and pausing for it would discard the record and re-run finished
+   work; anything else increments `Attempts`, which is persisted so a restart cannot reset it. At
    `MaxRetries` the item is paused (`fabrik:paused` + `fabrik:awaiting-input`, one comment naming the step's
    error), the record is discarded and the comment says the stage re-runs on resume. A literal reading of R4
    ("only while the hold is engaged") would let three early transport failures exhaust the bound before the
