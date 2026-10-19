@@ -1350,6 +1350,7 @@ FABRIK_USER=my-personal-username
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
+| `--max-stage-dispatches` | Maximum number of times one stage of one item is dispatched in a single episode before the item is paused for a human (`0` = disable the bound; also `FABRIK_MAX_STAGE_DISPATCHES` / `max_stage_dispatches`). Every dispatch counts, whatever its outcome, so it also bounds a stage that completes but whose completion is never recorded — the shape `--max-retries` (failures only) and `max_turns` (one invocation) cannot see. A negative or non-integer value is refused at startup — see the "stage dispatch limit reached" troubleshooting note below | `25` |
 | `--max-resume-failures` | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts the next invocation instead of resuming (0 = use default of 2; also `FABRIK_MAX_RESUME_FAILURES`). Independent of `--max-retries` — a resume failure never consumes a retry slot, so the guaranteed cold-start attempt can't be starved by the failures it exists to recover from. See the "Resume failures" troubleshooting note below | `0` (2 failures) |
 | `--max-tools-denied-retries` | Maximum number of consecutive tool-permission-denial exits per stage before pausing (0 = use default of 3; also `FABRIK_MAX_TOOLS_DENIED_RETRIES`). Independent of `--max-retries` — a permission misconfiguration is not a stage failure, so it never consumes a retry slot. See the "Tool permission denied" troubleshooting note below | `0` (3 denials) |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
@@ -1434,6 +1435,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions for stage work. When every slot is busy, further dispatchable items are deferred (one `deferred dispatch` log line per poll) and picked up as slots free; the poll itself never waits. With `merge_train: on` the merge train has one extra reserved slot on top of it (it never takes stage work's slots while the reserved one is free), so the host can run `max_concurrent + 1` Claude processes | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
+| `FABRIK_MAX_STAGE_DISPATCHES` | `max_stage_dispatches` | Maximum dispatches of one stage of one item per episode before pausing with `fabrik:paused` + `fabrik:awaiting-input` (non-negative integer; `0` disables the bound; a negative or non-integer value is refused at startup, not defaulted). See `--max-stage-dispatches`. | `25` |
 | `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
 | `FABRIK_MAX_TOOLS_DENIED_RETRIES` | *(no config.yaml key)* | Maximum number of consecutive tool-permission-denial exits per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Independent of `max_retries` — see `--max-tools-denied-retries`. | `3` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
@@ -2217,6 +2219,37 @@ to resume it.
 > reset the slice counter — it is already at the limit, so the very next
 > turn-cap exit re-pauses immediately unless the underlying job size or turn
 > budget actually changes. See #1199 and #1191.
+
+> **Troubleshooting: an issue is paused with a "stage dispatch limit reached"
+> comment.** `--max-retries` counts failed runs and `max_turns` bounds one
+> invocation, so a stage whose every run ends in apparent success — it completes,
+> but its completion is never recorded on the issue (for example the
+> `stage:<name>:complete` label cannot be written) — is dispatched again on the
+> next poll, for ever, resuming an ever-growing session each time. Fabrik counts
+> every dispatch of one stage of one item in the current episode and, at
+> `--max-stage-dispatches` (default 25; `0` disables), pauses the item with
+> `fabrik:paused` + `fabrik:awaiting-input`. The comment names the stage, the
+> count and the outcomes of the last five dispatches; "complete (completion not
+> recorded)" means the run finished but nothing durable was left behind, so
+> repeating it cannot help — look for the failing label or board write in the
+> engine log. The count persists across a restart (including a self-upgrade). It
+> starts again from zero when the stage's completion is recorded, the item
+> changes column, or you resume the item — reply with a comment or remove the
+> pause labels. A stage that is legitimately re-dispatched many times (turn-cap
+> slices, up to `--max-slice-retries`, plus retries) stays below the default.
+>
+> Separately, a re-dispatch after a run that ended with `FABRIK_STAGE_COMPLETE`
+> (so the completion was not recorded) whose inputs are unchanged since the
+> previous run (same head commit, issue body and comments, ignoring Fabrik's own
+> comments) does
+> not resume a saved session whose measured context is above the stage's
+> `resume_threshold_tokens` (default 250000): it starts a fresh session instead,
+> so the context carried into a looping stage does not grow with the run count.
+> This applies under every `resume_session` mode; a session whose last run was
+> cut short (a turn-cap or wall-time slice) is a continuation and still resumes.
+> The log line is `fresh session (unchanged
+> re-dispatch, saved session <N>k > threshold <T>k)`. See #2395 (mentioned for
+> context: #2388).
 
 > **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
 > prior invocation.** A `--resume` invocation resumes the same session every

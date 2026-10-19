@@ -713,6 +713,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 	}
 
+	// Per-episode dispatch bound (#2395): before the lock is taken, so a stage is
+	// never dispatched more than max_stage_dispatches times without a human.
+	if e.dispatchLimitReached(item, stage) {
+		return nil
+	}
+
 	// Bail early if context was cancelled before starting new work.
 	select {
 	case <-ctx.Done():
@@ -897,7 +903,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Decide whether this run resumes the stage's saved session (ADR 2300). It is
 	// computed here so a fresh re-entry also gets the stage's own previous output
 	// as context (R4), and logged just before the invoke below.
-	sessDecision := e.decideSessionResume(item, stage, sessionStageDispatch, !lastAttempt.IsZero())
+	//
+	// stageInputs fingerprints what this run will see, so an unchanged re-dispatch
+	// of an oversized session starts fresh (#2395); dispatching this stage also
+	// ends any other stage's episode (the column-change reset).
+	runInputs := computeStageInputs(item, workDir)
+	e.clearOtherStageDispatches(item, stage.Name)
+	sessDecision := e.decideSessionResumeWith(item, stage, sessionStageDispatch, !lastAttempt.IsZero(), &runInputs)
 
 	// Write context files after any stash so they are present for Claude but
 	// not captured in the stash. Errors are non-fatal.
@@ -980,6 +992,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		release:         releaseLock,
 		stashed:         stashed,
 		workerStartedAt: workerStartedAt,
+		inputs:          runInputs,
 	})
 
 	return nil
@@ -1023,6 +1036,8 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 			e.logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
 		}
 	}
+
+	e.removeStageDispatches(item)
 
 	e.addLabel(item, completeLabel)
 
@@ -1343,6 +1358,7 @@ type stageOutcomeParams struct {
 	release         func()
 	stashed         bool
 	workerStartedAt time.Time
+	inputs          stageInputs // what the run saw, recorded with the dispatch (#2395)
 }
 
 // finalizeStageOutcome runs everything that happens after a Claude invocation
@@ -1805,6 +1821,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// run of this stage resumes it whatever resume_session says — also after
 		// a restart, which the in-memory LastAttemptAt cannot promise.
 		e.markSessionClosed(item, stage.Name, completed)
+		// Count the dispatch whatever its outcome (#2395). Durable completion, not
+		// this branch, resets the count.
+		e.recordStageDispatch(item, stage.Name, stageDispatchOutcome(completed, err == nil && CheckBlockedOnInput(output), isTimeSlice(err, turnLimited), err), p.inputs)
 	}
 
 	// Warn the user when Claude ran without error but produced no output at all.
@@ -2445,6 +2464,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.markSessionReset(item, stage.Name)
+	e.resetStageDispatches(item, stage.Name)
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 
 	// Circuit breaker (#1089): a manual unpause is "a human investigated and is
@@ -2523,6 +2543,7 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.markSessionReset(item, "Validate")
+	e.resetStageDispatches(item, "Validate")
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	// Circuit breaker (#1089, #1575): reset together with the cycle counters,
 	// on the success side of the deferral returns above (as clearFailedStage).
@@ -2594,6 +2615,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.markSessionReset(item, "Validate")
+	e.resetStageDispatches(item, "Validate")
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	// Circuit breaker (#1089, #1575): every resume path clears both breakers
 	// together; this sits after the hasError return so a deferred attempt
@@ -2675,6 +2697,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.markSessionReset(item, stage.Name)
+	e.resetStageDispatches(item, stage.Name)
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 

@@ -203,6 +203,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		}
 		alreadyAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
 		awaitingCIArmed := alreadyAwaitingCI
+		// awaiting-ci is this stage's durable completion state (#2395): only once it
+		// stands does the dispatch count of the episode end.
+		completionDurable := alreadyAwaitingCI
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
@@ -215,8 +218,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
 				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
+				completionDurable = true
 				e.setStatusLine(item, statusLineAwaitingCI(item.LinkedPRNumber)) // display-only (#2048)
 			}
+		}
+		if completionDurable {
+			e.resetStageDispatches(item, stage.Name)
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
 		// Path 2 (checkReviewGate in the catch-up loop) handles the review gate
@@ -238,6 +245,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	} else {
+		// The completion is durable: the dispatch count of the episode ends (#2395).
+		e.resetStageDispatches(item, stage.Name)
 		if c := e.cache(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 		}
@@ -772,6 +781,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 				e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 			} else {
+				e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
 				if c := e.cache(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 				}
@@ -787,6 +797,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {
 			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
+			e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
 			if c := e.cache(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-done")
 			}

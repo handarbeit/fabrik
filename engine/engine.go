@@ -69,6 +69,7 @@ type Config struct {
 	MaxBatchSize               int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations       int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
 	MaxTrainRebaseCycles       int                 // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
+	MaxStageDispatches         int                 // Max dispatches of one stage of one item per episode before pausing (0 = disabled; cmd applies the default of 25; #2395, ADR 2395)
 	MaxTrainAutoRepairAttempts int                 // Red-singleton auto-repair attempts per member per base SHA (0 = disabled, pause as before; cmd applies the default of 1; #2045, ADR-2045)
 	MaxTrainTrialsPerWindow    int                 // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
 	TrainTrialWindowDuration   time.Duration       // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
@@ -340,6 +341,8 @@ type Engine struct {
 	stageFirstRoutingOff                  atomic.Bool                               // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                               // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                               // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
+	stageDispatchCapOff                   atomic.Bool                               // test seam: SetStageDispatchCapDisabledForTest (#2395) — the per-episode dispatch bound never pauses
+	unchangedInputExemptionOff            atomic.Bool                               // test seam: SetUnchangedInputExemptionDisabledForTest (#2395) — an unchanged re-dispatch is decided by the #2300 rule alone
 	sessionRootForTest                    atomic.Pointer[string]                    // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
