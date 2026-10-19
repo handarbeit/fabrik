@@ -106,7 +106,6 @@ func (e *captureEnv) reset() {
 	e.mu.Unlock()
 }
 
-
 // ---- wire pins: the fields each handler reads ----
 
 func TestCapturedPayloadsDecodeThroughTheHandlerStructs(t *testing.T) {
