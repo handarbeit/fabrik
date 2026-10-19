@@ -67,6 +67,13 @@ newer fact.
    stamped the Store's `blockedBy` record such as the #1995 webhook). An already-blocked item is always re-read
    (ADR 1419). Cleanup-stage items are never read.
 
+**`livePRMerged` and an unlinked Store.** A confirmed merge is applied only when the Store already
+records a linked PR with that number. With no linked PR recorded it is returned to the caller but not
+written: the helper's callers include landing verification, whose PR is the merge-train's credited
+integration PR, not the item's own, so inventing a linkage from a bare number could attach the wrong PR.
+The linkage is recorded by the first linked-PR write (the cache's `FetchLinkedPR`, a deep fetch or a
+probe), after which the next confirmation applies. A known, narrow limit.
+
 **Ordering of the new reads.** `PRReviewsRead` is judged by the shifted authority time (fetch start
 minus the grace), as ADR 2348 specifies for a PR read, both for the whole-list check and per author:
 a webhook review is stamped at whole-second resolution (and read replicas lag), so a review submitted

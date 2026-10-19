@@ -160,6 +160,13 @@ func (e *Engine) liveItem(item *gh.ProjectItem) error {
 // the Store (State and Merged only, never Title or Draft) when the PR is the
 // item's linked PR; "not merged" is never applied, because the single-PR read
 // says nothing about a PR the list endpoint has not caught up with.
+//
+// The apply deliberately needs a recorded linked PR with that number. A Store with
+// no linked PR yet is not given one here: callers pass PRs that are not always the
+// item's own (landing verification checks the merge-train's credited integration PR),
+// so creating a linkage from a bare number could attach the wrong PR to the item.
+// The first linked-PR write (the cache's FetchLinkedPR, a deep fetch, a probe)
+// records the linkage; the answer is still returned to the caller either way.
 func (e *Engine) livePRMerged(owner, repo string, issueNumber, prNumber int) (bool, error) {
 	start := time.Now()
 	merged, err := e.client.FetchPRMerged(owner, repo, prNumber)

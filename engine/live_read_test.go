@@ -147,6 +147,22 @@ func TestLivePRMerged_NotMergedAndOtherPRsApplyNothing(t *testing.T) {
 	}
 }
 
+// With no linked PR recorded the confirmed merge is returned but no linkage is
+// invented from the bare PR number (landing verification passes a credited
+// integration PR that is not the item's own).
+func TestLivePRMerged_NoRecordedLinkedPRIsNotInvented(t *testing.T) {
+	client := &mockGitHubClient{fetchPRMergedFn: func(string, string, int) (bool, error) { return true, nil }}
+	eng := testEngineForMerge(t, client)
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 1, Status: "Validate"}})
+	got, err := eng.livePRMerged("owner", "repo", 1, 10)
+	if err != nil || !got {
+		t.Fatalf("merged = %v, err = %v; want the merged answer returned", got, err)
+	}
+	if snap, _ := eng.store.Peek("owner/repo", 1); snap.LinkedPR() != nil {
+		t.Fatalf("a linkage was invented from a bare PR number: %+v", snap.LinkedPR())
+	}
+}
+
 func TestLiveReviews_AppliesBothHalvesAndAPartialReadAppliesNothing(t *testing.T) {
 	failRequests := false
 	client := &mockGitHubClient{
