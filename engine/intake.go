@@ -422,7 +422,7 @@ type keyPayload struct {
 	CheckSuite  *keyCheck             `json:"check_suite"`
 	// BlockedIssue is the issue_dependencies payload's blocked side (#1995).
 	BlockedIssue *struct{ Number int } `json:"blocked_issue"`
-	ProjectItem *struct {
+	ProjectItem  *struct {
 		NodeID string `json:"node_id"`
 	} `json:"projects_v2_item"`
 }
