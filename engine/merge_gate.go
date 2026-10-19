@@ -353,7 +353,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			merged = true
 		}
 		if !merged && pr.State == "closed" {
-			if m, mErr := e.client.FetchPRMerged(owner, repo, pr.Number); mErr == nil {
+			if m, mErr := e.livePRMerged(owner, repo, item.Number, pr.Number); mErr == nil {
 				merged = m
 			}
 		}
@@ -776,7 +776,7 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 	}
 
 	// (1) Merged-first re-confirmation at the mutation point (#913 trap).
-	merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+	merged, mErr := e.livePRMerged(owner, repo, item.Number, pr.Number)
 	if mErr != nil {
 		e.logf(item.Number, "auto-merge", "could not confirm merged-state of PR #%d before re-enqueue: %v — waiting\n", pr.Number, mErr)
 		return

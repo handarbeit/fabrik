@@ -46,9 +46,10 @@ type priorEntry struct {
 }
 
 // unattributed reports whether a change of this origin was seen only by polling
-// (a reconcile, deep fetch or probe), so no known write or webhook backs it.
+// (a reconcile, deep fetch, probe or a gate's live read, #2350), so no known write
+// or webhook backs it.
 func unattributed(o itemstate.ChangeOrigin) bool {
-	return o == itemstate.OriginOther || o == itemstate.OriginProbe
+	return o == itemstate.OriginOther || o == itemstate.OriginProbe || o == itemstate.OriginLiveRead
 }
 
 // observeLedger records the item's state as just observed.

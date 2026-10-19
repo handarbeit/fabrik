@@ -247,6 +247,7 @@ func TestHandleReviewGate_NoOpReinvoke_LeavesCycleCounterUnchanged(t *testing.T)
 			{Author: "copilot-pull-request-reviewer", State: "COMMENTED", Body: "## Pull request overview\n\nLGTM.", DatabaseID: 1001},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	advancedItems := make(map[string]bool)
 	pctx := &phase1Ctx{
 		ctx:           context.Background(),
@@ -351,6 +352,7 @@ func TestHandleReviewGate_FiveNoOpReinvokes_DoNotExhaustBudget_SixthGenuineFindi
 	dispatchRound := func(review gh.PRReview) {
 		item := baseItem
 		item.LinkedPRReviews = []gh.PRReview{review}
+		remirrorLiveReviews(client, item)
 		advancedItems := make(map[string]bool)
 		pctx := &phase1Ctx{
 			ctx:           context.Background(),
@@ -500,6 +502,7 @@ func TestHandleReviewGate_BlockedNoOpReinvokes_ReachCycleLimitViaReviewBlockedCy
 	dispatchRound := func(review gh.PRReview) bool {
 		item := baseItem
 		item.LinkedPRReviews = []gh.PRReview{review}
+		remirrorLiveReviews(client, item)
 		advancedItems := make(map[string]bool)
 		pctx := &phase1Ctx{
 			ctx:           context.Background(),

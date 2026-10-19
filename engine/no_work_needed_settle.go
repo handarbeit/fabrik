@@ -221,7 +221,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			e.recordNoWorkNeededRetry(item)
 			return
 		}
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		e.logf(item.Number, "done", "closed issue (no work needed)\n")

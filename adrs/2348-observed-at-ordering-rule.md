@@ -43,6 +43,8 @@ This had to land before a second webhook source (#2143), and #2383 made real `pr
 - Review lists change shape (one entry per author, sorted by author); the review gate, feedback gate and `reviewerVerdicts` were checked against it.
 - Neutralisation seam: `Store.SetObservedOrderingDisabledForTest` (and `Engine.SetObservedOrderingDisabledForTest`). Sim twins `tests/sim/webhook_ordering_test.go` run with and without it; live case `TestWebhookChangeSurvivesReconcile`.
 
+- ADR 2350 amendment: the new live reads follow this rule (`PRReviewsRead` by the shifted authority time, per author), with one deviation: `LinkedPRStateObserved`, a single-PR GET that applies only `merged=true`, is judged by the raw request start (a merge is monotonic and the GET does not lag) while still recording the shifted baseline.
+
 ## Not changed
 
 Dispatch, gate and landing decisions; what the board query, the probe or the webhook handlers fetch beyond carrying observation times; persistence of the records across restarts (the first listing re-baselines every fact); a second webhook source (#2143), which needs only to supply observation times.

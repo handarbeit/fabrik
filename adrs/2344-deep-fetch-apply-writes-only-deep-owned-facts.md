@@ -36,4 +36,5 @@ Separately, `copyDeepFieldsFromState` and `snapshotToProjectItem` omitted the th
 - A live deep fetch no longer reverts an engine label or close recorded inside the grace window of its start.
 - The "left the merge queue" edge (`priorInQueue`) now fires correctly on cache-served polls; before, it was silently lost.
 - The dispatch handlers still run on the poll-start `board.Items[i]` copy, which can hold the old Status (audit §3.1). This ADR fixes what the Store holds, not that copy.
+  *Amended by ADR 2350:* the dispatch decision (and the item `processItem` receives) is now re-read from the Store immediately before dispatch (`refreshDispatchItem`); the Phase 1/2 handlers still run on the poll-start copy.
 - The pre-#2344 apply remains behind `Store.SetLegacyDeepFetchApplyForTest` / `Engine.SetLegacyDeepFetchApplyForTest` so the tests can show they are not vacuous.

@@ -91,7 +91,7 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 		return
 	}
 
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
 	if itemOnDefaultBase(item) {

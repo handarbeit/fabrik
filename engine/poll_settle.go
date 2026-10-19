@@ -44,6 +44,7 @@ func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard) {
 		// already-working "Done move succeeded, only CloseIssue failed" sub-case.
 		if item.Status != "Done" {
 			repo := itemOwnerRepoString(item, e.defaultRepo())
+			// live-read-audited: board-cache-backed deep fetch, applied by applyDeepFetched right after
 			if err := e.readClient.FetchItemDetails(&item); err != nil {
 				e.logf(item.Number, "warn", "no-work-needed settle: could not deep-fetch item details: %v — will retry next poll\n", err)
 				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: item.Number, At: time.Now()})
@@ -77,14 +78,14 @@ func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
 				res.Cancel()
 				if errors.Is(rerr, gh.ErrNotFound) {
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 					}
 				} else {
 					e.logf(item.Number, "warn", "revalidate: could not remove label from non-Validate issue: %v\n", rerr)
 				}
 			} else {
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 				}
 			}

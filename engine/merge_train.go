@@ -1833,6 +1833,7 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 
 	var contradictions []string
 	for _, m := range members {
+		// live-read-audited: batch-member labels at formation; the train avoids Store-sourced member state (ADR 1208, 1773)
 		labels, err := e.client.FetchLabels(owner, repo, m.item.Number)
 		if err != nil {
 			contradictions = append(contradictions, fmt.Sprintf("#%d (label read failed: %v)", m.item.Number, err))
@@ -3682,7 +3683,7 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 		pausedRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:paused")
 		}
 	}
@@ -3691,7 +3692,7 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 		inputRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
 		}
 	}

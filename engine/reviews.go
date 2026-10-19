@@ -188,19 +188,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// snapshot, indexing lag, or GitHub not creating it at all (#1962).
 	var fetchFailed bool
 	if prNumber > 0 && (itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) {
-		restReviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
-		restRequests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-		fetchFailed = reviewsErr != nil || requestsErr != nil
+		restReviews, restRequests, readErr := e.liveReviews(owner, repo, item.Number, prNumber)
+		fetchFailed = readErr != nil
 		if fetchFailed {
 			// Conservative: treat a partial failure as no-data rather than trusting
 			// whichever call succeeded — a false len(outstanding)==0 read could
 			// falsely clear the gate while real outstanding reviewers are unknown.
-			if reviewsErr != nil {
-				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviews failed: %v\n", reviewsErr)
-			}
-			if requestsErr != nil {
-				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewRequests failed: %v\n", requestsErr)
-			}
+			e.logf(item.Number, "warn", "checkReviewGate: live review read failed: %v\n", readErr)
 			reviewRequests, reviews = nil, nil
 		} else {
 			reviewRequests, reviews = restRequests, restReviews
@@ -208,6 +202,36 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	outstanding, hasReviews := reviewGateOutstanding(reviewRequests, reviews)
+
+	// Confirm before clearing (#2350, R3/FR-007/FR-008). The cached review data of
+	// the poll-start copy cannot see a reviewer requested after the cache filled
+	// (a review request bumps no timestamp the freshness rule compares), so a gate
+	// that is about to clear on it first reads the requests and reviews live —
+	// the same read the landing gate makes — applies them to the Store and decides
+	// on that read alone, never on a union with the cached copy: a review dismissed
+	// or removed on GitHub no longer counts, so the advance and the landing gate
+	// agree on identical PR state (FR-007). A gate that holds needs no confirmation (a hold is always safe), and
+	// a read made within liveFreshFor is not repeated: the Store's applied view is
+	// used instead, so an item waiting for a human to advance does not pay a read
+	// per poll. A failed read leaves the cached verdict, as before.
+	if !fetchFailed && !e.reviewConfirmLiveOff.Load() && prNumber > 0 && !(itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) &&
+		e.reviewGateWouldClear(item, stage, outstanding, hasReviews) {
+		repoKey := owner + "/" + repo
+		// A fresh stamp is trusted only if the Store still holds the item's review
+		// state for this PR (the item may have been evicted or its linked PR may
+		// have changed since the stamp); otherwise the gate confirms live, so the
+		// "confirm before clearing" guarantee never silently falls back to the cache.
+		storeReviews, storeRequests, storeOK := e.storeReviewState(repoKey, item.Number, prNumber)
+		if storeOK && e.liveReviewsFresh(repoKey, item.Number) {
+			reviews, reviewRequests = storeReviews, storeRequests
+			outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
+		} else if lr, lq, err := e.liveReviews(owner, repo, item.Number, prNumber); err != nil {
+			e.logf(item.Number, "warn", "checkReviewGate: live confirmation read failed: %v — deciding on the cached review data\n", err)
+		} else {
+			reviews, reviewRequests = lr, lq
+			outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
+		}
+	}
 
 	// FR-2 fast path: nothing requested, nothing reviewed yet, and the stage
 	// explicitly declared expected_reviewers: [] (no unrequested reviewer is
@@ -856,19 +880,17 @@ func (e *Engine) reviewGateHold(item gh.ProjectItem, stage *stages.Stage, owner,
 		prNumber = pr.Number
 	}
 
-	reviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
-	requests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-	fetchFailed := reviewsErr != nil || requestsErr != nil
+	// The landing gate reads reviews and requests live through the shared helper
+	// (#2350, R3): the read is applied to the Store, and the advance gate
+	// (checkReviewGate) confirms against the same read before it clears, so the
+	// two cannot disagree on identical PR state.
+	reviews, requests, readErr := e.liveReviews(owner, repo, item.Number, prNumber)
+	fetchFailed := readErr != nil
 	if fetchFailed {
-		// Conservative: treat a partial failure as no-data rather than trusting
+		// Conservative: treat a failed read as no-data rather than trusting
 		// whichever call succeeded — a false len(outstanding)==0 read could clear
 		// the gate while real outstanding reviewers are unknown.
-		if reviewsErr != nil {
-			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviews failed: %v\n", reviewsErr)
-		}
-		if requestsErr != nil {
-			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewRequests failed: %v\n", requestsErr)
-		}
+		e.logf(item.Number, "warn", "reviewGateBlocksLanding: live review read failed: %v\n", readErr)
 		reviews, requests = nil, nil
 	}
 
@@ -1381,6 +1403,7 @@ func (e *Engine) resolveReviewsForFeedbackChecked(item gh.ProjectItem) ([]gh.PRR
 			}
 			prNumber = pr.Number
 		}
+		// live-read-audited: feedback-body review read: builds comments, not a gate verdict
 		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		if err != nil {
 			return nil, fmt.Errorf("FetchPRReviews failed: %w", err)
@@ -1620,6 +1643,7 @@ func (e *Engine) resolvedReviewData(item gh.ProjectItem) (prNumber int, reviews 
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
 			prNumber = pr.Number
+			// live-read-audited: feedback-body review read: builds comments, not a gate verdict
 			if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 				reviews = restReviews
 			}
@@ -1749,6 +1773,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			if prNumber == 0 {
 				if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
 					prNumber = pr.Number
+					// live-read-audited: timeout-message review read: builds wording, not a gate verdict
 					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 						reviews = restReviews
 						_, hasReviews = reviewGateOutstanding(nil, reviews)
@@ -2128,3 +2153,31 @@ func declaredReviewersOutstanding(declared []string, reviews []gh.PRReview) []st
 func reviewDataRidesMissingLink(item gh.ProjectItem) bool {
 	return item.LinkedPRNumber == 0 && len(item.LinkedPRReviews) == 0 && len(item.LinkedPRReviewRequests) == 0
 }
+
+// reviewGateWouldClear reports whether the review data in hand would clear the
+// advance gate: the FR-2 fast path, or every requested reviewer responded with at
+// least one review. It is the condition checkReviewGate confirms live (#2350).
+func (e *Engine) reviewGateWouldClear(item gh.ProjectItem, stage *stages.Stage, outstanding []string, hasReviews bool) bool {
+	if len(outstanding) == 0 && hasReviews {
+		return true
+	}
+	return reviewGateFastAdvance(outstanding, hasReviews, e.effectiveExpectedReviewers(item, stage))
+}
+
+// storeReviewState returns the reviews and review requests the Store holds for
+// the item's linked PR, when it holds that PR.
+func (e *Engine) storeReviewState(repoKey string, issueNumber, prNumber int) ([]gh.PRReview, []gh.ReviewRequest, bool) {
+	snap, ok := e.store.Peek(repoKey, issueNumber)
+	if !ok {
+		return nil, nil, false
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil || lpr.Number != prNumber {
+		return nil, nil, false
+	}
+	return lpr.Reviews, lpr.ReviewRequests, true
+}
+
+// SetReviewConfirmLiveDisabledForTest restores the pre-#2350 advance gate, which
+// decides on the cached review data alone. Test seam only (tests/sim, engine).
+func (e *Engine) SetReviewConfirmLiveDisabledForTest(off bool) { e.reviewConfirmLiveOff.Store(off) }

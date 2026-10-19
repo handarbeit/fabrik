@@ -189,6 +189,7 @@ func (e *Engine) catchUpBusyReason(p trialParams, m trainMember) string {
 			return "a stage session is in flight on the member"
 		}
 	}
+	// live-read-audited: singleton catch-up ownership check on a batch member (ADR 2044)
 	labels, err := e.client.FetchLabels(p.owner, p.repo, m.item.Number)
 	if err != nil {
 		return fmt.Sprintf("could not read the member's labels: %v", err)

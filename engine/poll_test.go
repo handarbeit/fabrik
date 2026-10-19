@@ -1362,7 +1362,7 @@ func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 		},
 	}
 	fixedTime := time.Now().Add(-time.Hour)
-	var deepFetched bool
+	var deepFetched atomic.Bool
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -1374,7 +1374,7 @@ func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 				}},
 			}, nil
 		},
-		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched.Store(true); return nil },
 	}
 	eng := NewWithDeps(Config{
 		Owner:         "owner",
@@ -1393,7 +1393,7 @@ func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if deepFetched {
+	if deepFetched.Load() {
 		t.Error("expected item not to be deep-fetched for wait_for_ci stage with only stage:complete (post-CI-clear state)")
 	}
 }
@@ -1413,7 +1413,7 @@ func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 		},
 	}
 	fixedTime := time.Now().Add(-time.Hour)
-	var deepFetched bool
+	var deepFetched atomic.Bool
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -1425,7 +1425,7 @@ func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 				}},
 			}, nil
 		},
-		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched.Store(true); return nil },
 	}
 	eng := NewWithDeps(Config{
 		Owner:         "owner",
@@ -1443,7 +1443,7 @@ func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if deepFetched {
+	if deepFetched.Load() {
 		t.Error("expected item not to be deep-fetched for non-wait_for_ci stage with only stage:complete")
 	}
 }

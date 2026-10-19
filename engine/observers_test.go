@@ -598,6 +598,25 @@ func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.
 	}
 }
 
+// A gate's own live read never wakes the poll loop (#2350) but the item is still
+// admitted to the cycleSet, so it is evaluated once more on the next poll.
+func TestLiveReadOrigin_NoWakeButCycleSetAdmission(t *testing.T) {
+	wakeCh := make(chan struct{}, 4)
+	var mu sync.Mutex
+	set := map[string]bool{}
+	flags := itemstate.CommentsChanged | itemstate.LabelsChanged
+	ch := itemstate.Change{Repo: "o/r", Number: 1, Fields: flags, Origin: itemstate.OriginLiveRead}
+
+	newWakeChObserver(wakeCh).OnChange(ch, itemstate.Snapshot{})
+	if len(wakeCh) != 0 {
+		t.Fatal("a live-read change woke the poll loop")
+	}
+	newMayNeedWorkObserver(&mu, &set).OnChange(ch, itemstate.Snapshot{})
+	if !set["o/r#1"] {
+		t.Fatal("a live-read change must still admit the item to the cycleSet")
+	}
+}
+
 // TestWakeChObserver_IgnoresProbeOrigin (#2080 R3): the probe loop's own writes
 // never wake the poll loop, while the same flags from any other origin do.
 func TestWakeChObserver_IgnoresProbeOrigin(t *testing.T) {

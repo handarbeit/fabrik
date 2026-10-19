@@ -811,13 +811,15 @@ func TestProcessItem_PRCreationFailed_SkipsClaudeOnRetry(t *testing.T) {
 	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
 
 	// FetchLinkedPR fails on first processItem, succeeds on second. The first
-	// processItem reads it twice: the merged-PR pre-push check (#2299, fails open)
-	// and then PR creation.
+	// processItem reads it three times: the live item read of the dependency
+	// decision point (#2350; the mock's FetchItemDetails backfills the PR head
+	// from it), the merged-PR pre-push check (#2299, fails open) and then PR
+	// creation.
 	var fetchCalls int
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			fetchCalls++
-			if fetchCalls <= 2 {
+			if fetchCalls <= 3 {
 				return nil, errors.New("GitHub API returned 422: validation failed")
 			}
 			return &gh.PRDetails{Number: 77, State: "open"}, nil

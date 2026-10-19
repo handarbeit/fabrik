@@ -46,10 +46,14 @@ const cycleSetFlags = wakeChFlags &^ itemstate.WorkerLifecycleChanged
 // Changes with OriginProbe (the per-poll board probe loop's own writes, #2080)
 // never wake: the probe runs at the start of the poll that dispatches, so its
 // writes are already seen by that poll and a wake would only schedule a
-// redundant early one. Webhook, worker and REST writes are untagged and wake.
+// redundant early one. Changes with OriginLiveRead (a gate applying its own live
+// read inside the poll, #2350) likewise never wake (the read is already part of the
+// decision being made), but they are still added to the cycleSet by
+// newMayNeedWorkObserver, so the item is evaluated once more on the next poll.
+// Webhook, worker and REST writes are untagged and wake.
 func newWakeChObserver(wakeCh chan struct{}) itemstate.Observer {
 	return itemstate.ObserverFunc(func(change itemstate.Change, _ itemstate.Snapshot) {
-		if change.Fields&wakeChFlags == 0 || change.Origin == itemstate.OriginProbe {
+		if change.Fields&wakeChFlags == 0 || change.Origin == itemstate.OriginProbe || change.Origin == itemstate.OriginLiveRead {
 			return
 		}
 		select {

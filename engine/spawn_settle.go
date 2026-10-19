@@ -113,7 +113,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 			res.Cancel()
 			e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
 		} else {
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: comment, Author: e.selfLogin(),
 				})
@@ -145,6 +145,7 @@ func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo stri
 // already completed by the time this is called and must not be affected by
 // this function's outcome.
 func (e *Engine) notifyParentOfStalledChild(childOwner, childRepo string, childItem gh.ProjectItem) {
+	// live-read-audited: reads only the child body to recover the parent link; no Store-held fact is decided from it
 	if err := e.readClient.FetchItemDetails(&childItem); err != nil {
 		e.logf(childItem.Number, "warn", "could not fetch child body to notify parent: %v\n", err)
 		return

@@ -505,3 +505,17 @@ func copyPRFacts(f PRFacts, v CIVerdictRecord) (PRFacts, CIVerdictRecord) {
 	v.Failing = copyStrings(v.Failing)
 	return f, v
 }
+
+// ObservedAt returns the authority time of the last applied observation of a
+// fact ("blockedBy", "labels", "linkedpr", "reviews", ...), or zero when none
+// is recorded (#2350). The later of the engine-write and observed records.
+func (s Snapshot) ObservedAt(fact string) time.Time {
+	return recordedAt(&s.state, fact)
+}
+
+// LastDeepFetchAt returns when a deep fetch was last applied, zero if never.
+func (s Snapshot) LastDeepFetchAt() time.Time { return s.state.LastDeepFetchAt }
+
+// LabelsKnown reports whether the Store holds a label set for the item (a
+// populated one, as opposed to a probe-seeded record that carries none).
+func (s Snapshot) LabelsKnown() bool { return s.state.LabelsKnown }

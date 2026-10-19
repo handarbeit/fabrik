@@ -83,7 +83,7 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 // callers pass the result to pausedOrUnread and fail closed.
 func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) (live bool) {
 	owner, repo := itemOwnerRepo(*item, e.defaultRepo())
-	freshLabels, err := e.client.FetchLabels(owner, repo, item.Number)
+	freshLabels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "refreshAutonomyLabels: could not re-fetch labels for %s/%s#%d: %v\n", owner, repo, item.Number, err)
 		return false
@@ -137,7 +137,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			unlabelEcho.Cancel()
 			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 		} else if err == nil {
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
 			}
 		} else {
@@ -233,7 +233,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				completionErr = fmt.Errorf("adding fabrik:awaiting-ci: %w", err)
 			} else {
 				awaitingCIArmed = true
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-ci")
 				}
 				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
@@ -269,7 +269,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	} else {
 		// The completion is durable: the dispatch count of the episode ends (#2395).
 		e.resetStageDispatches(item, stage.Name)
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 		}
 		if stage.Name == "Validate" {
@@ -360,7 +360,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					labelEcho.Cancel()
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
 				} else {
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-review")
 					}
 					e.recordLabelAppliedAtNow(item, "fabrik:awaiting-review")
@@ -456,17 +456,21 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// window guard 1 below already re-fetches live data in.
 	fresh := item
 	liveRead := true
-	if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+	if ferr := e.liveItem(&fresh); ferr != nil {
 		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
 		liveRead = false
 	} else {
-		item = fresh
+		item = e.overlayStoreFacts(fresh)
 		// Second pause check (#2341), against the labels the re-read just returned.
 		if e.refuseIfPaused(item, "landing") {
 			return false, true, nil
 		}
 	}
-	if e.checkDependencies(board, item, stage) {
+	depMode := depAlreadyLive
+	if !liveRead {
+		depMode = depCacheOnly // the re-read just failed; do not repeat it
+	}
+	if e.checkDependenciesMode(board, item, stage, depMode) {
 		e.logf(item.Number, "yolo-merge-guard", "not merging: dependencies are open (live re-check)\n")
 		return false, false, nil
 	}
@@ -648,7 +652,7 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		// immediately before the point of no return, instead of trusting the
 		// stale snapshot guard 1 already checked.
 		fresh := item
-		if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+		if ferr := e.liveItem(&fresh); ferr != nil {
 			return false, false, fmt.Errorf("direct-merge fallback: live re-read of review threads for PR #%d: %w", pr.Number, ferr)
 		}
 		// Pause guard (#2341): the last live read before the irreversible merge.
@@ -688,7 +692,7 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 			labelEcho.Cancel()
 			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 		} else {
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
 			}
 			e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
@@ -703,7 +707,7 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
 		}
 		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
@@ -760,7 +764,7 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			// Use the resolved owner/repo (not item.Repo, which may be empty when it
 			// defaults to the default repo) so the cache key matches the stored entry
 			// and the write-through actually lands on the right item — consistent with
@@ -800,7 +804,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 				e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 			} else {
 				e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 				}
 			}
@@ -815,7 +819,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
 			e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-done")
 			}
 		}
@@ -897,7 +901,7 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 		e.logf(item.Number, "warn", "advanced to %s but could not add %s label: %v — will retry on next poll\n", hs.Name, completeLabel, lerr)
 		return fmt.Errorf("add %s label: %w", completeLabel, lerr)
 	}
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 	}
 

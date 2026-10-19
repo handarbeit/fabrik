@@ -1151,7 +1151,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		time.Sleep(lockVerifyDelay)
 		// Lock verification needs live labels, not cached state — another instance
 		// may have written its lock label in the window since we read from cache.
-		labels, err := e.client.FetchLabels(owner, repo, item.Number)
+		labels, err := e.liveLabels(owner, repo, item.Number)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
 		} else {
@@ -3277,6 +3277,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 			return true, nil
 		}
 		// No new commits — re-fetch to check resolved reviewer threads.
+		// live-read-audited: extend-turns progress measurement on the caller's item copy; compares against a baseline, decides nothing about Store state
 		if err := client.FetchItemDetails(item); err != nil {
 			logfFn("extend-turns", "progress check: HEAD %s (unchanged), re-fetch failed: %v, has_progress=false — no extension\n", sha, err)
 			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
@@ -3291,6 +3292,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 		}
 		return progress, nil
 	case "Validate":
+		// live-read-audited: extend-turns progress measurement on the caller's item copy; compares against a baseline, decides nothing about Store state
 		if err := client.FetchItemDetails(item); err != nil {
 			fetchErr := fmt.Errorf("re-fetching item for progress check: %w", err)
 			logfFn("extend-turns", "progress check: comments %d (fetch failed), has_progress=false, err=%v\n", baseline.commentCount, fetchErr)

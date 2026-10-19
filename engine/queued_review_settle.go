@@ -98,6 +98,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 			} else {
 				e.logf(item.Number, "queued-review-settle", "deep-fetching details from GitHub\n")
 			}
+			// live-read-audited: board-cache-backed deep fetch: the cache writes a miss back to the Store; the scan then reads the findings from this copy
 			if err := e.readClient.FetchItemDetails(&item); err != nil {
 				e.logf(item.Number, "queued-review-settle", "could not deep-fetch item details: %v — will retry next poll\n", err)
 				continue

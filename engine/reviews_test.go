@@ -354,6 +354,7 @@ func TestCheckReviewGate_LabelOverride_AdvisoryOnAuthoritativeStage_Clears(t *te
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -388,6 +389,7 @@ func TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears(t *testing.
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -419,6 +421,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionApproved_Clears(t *testing.
 			{Author: "alice", State: "APPROVED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -481,6 +484,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_NoChangesRequested_Cle
 			{Author: "alice", State: "APPROVED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -600,6 +604,7 @@ func TestCheckReviewGate_DeclaredBotDoesNotDeferAuthoritativeHumanEscalation(t *
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	declared := []string{"some-declared-bot"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative", ExpectedReviewers: &declared}
 
@@ -1958,6 +1963,7 @@ func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 			{Author: "copilot-pull-request-reviewer", State: "COMMENTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -3146,6 +3152,7 @@ func TestCheckReviewGate_MultipleDeclaredReviewers_AnyOneResponds_Clears(t *test
 			{Author: "handarbeit-pruefer[bot]", State: "COMMENTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 
@@ -3727,28 +3734,27 @@ func TestCheckReviewGate_NonDefaultBase_RESTFetchError_DeclaredReviewers_NoSpuri
 	}
 }
 
-// Default-branch items must never invoke the REST review-fetch helpers — the gate
-// continues to use the GraphQL-sourced item.LinkedPRReviewRequests/LinkedPRReviews
-// exclusively, exactly as before this change.
-func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) {
+// A default-branch item decides on the GraphQL-sourced review data while that data
+// holds the gate; when it would clear, the gate first confirms against a live read
+// (#2350, R3) so a reviewer requested after the cache filled cannot be missed.
+func TestCheckReviewGate_DefaultBranch_ConfirmsLiveBeforeClearing(t *testing.T) {
 	var restReviewCalls, restRequestCalls int
 	client := &mockGitHubClient{
 		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 			restReviewCalls++
-			return nil, fmt.Errorf("should not be called on default-branch items")
+			return []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}}, nil
 		},
 		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 			restRequestCalls++
-			return nil, fmt.Errorf("should not be called on default-branch items")
+			return nil, nil
 		},
 	}
 	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
-		Number:                 10,
-		Repo:                   "owner/repo",
-		LinkedPRNumber:         77, // linkage already resolved via GraphQL
-		LinkedPRReviewRequests: nil,
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 77, // linkage already resolved via GraphQL
 		LinkedPRReviews: []gh.PRReview{
 			{Author: "reviewer1", State: "APPROVED"},
 		},
@@ -3757,14 +3763,72 @@ func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) 
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
 
-	if blocked {
-		t.Error("expected gate to clear using the existing GraphQL-sourced data")
+	if blocked || timedOut {
+		t.Errorf("expected the gate to clear (live agrees with the cache), blocked=%v timedOut=%v", blocked, timedOut)
 	}
-	if timedOut {
-		t.Error("expected not timedOut")
+	if restReviewCalls != 1 || restRequestCalls != 1 {
+		t.Errorf("expected exactly one live confirmation pair before clearing, got reviews=%d requests=%d", restReviewCalls, restRequestCalls)
 	}
-	if restReviewCalls != 0 || restRequestCalls != 0 {
-		t.Errorf("expected no REST review-fetch calls on a default-branch item, got reviews=%d requests=%d", restReviewCalls, restRequestCalls)
+}
+
+// R3/FR-008: a reviewer requested after the cache filled holds the advance. With the
+// confirmation disabled (the pre-#2350 gate) the same state clears.
+func TestCheckReviewGate_ReviewerRequestedAfterCacheFilled_HoldsAdvance(t *testing.T) {
+	run := func(confirmOff bool) (blocked bool) {
+		client := &mockGitHubClient{
+			fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+				return []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}}, nil
+			},
+			fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+				return []gh.ReviewRequest{{Login: "late-reviewer"}}, nil
+			},
+		}
+		eng := reviewTestEngine(t, client)
+		eng.SetReviewConfirmLiveDisabledForTest(confirmOff)
+		item := gh.ProjectItem{
+			Number: 10, Repo: "owner/repo", LinkedPRNumber: 77,
+			LinkedPRReviews: []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}},
+		}
+		stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+		blocked, _, _, _ = eng.checkReviewGate(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+		return blocked
+	}
+	if !run(false) {
+		t.Fatal("a reviewer requested after the cache filled must hold the advance")
+	}
+	if run(true) {
+		t.Fatal("non-vacuity: without the live confirmation the stale cache clears the gate")
+	}
+}
+
+// A fresh live-read stamp is trusted only while the Store still holds the item's
+// review state for this PR. When it does not (item evicted, linked PR changed),
+// the gate confirms live instead of clearing on the stale cache.
+func TestCheckReviewGate_FreshStampWithoutStoreReviewState_StillConfirmsLive(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reads++
+			return []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "late-reviewer"}}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.SetLiveFreshForTest(time.Minute)
+	eng.live.note(liveKey("reviews", "owner/repo", 10), eng.now()) // stamped, but the Store holds no item 10
+	item := gh.ProjectItem{
+		Number: 10, Repo: "owner/repo", LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+	blocked, _, _, _ := eng.checkReviewGate(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	if reads != 1 {
+		t.Fatalf("live review reads = %d, want 1: a fresh stamp with no Store review state must not skip the confirmation", reads)
+	}
+	if !blocked {
+		t.Fatal("the live-requested reviewer must hold the advance")
 	}
 }
 

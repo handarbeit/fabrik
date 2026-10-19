@@ -1254,3 +1254,31 @@ func (m *mockGitHubClient) fixedWriteStamps(at time.Time) {
 	m.issueWriteStampFn = func(string, int) time.Time { return at }
 	m.itemWriteStampFn = func(string) time.Time { return at }
 }
+
+// mirrorLiveReviews makes the mock's live review reads (FetchPRReviews and
+// FetchPRReviewRequests) report what item's cached linked-PR data holds, unless the
+// test set its own. The advance review gate confirms against the live read alone
+// since #2350, so a test that models "the cache has these reviews" must also model
+// GitHub having them; an empty live read would (correctly) mean they were dismissed.
+func mirrorLiveReviews(m *mockGitHubClient, item gh.ProjectItem) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.fetchPRReviewsFn == nil {
+		reviews := append([]gh.PRReview(nil), item.LinkedPRReviews...)
+		m.fetchPRReviewsFn = func(string, string, int) ([]gh.PRReview, error) { return reviews, nil }
+	}
+	if m.fetchPRReviewRequestsFn == nil {
+		requests := append([]gh.ReviewRequest(nil), item.LinkedPRReviewRequests...)
+		m.fetchPRReviewRequestsFn = func(string, string, int) ([]gh.ReviewRequest, error) { return requests, nil }
+	}
+}
+
+// remirrorLiveReviews is mirrorLiveReviews for a test that changes the cached
+// review between rounds: it replaces the previous mirror.
+func remirrorLiveReviews(m *mockGitHubClient, item gh.ProjectItem) {
+	m.mu.Lock()
+	m.fetchPRReviewsFn = nil
+	m.fetchPRReviewRequestsFn = nil
+	m.mu.Unlock()
+	mirrorLiveReviews(m, item)
+}

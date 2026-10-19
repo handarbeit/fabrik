@@ -902,13 +902,133 @@ func TestCheckDependencies_FirstTimeBlock_NoLiveReadAttempted(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Research"}
 
-	blocked := eng.checkDependencies(board, item, stage)
+	// The per-poll Phase 1 call decides on the cached edge list (#2350): an
+	// unblocked item costs no read.
+	blocked := eng.checkDependenciesMode(board, item, stage, depCacheOnly)
 
 	if !blocked {
 		t.Error("expected blocked on first-time block with an open dependency")
 	}
 	if fetchCalls != 0 {
 		t.Errorf("expected no live re-read on first-time block, got %d calls", fetchCalls)
+	}
+}
+
+// A blocker added on GitHub after the cache filled stops the dispatch (#2350, R4,
+// SC-004): at a decision point the edge list is read live, applied to the Store
+// and decided on, though the cached list is empty and the item is not marked
+// blocked. With the live read disabled (the pre-#2350 check) it is missed.
+func TestCheckDependencies_DecisionPoint_NewBlockerStopsDispatch(t *testing.T) {
+	run := func(liveOff bool) (blocked bool, reads int) {
+		client := &mockGitHubClient{
+			fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+				reads++
+				item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+				return nil
+			},
+		}
+		eng := depTestEngine(t, client)
+		eng.SetDependencyLiveReadDisabledForTest(liveOff)
+		item := gh.ProjectItem{Number: 979, Repo: "owner/repo"} // cached: no blockers, not blocked
+		blocked = eng.checkDependencies(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Research"})
+		return blocked, reads
+	}
+	if blocked, reads := run(false); !blocked || reads != 1 {
+		t.Fatalf("blocked=%v reads=%d, want a block from exactly one live read", blocked, reads)
+	}
+	if blocked, _ := run(true); blocked {
+		t.Fatal("non-vacuity: without the live read the cached empty list lets the dispatch through")
+	}
+}
+
+// The decision-point read is bounded (#2350, R4/FR-009): a second dispatch or
+// advance decision inside liveFreshFor repeats no read and decides from the Store
+// the first read applied; once the window has passed the edge list is read again.
+func TestCheckDependencies_DecisionPoint_FreshObservationSkipsTheRead(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			reads++
+			item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	eng.cfg.PollSeconds = 10
+	clk := &fakeClock{t: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	eng.SetClock(clk)
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 979, Status: "Research"}})
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Status: "Research"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research"}
+
+	if !eng.checkDependencies(board, item, stage) || reads != 1 {
+		t.Fatalf("first decision: reads=%d, want a block from one live read", reads)
+	}
+	clk.t = clk.t.Add(5 * time.Second)
+	if !eng.checkDependencies(board, item, stage) || reads != 1 {
+		t.Fatalf("decision inside the window: reads=%d, want no repeated read and the Store's blocker honoured", reads)
+	}
+	clk.t = clk.t.Add(liveFreshFloor + time.Second)
+	eng.checkDependencies(board, item, stage)
+	if reads != 2 {
+		t.Fatalf("decision after the window: reads=%d, want a fresh read", reads)
+	}
+}
+
+// Another gate's live item read (the feedback gate's, say) in the same poll leaves
+// the edges in the Store and stamps them fresh, so the decision-point dependency
+// check repeats no read (#2350). The Store's own "blockedBy" record is the fetch
+// start minus the listing-lag allowance and could never satisfy this window.
+func TestCheckDependencies_DecisionPoint_SkipsTheReadAfterAnotherGatesLiveItem(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			reads++
+			item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+			item.DeepFetchLive = true
+			item.DeepFetchStartedAt = time.Now()
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	eng.cfg.PollSeconds = 10
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 979, Status: "Research"}})
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Status: "Research"}
+
+	other := item
+	if err := eng.liveItem(&other); err != nil || reads != 1 {
+		t.Fatalf("setup: err=%v reads=%d", err, reads)
+	}
+	if !eng.checkDependencies(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Research"}) {
+		t.Fatal("the blocker applied by the other gate's read must stop the dispatch")
+	}
+	if reads != 1 {
+		t.Fatalf("reads = %d, want the decision-point read skipped after a same-poll live item read", reads)
+	}
+}
+
+// depAlreadyLive means the caller has just read the item live and passed that read
+// in: even an item already marked fabrik:blocked needs no second read (#2350).
+func TestCheckDependencies_AlreadyLiveMode_DoesNotRepeatTheBlockedReread(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{fetchItemDetailsFn: func(item *gh.ProjectItem) error { reads++; return nil }}
+	eng := depTestEngine(t, client)
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research"}
+
+	if !eng.checkDependenciesMode(board, item, stage, depAlreadyLive) {
+		t.Fatal("the open blocker in the caller's own live read must still block")
+	}
+	if reads != 0 {
+		t.Fatalf("reads = %d, want none: the caller had just read the item", reads)
+	}
+	// Other modes keep the ADR 1419 re-read of an already-blocked item.
+	eng.checkDependenciesMode(board, item, stage, depCacheOnly)
+	if reads != 1 {
+		t.Fatalf("reads = %d, want the already-blocked re-read in cache-only mode", reads)
 	}
 }
 

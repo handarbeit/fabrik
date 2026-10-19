@@ -141,6 +141,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				continue
 			}
 			e.logf(pi.Number, "cache", "probe: new item discovered — deep-fetching\n")
+			// live-read-audited: board-cache-backed deep fetch of a newly discovered item: the cache writes it to the Store
 			if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
 				e.logf(pi.Number, "warn", "probe: deep-fetch for new item failed: %v\n", fetchErr)
 				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: pi.Number, At: time.Now()})

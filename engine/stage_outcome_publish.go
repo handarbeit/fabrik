@@ -143,6 +143,7 @@ func (e *Engine) settleStageOutcome(ctx context.Context, board *gh.ProjectBoard,
 		return
 	}
 
+	// live-read-audited: board-cache-backed deep fetch, applied to the Store on the next line via applyDeepFetched
 	if err := e.readClient.FetchItemDetails(&item); err != nil {
 		e.noteOutcomeFailure(item, rec, fmt.Errorf("reading the item: %w", err))
 		return

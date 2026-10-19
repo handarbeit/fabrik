@@ -75,6 +75,7 @@ func (e *Engine) dispatcherGap(orig gh.ProjectItem, pf pendingFeedback) (gap []g
 	if itemHasBaseLabel(orig) {
 		return nil, false
 	}
+	// live-read-audited: deliberately NOT applied: this reads what the next admission would see, to detect a gap between it and the gate; applying it would hide the gap (ADR 2160)
 	if err := e.readClient.FetchItemDetails(&view); err != nil {
 		e.logf(orig.Number, "warn", "feedback-gate: dispatcher-view read failed (%v) — skipping gap check\n", err)
 		return nil, true

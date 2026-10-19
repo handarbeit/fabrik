@@ -227,6 +227,10 @@ const (
 	// start of the same poll that dispatches work, so waking the poll loop for its
 	// own writes only buys a redundant early poll; the wake observer ignores it.
 	OriginProbe
+	// OriginLiveRead is a mutation a gate applied after a live GitHub read inside
+	// the poll (FromLiveRead, #2350). The wake observer ignores it for the same
+	// reason as OriginProbe.
+	OriginLiveRead
 )
 
 // diffLabels returns the labels added to and removed from before to reach after.

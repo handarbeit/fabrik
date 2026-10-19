@@ -237,6 +237,7 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 
 	if !itemHasBaseLabel(item) {
 		// Fast path: re-fetch item to get fresh closedByPullRequestsReferences data.
+		// live-read-audited: linkage heal reads the PR it is repairing before the item is tracked as linked
 		if err := e.client.FetchItemDetails(&item); err != nil {
 			e.logf(item.Number, "warn", "verifyAndHealLinkage: FetchItemDetails failed: %v\n", err)
 			// Non-fatal: skip verification to avoid false positives on transient errors.

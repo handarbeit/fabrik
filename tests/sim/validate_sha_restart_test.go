@@ -352,6 +352,11 @@ func TestValidateSHARestart_NonCompletingCommentPass_NonVacuity(t *testing.T) {
 	t.Parallel()
 	restarted, num, log := forcedRerunRestartMode(t, false)
 	restarted.Engine.SetValidateReworkRestoreGuardDisabledForTest(true)
+	// The scenario's window needs the pre-#2350 timing: with the strip mirrored into
+	// the Store of this cacheless engine, the dispatch re-read sees it and runs the
+	// Validate stage in the very poll that stripped the label, before the comment
+	// exists, so the rework bracket this twin targets is never reached.
+	restarted.Engine.SetCachelessWriteThroughDisabledForTest(true)
 
 	if early := runForcedRerunScenario(t, restarted, num, log); !early {
 		t.Errorf("with the rework guard disabled the completion label never preceded the Validate stage run — the twin is vacuous; invocations = %v\n\n%s", log.get(), diagnostics(restarted))

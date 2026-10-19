@@ -97,7 +97,7 @@ func (e *Engine) refuseIfPausedLive(item gh.ProjectItem, site string) bool {
 		return false
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	labels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil && e.pauseGuardUnreadOK.Load() {
 		return false
 	}
@@ -117,6 +117,7 @@ func (e *Engine) refuseIfPausedLive(item gh.ProjectItem, site string) bool {
 // unreadable member as a refusal for this poll.
 func (e *Engine) pausedTrainMembers(owner, repo string, members []trainMember) (paused, unread []int) {
 	for _, m := range members {
+		// live-read-audited: merge-train member pause check (refuseIfMembersPaused): batch state, not the poll's item (ADR 2341)
 		labels, err := e.client.FetchLabels(owner, repo, m.item.Number)
 		if err != nil {
 			e.logfRepo(owner+"/"+repo, "pause-guard", "could not re-read labels of #%d (%v) — refusing to land this poll, fabrik:paused cannot be ruled out\n", m.item.Number, err)

@@ -128,7 +128,7 @@ func (e *Engine) classifyLinkedPRTerminal(owner, repo string, number int, tag st
 	// a PR the engine just merged (e.g. the direct-merge fallback) gets misread as
 	// "closed without merging" and the issue is wrongly paused.
 	if !pr.Merged && pr.State == "closed" {
-		merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+		merged, mErr := e.livePRMerged(owner, repo, number, pr.Number)
 		if mErr != nil {
 			e.logf(number, tag, "PR #%d closed; could not confirm merged state: %v — skipping (re-check next poll)\n", pr.Number, mErr)
 			return pr, linkedPRReadErr
@@ -196,7 +196,7 @@ func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.Proje
 			e.logf(item.Number, "warn", "pr-terminal: could not add %s: %v — skipping item\n", completeLabel, addErr)
 			fillFailed = true
 			break
-		} else if c := e.cache(); c != nil {
+		} else if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 		}
 		e.logf(item.Number, "pr-terminal", "added %s\n", completeLabel)
@@ -248,13 +248,13 @@ func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.Proje
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
 				if errors.Is(rerr, gh.ErrNotFound) {
 					// Label already absent on GitHub — desired end state achieved; sync cache.
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 					}
 				} else {
 					e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
 				}
-			} else if c := e.cache(); c != nil {
+			} else if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 			}
 		}

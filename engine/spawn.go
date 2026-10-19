@@ -499,6 +499,7 @@ func (e *Engine) refreshForSpawnResume(item *gh.ProjectItem) error {
 		}
 	}
 
+	// live-read-audited: spawn recovery read of an item that may not be in the Store (ADR 1419, 1583)
 	if err := e.client.FetchItemDetails(item); err != nil {
 		e.logf(item.Number, "spawn", "resume: live re-read failed (%v) — deferring to next poll\n", err)
 		e.store.Apply(itemstate.CooldownRecorded{
@@ -630,6 +631,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 	}
 
 	fresh := item
+	// live-read-audited: spawn recovery read of an item that may not be in the Store (ADR 1419, 1583)
 	if err := e.client.FetchItemDetails(&fresh); err != nil {
 		e.logf(item.Number, "spawn", "pre-Implement: live re-read failed (%v) — deferring to next poll\n", err)
 		e.store.Apply(itemstate.CooldownRecorded{
