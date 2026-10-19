@@ -45,10 +45,13 @@ newer fact.
    what `processItem` receives. A skip records nothing and re-arms the periodic re-evaluation
    (ADR 2096). Overlay, not rebuild: the Store snapshot lacks fields a `ProjectItem` carries.
 4. **Cacheless engines** mirror the labels that decide whether an item still needs work, and
-   closes and comments, into the Store (`localWriter`). The gate labels are deliberately not
-   mirrored at the instant of the write: doing so exposes intermediate label states (`awaiting-ci`
-   removed before `awaiting-review` is applied) to the channel deriver that a poll-start listing
-   never showed.
+   closes and comments, into the Store (`localWriter`), plus the REMOVAL of a stage completion
+   label (`stage:<name>:complete`), so a phase that strips it (e.g. SHA invalidation) is seen by the
+   dispatch re-read (FR-003). The gate labels, and the ADD of a completion label, are deliberately
+   not mirrored at the instant of the write: doing so exposes intermediate label states
+   (`awaiting-ci` removed before `awaiting-review` is applied) to the channel deriver that a
+   poll-start listing never showed. `settlePRMergeState`'s terminal merged-state confirmation goes
+   through `livePRMerged`, so the merge it confirms is applied to the Store like every other one.
 5. **Review gates.** The landing gate reads live through `liveReviews`. The advance gate confirms
    live only when its cached view would clear, and decides on that live read alone (reviews and
    requests), never on a union with the cached copy: a review dismissed or removed on GitHub no

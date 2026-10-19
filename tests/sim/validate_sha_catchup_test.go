@@ -129,7 +129,7 @@ func TestSHAInvalidation_OpenItem_PureCatchUpHead_NotRevalidated(t *testing.T) {
 	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, memberBranch(num), memberBranch(num), map[string]string{"evil.txt": "x\n"}, "external push")
 	pushed, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, prNum, pushed)
-	WaitForLabelAbsent(t, env, num, validateCompleteLabel, 5)
+	waitForValidateRerun(t, env)
 }
 
 func TestSHAInvalidation_OpenItem_ExternalPush_StillInvalidates(t *testing.T) {
@@ -143,7 +143,18 @@ func TestSHAInvalidation_OpenItem_ExternalPush_StillInvalidates(t *testing.T) {
 	}
 	pushed, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
 	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, prNum, pushed)
-	WaitForLabelAbsent(t, env, num, validateCompleteLabel, 5)
+	waitForValidateRerun(t, env)
+}
+
+// waitForValidateRerun waits for the observable consequence of an invalidation: the
+// scan strips the completion label and Validate is dispatched again. Since #2350 the
+// dispatch re-read sees the strip in the same poll (also on an engine with no board
+// cache), so the label is restored by the re-run before a poll boundary and its
+// transient absence can no longer be polled for.
+func waitForValidateRerun(t *testing.T, env *Env) {
+	t.Helper()
+	before := env.Claude.StageCallCount("Validate")
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Validate") > before }, 5)
 }
 
 func formatMarker(head string) string {

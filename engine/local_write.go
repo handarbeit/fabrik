@@ -87,7 +87,7 @@ func (w storeWriter) ApplyLabelAddedBy(key, label, requester string) {
 }
 func (w storeWriter) ApplyLabelRemoved(key, label string) { w.ApplyLabelRemovedBy(key, label, "") }
 func (w storeWriter) ApplyLabelRemovedBy(key, label, requester string) {
-	if !cachelessMirroredLabel(label) {
+	if !cachelessMirroredLabel(label) && !isStageCompleteLabel(label) {
 		return
 	}
 	w.apply(key, func(repo string, n int) itemstate.Mutation {
@@ -103,6 +103,14 @@ func (w storeWriter) ApplyCommentAdded(key string, comment gh.Comment) {
 	w.apply(key, func(repo string, n int) itemstate.Mutation {
 		return itemstate.LocalCommentAdded{Repo: repo, Number: n, Comment: comment}
 	})
+}
+
+// isStageCompleteLabel reports whether label is a stage completion label
+// (stage:<name>:complete). Its REMOVAL is mirrored into a cacheless Store (a phase
+// of the poll that strips it, e.g. handleValidateSHAInvalidation, must be seen by
+// the dispatch re-read, FR-003); its ADD is not, for the reason below.
+func isStageCompleteLabel(label string) bool {
+	return strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":complete")
 }
 
 // cachelessMirroredLabel reports whether a label write reaches the Store of an

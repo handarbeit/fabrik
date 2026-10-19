@@ -313,3 +313,47 @@ func TestOverlayStoreFacts_AddsLabelsNeverHidesTheReadsOwn(t *testing.T) {
 		t.Fatal("the input copy was mutated")
 	}
 }
+
+// A cacheless engine mirrors the removal of a stage completion label into the Store,
+// so the dispatch re-read sees an earlier phase's strip of it (#2350, FR-003, US1.2).
+// Adds of completion/gate labels stay unmirrored (the channel deriver would see
+// transient intermediate states).
+func TestRefreshDispatchItem_CachelessEngineSeesCompletionLabelRemoval(t *testing.T) {
+	eng := liveReadEngine(t, &mockGitHubClient{})
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 1, Status: "Validate", Labels: []string{"stage:Validate:complete"}}
+	eng.removeLabel(item, "stage:Validate:complete")
+
+	got, changed := eng.refreshDispatchItem(item)
+	if !changed || hasLabel(got.Labels, "stage:Validate:complete") {
+		t.Fatalf("dispatch re-read kept the stripped completion label: changed=%v labels=%v", changed, got.Labels)
+	}
+
+	// An add of a gate label is not mirrored into a cacheless Store.
+	eng.addLabel(item, "fabrik:awaiting-ci")
+	snap, _ := eng.store.Peek("owner/repo", 1)
+	if hasLabel(snap.State().Labels, "fabrik:awaiting-ci") {
+		t.Fatalf("gate-label add reached the cacheless Store: %v", snap.State().Labels)
+	}
+}
+
+// settlePRMergeState's terminal confirmation goes through livePRMerged, so the
+// merge it confirms reaches the Store at once (#2350, FR-006) rather than only the
+// returned result.
+func TestSettlePRMergeState_ConfirmedMergeIsAppliedToTheStore(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed"}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, n int) (bool, error) { return true, nil },
+	}
+	eng := liveReadEngine(t, client)
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 1, Status: "Validate", LinkedPRNumber: 10}
+	res := eng.settlePRMergeState(item, nil)
+	if res.Status != PRMergeTerminal {
+		t.Fatalf("status = %v (%s), want terminal", res.Status, res.Reason)
+	}
+	snap, _ := eng.store.Peek("owner/repo", 1)
+	if lpr := snap.LinkedPR(); lpr == nil || !lpr.Merged {
+		t.Fatalf("Store linked PR = %+v, want merged", lpr)
+	}
+}
