@@ -99,6 +99,18 @@ type webhookManager struct {
 	requestedPort int
 	// started is true after the first successful subprocess launch (protected by mu).
 	started bool
+	// reconnectPending is set when a subprocess RE-start is waiting to request its
+	// catch-up reconcile; reconnectTimer is the fallback that fires it when no
+	// delivery arrives (protected by mu).
+	reconnectPending bool
+	reconnectTimer   *time.Timer
+	// reconnectSettle overrides webhookReconnectSettle when non-zero (tests only).
+	reconnectSettle time.Duration
+	// startingUpSince / startingUpEnd bracket the latest StartingUp period (end is
+	// zero while it lasts). Echo reservations made inside it can never be echoed —
+	// the hook was not attached — so their expiry is not a miss (protected by mu).
+	startingUpSince time.Time
+	startingUpEnd   time.Time
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
@@ -875,23 +887,30 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		forgetSupersededWebhookStart(wm.currentCmd, cmd) // the previous subprocess is gone; its token is no longer needed
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
+		wm.startingUpSince = time.Now()
+		wm.startingUpEnd = time.Time{}
 		wm.subscriptionNote = subscriptionCoverageNote(org, repos)
 		reconnected := wm.started
 		wm.started = true
-		reconnectFn := wm.reconnectFn
 		wm.mu.Unlock()
 		wm.emitCurrentState()
-		// R5 (#2351): a subprocess RE-start means events were missed while the
-		// stream was down; ask the engine for a catch-up reconcile. Never on the
-		// first launch.
-		if reconnected && reconnectFn != nil {
-			wm.logFn(0, "webhook", "gh webhook forward restarted — requesting a catch-up reconcile\n")
-			reconnectFn()
+		// R5 (#2351): a subprocess RE-start (a crash restart, a secret rotation or a
+		// repo-set change) means events were missed while the stream was down. The
+		// catch-up reconcile is NOT requested now: the new subprocess has not yet
+		// re-registered its hook, so a reconcile run immediately could finish before
+		// the stream is up and leave a gap. It is armed here and fires on the first
+		// verified delivery (the stream demonstrably works) or after
+		// webhookReconnectSettle, whichever comes first. Never on the first launch.
+		if reconnected {
+			wm.armReconnect()
 		}
 
 		// Wait for subprocess exit.
 		waitErr := cmd.Wait()
 		elapsed := time.Since(startedAt)
+		// A subprocess that died before the settle delay (a crash loop) requests
+		// nothing: the next launch re-arms.
+		wm.disarmReconnect()
 
 		// Collect accumulated stderr (the goroutine should finish shortly after
 		// the process exits and the pipe reaches EOF).
@@ -1134,7 +1153,16 @@ func (wm *webhookManager) noteEchoMisses(registeredAt []time.Time) {
 		wm.mu.Unlock()
 		return
 	}
-	wm.missHistory = append(wm.missHistory, registeredAt...)
+	// A reservation made while the hook was still being attached could never have
+	// been echoed (the old code did not register during StartingUp at all), so its
+	// expiry after the state turned Healthy is not evidence of a dead stream.
+	for _, t := range registeredAt {
+		if !wm.startingUpSince.IsZero() && !t.Before(wm.startingUpSince) &&
+			(wm.startingUpEnd.IsZero() || t.Before(wm.startingUpEnd)) {
+			continue
+		}
+		wm.missHistory = append(wm.missHistory, t)
+	}
 	// Prune miss-history entries older than webhookEchoWindow.
 	cutoff := now.Add(-webhookEchoWindow)
 	live := wm.missHistory[:0]
@@ -1223,6 +1251,9 @@ func (wm *webhookManager) transitionHealthState(newState WebhookHealthState, rea
 		return
 	}
 	wm.state = newState
+	if prev == WebhookStreamStartingUp {
+		wm.startingUpEnd = time.Now()
+	}
 	wm.mu.Unlock()
 	if reason != "" {
 		wm.logFn(0, "webhook", "health state: %s → %s (%s)\n", prev, newState, reason)
@@ -1328,6 +1359,9 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	wm.consecutiveFailures = 0
 	wm.firstFailureAt = time.Time{}
 	wm.mu.Unlock()
+	// The first verified delivery after a restart proves the new stream is up: run
+	// the catch-up reconcile now (R5).
+	wm.fireReconnect("first verified delivery after restart")
 
 	// Parse minimal fields for logging (no payload contents logged — PII risk).
 	eventType := r.Header.Get("X-GitHub-Event")
@@ -1432,6 +1466,64 @@ func (wm *webhookManager) SetSink(sink func(delivery)) {
 	wm.mu.Lock()
 	wm.sink = sink
 	wm.mu.Unlock()
+}
+
+// webhookReconnectSettle is how long after a gh-forward RE-start the catch-up
+// reconcile waits for a first delivery before it runs anyway.
+const webhookReconnectSettle = 30 * time.Second
+
+// armReconnect marks a catch-up reconcile as owed for the subprocess that was just
+// launched and starts the fallback timer.
+func (wm *webhookManager) armReconnect() {
+	wm.mu.Lock()
+	if wm.reconnectFn == nil {
+		wm.mu.Unlock()
+		return
+	}
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+	}
+	wm.reconnectPending = true
+	settle := webhookReconnectSettle
+	if wm.reconnectSettle > 0 {
+		settle = wm.reconnectSettle
+	}
+	wm.reconnectTimer = time.AfterFunc(settle, func() {
+		wm.fireReconnect("settle delay elapsed")
+	})
+	wm.mu.Unlock()
+}
+
+// disarmReconnect drops an owed catch-up request (the subprocess it belonged to
+// has exited).
+func (wm *webhookManager) disarmReconnect() {
+	wm.mu.Lock()
+	wm.reconnectPending = false
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+		wm.reconnectTimer = nil
+	}
+	wm.mu.Unlock()
+}
+
+// fireReconnect requests the owed catch-up reconcile, at most once per restart.
+func (wm *webhookManager) fireReconnect(why string) {
+	wm.mu.Lock()
+	if !wm.reconnectPending {
+		wm.mu.Unlock()
+		return
+	}
+	wm.reconnectPending = false
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+		wm.reconnectTimer = nil
+	}
+	fn := wm.reconnectFn
+	wm.mu.Unlock()
+	if fn != nil {
+		wm.logFn(0, "webhook", "gh webhook forward restarted — requesting a catch-up reconcile (%s)\n", why)
+		fn()
+	}
 }
 
 // SetReconnectHandler implements ingestTransport.

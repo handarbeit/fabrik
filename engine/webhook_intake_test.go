@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -163,24 +162,80 @@ func TestHookdeckManager_HandlePassesDeliveryID(t *testing.T) {
 	}
 }
 
-// gh-forward: the first subprocess launch is not a reconnect; each later restart
-// requests a catch-up reconcile (R5).
-func TestSupervise_RestartRequestsCatchUpReconcile(t *testing.T) {
+// setReconnectSettle overrides the fallback delay on one manager.
+func setReconnectSettle(wm *webhookManager, d time.Duration) {
+	wm.mu.Lock()
+	wm.reconnectSettle = d
+	wm.mu.Unlock()
+}
+
+// gh-forward: the first subprocess launch is not a reconnect; a later restart
+// requests its catch-up reconcile only once the settle delay has elapsed with the
+// subprocess still running — never at launch, before the hook is attached (R5).
+func TestSupervise_RestartDefersCatchUpUntilSettle(t *testing.T) {
 	wm, _ := newTestWebhookManager(t)
+	setReconnectSettle(wm, 150*time.Millisecond)
+	wm.probeTimeout = 30 * time.Millisecond
+	wm.mu.Lock()
+	wm.orgModeFailed = true
+	wm.mu.Unlock()
+
+	var mu sync.Mutex
+	var launches int
+	var launchAt, reconnectAt []time.Time
+	var reconnectLaunch []int
+	wm.SetReconnectHandler(func() {
+		mu.Lock()
+		reconnectAt = append(reconnectAt, time.Now())
+		reconnectLaunch = append(reconnectLaunch, launches)
+		mu.Unlock()
+	})
+	wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+		mu.Lock()
+		launches++
+		launchAt = append(launchAt, time.Now())
+		mu.Unlock()
+		cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 0.6")
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		ch := make(chan string, 1)
+		ch <- ""
+		return cmd, ch, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	go wm.supervise(ctx)
+	<-ctx.Done()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if launches < 2 {
+		t.Fatalf("only %d launches in 4s, want >= 2", launches)
+	}
+	if len(reconnectAt) == 0 {
+		t.Fatal("a restart never requested a catch-up reconcile")
+	}
+	if reconnectLaunch[0] != 2 {
+		t.Fatalf("first catch-up was requested during launch %d: the first launch must not request one", reconnectLaunch[0])
+	}
+	if gap := reconnectAt[0].Sub(launchAt[1]); gap < 100*time.Millisecond {
+		t.Fatalf("catch-up requested %v after the restart, want it deferred by the settle delay", gap)
+	}
+}
+
+// A subprocess that dies before the settle delay (a crash loop) requests nothing.
+func TestSupervise_CrashLoopRequestsNoCatchUp(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	setReconnectSettle(wm, 10*time.Second)
 	wm.probeTimeout = 30 * time.Millisecond
 	wm.mu.Lock()
 	wm.orgModeFailed = true
 	wm.mu.Unlock()
 
 	var launches, reconnects atomic.Int32
-	var mu sync.Mutex
-	order := []string{}
-	wm.SetReconnectHandler(func() {
-		reconnects.Add(1)
-		mu.Lock()
-		order = append(order, fmt.Sprintf("reconnect@launch%d", launches.Load()))
-		mu.Unlock()
-	})
+	wm.SetReconnectHandler(func() { reconnects.Add(1) })
 	wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
 		launches.Add(1)
 		cmd := exec.CommandContext(ctx, "sh", "-c", "exit 1")
@@ -200,12 +255,63 @@ func TestSupervise_RestartRequestsCatchUpReconcile(t *testing.T) {
 	if launches.Load() < 2 {
 		t.Fatalf("only %d launches in 3s, want >= 2", launches.Load())
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(order) == 0 || order[0] != "reconnect@launch2" {
-		t.Fatalf("reconnect order = %v: the first launch must not request a catch-up, the second must", order)
+	if reconnects.Load() != 0 {
+		t.Fatalf("%d catch-up requests from a crash-looping subprocess, want 0", reconnects.Load())
 	}
-	if int(reconnects.Load()) != int(launches.Load())-1 {
-		t.Fatalf("reconnects = %d for %d launches, want launches-1", reconnects.Load(), launches.Load())
+}
+
+// The first signature-verified delivery after a restart proves the stream is up
+// and fires the owed catch-up exactly once; an unsigned one does not.
+func TestHandleWebhook_FirstVerifiedDeliveryFiresPendingCatchUp(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	setReconnectSettle(wm, time.Hour)
+	var fired atomic.Int32
+	wm.SetReconnectHandler(func() { fired.Add(1) })
+	wm.SetSink(func(delivery) {})
+	wm.mu.Lock()
+	secret := wm.secret
+	wm.mu.Unlock()
+
+	wm.armReconnect()
+	bad := signedRequest(t, []byte(`{"action":"x"}`), "not-the-secret")
+	wm.handleWebhook(httptest.NewRecorder(), bad)
+	if fired.Load() != 0 {
+		t.Fatal("an unverified delivery fired the catch-up")
+	}
+	for i := 0; i < 2; i++ {
+		wm.handleWebhook(httptest.NewRecorder(), signedRequest(t, []byte(`{"action":"x"}`), secret))
+	}
+	if fired.Load() != 1 {
+		t.Fatalf("catch-up fired %d times, want exactly 1", fired.Load())
+	}
+}
+
+// Echo misses for reservations made while the hook was still attaching are not
+// evidence of a dead stream, even when the sweep lands after the state turned Healthy.
+func TestWebhookManager_NoteEchoMisses_IgnoresStartingUpReservations(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	base := time.Now()
+	wm.mu.Lock()
+	wm.state = WebhookStreamHealthy
+	wm.startingUpSince = base.Add(-10 * time.Second)
+	wm.startingUpEnd = base.Add(-5 * time.Second)
+	wm.mu.Unlock()
+
+	during := base.Add(-8 * time.Second)
+	wm.noteEchoMisses([]time.Time{during, during, during})
+	wm.mu.Lock()
+	state, n := wm.state, len(wm.missHistory)
+	wm.mu.Unlock()
+	if state != WebhookStreamHealthy || n != 0 {
+		t.Fatalf("state=%s misses=%d: startup-window reservations must not count", state, n)
+	}
+
+	after := base.Add(-2 * time.Second)
+	wm.noteEchoMisses([]time.Time{after, after, after})
+	wm.mu.Lock()
+	state = wm.state
+	wm.mu.Unlock()
+	if state != WebhookStreamUnhealthy {
+		t.Fatalf("state = %s: reservations made after the stream was up still count", state)
 	}
 }
