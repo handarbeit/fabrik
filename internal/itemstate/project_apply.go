@@ -211,8 +211,13 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 		flags |= BlockedByChanged
 	}
 
-	if !reflect.DeepEqual(item.Comments, pi.Comments) {
-		item.Comments = copyComments(pi.Comments)
+	comments := pi.Comments
+	if pi.DeepFetchLive && !pi.DeepFetchStartedAt.IsZero() {
+		// A comment recorded after the read began is not in it; keep it (#2350).
+		comments = unionRecentComments(item.Comments, comments, pi.DeepFetchStartedAt.Add(-grace))
+	}
+	if !reflect.DeepEqual(item.Comments, comments) {
+		item.Comments = copyComments(comments)
 		flags |= CommentsChanged
 	}
 

@@ -312,9 +312,14 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	before := newSnapshot(*item).state
 
 	fromProbe := false
+	fromLiveRead := false
 	if fp, ok := m.(FromProbe); ok {
 		fromProbe = true
 		m = fp.Inner
+	}
+	if fl, ok := m.(FromLiveRead); ok {
+		fromLiveRead = true
+		m = fl.Inner
 	}
 	flags := s.applyToItem(item, m)
 	if existed {
@@ -358,6 +363,9 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	if fromProbe {
 		change.Origin = OriginProbe
 		change.Path = PathProbe
+	}
+	if fromLiveRead {
+		change.Origin = OriginLiveRead
 	}
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
@@ -1238,6 +1246,31 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			}
 			delete(s.pendingCheckRuns, v.SHA)
 			flags |= CheckRunChanged
+		}
+		return flags
+
+	case LabelsRead:
+		return s.applyLabelsRead(item, v)
+
+	case PRReviewsRead:
+		return s.applyPRReviewsRead(item, v)
+
+	case LinkedPRStateObserved:
+		auth := authorityOf(v.At, true, s.graceLocked())
+		if observedStale(item, observedLinkedPRKey, auth) {
+			return 0
+		}
+		ensureLinkedPR(item, v.PRNumber)
+		s.observe(item, observedLinkedPRKey, auth)
+		var flags ChangeFlags
+		if item.LinkedPR.Number != v.PRNumber && v.PRNumber != 0 {
+			item.LinkedPR.Number = v.PRNumber
+			flags |= LinkedPRChanged
+		}
+		if item.LinkedPR.State != v.State || item.LinkedPR.Merged != v.Merged {
+			item.LinkedPR.State = v.State
+			item.LinkedPR.Merged = v.Merged
+			flags |= LinkedPRChanged | PRStateChanged
 		}
 		return flags
 

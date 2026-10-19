@@ -1,6 +1,7 @@
 package itemstate
 
 import (
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -407,4 +408,96 @@ func keepNewerReviews(item *ItemState, incoming []gh.PRReview, auth time.Time) [
 		}
 	}
 	return out
+}
+
+// applyLabelsRead applies a full label set read live by a gate (#2350). It is
+// ordered like a listing: fetch start minus the grace, through the same
+// engine-write protection (protectLabels), so a label the engine added or removed
+// after the read began is kept as the engine left it. Closed state is not part of
+// the read and is never touched.
+func (s *Store) applyLabelsRead(item *ItemState, v LabelsRead) ChangeFlags {
+	var flags ChangeFlags
+	grace := s.graceLocked()
+	pi := gh.ProjectItem{Labels: v.Labels}
+	var view shallowView
+	if !v.FetchedAt.IsZero() && hasRecords(item) {
+		protectLabels(item, pi, v.FetchedAt, grace, &view)
+		if dropEngineWrites(item, view.Drop) {
+			flags |= EngineWriteRecordedChanged
+		}
+	}
+	labels := v.Labels
+	if view.Labels != nil {
+		labels = view.Labels
+	}
+	if view.Labels != nil && sameStringSet(item.Labels, labels) {
+		// Only the order differs from the kept local set: leave it untouched.
+	} else if !sameStringSet(item.Labels, labels) || !item.LabelsKnown {
+		item.Labels = copyStrings(labels)
+		flags |= LabelsChanged
+	}
+	item.LabelsKnown = true
+	s.observe(item, observedLabelsKey, authorityOf(v.FetchedAt, true, grace))
+	return flags
+}
+
+// applyPRReviewsRead applies the review requests and reviews read live by a gate
+// (#2350), ordered by the request start like a live deep fetch: a whole-list read
+// older than the Store's record of the reviews is dropped, and an author whose
+// review was recorded after the read began keeps the Store's review.
+func (s *Store) applyPRReviewsRead(item *ItemState, v PRReviewsRead) ChangeFlags {
+	grace := s.graceLocked()
+	auth := authorityOf(v.FetchedAt, true, grace)
+	if s.ordering() && observedStale(item, observedReviewsKey, auth) {
+		return 0
+	}
+	if item.LinkedPR == nil && v.PRNumber == 0 {
+		return 0
+	}
+	ensureLinkedPR(item, v.PRNumber)
+	var flags ChangeFlags
+	reviews := v.Reviews
+	if s.ordering() && !auth.IsZero() {
+		reviews = keepNewerReviews(item, reviews, auth)
+	}
+	reviews = latestReviewPerAuthor(reviews)
+	lpr := item.LinkedPR
+	if !reflect.DeepEqual(lpr.Reviews, reviews) {
+		lpr.Reviews = copyPRReviews(reviews)
+		flags |= LinkedPRChanged
+	}
+	if !reflect.DeepEqual(lpr.ReviewRequests, v.Requests) && !(len(lpr.ReviewRequests) == 0 && len(v.Requests) == 0) {
+		lpr.ReviewRequests = copyReviewRequests(v.Requests)
+		flags |= LinkedPRChanged
+	}
+	s.observe(item, observedReviewsKey, auth)
+	return flags
+}
+
+// unionRecentComments keeps, besides the freshly read comments, every comment the
+// Store already holds that the read does not contain and that was created at or
+// after cutoff: it was written (by the engine or a webhook) after the read
+// began, so the read cannot be telling us it does not exist. Comments carry no
+// observed-at record, so this is the live read's guard against dropping one
+// (#2350). The result keeps the read's order, then the kept ones.
+func unionRecentComments(cur, read []gh.Comment, cutoff time.Time) []gh.Comment {
+	if len(cur) == 0 {
+		return read
+	}
+	have := make(map[string]bool, len(read))
+	for _, c := range read {
+		have[c.ID] = true
+	}
+	var extra []gh.Comment
+	for _, c := range cur {
+		if !have[c.ID] && !c.CreatedAt.IsZero() && !c.CreatedAt.Before(cutoff) {
+			extra = append(extra, c)
+		}
+	}
+	if len(extra) == 0 {
+		return read
+	}
+	out := make([]gh.Comment, 0, len(read)+len(extra))
+	out = append(out, read...)
+	return append(out, extra...)
 }

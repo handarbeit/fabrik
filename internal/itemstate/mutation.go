@@ -33,6 +33,64 @@ type FromProbe struct {
 func (FromProbe) isMutation()       {}
 func (m FromProbe) itemKey() string { return m.Inner.itemKey() }
 
+// FromLiveRead wraps a single-item mutation that a gate applies after reading
+// GitHub live inside the poll (#2350). The Store applies Inner unchanged and tags
+// the resulting Change with OriginLiveRead, which the wake observer ignores: the
+// read happens inside a poll that is already deciding on the item, so its own
+// write must not request another poll.
+type FromLiveRead struct {
+	Inner Mutation
+}
+
+func (FromLiveRead) isMutation()       {}
+func (m FromLiveRead) itemKey() string { return m.Inner.itemKey() }
+
+// LabelsRead applies a full label set read live from GitHub (FetchLabels) by a
+// gate (#2350). FetchedAt is the instant the request was issued; the read is
+// ordered like a listing (fetch start minus the listing-lag allowance) and goes
+// through the engine-write protection, so a label the engine wrote after the
+// read began is not cleared by it. A failed read is never applied.
+type LabelsRead struct {
+	Repo      string
+	Number    int
+	Labels    []string
+	FetchedAt time.Time
+}
+
+func (LabelsRead) isMutation()       {}
+func (m LabelsRead) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRReviewsRead applies the review requests and reviews of the item's linked PR
+// read live from GitHub (FetchPRReviews + FetchPRReviewRequests) by a gate
+// (#2350). Both halves must have been read: a partial read is never applied.
+// FetchedAt is the request start; the read is ordered like a live deep fetch.
+type PRReviewsRead struct {
+	Repo      string
+	Number    int // issue number
+	PRNumber  int
+	Reviews   []gh.PRReview
+	Requests  []gh.ReviewRequest
+	FetchedAt time.Time
+}
+
+func (PRReviewsRead) isMutation()       {}
+func (m PRReviewsRead) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// LinkedPRStateObserved sets only LinkedPR.State and Merged from a live PR read
+// (FetchPRMerged) by a gate (#2350). Unlike PRDetailsUpdated it never touches
+// Title or Draft. At is the request start (it gets the listing-lag allowance).
+type LinkedPRStateObserved struct {
+	Repo     string
+	Number   int // issue number
+	PRNumber int
+	State    string
+	Merged   bool
+	At       time.Time
+}
+
+func (LinkedPRStateObserved) isMutation()       {}
+func (m LinkedPRStateObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ---- Inbound webhook deltas ----
 
 // IssueOpened is emitted when a new issue is created or first observed.
