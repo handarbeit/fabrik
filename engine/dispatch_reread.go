@@ -55,6 +55,50 @@ func (e *Engine) refreshDispatchItem(item gh.ProjectItem) (gh.ProjectItem, bool)
 	return out, changed
 }
 
+// overlayStoreFacts returns item, a copy just read live by liveItem, with the
+// facts the Store holds on top of the raw read (#2350). A live deep fetch keeps in
+// the Store a comment recorded after the read began (a webhook delivery mid-read);
+// the raw copy lacks it, so a gate deciding on the copy alone would miss it. The
+// overlay is additive for comments (by node or database ID), takes blockedBy from
+// the Store once a deep fetch has populated it, and only ADDS labels: a label the
+// Store holds that the read lacks (an engine write the read predates) is added, but
+// a label the read shows is never hidden, so a fail-closed guard such as the pause
+// guard still sees a pause GitHub reports even when an engine removal is
+// protected in the Store (see liveLabels). Status and closed state are left as read.
+func (e *Engine) overlayStoreFacts(item gh.ProjectItem) gh.ProjectItem {
+	if e.liveOverlayOff.Load() {
+		return item
+	}
+	snap, ok := e.store.Peek(itemOwnerRepoString(item, e.defaultRepo()), item.Number)
+	if !ok {
+		return item
+	}
+	st := snap.State()
+	out := item
+	if added := commentsMissingFrom(item.Comments, st.Comments); len(added) > 0 {
+		out.Comments = append(append([]gh.Comment(nil), item.Comments...), added...)
+	}
+	if !st.LastDeepFetchAt.IsZero() && !(len(item.BlockedBy) == 0 && len(st.BlockedBy) == 0) {
+		out.BlockedBy = append([]gh.Dependency(nil), st.BlockedBy...)
+	}
+	if snap.LabelsKnown() {
+		var extra []string
+		for _, l := range st.Labels {
+			if !hasLabel(item.Labels, l) {
+				extra = append(extra, l)
+			}
+		}
+		if len(extra) > 0 {
+			out.Labels = append(append([]string(nil), item.Labels...), extra...)
+		}
+	}
+	return out
+}
+
+// SetLiveOverlayDisabledForTest makes the gates decide on the raw live copy, as
+// before the Store overlay. Test seam only.
+func (e *Engine) SetLiveOverlayDisabledForTest(off bool) { e.liveOverlayOff.Store(off) }
+
 // SetDispatchRereadDisabledForTest restores the pre-#2350 dispatch decision on
 // the poll-start copy. Test seam only (tests/sim): it shows a scenario is not
 // vacuous.

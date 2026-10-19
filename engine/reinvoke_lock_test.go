@@ -87,7 +87,7 @@ func TestReinvoke_ContextCancelledLeavesNoStoreLock(t *testing.T) {
 
 func TestReinvoke_RunningWorkerHasNoLock(t *testing.T) {
 	var calls int
-	eng, _, stgs := newDidNotRunReviewEngine(t, nil, &calls)
+	eng, client, stgs := newDidNotRunReviewEngine(t, nil, &calls)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	eng.claude.(*mockClaudeInvoker).invokeForCommentsFn = func(*stages.Stage, gh.ProjectItem, []gh.Comment, string, InvokeOptions) (string, bool, TokenUsage, error) {
@@ -112,6 +112,7 @@ func TestReinvoke_RunningWorkerHasNoLock(t *testing.T) {
 		hasComplete:   true,
 		advancedItems: map[string]bool{},
 	}
+	mirrorLiveReviews(client, pctx.item) // GitHub holds the review the cache holds
 	if !eng.handleReviewGate(pctx) {
 		t.Fatal("handleReviewGate did not claim the item")
 	}

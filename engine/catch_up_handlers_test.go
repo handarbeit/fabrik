@@ -620,6 +620,7 @@ func TestHandleReviewGate_AuthoritativeBlocked_ReinvokesOnActionableBody(t *test
 			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	advancedItems := make(map[string]bool)
 	pctx := &phase1Ctx{
 		ctx:           context.Background(),
@@ -713,6 +714,7 @@ func TestHandleReviewGate_TimedOutButActionable_DispatchesReinvokeNotPause(t *te
 			{Author: "alice", State: "CHANGES_REQUESTED", Body: "please fix the error handling", DatabaseID: 900},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	advancedItems := make(map[string]bool)
 	pctx := &phase1Ctx{
 		ctx:           context.Background(),

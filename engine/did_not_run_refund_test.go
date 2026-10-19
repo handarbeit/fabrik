@@ -82,6 +82,9 @@ func dispatchReviewRound(t *testing.T, eng *Engine, stg *stages.Stage, id int) {
 			DatabaseID: id,
 		}},
 	}
+	if m, ok := eng.client.(*mockGitHubClient); ok {
+		remirrorLiveReviews(m, item) // each round has a new review
+	}
 	pctx := &phase1Ctx{
 		ctx:           context.Background(),
 		board:         &gh.ProjectBoard{ProjectID: "PVT_1"},

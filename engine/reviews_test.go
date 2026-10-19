@@ -354,6 +354,7 @@ func TestCheckReviewGate_LabelOverride_AdvisoryOnAuthoritativeStage_Clears(t *te
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -388,6 +389,7 @@ func TestCheckReviewGate_Advisory_ChangesRequestedReview_StillClears(t *testing.
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)} // ReviewAuthority unset
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -419,6 +421,7 @@ func TestCheckReviewGate_Authoritative_ReviewDecisionApproved_Clears(t *testing.
 			{Author: "alice", State: "APPROVED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -481,6 +484,7 @@ func TestCheckReviewGate_Authoritative_NoBranchProtection_NoChangesRequested_Cle
 			{Author: "alice", State: "APPROVED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -600,6 +604,7 @@ func TestCheckReviewGate_DeclaredBotDoesNotDeferAuthoritativeHumanEscalation(t *
 			{Author: "alice", State: "CHANGES_REQUESTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	declared := []string{"some-declared-bot"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative", ExpectedReviewers: &declared}
 
@@ -1958,6 +1963,7 @@ func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 			{Author: "copilot-pull-request-reviewer", State: "COMMENTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
 	blocked, timedOut, _, _ := eng.checkReviewGate(board, item, stage)
@@ -3146,6 +3152,7 @@ func TestCheckReviewGate_MultipleDeclaredReviewers_AnyOneResponds_Clears(t *test
 			{Author: "handarbeit-pruefer[bot]", State: "COMMENTED"},
 		},
 	}
+	mirrorLiveReviews(client, item)
 	declared := []string{"handarbeit-pruefer", "gemini-code-assist"}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true), ExpectedReviewers: &declared}
 

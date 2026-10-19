@@ -447,10 +447,14 @@ func (s *Store) applyLabelsRead(item *ItemState, v LabelsRead) ChangeFlags {
 // review was recorded after the read began keeps the Store's review.
 func (s *Store) applyPRReviewsRead(item *ItemState, v PRReviewsRead) ChangeFlags {
 	grace := s.graceLocked()
-	// Judged by the read's own start (a direct REST read, not a lagging listing);
-	// the baseline it records is the shifted lower bound (see LinkedPRStateObserved).
+	// Judged by the shifted authority time, as ADR 2348 specifies for a PR read: a
+	// webhook review is stamped at whole-second resolution (and read replicas lag),
+	// so a review submitted just after the read began can carry a time before its
+	// start. Judging by the raw start would let a read that predates the review wipe
+	// it. (LinkedPRStateObserved is judged by the raw start: it applies only a merge,
+	// which is monotonic.)
 	auth := authorityOf(v.FetchedAt, true, grace)
-	if s.ordering() && observedStale(item, observedReviewsKey, v.FetchedAt) {
+	if s.ordering() && observedStale(item, observedReviewsKey, auth) {
 		return 0
 	}
 	if item.LinkedPR == nil && v.PRNumber == 0 {
@@ -459,8 +463,8 @@ func (s *Store) applyPRReviewsRead(item *ItemState, v PRReviewsRead) ChangeFlags
 	ensureLinkedPR(item, v.PRNumber)
 	var flags ChangeFlags
 	reviews := v.Reviews
-	if s.ordering() && !v.FetchedAt.IsZero() {
-		reviews = keepNewerReviews(item, reviews, v.FetchedAt)
+	if s.ordering() && !auth.IsZero() {
+		reviews = keepNewerReviews(item, reviews, auth)
 	}
 	reviews = latestReviewPerAuthor(reviews)
 	lpr := item.LinkedPR

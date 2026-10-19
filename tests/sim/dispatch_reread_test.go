@@ -2,6 +2,7 @@ package sim
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,16 +38,17 @@ func runPausedMidPollScenario(t *testing.T, rereadDisabled bool) (commentPasses 
 	passesBefore := env.Claude.CommentCallCount("Review")
 	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "a-human-operator", "one more thing, please")
 
-	var changes int
+	// The observer runs on the engine's goroutine, the read below on the test's.
+	var changes atomic.Int32
 	env.Engine.SubscribeStoreForTest(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) {
 		if c.Number == num && c.Fields&itemstate.WorkerLifecycleChanged != 0 {
-			changes++
+			changes.Add(1)
 		}
 	}))
 	RunPoll(t, env)
 
 	paused = hasLabel(IssueLabels(t, env, num), "fabrik:paused")
-	return env.Claude.CommentCallCount("Review") - passesBefore, paused, changes
+	return env.Claude.CommentCallCount("Review") - passesBefore, paused, int(changes.Load())
 }
 
 func TestDispatchReread_PausedByPhase1IsNotDispatchedInTheSamePoll(t *testing.T) {

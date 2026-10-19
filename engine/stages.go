@@ -460,7 +460,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
 		liveRead = false
 	} else {
-		item = fresh
+		item = e.overlayStoreFacts(fresh)
 		// Second pause check (#2341), against the labels the re-read just returned.
 		if e.refuseIfPaused(item, "landing") {
 			return false, true, nil

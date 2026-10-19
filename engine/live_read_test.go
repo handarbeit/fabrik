@@ -262,3 +262,54 @@ func TestLiveReviews_ForAnotherPRIsNotAppliedNorStampedFresh(t *testing.T) {
 		t.Fatalf("the matching PR was not applied: %+v", lpr)
 	}
 }
+
+// A human comment delivered by webhook while the feedback gate's live read is in
+// flight is kept in the Store (the read began before it existed) but is absent from
+// the raw read. The gate decides from the Store's facts on top of the read, so it
+// still holds on that comment; without the overlay it would pass over it (#2350).
+func TestFeedbackGate_WebhookCommentLandingDuringTheReadStillHoldsTheGate(t *testing.T) {
+	run := func(overlayOff bool) bool {
+		var eng *Engine
+		client := landingClient()
+		client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+			started := time.Now()
+			// The webhook delivery arrives after the read began.
+			eng.store.Apply(itemstate.IssueCommentCreated{Repo: "owner/repo", Number: 1,
+				Comment: gh.Comment{ID: "IC_w", DatabaseID: 22, Author: "maintainer", Body: "wait, one more thing", CreatedAt: started.Add(time.Millisecond)}})
+			item.Comments = nil // the read predates the comment
+			item.DeepFetchLive = true
+			item.DeepFetchStartedAt = started
+			return nil
+		}
+		eng = testEngineForMerge(t, client)
+		eng.SetLiveOverlayDisabledForTest(overlayOff)
+		eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 1, Status: "Validate"}})
+		item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
+		return eng.feedbackGateBlocks(item, false, "advance")
+	}
+	if !run(false) {
+		t.Fatal("a comment recorded in the Store during the read must hold the gate")
+	}
+	if run(true) {
+		t.Fatal("non-vacuity: on the raw live copy alone the gate misses the comment")
+	}
+}
+
+// The overlay only ever ADDS labels the Store holds to the raw read: a label the read
+// shows (fabrik:paused after a human re-pause) is never hidden by an engine write the
+// Store still protects, and an engine-added label the read predates is kept.
+func TestOverlayStoreFacts_AddsLabelsNeverHidesTheReadsOwn(t *testing.T) {
+	eng := liveReadEngine(t, &mockGitHubClient{})
+	eng.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:awaiting-ci"})
+	read := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"stage:Validate:complete", "fabrik:paused"}}
+	got := eng.overlayStoreFacts(read)
+	if !hasLabel(got.Labels, "fabrik:paused") {
+		t.Fatalf("the overlay hid a label the live read shows: %v", got.Labels)
+	}
+	if !hasLabel(got.Labels, "fabrik:awaiting-ci") {
+		t.Fatalf("the engine-added label the read predates was dropped: %v", got.Labels)
+	}
+	if len(read.Labels) != 2 {
+		t.Fatal("the input copy was mutated")
+	}
+}

@@ -46,12 +46,11 @@ newer fact.
    removed before `awaiting-review` is applied) to the channel deriver that a poll-start listing
    never showed.
 5. **Review gates.** The landing gate reads live through `liveReviews`. The advance gate confirms
-   live only when its cached view would clear, folding the live read into the cached view: review
-   requests from either side stand (the confirmation can only add holds), reviews are a union keyed
-   by author where the live review wins and a cached-only review still counts. The latter is a
-   deliberate trade-off, not a pure "adds constraints" rule: a review dismissed on GitHub that the
-   live read no longer returns keeps counting at the advance, and the landing gate (live alone)
-   is the authority that corrects it. A read within `liveFreshFor()` is not repeated.
+   live only when its cached view would clear, and decides on that live read alone (reviews and
+   requests), never on a union with the cached copy: a review dismissed or removed on GitHub no
+   longer counts, so the advance and the landing gate (`reviewGateHold`, also live alone) agree on
+   identical PR state (FR-007). Within `liveFreshFor()` the Store's view after the last applied read
+   is used instead of repeating it. A failed read leaves the cached verdict.
    `liveFreshFor()` is one poll interval floored at 30 s (zero when no poll interval is configured),
    deliberately not the ten-interval API-cost knob of ADR 1831: a reviewer or blocker added inside
    the window is invisible to a caller that trusts it, so the window stays short.
@@ -61,18 +60,35 @@ newer fact.
    stamped the Store's `blockedBy` record such as the #1995 webhook). An already-blocked item is always re-read
    (ADR 1419). Cleanup-stage items are never read.
 
-Direct REST reads (`LinkedPRStateObserved`, `PRReviewsRead`) are judged by their own start, not the
-listing-lag-shifted one: they are consistent GETs, so a record from the previous grace window cannot
-make them stale or let a webhook's older per-author review outrank them. The baseline they record is
-still the shifted lower bound, like every other fetch.
+**Ordering of the new reads.** `PRReviewsRead` is judged by the shifted authority time (fetch start
+minus the grace), as ADR 2348 specifies for a PR read, both for the whole-list check and per author:
+a webhook review is stamped at whole-second resolution (and read replicas lag), so a review submitted
+just after the read began can carry a time before its start, and a read that predates the review must
+not wipe it. **Deviation from ADR 2348:** `LinkedPRStateObserved` is judged by the raw request start.
+It applies only `merged=true`, a merge is monotonic, and the single-PR GET does not lag, so a record
+from the previous grace window must not drop a merge just confirmed; the baseline it records is still
+the shifted lower bound. (ADR 2348 carries a matching amendment line.)
+
+**Deciding from the Store at the feedback and landing re-reads (item 5).** After `liveItem`,
+`feedbackGateBlocks` (`unprocessedFeedback`) and `attemptMergeOnValidate` decide on the read overlaid
+with the Store's facts (`overlayStoreFacts`, the same comment/`blockedBy` overlay `refreshDispatchItem`
+uses): the Store keeps a comment recorded after the read began (a webhook delivery mid-read) that the
+raw copy lacks. Comments are added by ID, `blockedBy` comes from the Store once it has been deep
+fetched, and labels are **add-only**: a label the Store holds that the read lacks is added, but a label
+the read shows is never hidden. That is a deliberate deviation from "overlay the Store's labels": the
+Store's merged view protects an engine write made inside the grace window, which would hide a pause a
+human re-applied right after an engine unpause from the fail-closed pause guard that runs on this copy
+(see `liveLabels`). Seam: `SetLiveOverlayDisabledForTest`.
 
 ## Alternatives considered
 
 - *Read live in every per-poll handler.* One GraphQL or REST read per stage-complete item per poll;
   rejected on cost. Reads happen at a transition instead.
 - *Replace the advance gate's data with the landing gate's raw live read.* Changes the verdict for
-  every cached-only fact (a dismissed or absent review) and breaks the tests that pin the cached
-  contract; the union keeps gate policy untouched.
+  every cached-only fact, and the existing review-gate tests that model "the cache holds reviews" with
+  an empty live read had to be updated to model GitHub holding them too (`mirrorLiveReviews`). The
+  confirmation nevertheless decides on the live read alone (a cached-and-live union let a dismissed
+  review keep counting at the advance while the landing gate held, which broke FR-007).
 - *Rebuild a full `ProjectItem` from the Store.* Duplicates `copyDeepFieldsFromState` and still
   lacks the linked-PR head and the live markers.
 - *Mirror every label for cacheless engines.* Exposed the channel's transient label states.
@@ -98,4 +114,4 @@ still the shifted lower bound, like every other fetch.
 
 Seams (per-Engine): `SetDispatchRereadDisabledForTest`, `SetLiveReadApplyDisabledForTest`,
 `SetReviewConfirmLiveDisabledForTest`, `SetDependencyLiveReadDisabledForTest`,
-`SetCachelessWriteThroughDisabledForTest`, `SetLiveFreshForTest`.
+`SetCachelessWriteThroughDisabledForTest`, `SetLiveFreshForTest`, `SetLiveOverlayDisabledForTest`.

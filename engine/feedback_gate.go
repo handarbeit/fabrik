@@ -57,7 +57,7 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 			e.logf(item.Number, "warn", "feedback-gate: live re-read failed (%v) — feedback state unknown\n", err)
 			pf.Live = false
 		} else {
-			item = fresh
+			item = e.overlayStoreFacts(fresh)
 		}
 	}
 	reviews, err := e.resolveReviewsForFeedbackChecked(item)

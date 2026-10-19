@@ -208,7 +208,9 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// (a review request bumps no timestamp the freshness rule compares), so a gate
 	// that is about to clear on it first reads the requests and reviews live —
 	// the same read the landing gate makes — applies them to the Store and decides
-	// on that. A gate that holds needs no confirmation (a hold is always safe), and
+	// on that read alone, never on a union with the cached copy: a review dismissed
+	// or removed on GitHub no longer counts, so the advance and the landing gate
+	// agree on identical PR state (FR-007). A gate that holds needs no confirmation (a hold is always safe), and
 	// a read made within liveFreshFor is not repeated: the Store's applied view is
 	// used instead, so an item waiting for a human to advance does not pay a read
 	// per poll. A failed read leaves the cached verdict, as before.
@@ -226,7 +228,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		} else if lr, lq, err := e.liveReviews(owner, repo, item.Number, prNumber); err != nil {
 			e.logf(item.Number, "warn", "checkReviewGate: live confirmation read failed: %v — deciding on the cached review data\n", err)
 		} else {
-			reviews, reviewRequests = mergeLiveReviewState(reviews, reviewRequests, lr, lq)
+			reviews, reviewRequests = lr, lq
 			outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
 		}
 	}
@@ -2179,38 +2181,3 @@ func (e *Engine) storeReviewState(repoKey string, issueNumber, prNumber int) ([]
 // SetReviewConfirmLiveDisabledForTest restores the pre-#2350 advance gate, which
 // decides on the cached review data alone. Test seam only (tests/sim, engine).
 func (e *Engine) SetReviewConfirmLiveDisabledForTest(off bool) { e.reviewConfirmLiveOff.Store(off) }
-
-// mergeLiveReviewState folds a live review read into the cached view the advance
-// gate started from (#2350). The confirmation exists to catch what the cache
-// cannot see, so for review requests it only adds constraints: every request from
-// either side stands, which is what makes a reviewer requested after the cache
-// filled hold the advance. Reviews are a union keyed by author: a review the live
-// read has for an author replaces the cached one (a newer verdict or a changed
-// state is seen), and an author only the cache knows keeps the cached review. That
-// half does NOT only add constraints: a review dismissed or removed on GitHub, which
-// the live read no longer returns, still counts at the advance. This is a
-// deliberate trade-off (the pre-existing review-gate tests model the cached
-// reviews with an empty live read); the landing gate reads live alone and is the
-// authority that corrects it. Gate policy is untouched: the same pure cores decide
-// on the merged view.
-func mergeLiveReviewState(cachedReviews []gh.PRReview, cachedRequests []gh.ReviewRequest, liveReviews []gh.PRReview, liveRequests []gh.ReviewRequest) ([]gh.PRReview, []gh.ReviewRequest) {
-	liveBy := make(map[string]bool, len(liveReviews))
-	for _, r := range liveReviews {
-		liveBy[r.Author] = true
-	}
-	reviews := append([]gh.PRReview(nil), liveReviews...)
-	for _, r := range cachedReviews {
-		if !liveBy[r.Author] {
-			reviews = append(reviews, r)
-		}
-	}
-	seen := make(map[string]bool, len(cachedRequests)+len(liveRequests))
-	var requests []gh.ReviewRequest
-	for _, q := range append(append([]gh.ReviewRequest(nil), cachedRequests...), liveRequests...) {
-		if !seen[q.Login] {
-			seen[q.Login] = true
-			requests = append(requests, q)
-		}
-	}
-	return reviews, requests
-}
