@@ -1,6 +1,9 @@
 package github
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // StatusField holds the Status field metadata for a project.
 type StatusField struct {
@@ -36,6 +39,7 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
   }) {
     projectV2Item {
       id
+      updatedAt
     }
   }
 }`
@@ -50,10 +54,22 @@ func (c *Client) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statu
 		"optionId":  statusOptionID,
 	}
 
-	var result struct{}
+	var result struct {
+		Data struct {
+			Update struct {
+				Item struct {
+					UpdatedAt time.Time `json:"updatedAt"`
+				} `json:"projectV2Item"`
+			} `json:"updateProjectV2ItemFieldValue"`
+		} `json:"data"`
+	}
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
 		return fmt.Errorf("updating status for item %s on project %s: %w", itemID, projectID, err)
 	}
+	// The project item's own updatedAt is GitHub's stamp for this move (#1945).
+	// A payload without one records nothing (graphqlRequest does not expose the
+	// Date header, and the local clock is never a substitute).
+	c.recordItemWrite(itemID, result.Data.Update.Item.UpdatedAt)
 	return nil
 }
 

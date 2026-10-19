@@ -615,6 +615,7 @@ func (s *Sim) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOp
 		it.status = name
 		it.updatedAt = now
 		p.updatedAt = now
+		s.stampItemWriteLocked(itemID, now)
 		return nil
 	}
 	return fmt.Errorf("simgh: no status option %q in project %q", statusOptionID, projectID)

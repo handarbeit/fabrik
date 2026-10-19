@@ -72,7 +72,7 @@ const (
 	// LinkedPRChanged) can filter precisely.
 	PRStateChanged
 	// SelfWriteBaselineChanged indicates LastSeenSourceUpdatedAt was advanced by
-	// a SelfWriteObserved mutation (#1090). Pure bookkeeping for the probe
+	// a SelfWriteObserved mutation carrying a GitHub timestamp (#1090, #1945). Pure bookkeeping for the probe
 	// staleness check — intentionally excluded from wakeChFlags/cycleSetFlags
 	// (engine/observers.go) so it never wakes the poll loop or bypasses the
 	// dispatch cooldown.

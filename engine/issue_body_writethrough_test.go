@@ -30,7 +30,7 @@ func bodyWTEngine(t *testing.T, client *mockGitHubClient) (*Engine, *boardcache.
 	t.Helper()
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache, _ := eng.UseBoardCacheForTest()
-	updatedAt := time.Now().Add(-time.Hour)
+	updatedAt := githubWriteAt.Add(-time.Hour) // GitHub-clock, before the stamped self-write
 	pi := gh.ProjectItem{
 		ID: "I_60", ItemID: "PVTI_60", Number: bodyWTNumber, Repo: bodyWTRepo, Status: "Specify",
 		Title: "Title", Body: bodyWTOld, UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
@@ -119,8 +119,9 @@ func TestUpdateIssueBody_FailureLeavesStoreAndBaselineUnchanged(t *testing.T) {
 // The stage-output path (item.go) uses the same helper; the helper itself is the
 // shared step, so exercise it directly with the item shape processItem passes.
 func TestUpdateIssueBody_AppliesBodyAndAdvancesBaselineTogether(t *testing.T) {
-	eng, _, _ := bodyWTEngine(t, &mockGitHubClient{})
-	before := time.Now()
+	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
+	eng, _, _ := bodyWTEngine(t, client)
 
 	if err := eng.updateIssueBody(gh.ProjectItem{Number: bodyWTNumber, Repo: bodyWTRepo}, "owner", "repo", bodyWTNew); err != nil {
 		t.Fatalf("updateIssueBody: %v", err)
@@ -129,18 +130,19 @@ func TestUpdateIssueBody_AppliesBodyAndAdvancesBaselineTogether(t *testing.T) {
 	if snap.State().Body != bodyWTNew {
 		t.Errorf("Body = %q; want %q", snap.State().Body, bodyWTNew)
 	}
-	if snap.State().LastSeenSourceUpdatedAt.Before(before) {
-		t.Errorf("baseline = %v; want advanced to >= %v", snap.State().LastSeenSourceUpdatedAt, before)
+	if !snap.State().LastSeenSourceUpdatedAt.Equal(githubWriteAt) {
+		t.Errorf("baseline = %v; want GitHub's stamp %v", snap.State().LastSeenSourceUpdatedAt, githubWriteAt)
 	}
 }
 
 func TestUpdateIssueBody_NoCacheStillAdvancesBaseline(t *testing.T) {
-	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-	before := time.Now()
+	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	if err := eng.updateIssueBody(gh.ProjectItem{Number: 61, Repo: bodyWTRepo}, "owner", "repo", bodyWTNew); err != nil {
 		t.Fatalf("updateIssueBody: %v", err)
 	}
-	if got := lastSeenSourceUpdatedAt(t, eng, bodyWTRepo, 61); got.Before(before) {
-		t.Errorf("baseline = %v; want advanced to >= %v", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, bodyWTRepo, 61); !got.Equal(githubWriteAt) {
+		t.Errorf("baseline = %v; want GitHub's stamp %v", got, githubWriteAt)
 	}
 }

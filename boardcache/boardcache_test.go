@@ -1421,13 +1421,15 @@ func TestUpdateItemStatusSetsStatusAndUpdatedAt(t *testing.T) {
 	if s.Status != "Plan" {
 		t.Errorf("want Status %q, got %q", "Plan", s.Status)
 	}
-	// UpdateItemStatus bumps localDeltaAt (not item.UpdatedAt directly).
+	// An engine write-through does not stamp localDeltaAt (#1945): the write's
+	// GitHub updatedAt bump is covered by the GitHub-anchored baseline, and a
+	// daemon-clock stamp would read as an external change on every self-write.
 	c.mu.RLock()
-	deltaAt := c.localDeltaAt[key]
+	_, stamped := c.localDeltaAt[key]
 	c.mu.RUnlock()
 
-	if deltaAt.Before(before) || deltaAt.After(after) {
-		t.Errorf("localDeltaAt %v not in expected range [%v, %v]", deltaAt, before, after)
+	if stamped {
+		t.Errorf("UpdateItemStatus stamped localDeltaAt; an engine write-through must not (window [%v, %v])", before, after)
 	}
 }
 
@@ -1887,12 +1889,12 @@ func TestApplyLabelAdded(t *testing.T) {
 		t.Errorf("want fabrik:awaiting-ci in labels after ApplyLabelAdded, got %v", labels)
 	}
 
-	// localDeltaAt must be bumped.
+	// An engine write-through must not stamp localDeltaAt (#1945).
 	c.mu.RLock()
 	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
-	if !deltaAt.After(before) {
-		t.Error("want localDeltaAt bumped after ApplyLabelAdded")
+	if deltaAt.After(before) {
+		t.Error("ApplyLabelAdded stamped localDeltaAt; an engine write-through must not")
 	}
 }
 
@@ -1943,8 +1945,8 @@ func TestApplyLabelRemoved(t *testing.T) {
 	c.mu.RLock()
 	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
-	if !deltaAt.After(before) {
-		t.Error("want localDeltaAt bumped after ApplyLabelRemoved")
+	if deltaAt.After(before) {
+		t.Error("ApplyLabelRemoved stamped localDeltaAt; an engine write-through must not (#1945)")
 	}
 }
 
@@ -1975,12 +1977,12 @@ func TestApplyIssueClosed(t *testing.T) {
 		t.Error("want IsClosed=true after ApplyIssueClosed")
 	}
 
-	// localDeltaAt must be bumped.
+	// An engine write-through must not stamp localDeltaAt (#1945).
 	c.mu.RLock()
 	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
-	if deltaAt.IsZero() {
-		t.Error("want localDeltaAt bumped after ApplyIssueClosed")
+	if !deltaAt.IsZero() {
+		t.Error("ApplyIssueClosed stamped localDeltaAt; an engine write-through must not")
 	}
 }
 
@@ -2015,8 +2017,8 @@ func TestApplyIssueBodyUpdated(t *testing.T) {
 	c.mu.RLock()
 	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
-	if deltaAt.IsZero() {
-		t.Error("want localDeltaAt bumped after ApplyIssueBodyUpdated")
+	if !deltaAt.IsZero() {
+		t.Error("ApplyIssueBodyUpdated stamped localDeltaAt; an engine write-through must not (#1945)")
 	}
 }
 
@@ -2203,8 +2205,8 @@ func TestApplyCommentAdded(t *testing.T) {
 	c.mu.RLock()
 	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
-	if !deltaAt.After(before) {
-		t.Error("want localDeltaAt bumped after ApplyCommentAdded")
+	if deltaAt.After(before) {
+		t.Error("ApplyCommentAdded stamped localDeltaAt; an engine write-through must not (#1945)")
 	}
 }
 

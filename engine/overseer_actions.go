@@ -227,7 +227,7 @@ func (e *Engine) moveItemToStatus(projectID string, item gh.ProjectItem, field *
 	if c := e.cache(); c != nil {
 		c.UpdateItemStatusBy(boardcache.ItemKey(owner+"/"+repo, item.Number), targetName, requester)
 	}
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribedVia("projects_v2_item", "edited", item.ItemID, requester)
 	}

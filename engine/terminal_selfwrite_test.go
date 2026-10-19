@@ -48,6 +48,10 @@ func newWarmableClient(baseTime time.Time) (*mockGitHubClient, *int) {
 			return nil
 		},
 	}
+	// Every engine write is stamped by GitHub five seconds after the warm-up
+	// (#1945): the self-write baseline is that GitHub time, and the probe then
+	// reports the same GitHub time as the item's updatedAt.
+	client.fixedWriteStamps(baseTime.Add(5 * time.Second))
 	return client, &calls
 }
 

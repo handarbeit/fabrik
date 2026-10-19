@@ -355,7 +355,7 @@ func (e *Engine) moveItemToValidate(board *gh.ProjectBoard, item gh.ProjectItem)
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), targetStatus)
 		}
-		e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+		e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}

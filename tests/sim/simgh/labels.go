@@ -42,6 +42,7 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	iss.labelAppliedAt[labelName] = now
 	iss.recordLabelEvent(LabelEventLabeled, labelName, now)
 	iss.updatedAt = now
+	s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 	r.labelVocab[labelName] = true
 	return nil
 }
@@ -78,6 +79,7 @@ func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelNam
 	delete(iss.labelAppliedAt, labelName)
 	iss.recordLabelEvent(LabelEventUnlabeled, labelName, now)
 	iss.updatedAt = now
+	s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 	return nil
 }
 

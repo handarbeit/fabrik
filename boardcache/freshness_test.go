@@ -169,7 +169,7 @@ func TestFreshness_SelfWriteAloneNeverRefetches(t *testing.T) {
 	// total follows.
 	for i := 1; i <= 3; i++ {
 		store.Apply(itemstate.LocalCommentAdded{Repo: "owner/repo", Number: 5, Comment: gh.Comment{DatabaseID: i}})
-		store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 5})
+		store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 5, At: t0.Add(time.Second)})
 	}
 	board := gh.ProjectItem{
 		ID: "I_5", Number: 5, Repo: "owner/repo", Status: "Plan",
@@ -212,9 +212,9 @@ func TestFreshness_ExternalCommentBeforeSelfWrite_RefetchesOnceAndSettles(t *tes
 		t.Fatalf("seed fetch: %v", err)
 	}
 
-	// A human comments at t0+1s; the engine self-writes (a label) at ~now,
-	// which moves the baseline past the comment's updatedAt.
-	store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 5})
+	// A human comments at t0+1s; the engine self-writes (a label) at GitHub time
+	// t0+2s, which moves the baseline past the comment's updatedAt.
+	store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: 5, At: t0.Add(2 * time.Second)})
 	board := gh.ProjectItem{
 		ID: "I_5", Number: 5, Repo: "owner/repo", Status: "Plan",
 		UpdatedAt: t0.Add(time.Second), IssueLayerUpdatedAt: t0.Add(time.Second),

@@ -1,6 +1,7 @@
 package github
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -13,13 +14,26 @@ func (c *Client) AddComment(owner, repo string, issueNumber int, body string) (i
 		"body": body,
 	}
 	var resp struct {
-		ID int `json:"id"`
+		ID        int       `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
 	}
-	if err := c.restPostWithResponse(apiURL, payload, &resp); err != nil {
+	httpResp, respBody, err := c.do("POST", apiURL, payload)
+	if err != nil {
 		return 0, fmt.Errorf("adding comment to %s/%s#%d: %w", owner, repo, issueNumber, err)
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return 0, fmt.Errorf("adding comment to %s/%s#%d: decoding response: %w", owner, repo, issueNumber, err)
 	}
 	if resp.ID <= 0 {
 		return 0, fmt.Errorf("github: add comment response missing valid id")
+	}
+	// A new comment bumps the issue's updatedAt to (at least) the comment's own
+	// stamp. Prefer that over the Date header (#1945, FR-002).
+	if t := latestOf(resp.CreatedAt, resp.UpdatedAt); !t.IsZero() {
+		c.recordIssueWrite(owner, repo, issueNumber, t)
+	} else {
+		c.recordIssueWrite(owner, repo, issueNumber, responseDate(httpResp.Header))
 	}
 	return resp.ID, nil
 }
@@ -154,8 +168,19 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 	payload := map[string]interface{}{
 		"body": body,
 	}
-	if err := c.restPatch(apiURL, payload); err != nil {
+	httpResp, respBody, err := c.do("PATCH", apiURL, payload)
+	if err != nil {
 		return fmt.Errorf("updating body of %s/%s#%d: %w", owner, repo, issueNumber, err)
+	}
+	// The PATCH response is the issue object; its updated_at is GitHub's stamp
+	// for this edit (#1945, FR-002). Date is the fallback.
+	var issue struct {
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if json.Unmarshal(respBody, &issue) == nil && !issue.UpdatedAt.IsZero() {
+		c.recordIssueWrite(owner, repo, issueNumber, issue.UpdatedAt)
+	} else {
+		c.recordIssueWrite(owner, repo, issueNumber, responseDate(httpResp.Header))
 	}
 	return nil
 }

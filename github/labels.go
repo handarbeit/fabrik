@@ -143,18 +143,24 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 	body := map[string]interface{}{
 		"labels": []string{labelName},
 	}
-	if err := c.restPost(apiURL, body); err != nil {
+	resp, _, err := c.do("POST", apiURL, body)
+	if err != nil {
 		return fmt.Errorf("adding label %q to %s/%s#%d: %w", labelName, owner, repo, issueNumber, err)
 	}
+	// The response body carries no timestamp; the Date header is GitHub's clock
+	// (#1945, FR-002/003). Absent → nothing recorded → the baseline stays put.
+	c.recordIssueWrite(owner, repo, issueNumber, responseDate(resp.Header))
 	return nil
 }
 
 // RemoveLabelFromIssue removes a label from an issue.
 func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels/%s", c.baseURL, owner, repo, issueNumber, url.PathEscape(labelName))
-	if err := c.restDelete(apiURL); err != nil {
+	resp, _, err := c.do("DELETE", apiURL, nil)
+	if err != nil {
 		return fmt.Errorf("removing label %q from %s/%s#%d: %w", labelName, owner, repo, issueNumber, err)
 	}
+	c.recordIssueWrite(owner, repo, issueNumber, responseDate(resp.Header))
 	return nil
 }
 

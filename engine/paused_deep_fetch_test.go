@@ -342,7 +342,7 @@ func pausedCachedItem(t *testing.T, eng *Engine, number int, updatedAt time.Time
 		UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
 		IssueCommentTotal: 1, IssueCommentTotalKnown: true,
 	}})
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: number})
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: "owner/repo", Number: number, At: updatedAt.Add(time.Second)})
 	eng.store.Apply(itemstate.CooldownRecorded{
 		Repo: "owner/repo", Number: number, Reason: "periodic-re-eval", Until: time.Now().Add(-time.Minute),
 	})

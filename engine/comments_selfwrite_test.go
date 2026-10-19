@@ -3,7 +3,6 @@ package engine
 import (
 	"errors"
 	"testing"
-	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -24,15 +23,15 @@ const bodyOnlyOutput = "FABRIK_ISSUE_UPDATE_BEGIN\nupdated spec body\nFABRIK_ISS
 
 func TestPublishCommentOutput_BodyEditAdvancesStaleness(t *testing.T) {
 	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 50, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Specify"}
-	before := time.Now()
 
 	eng.publishCommentOutput("owner", "repo", item, stage, nil, bodyOnlyOutput, "", "main")
 
-	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 50); got.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful issue body edit", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 50); !got.Equal(githubWriteAt) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v after a successful issue body edit", got, githubWriteAt)
 	}
 }
 

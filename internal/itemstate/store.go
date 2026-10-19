@@ -41,6 +41,11 @@ type Store struct {
 	// freshness baselines). Test seam only (SetLegacyDeepFetchApplyForTest).
 	legacyDeepFetchApply atomic.Bool
 
+	// legacyLocalClockSelfWrite restores the pre-#1945 SelfWriteObserved apply
+	// (baseline = the daemon's time.Now()). Test seam only
+	// (SetLegacyLocalClockSelfWriteForTest) — the non-vacuity switch.
+	legacyLocalClockSelfWrite atomic.Bool
+
 	// observedOrderingOff disables the observed-at ordering rule (#2348): no
 	// record is kept or consulted and Reconcile's removal guard is lifted. Test
 	// seam only (SetObservedOrderingDisabledForTest).
@@ -1135,9 +1140,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return DeepFetchChanged
 
 	case SelfWriteObserved:
-		now := time.Now()
-		if now.After(item.LastSeenSourceUpdatedAt) {
-			item.LastSeenSourceUpdatedAt = now
+		at := v.At
+		if s.legacyLocalClockSelfWrite.Load() {
+			at = time.Now()
+		}
+		if !at.IsZero() && at.After(item.LastSeenSourceUpdatedAt) {
+			item.LastSeenSourceUpdatedAt = at
 			return SelfWriteBaselineChanged
 		}
 		return 0
@@ -1953,4 +1961,11 @@ func stringsEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// SetLegacyLocalClockSelfWriteForTest restores the pre-#1945 SelfWriteObserved
+// apply, which ignores the mutation's At and sets the baseline to the daemon's
+// wall clock, so a test can show its clock-skew assertions bite.
+func (s *Store) SetLegacyLocalClockSelfWriteForTest(on bool) {
+	s.legacyLocalClockSelfWrite.Store(on)
 }

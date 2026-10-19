@@ -27,6 +27,30 @@ func (e *Engine) cache() *boardcache.CacheImpl {
 	return c
 }
 
+// observeSelfWrite advances the item's probe staleness baseline after a
+// successful engine write to the issue (#1090), anchored to the time GitHub
+// stamped on that write (#1945, ADR 1945). It never reads the host clock: a
+// client without WriteStampSource, or a write that yielded no stamp, advances
+// nothing (at worst one redundant deep fetch at the next probe — never a masked
+// external write). The Store keeps the baseline raise-only.
+func (e *Engine) observeSelfWrite(owner, repo string, number int) {
+	var at time.Time
+	if src, ok := e.client.(WriteStampSource); ok {
+		at = src.IssueWriteStamp(owner+"/"+repo, number)
+	}
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: number, At: at})
+}
+
+// observeStatusMoveWrite is observeSelfWrite for a board Status move: the write
+// bumps the project item, so the anchor is that item's GitHub stamp.
+func (e *Engine) observeStatusMoveWrite(owner, repo string, number int, itemID string) {
+	var at time.Time
+	if src, ok := e.client.(WriteStampSource); ok {
+		at = src.ProjectItemWriteStamp(itemID)
+	}
+	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: number, At: at})
+}
+
 // updateIssueBody is the single engine write of an issue body (#2346): the
 // GitHub mutation, then — only on success — the Store write-through, the probe
 // staleness baseline advance (#1090) and the issues/edited webhook echo. The body
@@ -44,7 +68,7 @@ func (e *Engine) updateIssueBody(item gh.ProjectItem, owner, repo, body string) 
 	if c := e.cache(); c != nil && !e.issueBodyWriteThroughOff.Load() {
 		c.ApplyIssueBodyUpdated(key, body)
 	}
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	e.observeSelfWrite(owner, repo, item.Number)
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issues", "edited", key)
 	}
@@ -81,7 +105,7 @@ func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, re
 	// succeeded — this is the only real "did GitHub's own updatedAt just bump"
 	// signal available here, so the probe staleness baseline advances
 	// unconditionally (#1090).
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	e.observeSelfWrite(owner, repo, item.Number)
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoVia("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
 	}
@@ -249,7 +273,7 @@ func (e *Engine) syncLabelRemovalBy(item gh.ProjectItem, label string, echo bool
 	// happened" signal RegisterEcho below relies on, so the staleness baseline
 	// advances under the identical condition (#1090).
 	if echo {
-		e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+		e.observeSelfWrite(owner, repo, item.Number)
 	}
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoVia("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
@@ -320,7 +344,7 @@ func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool)
 	// AddComment already succeeded (the error path returned above), so the
 	// staleness baseline advances unconditionally, same as the cache
 	// write-through above (#1090).
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	e.observeSelfWrite(owner, repo, item.Number)
 	if echo && e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}

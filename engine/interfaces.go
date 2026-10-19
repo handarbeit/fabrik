@@ -8,6 +8,24 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
+// WriteStampSource is the optional capability of a GitHubClient to report the
+// time GitHub itself stamped on the writes the client completed (#1945, ADR
+// 1945). The engine anchors the probe staleness baseline to it after a
+// self-write (observeSelfWrite); a client without it, or a zero stamp, means
+// the baseline is not advanced — the host clock is never a substitute.
+//
+// The stamps are GitHub's clock only: a comment's created_at/updated_at, an issue
+// PATCH's updated_at, the Date header of a label write, a Status move's
+// projectV2Item.updatedAt. Each is raise-only and recorded only for completed
+// engine writes, never for display-field writes (#2180).
+type WriteStampSource interface {
+	// IssueWriteStamp is the latest GitHub-reported time of a write to repo
+	// ("owner/repo") #number; zero when none is known.
+	IssueWriteStamp(repo string, number int) time.Time
+	// ProjectItemWriteStamp is the same for a Status write to a project item.
+	ProjectItemWriteStamp(itemID string) time.Time
+}
+
 // GitHubClient defines the GitHub operations needed by the engine.
 type GitHubClient interface {
 	FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)

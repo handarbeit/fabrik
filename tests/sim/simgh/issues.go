@@ -32,7 +32,9 @@ func (s *Sim) UpdateIssueBody(owner, repo string, issueNumber int, body string) 
 		return err
 	}
 	iss.body = body
-	iss.updatedAt = s.now()
+	now := s.now()
+	iss.updatedAt = now
+	s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 	return nil
 }
 

@@ -75,6 +75,17 @@ func Instrument(s *Sim) *Instrumented {
 // Sim returns the wrapped model, for the Seed* API and for Snapshot/Restore.
 func (in *Instrumented) Sim() *Sim { return in.sim }
 
+// IssueWriteStamp / ProjectItemWriteStamp forward engine.WriteStampSource to the
+// model. They are reads of the model's own bookkeeping, not GitHub calls, so
+// they are neither logged nor faultable (#1945).
+func (in *Instrumented) IssueWriteStamp(repo string, number int) time.Time {
+	return in.sim.IssueWriteStamp(repo, number)
+}
+
+func (in *Instrumented) ProjectItemWriteStamp(itemID string) time.Time {
+	return in.sim.ProjectItemWriteStamp(itemID)
+}
+
 // Faults returns the fault table.
 func (in *Instrumented) Faults() *FaultTable { return in.faults }
 
