@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -336,4 +337,34 @@ func TestDiscardOutcomeForFreshStart(t *testing.T) {
 	}
 	var nilEngine Engine
 	nilEngine.discardOutcomeForFreshStart(item, "Research", "no store") // must not panic
+}
+
+// A worker still inside finalizeStageOutcome has not reached the ready checkpoint, so its
+// record is still in phase "recorded"; the settle scan must leave it alone rather than judge
+// (and discard) it. Without the worker the same record is discarded as interrupted.
+func TestSettleStageOutcome_LeavesRecordOfInFlightWorkerAlone(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.EnableStageOutcomesForTest(t.TempDir())
+	item := gh.ProjectItem{Number: 7, Repo: "owner/repo", Status: "Research", UpdatedAt: time.Now()}
+	repoStr := issueKeyRepo(item, eng)
+
+	rec := testOutcomeRecord()
+	rec.Repo = repoStr
+	rec.Phase = outcomePhaseRecorded
+	if err := eng.stageOutcomes.put(rec); err != nil {
+		t.Fatal(err)
+	}
+	board := &gh.ProjectBoard{Items: []gh.ProjectItem{item}}
+
+	eng.store.Apply(itemstate.WorkerEntered{Repo: repoStr, Number: item.Number, StageName: "Research", StartedAt: time.Now()})
+	eng.settleStageOutcomes(context.Background(), board)
+	if eng.stageOutcomes.get(rec.key()) == nil {
+		t.Fatal("the scan discarded the record of an item whose worker is still running")
+	}
+
+	eng.store.Apply(itemstate.WorkerExited{Repo: repoStr, Number: item.Number})
+	eng.settleStageOutcomes(context.Background(), board)
+	if eng.stageOutcomes.get(rec.key()) != nil {
+		t.Fatal("with no worker, a record that never reached ready must be discarded")
+	}
 }

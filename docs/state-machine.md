@@ -5177,12 +5177,15 @@ function (pause, malformed marker, spawn failure, PR-creation escalation, succes
 **Retry — `settleStageOutcomes`** (board-sourced, beside `settleNoWorkNeededScan`, so independent of the admission
 it refuses). Per record, in order:
 
+0. skip the poll while a worker for the item is in flight or `fabrik:editing` is present — first, before any rule
+   below, because a `finalizeStageOutcome` still running has not reached its `ready` checkpoint and its record
+   would otherwise be judged (and discarded) as interrupted;
 1. completion signal already on the item → remove (`published`);
 2. discard, with one `[outcome]` log line naming the reason (R3): the item is closed or left the board, carries
    `fabrik:paused`, moved to another column, the record is not `ready`, or the worktree is missing/unreadable or its
    `HEAD` differs from the recorded SHA; for a Validate record also `fabrik:revalidate` on the item, or
    `fabrik:validate-rerun` on it when the record is not the forced re-run's own (see *Forced re-runs* below);
-3. skip the poll while a worker for the item is in flight, `fabrik:editing` is present, or `forgeHeld()` (§7.21);
+3. skip the poll while `forgeHeld()` (§7.21);
 4. otherwise `publishStageOutcome` (never calls `EnsureWorktree`): issue body (written only if the live body still
    equals the body it replaces — a human edit made during the outage is never overwritten), stage comment(s)
    (hidden `<!-- fabrik:outcome=<nonce>:pr|issue -->` marker; the thread is read first so a comment whose flag was

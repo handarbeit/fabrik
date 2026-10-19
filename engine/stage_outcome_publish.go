@@ -108,6 +108,17 @@ func (e *Engine) settleStageOutcomes(ctx context.Context, board *gh.ProjectBoard
 }
 
 func (e *Engine) settleStageOutcome(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, rec *stageOutcomeRecord) {
+	// A worker or a comment pass for the item owns the record first: a finalizeStageOutcome
+	// still running has not reached its ready checkpoint (the phase is still "recorded", the
+	// head may still move with a spec commit), so judging the record now would discard a live
+	// one. Skip before any discard rule is evaluated.
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil && snap.Worker() != nil {
+		return
+	}
+	if hasLabel(item.Labels, "fabrik:editing") {
+		return
+	}
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage != nil && stage.Name == rec.Stage && !item.IsClosed && outcomeSignalPresent(item, stage) {
 		e.dropStageOutcome(rec.key(), rec.Number, "the completion signal is already on the item")
@@ -127,13 +138,8 @@ func (e *Engine) settleStageOutcome(ctx context.Context, board *gh.ProjectBoard,
 		e.dropStageOutcome(rec.key(), rec.Number, reason)
 		return
 	}
-	// Never publish under a worker or a comment pass for the same item, and not while the
-	// forge is unreachable (the attempt would fail and teach nothing).
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	if snap, err := e.store.Get(repoStr, item.Number); err == nil && snap.Worker() != nil {
-		return
-	}
-	if hasLabel(item.Labels, "fabrik:editing") || e.forgeHeld() {
+	// Not while the forge is unreachable (the attempt would fail and teach nothing).
+	if e.forgeHeld() {
 		return
 	}
 
