@@ -149,6 +149,13 @@ func (e *Engine) refundDidNotRunCycle(item gh.ProjectItem, itemRepo string, stag
 	}
 	e.store.Apply(itemstate.DidNotRunReinvokeRecorded{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
 	e.logf(item.Number, tag, "invocation did not run (%s) — refunding %s cycle counter for stage %q (#1812)\n", kind, c.label, stage.Name)
+	// A reinvoke dispatched from catch-up Phase 1 marks the item advanced, so the
+	// poll defer re-stamps no periodic re-evaluation for it, and a run that never
+	// happened leaves no change to admit it by. Re-arm the safety net so every
+	// did-not-run outcome keeps an admission path (#2407, ADR 2096).
+	if !e.usageHoldReinvokeGateDisabled.Load() {
+		e.rearmPeriodicReEval(item)
+	}
 }
 
 // commentIDsForLog joins the IDs of a dispatched comment batch for inclusion
@@ -204,7 +211,14 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 	// later poll, once the hold lifts.
 	if e.forgeHeld() {
 		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting %s re-invocation for stage %q\n", opts.tag, stage.Name)
+		e.recordLockWriteCooldown(item)
 		e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, didNotRunForgeHeld, opts.cycle)
+		return
+	}
+
+	// Claude usage-limit hold (#2407): same position, so no worker is entered and
+	// nothing wakes the poll; the item gets a cooldown expiring at the lift.
+	if e.usageHoldReinvokeRefused(item, itemRepo, stage, opts) {
 		return
 	}
 
