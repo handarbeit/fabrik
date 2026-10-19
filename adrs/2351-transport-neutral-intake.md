@@ -1,0 +1,42 @@
+# ADR 2351: Transport-neutral webhook intake — shared dedupe, per-item order, fast ack, engine echo registry
+
+**Date**: 2026-10-19
+**Status**: Accepted
+**Issue**: #2351 — statefix: transport-neutral webhook intake with delivery dedupe, per-item ordering and fast ack
+**Amends**: ADR 042 (mutation echo-check: registry ownership, register-before-write), ADR 1142 Decision #3 (transport interface scope; Hookdeck echo no-ops) and its `RefuseHookdeckWithWebhooks` refusal. Leaves ADR 1752 and ADR 1254/1563 in place.
+
+## Context
+
+The webhook path was built for exactly two transports (`gh webhook forward`, Hookdeck) and had no shared delivery handling. Before a second, millisecond-latency source (#2143, the Funnel receiver) each weakness became real:
+
+- no engine-level dedupe (Hookdeck had a private in-memory ring); two sources applying one delivery double the auto-heal reads and re-apply partial payloads;
+- each request was applied on its own goroutine, unordered, with network work (`ensureIssueInStore`, the Layer 1 refresh) before the 200 — GitHub times out at 10 s and does not retry;
+- echoes were registered *after* the write and its write-through, so a fast echo was attributed as external and a failed write could leave an orphan that swallowed a later identical human event; under Hookdeck the echo methods were no-ops;
+- a single `e.webhookMgr`, type switches in `reconcileTick`/`transitionMgrHealthState`, `RefuseHookdeckWithWebhooks`; a third transport silently got no health transitions;
+- Hookdeck reconnects ran no catch-up reconcile;
+- the listener cut bodies at 10 MiB (GitHub allows 25 MB), silently truncating larger ones into an HMAC failure that counts toward secret rotation.
+
+## Decision
+
+1. **One intake stage in front of the apply function** (`engine/intake.go`). A transport verifies its own signature, normalises, and hands a `delivery{ID, EventType, Payload, Transport}` to the intake and acknowledges; nothing after that is transport-specific. The apply function (`ApplyDelta`, then the Layer 1 refresh) runs from a worker goroutine.
+2. **Dedupe is a persisted ledger** (`engine/delivery_ledger.go`): `Accept(id)` is one mutex-guarded check-and-record; 24 h / 10,000 entries as constants (no flag, env var or YAML key, so no `workerenv` classification); persisted atomically at `.fabrik/state/webhook/deliveries.json` and flushed before an exec; a missing or corrupt file starts an empty window. An empty ID is applied and never recorded. It records on acceptance, not application; an overflow drop is *forgotten* so a redelivery is accepted.
+3. **Per-item serial queues**, keyed by `repo#number` (issues, comments and PRs share a number space), a check event's linked PR, a `projects_v2_item`'s node ID, else the repository or `global`. A goroutine per active key, a semaphore of 8 for concurrent applies, panic recovery, bounded depth (drop-and-forget, reconcile heals), and never a blocked `Submit`. Ordering is arrival order; GitHub-time ordering of Store writes remains ADR 2348's.
+4. **A transport interface** (`ingestTransport`) and a nil-safe `transportSet` replace `eventIngestionManager`, `e.webhookMgr` and every concrete-type switch: start/stop, health (`IsHealthyOrStartingUp`, `IsDisabled`, `TransitionHealth`), `UpdateRepos`, `CheckCoverage`, `SubscribesTo`, a delivery sink and a reconnect handler. Aggregates: healthy = any transport healthy or starting; disabled = at least one and all disabled; with one transport every value equals that transport's own (FR-014). Hookdeck's `TransitionHealth` goes through `reconcileHint`, preserving the signature-drift masking invariant.
+5. **`RefuseHookdeckWithWebhooks` is removed.** The engine supports N transports structurally. ADR 1752 (`--webhooks` refused under App auth) and `RefuseHookdeckWithoutGitHubApp` are unchanged, so no new combination of the two existing transports becomes runnable; #2143 sits alongside either.
+6. **The echo registry is engine-level** (`engine/echo_registry.go`), wired into the board cache once and used by every transport. **Reserve before the write; cancel on failure** (generation-scoped `Cancel`), at every engine write site; `ReserveIfSubscribed` consults `SubscribesTo`. Reservation is unconditional while a transport is attached (the old "not while starting up" suppression moves to the miss consumer); a poll-only engine has no registry and reserves nothing. The PR-created echo is the one exception (its key holds the new PR number) and is reserved immediately after the create call. A scan test requires every reservation's result to be bound so it can be cancelled.
+7. **The echo-miss health signal stays gh-forward-only** (ADR 042's K = 3 in 60 s → Unhealthy). The registry's sweep reports expired entries to an observer only `webhookManager` registers, ignoring misses during `StartingUp`. Hookdeck keeps its native connectivity health, which was the original reason for ADR 1142's no-ops.
+8. **Reconnect triggers a catch-up reconcile.** Transports call `Engine.requestReconcile` (gh-forward on each subprocess *re*-start, Hookdeck on a `HealthConnected` after a prior connection; never the first connect). `reconcileLoop` selects on it, spaces runs by `reconcileRequestMinGap` (10 s) and coalesces a flapping connection into one delayed run.
+9. **Body cap = 25 MiB** (`webhookMaxBodyBytes`, equal to the exported `hookdeck.MaxFrameBytes`), read as cap+1 and answered 413 before HMAC verification, so an oversized legitimate body is neither truncated nor counted as an HMAC failure.
+10. **The Hookdeck source keeps its private `events.Dedupe`.** Pruefer shares the package and its `DropDedupe` accounting; the engine ledger sits in front of the sink and is the authority.
+
+## Consequences
+
+- A delivery is applied once across transports and restarts within 24 h; a slow apply no longer costs GitHub's ack; a fast echo is attributed to the engine and a failed write leaves nothing pending, under every transport.
+- A delivery acknowledged but not yet applied at a crash, or dropped on queue overflow or during a cache pause, is lost to the webhook path and healed by the next reconcile. Because the ledger records on acceptance, a source's redelivery of an accepted-but-unapplied ID is suppressed (overflow drops are forgotten; crashes are not) — accepted by the spec. A repeated ID is not bound to a payload digest.
+- Async apply moves Store observers (including the wake observer) to the worker goroutine; wakes still fire.
+- With several transports the TUI footer shows the most recent status event (single-valued `WebhookStatusEvent`); #2143 can refine.
+- Operators see: persisted dedupe state, the 25 MiB limit, a catch-up after reconnects, working Hookdeck echo attribution. No config key changes.
+
+## Verification
+
+Unit tests in `engine/` (`intake_test.go`, `delivery_ledger_test.go`, `echo_registry_test.go`, `ingest_transport_test.go`, `reconcile_reconnect_test.go`, `webhook_intake_test.go`, `webhook_acceptance_test.go`) and the sim twin `tests/sim/webhook_intake_test.go` over `Engine.EnableDeliveryIntakeForTest`. The headline "echo arrives inside the write call" ordering is unit-tested (the simulated GitHub has no mid-write hook). No live e2e test exercises dedupe, ordering or echoes; the sim bed has no transport layer.
