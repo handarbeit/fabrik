@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -225,4 +226,29 @@ func TestStageOutcomePending_GatesAdmission(t *testing.T) {
 
 func issueKeyRepo(item gh.ProjectItem, eng *Engine) string {
 	return itemOwnerRepoString(item, eng.defaultRepo())
+}
+
+// A wait_for_ci stage's completion signal is fabrik:awaiting-ci: when that write fails,
+// handleStageComplete must say so, or a recorded outcome is dropped as published and the
+// stage runs again (#2394).
+func TestHandleStageComplete_WaitForCI_AwaitingCIWriteFailureIsReported(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, n int, label string) error {
+			if label == "fabrik:awaiting-ci" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	item := completionItem("stage:Implement:complete")
+	err := eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, eng.cfg.Stages[2])
+	if err == nil {
+		t.Fatal("handleStageComplete returned nil although fabrik:awaiting-ci could not be written")
+	}
+
+	client.addLabelToIssueFn = nil
+	if err := eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, eng.cfg.Stages[2]); err != nil {
+		t.Fatalf("handleStageComplete = %v once the write succeeds, want nil", err)
+	}
 }

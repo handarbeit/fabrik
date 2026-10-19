@@ -218,6 +218,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
+				// awaiting-ci is this stage's completion signal: report its loss so a
+				// recorded outcome (#2394) is retried rather than dropped as published.
+				completionErr = fmt.Errorf("adding fabrik:awaiting-ci: %w", err)
 			} else {
 				awaitingCIArmed = true
 				if c := e.cache(); c != nil {
