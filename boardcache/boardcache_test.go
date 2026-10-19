@@ -3017,7 +3017,7 @@ func TestDeltaIssueClosedCarriesSenderButNoEcho(t *testing.T) {
 	// an engine echo: the engine registers no issues/closed echo, so IssueClosed
 	// carries the sender only.
 	c.SetMatchEchoViaFn(func(typ, action, key string) (bool, string) { return typ == "issues" && action == "closed", "" })
-	c.applyIssuesDelta([]byte(`{"action":"closed","sender":{"login":"alice"},"issue":{"number":1},"repository":{"full_name":"owner/repo"}}`))
+	c.applyIssuesDelta([]byte(`{"action":"closed","sender":{"login":"alice"},"issue":{"number":1},"repository":{"full_name":"owner/repo"}}`), time.Now())
 	if !got.Closed || got.Sender != "alice" || got.EchoOfEngine {
 		t.Fatalf("closed change = %+v", got)
 	}

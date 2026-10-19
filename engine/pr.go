@@ -100,9 +100,10 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 		if c := e.cache(); c != nil {
 			c.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
-		}
+		// The echo key carries the new PR's number, which exists only once the
+		// create call returns, so this is the one write whose echo cannot be
+		// reserved before it (#2351): reserved here, immediately after.
+		e.echo.Reserve("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
 		return prNum, nil
 	}
 	e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, lastErr)
@@ -197,12 +198,11 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 	}
 
 	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
+	res := e.echo.Reserve("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "could not update PR #%d Verification section: %v\n", prNumber, err)
 		return
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 	}
 	e.logf(item.Number, "pr", "updated PR #%d Verification section\n", prNumber)
 }
@@ -225,12 +225,11 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	balanced := balanceFences(body)
 	if balanced != body {
 		// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
+		res := e.echo.Reserve("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 		if err := e.client.UpdateIssueBody(owner, repo, prNumber, balanced); err != nil {
+			res.Cancel()
 			e.logf(item.Number, "warn", "could not update PR #%d body to close fence: %v\n", prNumber, err)
 			return
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 		}
 		e.logf(item.Number, "pr", "balanced unclosed code fence in PR #%d body\n", prNumber)
 	}
@@ -242,12 +241,11 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	// Append closing keyword
 	updatedBody := balanced + "\n\n" + closingKeyword
 	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
+	res := e.echo.Reserve("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 	}
 	e.logf(item.Number, "pr", "added '%s' to PR #%d body\n", closingKeyword, prNumber)
 }
@@ -304,11 +302,12 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) (pushRefused bool
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		res := e.echo.Reserve("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNumber))
 		err := e.client.MarkPRReady(owner, repo, prNumber)
+		if err != nil {
+			res.Cancel()
+		}
 		if err == nil {
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNumber))
-			}
 			e.logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
 			if hasLabel(item.Labels, prReadyAwaitingLabel) {
 				e.clearPRReadyMarker(item, owner, repo)
@@ -386,21 +385,23 @@ func (e *Engine) postStageOutput(item gh.ProjectItem, stageName string, postToPR
 			if skip {
 				rec.PRCommentDone = true
 				e.persistOutcome(rec)
-			} else if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
-				e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
-				firstErr = err
 			} else {
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
-				}
-				e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
-				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-				}
-				if rec != nil {
-					rec.PRCommentDone = true
-					e.persistOutcome(rec)
+				res := e.echo.Reserve("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
+				dbID, err := e.client.AddComment(owner, repo, prNumber, comment)
+				if err != nil {
+					res.Cancel()
+					e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
+					firstErr = err
+				} else {
+					e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
+					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+					if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+						e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+					}
+					if rec != nil {
+						rec.PRCommentDone = true
+						e.persistOutcome(rec)
+					}
 				}
 			}
 		}

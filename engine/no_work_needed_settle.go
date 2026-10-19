@@ -79,19 +79,25 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	if item.Status != "Done" {
 		// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
 		if hasLabel(item.Labels, "fabrik:awaiting-input") {
+			res := e.reserveLabelRemoval(item, "fabrik:awaiting-input", "")
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 				!errors.Is(err, gh.ErrNotFound) {
+				res.Cancel()
 				e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 				allStepsOK = false
 			} else if err == nil {
 				e.syncLabelRemoval(item, "fabrik:awaiting-input", true)
+			} else {
+				res.Cancel() // already absent on GitHub: no unlabeled webhook will follow
 			}
 		}
 
 		// Mark the emitting stage complete so the engine doesn't re-run it on restart.
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		if !hasLabel(item.Labels, completeLabel) {
+			res := e.reserveLabelAdd(item, completeLabel, "")
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+				res.Cancel()
 				e.logf(item.Number, "warn", "could not add completion label for stage %q: %v\n", stage.Name, err)
 				allStepsOK = false
 			} else {
@@ -144,7 +150,9 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			}
 			skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)
 			if !hasLabel(item.Labels, skipLabel) {
+				res := e.reserveLabelAdd(item, skipLabel, "")
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, skipLabel); err != nil {
+					res.Cancel()
 					e.logf(item.Number, "warn", "could not add skip label for stage %q: %v\n", s.Name, err)
 					allStepsOK = false
 				} else {
@@ -185,7 +193,9 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			return // deferred, not a failed attempt: no retry budget spent (#2396)
 		}
 		e.logf(item.Number, "advance", "moving no-work-needed issue to Done\n")
+		res := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+			res.Cancel()
 			e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
 			e.recordNoWorkNeededRetry(item)
 			return
@@ -196,9 +206,6 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		// Advances the probe staleness baseline (#1090) — the status move above
 		// just bumped the item's real GitHub updatedAt via the project-item mutation.
 		e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-		}
 		// Done move that bypasses advanceToNextStage: clear the display-only
 		// status line (#2048), e.g. the "<Stage> · running" the dispatch wrote.
 		e.clearStatusLine(item)

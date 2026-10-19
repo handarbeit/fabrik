@@ -273,13 +273,13 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 // the empty string (unset, defaults to poll), EventSourcePoll, or
 // EventSourceHookdeck (#1142 PR review finding). Without this check, a typo
 // like "Hookdeck" or "hook-deck" would silently fail every equality check
-// this package and poll.go make against the exact string EventSourceHookdeck
-// — RefuseHookdeckWithoutGitHubApp/RefuseHookdeckWithWebhooks would both
-// treat it as compatible (since neither refusal fires for a value that
-// isn't EventSourceHookdeck), and poll.go's own `else if e.cfg.EventSource
-// == EventSourceHookdeck` dispatch would silently fall through to plain
-// polling — an operator who explicitly opted into event-driven ingestion
-// would get no error and no log message, only silent poll-only delivery.
+// this package and setUpIngestion (engine/intake_wire.go) make against the
+// exact string EventSourceHookdeck — RefuseHookdeckWithoutGitHubApp would
+// treat it as compatible (since that refusal does not fire for a value that
+// isn't EventSourceHookdeck), and setUpIngestion's `wantHookdeck` check would
+// silently start no Hookdeck transport — an operator who explicitly opted
+// into event-driven ingestion would get no error and no log message, only
+// silent poll-only delivery.
 func RefuseUnknownEventSource(eventSource string) error {
 	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck {
 		return nil
@@ -308,23 +308,6 @@ func RefuseHookdeckWithoutGitHubApp(eventSource string, appAuthConfigured bool) 
 		"which has no PAT-mode equivalent. Configure github_app_id/github_app_private_key_path/" +
 		"github_app_installation_id to use event_source: hookdeck, or remove event_source (default: poll) to " +
 		"use PAT-mode --webhooks or plain polling instead")
-}
-
-// RefuseHookdeckWithWebhooks refuses event_source: hookdeck (#1142)
-// combined with --webhooks (FABRIK_WEBHOOKS) outright: the two are mutually
-// exclusive ingestion transports (R6/R7 of #1142) — gh webhook forward is
-// PAT-mode-only and Hookdeck is App-auth-only, so a config enabling both is
-// always contradictory, never additive. Mirrors RefuseWebhooksWithGitHubApp's
-// shape exactly: nil for the compatible case, a descriptive error otherwise
-// naming both settings and both ways out.
-func RefuseHookdeckWithWebhooks(eventSource string, webhooksEnabled bool) error {
-	if eventSource != EventSourceHookdeck || !webhooksEnabled {
-		return nil
-	}
-	return fmt.Errorf("event_source: hookdeck (FABRIK_EVENT_SOURCE) cannot be combined with --webhooks " +
-		"(FABRIK_WEBHOOKS) — they are mutually exclusive ingestion transports (gh webhook forward is PAT-mode-" +
-		"only; Hookdeck is App-auth-only). Remove --webhooks to use event_source: hookdeck, or remove " +
-		"event_source to use --webhooks instead")
 }
 
 // FormatPermissionShortfalls renders R3's "name each missing permission"

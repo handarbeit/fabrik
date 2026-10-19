@@ -270,12 +270,12 @@ func TestRunProbeAndDeepFetch_SelfWrite_FailedMutation_StillTreatedStale(t *test
 
 // TestRunProbeAndDeepFetch_SelfWrite_SuppressesRefetch_PollingOnlyMode
 // verifies the "must work identically in polling-only mode" requirement: the
-// baseline advance must not be gated on e.webhookMgr.
+// baseline advance must not be gated on a transport being attached.
 func TestRunProbeAndDeepFetch_SelfWrite_SuppressesRefetch_PollingOnlyMode(t *testing.T) {
 	baseTime := time.Now().Add(-time.Hour)
 	client, calls := newWarmableClient(baseTime)
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	eng.webhookMgr = nil // polling-only mode
+	eng.transports = nil // polling-only mode
 	item := warmDeepFetchAt(t, cache, baseTime)
 
 	eng.addLabel(item, "fabrik:awaiting-input")

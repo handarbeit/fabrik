@@ -73,7 +73,9 @@ func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 				stageName = stage.Name
 			}
 			e.logf(item.Number, "warn", "fabrik:revalidate applied to non-Validate stage %q — removing label, no action\n", stageName)
+			res := e.echo.Reserve("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
+				res.Cancel()
 				if errors.Is(rerr, gh.ErrNotFound) {
 					if c := e.cache(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
@@ -84,9 +86,6 @@ func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 			} else {
 				if c := e.cache(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
 				}
 			}
 			continue

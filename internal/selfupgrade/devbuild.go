@@ -39,6 +39,10 @@ type DevBuildConfig struct {
 	// no deferred cleanup). It must not tear anything down: if the exec fails the
 	// process keeps running.
 	PreExecHook func()
+	// ExecFailedHook, if non-nil, runs when the re-exec returned an error (an
+	// exec that succeeds never returns), so a caller that paused work in
+	// PreExecHook can resume it.
+	ExecFailedHook func()
 	// ExtraEnv is appended to the environment for the re-exec (e.g. a restart
 	// marker the new process reads at startup); nil for no extras.
 	ExtraEnv []string
@@ -290,6 +294,9 @@ func CheckAndRebuildDev(cfg DevBuildConfig) {
 	}
 	if err := execFn(exe, os.Args, append(os.Environ(), cfg.ExtraEnv...)); err != nil {
 		cfg.Logf("exec failed: %v\n", err)
+		if cfg.ExecFailedHook != nil {
+			cfg.ExecFailedHook()
+		}
 	}
 }
 

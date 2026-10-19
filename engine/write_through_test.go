@@ -238,8 +238,7 @@ func containsCommentByID(comments []gh.Comment, dbID int) bool {
 func TestEscalatePRCreationFailure_CacheKeyUsesResolvedRepo(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1} // empty Repo — must fall back to defaultRepo() "owner/repo"
 	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
@@ -258,8 +257,7 @@ func TestEscalatePRCreationFailure_CacheKeyUsesResolvedRepo(t *testing.T) {
 func TestEscalateFailedStage_CacheKeyUsesResolvedRepo(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
@@ -278,8 +276,7 @@ func TestEscalateFailedStage_CacheKeyUsesResolvedRepo(t *testing.T) {
 func TestBlockOnInputAndUnblock_CacheKeyUsesResolvedRepo(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
@@ -313,8 +310,7 @@ func TestBlockOnInputAndUnblock_CacheKeyUsesResolvedRepo(t *testing.T) {
 func TestHandleBoundaryViolation_CacheKeyUsesResolvedRepo(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
@@ -340,8 +336,7 @@ func TestHandleBoundaryViolation_CacheKeyUsesResolvedRepo(t *testing.T) {
 func TestAddPausedLabelToItem_CacheKeyAndEcho(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1} // empty Repo — must fall back to the passed-in owner/repo
 
@@ -354,10 +349,7 @@ func TestAddPausedLabelToItem_CacheKeyAndEcho(t *testing.T) {
 	if !containsLabel(labels, "fabrik:paused") {
 		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
 	if !gotEcho {
 		t.Error("expected fabrik:paused webhook echo to be registered")
 	}

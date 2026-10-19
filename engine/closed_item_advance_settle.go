@@ -117,7 +117,9 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 		return // deferred: project ID unknown (#2396); logged once per episode
 	}
 	e.logf(item.Number, "closed-advance", "closed issue stranded outside %s — advancing\n", cleanupName)
+	res := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "closed-item advance: could not move to %s: %v — will retry next poll\n", cleanupName, err)
 		return
 	}
@@ -128,9 +130,6 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 	// Advances the probe staleness baseline (#1090) — the status move above just
 	// bumped the item's real GitHub updatedAt via the project-item mutation.
 	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-	}
 	// A Done move that bypasses advanceToNextStage: clear the display-only
 	// status line (#2048).
 	e.clearStatusLine(item)

@@ -350,15 +350,15 @@ func (e *Engine) moveItemToValidate(board *gh.ProjectBoard, item gh.ProjectItem)
 		return pidErr
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID)
-	if err == nil {
+	if err != nil {
+		res.Cancel()
+	} else {
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), targetStatus)
 		}
 		e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-		}
 	}
 	return err
 }

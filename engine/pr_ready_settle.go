@@ -95,15 +95,14 @@ func (e *Engine) settlePRReady(item gh.ProjectItem) {
 		return
 	}
 
+	res := e.echo.Reserve("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, pr.Number))
 	if err := e.client.MarkPRReady(owner, repo, pr.Number); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "pr-ready", "retry: could not mark PR #%d ready: %v\n", pr.Number, err)
 		e.recordPRReadyRetry(item)
 		return
 	}
 
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, pr.Number))
-	}
 	e.logf(item.Number, "pr-ready", "marked PR #%d ready-for-review (retry)\n", pr.Number)
 	e.clearPRReadyMarker(item, owner, repo)
 }

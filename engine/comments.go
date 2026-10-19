@@ -359,11 +359,14 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// reinvoke cycle is refunded by the caller and a short admission cooldown
 	// re-admits the item. The loop that ADR 1413's charge bounded is now bounded
 	// by that cooldown (one failed write per poll, no model run).
+	editingEcho := e.reserveLabelAdd(item, "fabrik:editing", "")
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil && !e.lockWriteRefusalDisabled.Load() {
+		editingEcho.Cancel()
 		e.logf(item.Number, "lock", "could not add fabrik:editing: %v — not starting comment review; retrying after a short cooldown\n", err)
 		e.recordLockWriteCooldown(item)
 		return didNotRunEditingWrite, nil
 	} else if err != nil {
+		editingEcho.Cancel()
 		// Neutralised seam: the pre-#2393 charged-failure path (ADR 1413).
 		e.recordCommentBreakerInvocation(item, lastCommentAuthor(comments))
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
@@ -880,11 +883,13 @@ func (e *Engine) removeReworkingLabelRetrying(item gh.ProjectItem, label string)
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		res := e.reserveLabelRemoval(item, label, "")
 		err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
 		if err == nil {
 			e.syncLabelRemoval(item, label, true)
 			return
 		}
+		res.Cancel()
 		if errors.Is(err, gh.ErrNotFound) {
 			e.syncLabelRemoval(item, label, false)
 			return
@@ -1115,12 +1120,11 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 			addressedReviewIDs := addressedReviewIDsFromComments(comments)
 			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments), addressedReviewIDs)
 			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
+			res := e.echo.Reserve("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
+				res.Cancel()
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
 			} else {
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
-				}
 				e.logf(item.Number, "post", "review feedback summary posted to PR #%d (%d thread(s))\n", prNumber, len(threads))
 			}
 		} else {

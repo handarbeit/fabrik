@@ -195,9 +195,10 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 	if c := e.cache(); c != nil {
 		c.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
-	}
+	// The echo key carries the new PR's number, known only once the create call
+	// returned, so this echo is reserved immediately after rather than before it
+	// (#2351).
+	e.echo.Reserve("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
 
 	// Acknowledgement comment on the issue.
 	ackMsg := fmt.Sprintf("🏭 **Fabrik** — opened PR #%d", prNum)
@@ -385,13 +386,12 @@ func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage
 	healedBody := closingLine + "\n\n" + balanced
 
 	// no write-through: excluded — this edits a PR body, which is not cached (re-read live), not an issue body
+	res := e.echo.Reserve("issues", "edited", boardcache.ItemKey(owner+"/"+repo, pr.Number))
 	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
 		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
 		return closingLine, false, false
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, pr.Number))
 	}
 	e.logf(item.Number, "pr", "verifyAndHealLinkage: prepended '%s' to PR #%d body\n", closingLine, pr.Number)
 

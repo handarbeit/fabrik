@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,8 +31,8 @@ func newTestHookdeckManager(t *testing.T) (*hookdeckManager, chan tui.Event) {
 	return hm, events
 }
 
-func TestHookdeckManager_ImplementsEventIngestionManager(t *testing.T) {
-	var _ eventIngestionManager = (*hookdeckManager)(nil)
+func TestHookdeckManager_ImplementsIngestTransport(t *testing.T) {
+	var _ ingestTransport = (*hookdeckManager)(nil)
 }
 
 func TestHookdeckManager_IsDisabledAlwaysFalse(t *testing.T) {
@@ -41,14 +42,15 @@ func TestHookdeckManager_IsDisabledAlwaysFalse(t *testing.T) {
 	}
 }
 
-func TestHookdeckManager_EchoMethodsAreNoOps(t *testing.T) {
+// Echo matching works for Hookdeck like every transport (#2351): the registry is
+// engine-level, so the transport only needs to report that it receives the event.
+func TestHookdeckManager_SubscribesToEveryEvent(t *testing.T) {
 	hm, _ := newTestHookdeckManager(t)
-	// These must not panic and must have no observable effect — there is no
-	// pending-echo state on hookdeckManager to assert against; the absence
-	// of a field to mutate is itself the point (Decision #3).
-	hm.RegisterEcho("issues", "edited", "key")
-	hm.RegisterEchoIfSubscribed("projects_v2_item", "edited", "key")
-	hm.MatchEcho("issues", "edited", "key")
+	for _, ev := range []string{"issues", "projects_v2_item", "check_run"} {
+		if !hm.SubscribesTo(ev) {
+			t.Errorf("hookdeckManager.SubscribesTo(%q) = false, want true", ev)
+		}
+	}
 }
 
 func TestHookdeckManager_HealthTransitions(t *testing.T) {
@@ -369,5 +371,44 @@ func TestHookdeckHandleHealth_ErrorLoggedWhileSignatureDriftActive(t *testing.T)
 	}
 	if strings.Contains(got, "(websocket") || strings.Count(got, "health state:") > 1 {
 		t.Errorf("transition line changed by the cause:\n%s", got)
+	}
+}
+
+// The engine's persisted delivery ledger is the dedupe authority for Hookdeck:
+// the source's own ring is switched off, otherwise it would drop the redelivery
+// of a delivery the intake forgot on overflow (#2351).
+func TestHookdeckManager_SourceDedupeIsDisabled(t *testing.T) {
+	hm, _ := newTestHookdeckManager(t)
+	if hm.source.DedupeEnabled() {
+		t.Fatal("the hookdeck source still dedupes on its own, defeating the ledger's forget-on-overflow")
+	}
+}
+
+// An overflow-dropped Hookdeck delivery that is redelivered is applied: the
+// ledger forgot it and no earlier stage suppresses the repeated ID.
+func TestHookdeckManager_OverflowDroppedDeliveryIsAppliedOnRedelivery(t *testing.T) {
+	oldPer, oldTotal := intakeMaxPerKey, intakeMaxTotal
+	intakeMaxPerKey, intakeMaxTotal = 100, 1
+	t.Cleanup(func() { intakeMaxPerKey, intakeMaxTotal = oldPer, oldTotal })
+
+	release := make(chan struct{})
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) { <-release; rec.apply(et, p) })
+	hm, _ := newTestHookdeckManager(t)
+	hm.SetSink(func(d delivery) { in.Submit(d) })
+
+	send := func(id string, n int) {
+		hm.Handle(context.Background(), events.GitHubEvent{DeliveryID: id, EventType: "issues", Payload: payloadFor("o/r", n)})
+	}
+	send("held", 1)    // occupies the only slot
+	send("dropped", 2) // overflows: dropped and forgotten
+	close(release)
+	in.Drain()
+	before := len(rec.list())
+
+	send("dropped", 2) // the redelivery of the dropped ID
+	in.Drain()
+	if got := len(rec.list()); got != before+1 {
+		t.Fatalf("applied %d deliveries after the redelivery, want %d: a dropped Hookdeck delivery's redelivery was suppressed", got, before+1)
 	}
 }

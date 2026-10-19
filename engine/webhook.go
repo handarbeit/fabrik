@@ -83,7 +83,34 @@ type webhookManager struct {
 	logFn   func(issueNumber int, tag, format string, args ...any)
 	wakeCh  chan struct{}
 	emitFn  func(tui.Event)
-	deltaFn func(eventType string, payload []byte) // nil when board cache disabled
+	deltaFn func(eventType string, payload []byte) // nil when board cache disabled; used only when sink is nil
+
+	// sink is the engine's transport-neutral delivery intake (#2351). When set
+	// it replaces deltaFn: the handler hands the delivery over and acknowledges
+	// at once, before any of the apply work.
+	sink func(delivery)
+	// reconnectFn is called after each subprocess RE-start, never the first, so
+	// the engine can run a catch-up reconcile for events missed while the stream
+	// was down (R5).
+	reconnectFn func()
+	// coverageFn is the periodic hook-coverage re-check, injected by the engine.
+	coverageFn func()
+	// requestedPort is the listener port Start binds (0 = OS-assigned).
+	requestedPort int
+	// started is true after the first successful subprocess launch (protected by mu).
+	started bool
+	// reconnectPending is set when a subprocess RE-start is waiting to request its
+	// catch-up reconcile; reconnectTimer is the fallback that fires it when no
+	// delivery arrives (protected by mu).
+	reconnectPending bool
+	reconnectTimer   *time.Timer
+	// reconnectSettle overrides webhookReconnectSettle when non-zero (tests only).
+	reconnectSettle time.Duration
+	// startingUpSince / startingUpEnd bracket the latest StartingUp period (end is
+	// zero while it lasts). Echo reservations made inside it can never be echoed —
+	// the hook was not attached — so their expiry is not a miss (protected by mu).
+	startingUpSince time.Time
+	startingUpEnd   time.Time
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
@@ -134,14 +161,11 @@ type webhookManager struct {
 	// per-type event counters (protected by mu)
 	eventCounts map[string]int
 
-	// echo-check state (protected by mu)
-	// pendingEchoes maps composite-key → registration timestamp.
-	// missHistory records timestamps of echo misses for rolling-window detection.
-	pendingEchoes map[string]time.Time
-	// echoVia maps a pendingEchoes key to the overseer requester that
-	// registered it (#2125). Always a subset of pendingEchoes' keys: every
-	// delete of a pendingEchoes entry also deletes its echoVia entry.
-	echoVia     map[string]string
+	// echo-miss health state (protected by mu). The echo registry itself is
+	// engine-level (echo_registry.go, #2351); this manager only consumes its
+	// expired entries, because "the subprocess looks alive but isn't delivering"
+	// (ADR 042) is a gh-forward-specific failure mode. missHistory records
+	// timestamps of echo misses for rolling-window detection.
 	missHistory []time.Time
 
 	// R5 coverage notes (#1142), protected by mu — distinct from wm.state
@@ -184,8 +208,6 @@ func newWebhookManager(
 		unsubscribableRepos: make(map[string]bool),
 		stopCh:              make(chan struct{}),
 		repoReadyCh:         make(chan struct{}),
-		pendingEchoes:       make(map[string]time.Time),
-		echoVia:             make(map[string]string),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd, 0, "webhook")
@@ -598,7 +620,8 @@ func startListener(port int) (net.Listener, int, error) {
 // On any hard failure (gh not found, listener bind fails), returns a non-nil error so the
 // caller can fall back to polling-only. All other failures (subprocess crashes, etc.) are
 // handled internally and are non-fatal.
-func (wm *webhookManager) Start(ctx context.Context, port int) error {
+func (wm *webhookManager) Start(ctx context.Context) error {
+	port := wm.requestedPort
 	if err := ghVersionCheck(); err != nil {
 		wm.logFn(0, "webhook", "prerequisite check failed (falling back to polling only): %v\n", err)
 		return err
@@ -640,7 +663,6 @@ func (wm *webhookManager) Start(ctx context.Context, port int) error {
 	wm.mu.Unlock()
 
 	go wm.supervise(ctx)
-	go wm.runEchoSweep(ctx)
 
 	wm.logFn(0, "webhook", "webhook listener started on port %d\n", actualPort)
 	return nil
@@ -865,13 +887,30 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		forgetSupersededWebhookStart(wm.currentCmd, cmd) // the previous subprocess is gone; its token is no longer needed
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
+		wm.startingUpSince = time.Now()
+		wm.startingUpEnd = time.Time{}
 		wm.subscriptionNote = subscriptionCoverageNote(org, repos)
+		reconnected := wm.started
+		wm.started = true
 		wm.mu.Unlock()
 		wm.emitCurrentState()
+		// R5 (#2351): a subprocess RE-start (a crash restart, a secret rotation or a
+		// repo-set change) means events were missed while the stream was down. The
+		// catch-up reconcile is NOT requested now: the new subprocess has not yet
+		// re-registered its hook, so a reconcile run immediately could finish before
+		// the stream is up and leave a gap. It is armed here and fires on the first
+		// verified delivery (the stream demonstrably works) or after
+		// webhookReconnectSettle, whichever comes first. Never on the first launch.
+		if reconnected {
+			wm.armReconnect()
+		}
 
 		// Wait for subprocess exit.
 		waitErr := cmd.Wait()
 		elapsed := time.Since(startedAt)
+		// A subprocess that died before the settle delay (a crash loop) requests
+		// nothing: the next launch re-arms.
+		wm.disarmReconnect()
 
 		// Collect accumulated stderr (the goroutine should finish shortly after
 		// the process exits and the pipe reaches EOF).
@@ -1101,132 +1140,39 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 	return cmd, stderrCh, nil
 }
 
-// echoKey builds the composite key used in pendingEchoes: "eventType:action:discriminatingKey".
-func echoKey(eventType, action, key string) string {
-	return eventType + ":" + action + ":" + key
-}
-
-// RegisterEcho records a pending echo entry for a successful outgoing mutation.
-// No-op when the webhook stream is starting up.
-// For projects_v2_item conditional registration use RegisterEchoIfSubscribed instead.
-func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.state == WebhookStreamStartingUp {
-		return
-	}
-	k := echoKey(eventType, action, key)
-	wm.pendingEchoes[k] = time.Now()
-	// An engine-autonomous registration supersedes any overseer requester still
-	// pending for the same key, so its echo is never attributed to the overseer.
-	delete(wm.echoVia, k)
-}
-
-// RegisterEchoVia is RegisterEcho that also records the overseer requester behind
-// the write, so the matching webhook can be attributed to it (#2125). An empty
-// requester is exactly RegisterEcho.
-func (wm *webhookManager) RegisterEchoVia(eventType, action, key, requester string) {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.state == WebhookStreamStartingUp {
-		return
-	}
-	k := echoKey(eventType, action, key)
-	wm.pendingEchoes[k] = time.Now()
-	if requester != "" {
-		wm.echoVia[k] = requester
-	} else {
-		delete(wm.echoVia, k)
-	}
-}
-
-// RegisterEchoIfSubscribed registers an echo entry only when eventType is in wm.events.
-// Used for projects_v2_item (R7) where the event may have been dynamically removed.
-func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string) {
-	wm.RegisterEchoIfSubscribedVia(eventType, action, key, "")
-}
-
-// RegisterEchoIfSubscribedVia is RegisterEchoIfSubscribed that also records the
-// overseer requester behind the write (#2123), so the matching projects_v2_item
-// webhook is attributed to it. An empty requester is exactly RegisterEchoIfSubscribed.
-func (wm *webhookManager) RegisterEchoIfSubscribedVia(eventType, action, key, requester string) {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.state == WebhookStreamStartingUp {
-		return
-	}
-	if !containsEvent(wm.events, eventType) {
-		return
-	}
-	k := echoKey(eventType, action, key)
-	wm.pendingEchoes[k] = time.Now()
-	if requester != "" {
-		wm.echoVia[k] = requester
-	} else {
-		delete(wm.echoVia, k)
-	}
-}
-
-// MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.
-// Called from CacheImpl.ApplyDelta via the injected matchEchoFn.
-func (wm *webhookManager) MatchEcho(eventType, action, key string) {
-	wm.MatchEchoReported(eventType, action, key)
-}
-
-// MatchEchoReported is MatchEcho that also reports whether a pending echo entry
-// existed — i.e. whether the inbound webhook is the echo of a write Fabrik made.
-// Channel-event actor attribution (#1968 R3) is its only consumer.
-func (wm *webhookManager) MatchEchoReported(eventType, action, key string) bool {
-	ok, _ := wm.MatchEchoVia(eventType, action, key)
-	return ok
-}
-
-// MatchEchoVia is MatchEchoReported that also returns the overseer requester
-// recorded by RegisterEchoVia ("" when none), consuming both entries (#2125).
-func (wm *webhookManager) MatchEchoVia(eventType, action, key string) (bool, string) {
-	k := echoKey(eventType, action, key)
-	wm.mu.Lock()
-	_, ok := wm.pendingEchoes[k]
-	via := wm.echoVia[k]
-	delete(wm.pendingEchoes, k)
-	delete(wm.echoVia, k)
-	wm.mu.Unlock()
-	return ok, via
-}
-
-// doEchoSweep scans pendingEchoes for stale entries, records misses, and
-// transitions to Unhealthy when the rolling-window miss threshold is reached.
-// Safe to call from tests directly (no ticker dependency).
-func (wm *webhookManager) doEchoSweep() {
+// noteEchoMisses is the echo registry's expired-entry observer (ADR 042). It
+// records the misses in a rolling window and transitions to Unhealthy when the
+// threshold is reached. Misses while the subprocess is starting up are ignored:
+// entries reserved just before a restart would otherwise fire as false misses
+// during the grace period. Only this manager registers for misses — Hookdeck
+// reports genuine connectivity through its own OnHealth callback.
+func (wm *webhookManager) noteEchoMisses(registeredAt []time.Time) {
 	now := time.Now()
 	wm.mu.Lock()
-	// Suppress sweeping during startup: entries registered just before a restart
-	// would fire as false misses during the grace period.
 	if wm.state == WebhookStreamStartingUp {
 		wm.mu.Unlock()
 		return
 	}
-	var newMisses int
-	for k, registeredAt := range wm.pendingEchoes {
-		if now.Sub(registeredAt) >= webhookEchoTimeout {
-			delete(wm.pendingEchoes, k)
-			delete(wm.echoVia, k)
-			wm.missHistory = append(wm.missHistory, registeredAt)
-			newMisses++
+	// A reservation made while the hook was still being attached could never have
+	// been echoed (the old code did not register during StartingUp at all), so its
+	// expiry after the state turned Healthy is not evidence of a dead stream.
+	for _, t := range registeredAt {
+		if !wm.startingUpSince.IsZero() && !t.Before(wm.startingUpSince) &&
+			(wm.startingUpEnd.IsZero() || t.Before(wm.startingUpEnd)) {
+			continue
+		}
+		wm.missHistory = append(wm.missHistory, t)
+	}
+	// Prune miss-history entries older than webhookEchoWindow.
+	cutoff := now.Add(-webhookEchoWindow)
+	live := wm.missHistory[:0]
+	for _, t := range wm.missHistory {
+		if t.After(cutoff) {
+			live = append(live, t)
 		}
 	}
-	if newMisses > 0 {
-		// Prune miss-history entries older than webhookEchoWindow.
-		cutoff := now.Add(-webhookEchoWindow)
-		live := wm.missHistory[:0]
-		for _, t := range wm.missHistory {
-			if t.After(cutoff) {
-				live = append(live, t)
-			}
-		}
-		wm.missHistory = live
-	}
-	shouldFire := newMisses > 0 && len(wm.missHistory) >= webhookEchoMissThreshold
+	wm.missHistory = live
+	shouldFire := len(wm.missHistory) >= webhookEchoMissThreshold
 	if shouldFire {
 		wm.missHistory = wm.missHistory[:0]
 	}
@@ -1237,22 +1183,6 @@ func (wm *webhookManager) doEchoSweep() {
 		// Intentionally no cacheImpl.Pause() here: the cache continues serving webhook deltas while the
 		// reconcileTicker confirms drift (≤ one interval, default 3 min) and triggers Pause/Reconcile/Resume.
 		wm.transitionHealthState(WebhookStreamUnhealthy, "echo-check miss threshold")
-	}
-}
-
-// runEchoSweep is the goroutine that periodically calls doEchoSweep.
-func (wm *webhookManager) runEchoSweep(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-wm.stopCh:
-			return
-		case <-ticker.C:
-			wm.doEchoSweep()
-		}
 	}
 }
 
@@ -1321,6 +1251,9 @@ func (wm *webhookManager) transitionHealthState(newState WebhookHealthState, rea
 		return
 	}
 	wm.state = newState
+	if prev == WebhookStreamStartingUp {
+		wm.startingUpEnd = time.Now()
+	}
 	wm.mu.Unlock()
 	if reason != "" {
 		wm.logFn(0, "webhook", "health state: %s → %s (%s)\n", prev, newState, reason)
@@ -1351,12 +1284,19 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MiB cap
+	// Read at most the cap plus one byte so an oversized body is rejected
+	// explicitly (413) rather than silently truncated — a truncated body fails
+	// HMAC verification and would count toward secret rotation.
+	body, err := io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes+1))
 	if err != nil {
 		http.Error(w, "error reading body", http.StatusBadRequest)
 		return
 	}
 	r.Body.Close()
+	if int64(len(body)) > webhookMaxBodyBytes {
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	wm.mu.Lock()
 	secret := wm.secret
@@ -1419,6 +1359,9 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	wm.consecutiveFailures = 0
 	wm.firstFailureAt = time.Time{}
 	wm.mu.Unlock()
+	// The first verified delivery after a restart proves the new stream is up: run
+	// the catch-up reconcile now (R5).
+	wm.fireReconnect("first verified delivery after restart")
 
 	// Parse minimal fields for logging (no payload contents logged — PII risk).
 	eventType := r.Header.Get("X-GitHub-Event")
@@ -1445,13 +1388,18 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 
 	wm.emitCurrentState()
 
-	// Apply cache delta after any recovery reconciliation, so the cache is fresh
-	// when the poll loop wakes. The wakeChObserver registered on the cache store
-	// fires a non-blocking wakeCh send for every interesting ChangeFlag, replacing
-	// the unconditional send that was here previously.
-	if wm.deltaFn != nil {
-		wm.deltaFn(eventType, body)
-	}
+	// Hand the delivery to the engine's intake and acknowledge at once: GitHub
+	// gives up after 10 s and does not retry, so none of the apply work (cache
+	// delta, auto-heal reads, Layer 1 refresh) may sit before the 200. A delivery
+	// with no X-GitHub-Delivery header carries an empty ID and is applied
+	// undeduplicated (FR-003). The wakeChObserver registered on the cache store
+	// fires a non-blocking wakeCh send for every interesting ChangeFlag.
+	wm.deliver(delivery{
+		ID:        r.Header.Get("X-GitHub-Delivery"),
+		EventType: eventType,
+		Payload:   body,
+		Transport: "webhook",
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -1485,4 +1433,139 @@ func minWebhookDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// webhookMaxBodyBytes is the largest delivery body the listener accepts: GitHub's
+// documented maximum webhook payload (25 MB), matching Hookdeck's frame cap. A
+// larger body is rejected with 413 without being buffered past the cap+1 read.
+const webhookMaxBodyBytes = 25 << 20
+
+// deliver hands d to the engine sink, or to the legacy deltaFn (synchronous,
+// tests only) when no sink is installed.
+func (wm *webhookManager) deliver(d delivery) {
+	wm.mu.Lock()
+	sink := wm.sink
+	wm.mu.Unlock()
+	if sink != nil {
+		sink(d)
+		return
+	}
+	if wm.deltaFn != nil {
+		wm.deltaFn(d.EventType, d.Payload)
+	}
+}
+
+// Name implements ingestTransport.
+func (wm *webhookManager) Name() string { return "webhook" }
+
+// SetPort sets the listener port Start binds (0 = OS-assigned).
+func (wm *webhookManager) SetPort(port int) { wm.requestedPort = port }
+
+// SetSink implements ingestTransport.
+func (wm *webhookManager) SetSink(sink func(delivery)) {
+	wm.mu.Lock()
+	wm.sink = sink
+	wm.mu.Unlock()
+}
+
+// webhookReconnectSettle is how long after a gh-forward RE-start the catch-up
+// reconcile waits for a first delivery before it runs anyway.
+const webhookReconnectSettle = 30 * time.Second
+
+// armReconnect marks a catch-up reconcile as owed for the subprocess that was just
+// launched and starts the fallback timer.
+func (wm *webhookManager) armReconnect() {
+	wm.mu.Lock()
+	if wm.reconnectFn == nil {
+		wm.mu.Unlock()
+		return
+	}
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+	}
+	wm.reconnectPending = true
+	settle := webhookReconnectSettle
+	if wm.reconnectSettle > 0 {
+		settle = wm.reconnectSettle
+	}
+	wm.reconnectTimer = time.AfterFunc(settle, func() {
+		wm.fireReconnect("settle delay elapsed")
+	})
+	wm.mu.Unlock()
+}
+
+// disarmReconnect drops an owed catch-up request (the subprocess it belonged to
+// has exited).
+func (wm *webhookManager) disarmReconnect() {
+	wm.mu.Lock()
+	wm.reconnectPending = false
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+		wm.reconnectTimer = nil
+	}
+	wm.mu.Unlock()
+}
+
+// fireReconnect requests the owed catch-up reconcile, at most once per restart.
+func (wm *webhookManager) fireReconnect(why string) {
+	wm.mu.Lock()
+	if !wm.reconnectPending {
+		wm.mu.Unlock()
+		return
+	}
+	wm.reconnectPending = false
+	if wm.reconnectTimer != nil {
+		wm.reconnectTimer.Stop()
+		wm.reconnectTimer = nil
+	}
+	fn := wm.reconnectFn
+	wm.mu.Unlock()
+	if fn != nil {
+		wm.logFn(0, "webhook", "gh webhook forward restarted — requesting a catch-up reconcile (%s)\n", why)
+		fn()
+	}
+}
+
+// SetReconnectHandler implements ingestTransport.
+func (wm *webhookManager) SetReconnectHandler(fn func()) {
+	wm.mu.Lock()
+	wm.reconnectFn = fn
+	wm.mu.Unlock()
+}
+
+// SetCoverageCheck installs the periodic hook-coverage re-check (the engine owns
+// the GitHub client it needs).
+func (wm *webhookManager) SetCoverageCheck(fn func()) {
+	wm.mu.Lock()
+	wm.coverageFn = fn
+	wm.mu.Unlock()
+}
+
+// CheckCoverage implements ingestTransport.
+func (wm *webhookManager) CheckCoverage() {
+	wm.mu.Lock()
+	fn := wm.coverageFn
+	wm.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// TransitionHealth implements ingestTransport. The gh-forward manager has no
+// other independently-driven health condition to preserve, so the reconcile
+// signal is its state directly.
+func (wm *webhookManager) TransitionHealth(healthy bool, reason string) {
+	if healthy {
+		wm.transitionHealthState(WebhookStreamHealthy, reason)
+		return
+	}
+	wm.transitionHealthState(WebhookStreamUnhealthy, reason)
+}
+
+// SubscribesTo implements ingestTransport: whether eventType is in the live
+// subscription (projects_v2_item may be dropped at runtime).
+func (wm *webhookManager) SubscribesTo(eventType string) bool {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	return containsEvent(wm.events, eventType)
 }

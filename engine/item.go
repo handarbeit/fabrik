@@ -1094,7 +1094,9 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, owner, repo, repoStr, lockLabel string) (release func(), workerStartedAt time.Time, workerDone chan struct{}, ok bool, lockErr error) {
 	lockAcquired := false
 	workerStartedAt = time.Now()
+	lockEcho := e.reserveLabelAdd(item, lockLabel, "")
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
+		lockEcho.Cancel()
 		if !e.lockWriteRefusalDisabled.Load() {
 			return func() {}, workerStartedAt, nil, false, err
 		}
@@ -1168,7 +1170,9 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		}
 	}
 
+	inProgressEcho := e.reserveLabelAdd(item, inProgressLabel, "")
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
+		inProgressEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
 		inProgressAdded = true
@@ -2574,7 +2578,9 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	}
 	hasError := false
 	for _, lbl := range blockingLabels {
+		res := e.reserveLabelRemoval(item, lbl, "")
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
+			res.Cancel()
 			if errors.Is(err, gh.ErrNotFound) {
 				// Label already absent — desired state achieved; sync cache.
 				e.syncLabelRemoval(item, lbl, false)
@@ -2593,7 +2599,9 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 		return false
 	}
 
+	triggerEcho := e.reserveLabelRemoval(item, "fabrik:revalidate", "")
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); err != nil {
+		triggerEcho.Cancel()
 		if errors.Is(err, gh.ErrNotFound) {
 			e.syncLabelRemoval(item, "fabrik:revalidate", false)
 		} else {
@@ -2648,7 +2656,9 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	hasError := false
 	failedLabel := ""
 	for _, lbl := range labelsToRemove {
+		res := e.reserveLabelRemoval(item, lbl, "")
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
+			res.Cancel()
 			if errors.Is(err, gh.ErrNotFound) {
 				e.syncLabelRemoval(item, lbl, false)
 				continue
@@ -3015,11 +3025,13 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		res := e.reserveLabelRemoval(item, "fabrik:editing", "")
 		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing")
 		if err == nil {
 			e.syncLabelRemoval(item, "fabrik:editing", true)
 			return
 		}
+		res.Cancel()
 		if errors.Is(err, gh.ErrNotFound) {
 			// Label already absent — treat as success and sync cache (no echo).
 			e.syncLabelRemoval(item, "fabrik:editing", false)

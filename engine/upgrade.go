@@ -36,6 +36,27 @@ func (e *Engine) checkAndUpgrade() {
 	selfupgrade.CheckAndRebuildDev(e.devBuildConfig())
 }
 
+// flushBeforeExec persists the state that is written lazily and would otherwise
+// be lost to an exec, which runs no deferred cleanup: the channel hub's dedup
+// state and the webhook delivery ledger's debounce window (#2351), so an ID
+// accepted in the last second is still deduplicated after the restart. The
+// intake is quiesced first (bounded by intakeQuiesceGrace): a delivery the ledger
+// already records as seen but that is still queued or applying would otherwise be
+// lost to the exec while its redelivery stays suppressed. Nothing is closed
+// because a failed exec leaves this process running; resumeAfterFailedExec
+// returns the intake to service then.
+func (e *Engine) flushBeforeExec() {
+	e.intake.Quiesce(intakeQuiesceGrace) // nil-safe
+	e.flushChannelEvents()
+	e.intake.Flush() // nil-safe
+}
+
+// resumeAfterFailedExec is the selfupgrade ExecFailedHook: the exec returned, so
+// the process continues and the intake accepts deliveries again.
+func (e *Engine) resumeAfterFailedExec() {
+	e.intake.Resume() // nil-safe
+}
+
 // devBuildConfig is the dev-build self-upgrade configuration. PreExecHook flushes
 // the channel hub's coalesced dedup state right before the re-exec (#1968): the
 // exec runs no deferred cleanup, so a settle announced inside the flush delay
@@ -52,7 +73,8 @@ func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 		Logf:           logf,
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
-		PreExecHook:    e.flushChannelEvents,
+		PreExecHook:    e.flushBeforeExec,
+		ExecFailedHook: e.resumeAfterFailedExec,
 		// A dedicated marker, not FABRIK_AUTO_UPGRADED: that one triggers the
 		// plugin refresh on startup, which PostBuildHook below already did. It
 		// only tells the new process why it started (the fabrik.log banner, #2094).
@@ -115,15 +137,16 @@ func (e *Engine) releaseUpgradeConfig() selfupgrade.ReleaseConfig {
 		e.logf(0, "upgrade", format, args...)
 	}
 	return selfupgrade.ReleaseConfig{
-		Client:      e.releaseClient,
-		Owner:       fabrikOwner,
-		Repo:        fabrikRepo,
-		BinaryName:  "fabrik",
-		Version:     e.cfg.Version,
-		Token:       releaseUpgradeToken(e.cfg),
-		ExtraEnv:    []string{"FABRIK_AUTO_UPGRADED=1"},
-		Logf:        logf,
-		PreExecHook: e.flushChannelEvents,
+		Client:         e.releaseClient,
+		Owner:          fabrikOwner,
+		Repo:           fabrikRepo,
+		BinaryName:     "fabrik",
+		Version:        e.cfg.Version,
+		Token:          releaseUpgradeToken(e.cfg),
+		ExtraEnv:       []string{"FABRIK_AUTO_UPGRADED=1"},
+		Logf:           logf,
+		PreExecHook:    e.flushBeforeExec,
+		ExecFailedHook: e.resumeAfterFailedExec,
 	}
 }
 

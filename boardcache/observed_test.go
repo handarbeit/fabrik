@@ -168,3 +168,62 @@ func TestDeltaCheckRun_AutoHealDoesNotRegressHead(t *testing.T) {
 		t.Fatalf("head = %q, want sha-c filled by the heal", got)
 	}
 }
+
+// A delivery that carries no GitHub time is ordered by when the daemon RECEIVED
+// it, not by when it was applied (#2351): a delivery queued behind a slow apply
+// must lose to an engine write that landed while it waited.
+func TestApplyDeltaAt_ReceiptTimeLosesToALaterEngineWrite(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+	received := time.Now().Add(-time.Minute) // arrived a minute ago, applied now
+
+	c.ApplyLabelAdded(key, "x") // the engine's write, after the delivery arrived
+	c.ApplyDeltaAt("issues", issuesLabeledPayloadJSON("unlabeled", "owner/repo", 1, "x"), received)
+	if !hasStr(testGetState(t, c, "owner/repo", 1).Labels, "x") {
+		t.Fatal("a stale unlabeled delivery (received before the engine write) removed the label")
+	}
+
+	// Non-vacuity: stamped at apply time, the same delivery looks newer and wins —
+	// exactly what receipt-time stamping prevents.
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("unlabeled", "owner/repo", 1, "x"))
+	if hasStr(testGetState(t, c, "owner/repo", 1).Labels, "x") {
+		t.Fatal("non-vacuity: an apply-time stamped delivery should have removed the label")
+	}
+}
+
+// The same for a review edited/dismissed event, which has no time of its own
+// (submitted_at is the ORIGINAL submission time): it is ordered by receipt, so one
+// received before a fresher whole-list read of the PR's reviews does not undo it.
+func TestApplyDeltaAt_DismissedReviewOrderedByReceiptTime(t *testing.T) {
+	c := seedCache(t)
+	c.RecordPRLinkage("owner/repo", 5, 1)
+	now := time.Now()
+	dismissed := []byte(`{"action":"dismissed","review":{"id":9,"state":"dismissed","user":{"login":"alice"},"submitted_at":"` + iso(now.Add(-time.Hour)) + `"},` +
+		`"pull_request":{"number":5},"repository":{"full_name":"owner/repo"}}`)
+	reviews := func() []gh.PRReview { return testGetState(t, c, "owner/repo", 1).LinkedPR.Reviews }
+
+	// A live deep fetch, started at `now`, reads alice's review as APPROVED.
+	fresh := gh.ProjectItem{
+		Repo: "owner/repo", Number: 1, Status: "Plan", LabelsAbsent: true,
+		LinkedPRNumber:  5,
+		LinkedPRReviews: []gh.PRReview{{Author: "alice", State: "APPROVED", DatabaseID: 9, SubmittedAt: now.Add(-2 * time.Hour)}},
+		DeepFetchLive:   true, DeepFetchStartedAt: now,
+	}
+	c.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: fresh})
+	if rs := reviews(); len(rs) != 1 || rs[0].State != "APPROVED" {
+		t.Fatalf("setup: the deep fetch did not store the approval: %+v", rs)
+	}
+
+	// A dismissal RECEIVED before that read (but applied after, having waited in
+	// the intake) must not undo it.
+	c.ApplyDeltaAt("pull_request_review", dismissed, now.Add(-time.Hour))
+	if rs := reviews(); len(rs) != 1 || rs[0].State != "APPROVED" {
+		t.Fatalf("a dismissal received before the read overwrote it: %+v", rs)
+	}
+
+	// Non-vacuity: one received after the read applies.
+	c.ApplyDeltaAt("pull_request_review", dismissed, now.Add(time.Minute))
+	if rs := reviews(); len(rs) != 1 || rs[0].State != "DISMISSED" {
+		t.Fatalf("a dismissal received after the read was dropped: %+v", rs)
+	}
+}

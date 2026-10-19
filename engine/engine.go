@@ -93,10 +93,11 @@ type Config struct {
 	// EventSource selects the ingestion transport: EventSourcePoll (default,
 	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
 	// separate axis from Webhooks above — event_source: hookdeck is an
-	// App-auth-only opt-in that can never be combined with Webhooks (refused
-	// at startup by RefuseHookdeckWithWebhooks) or used without App auth
-	// (refused by RefuseHookdeckWithoutGitHubApp), and #1752's
-	// RefuseWebhooksWithGitHubApp never has to know this field exists. See
+	// App-auth-only opt-in that cannot be used without App auth (refused by
+	// RefuseHookdeckWithoutGitHubApp). Webhooks cannot run under App auth either
+	// (#1752's RefuseWebhooksWithGitHubApp, ADR 1752), which is why the two
+	// existing transports cannot be combined in practice; the engine itself
+	// supports several transports at once (ingestTransport, #2351). See
 	// engine/github_app_auth.go and adrs/1142-hookdeck-ingestion-for-app-auth.md.
 	EventSource string
 	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
@@ -403,7 +404,11 @@ type Engine struct {
 	logFile                               *os.File                                  // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                                // serializes concurrent writes to logFile
 	logSink                               atomic.Pointer[LogSink]                   // optional per-Engine plain-text sink (#2247); nil: print to stdout
-	webhookMgr                            eventIngestionManager                     // nil when no event-ingestion transport is active (#1142)
+	transports                            *transportSet                             // attached event-ingestion transports; nil/empty when none is active (#1142, #2351)
+	echo                                  *echoRegistry                             // engine-level mutation-echo registry; nil when no transport is attached (#2351)
+	intake                                *intake                                   // transport-neutral delivery dedupe/order/ack stage; nil when no transport is attached (#2351)
+	extraTransports                       []ingestTransport                         // transports attached beyond the built-in two (tests; #2143)
+	reconcileReq                          chan struct{}                             // transport-reconnect catch-up reconcile requests, coalescing (#2351)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -659,9 +664,6 @@ func New(cfg Config) (*Engine, error) {
 	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
 		return nil, err
 	}
-	if err := RefuseHookdeckWithWebhooks(cfg.EventSource, cfg.Webhooks); err != nil {
-		return nil, err
-	}
 
 	// GitHub App auth (#1713): resolved before the ordinary PAT-based client
 	// construction below, since a configured App-auth client takes its
@@ -722,6 +724,7 @@ func New(cfg Config) (*Engine, error) {
 	// (see releaseUpgradeToken's doc comment).
 	releaseClient := gh.NewClient(releaseUpgradeToken(cfg))
 	eng := &Engine{
+		reconcileReq:              make(chan struct{}, 1),
 		cfg:                       cfg,
 		client:                    ghClient,
 		releaseClient:             releaseClient,
@@ -858,6 +861,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
+		reconcileReq:              make(chan struct{}, 1),
 		cfg:                       cfg,
 		client:                    client,
 		releaseClient:             client,

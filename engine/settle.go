@@ -35,12 +35,16 @@ func (e *Engine) recordSettleRetry(item gh.ProjectItem, retryStage string, onEsc
 // Shared by the three settle scans; each passes its own marker label and
 // retryStage constant.
 func (e *Engine) clearSettleMarker(item gh.ProjectItem, owner, repo, markerLabel, retryStage string) {
+	res := e.reserveLabelRemoval(item, markerLabel, "")
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, markerLabel); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
+		res.Cancel()
 		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", markerLabel, err)
 		return
 	} else if err == nil {
 		e.syncLabelRemoval(item, markerLabel, true)
+	} else {
+		res.Cancel() // already absent on GitHub: no unlabeled webhook will follow
 	}
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
