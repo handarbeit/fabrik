@@ -672,6 +672,27 @@
       "traversal": "none"
     },
     {
+      "name": "TestWebhookChangeSurvivesReconcile",
+      "parity": "sim",
+      "sim": [
+        "TestWebhookOrdering_MoveSurvivesLaggingListing",
+        "TestWebhookOrdering_LateEchoDoesNotResurrectLabel",
+        "TestWebhookOrdering_ReplayedSynchronizeDoesNotRegressHead"
+      ],
+      "note": "the sim holds a stale listing with LagBoardStatus and delivers webhook payloads straight to the board cache; it cannot model GitHub's real read lag or real webhook delivery, which this test adds. Self-skips on a bed without webhooks and is Inconclusive when the daemon never shows the webhook move",
+      "skip_ok_legs": [
+        "app/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "needs webhook delivery, which GitHub App auth refuses (ADR 1752): the App legs structurally skip",
+      "train": "neutral",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only the webhook can move the daemon's copy, then triggers whole polls",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's copy of the column is exercised"
+    },
+    {
       "name": "TestYoloAutoMergeLabel",
       "parity": "sim",
       "sim": [

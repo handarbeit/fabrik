@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestAcquireLockAndVerify_TieBreakLoss(t *testing.T) {
 	stage := &stages.Stage{Name: "Research"}
 	item := gh.ProjectItem{Number: 10, Title: "Test issue"}
 
-	release, _, workerDone, ok := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
+	release, _, workerDone, ok, _ := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
 	if ok {
 		t.Fatal("expected ok=false on lost tie-break")
 	}
@@ -76,7 +77,7 @@ func TestAcquireLockAndVerify_NoConflict_AddsInProgress(t *testing.T) {
 	stage := &stages.Stage{Name: "Research"}
 	item := gh.ProjectItem{Number: 11, Title: "Test issue"}
 
-	release, workerStartedAt, workerDone, ok := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
+	release, workerStartedAt, workerDone, ok, _ := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
 	if workerDone != nil {
 		defer close(workerDone)
 	}
@@ -160,5 +161,55 @@ func TestHandleCleanupStage_AlreadyComplete_NoOp(t *testing.T) {
 
 	if len(client.addLabelCalls) != 0 {
 		t.Errorf("expected no label calls when already complete, got %d", len(client.addLabelCalls))
+	}
+}
+
+// A lock write that fails refuses the dispatch (#2393): no worker handle, no
+// in_progress write, and the error is handed back to the caller.
+func TestAcquireLockAndVerify_LockWriteFailureRefuses(t *testing.T) {
+	boom := errors.New("context deadline exceeded")
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, label string) error { return boom },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	stage := &stages.Stage{Name: "Research"}
+	item := gh.ProjectItem{Number: 12, Title: "Test issue"}
+	release, _, workerDone, ok, lockErr := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
+	if ok || !errors.Is(lockErr, boom) {
+		t.Fatalf("ok=%v lockErr=%v, want refusal with the write error", ok, lockErr)
+	}
+	if workerDone != nil {
+		t.Error("no heartbeat channel expected on a refused lock")
+	}
+	if release == nil {
+		t.Fatal("release must be non-nil")
+	}
+	release() // no-op, must not remove anything or panic
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "stage:Research:in_progress" {
+			t.Error("in_progress must not be attempted after a failed lock write")
+		}
+	}
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("unexpected label removals: %v", client.removeLabelCalls)
+	}
+}
+
+// Neutralised (the seam), the pre-#2393 behaviour returns: the worker proceeds unlocked.
+func TestAcquireLockAndVerify_LockWriteFailureProceedsWhenRefusalDisabled(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, label string) error {
+			if label == "fabrik:locked:testuser" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.SetLockWriteRefusalDisabledForTest(true)
+	_, _, _, ok, lockErr := eng.acquireLockAndVerify(context.Background(), gh.ProjectItem{Number: 13}, &stages.Stage{Name: "Research"}, "owner", "repo", "owner/repo", "fabrik:locked:testuser")
+	if !ok || lockErr != nil {
+		t.Fatalf("ok=%v lockErr=%v, want the legacy proceed-unlocked path", ok, lockErr)
 	}
 }

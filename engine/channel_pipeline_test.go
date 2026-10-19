@@ -269,3 +269,38 @@ func TestPipelineCatchUpSnapshotIsSourceCatchUp(t *testing.T) {
 		t.Fatalf("source = %q, want %q", got, channelevents.SourceCatchUp)
 	}
 }
+
+// #2393: the forge-unreachable hold opens one pipeline-stalled (scope=forge)
+// episode, however often it is evaluated, and closes it with one pipeline-resumed.
+func TestPipelineForgeHoldEpisodePublishesOncePerEpisode(t *testing.T) {
+	e, sink, clk, ce := pipelineEngine(t, &channelevents.Subscription{Repos: []string{"nobody/else"}})
+	since := clk.Now()
+
+	e.health.setForgeHold(since, 7, "executing request: context deadline exceeded")
+	ce.checkPipeline()
+	ce.checkPipeline()
+	evs := drain(sink, 150*time.Millisecond)
+	st := ofType(evs, channelevents.PipelineStalled)
+	if len(st) != 1 {
+		t.Fatalf("pipeline-stalled events = %d, want 1: %+v", len(st), evs)
+	}
+	if m := st[0].Meta; m["scope"] != "forge" || m["cause"] != "forge-unreachable" || m["failures"] != "7" {
+		t.Fatalf("meta = %v", m)
+	}
+	if st[0].Issue != 0 {
+		t.Fatalf("must be account-wide, got issue %d", st[0].Issue)
+	}
+	if cu := e.pipelineCatchUpEvents(clk.Now()); len(ofType(cu, channelevents.PipelineStalled)) != 1 {
+		t.Fatalf("catch-up must include the open forge episode: %+v", cu)
+	}
+
+	clk.set(since.Add(20 * time.Second))
+	e.health.clearForgeHold()
+	ce.checkPipeline()
+	ce.checkPipeline()
+	evs = drain(sink, 150*time.Millisecond)
+	rs := ofType(evs, channelevents.PipelineResumed)
+	if len(rs) != 1 || rs[0].Meta["scope"] != "forge" || len(ofType(evs, channelevents.PipelineStalled)) != 0 {
+		t.Fatalf("recovery events: %+v", evs)
+	}
+}

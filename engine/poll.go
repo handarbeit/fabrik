@@ -670,6 +670,10 @@ func (e *Engine) Run() error {
 	e.startChannelEvents()
 	defer e.closeChannelEvents()
 	e.startLocalAPI()
+	// #2349: a hold restored from disk is shown like a live one.
+	if until, held := e.claudeUsageLimitedUntilTime(e.now()); held {
+		e.emitStructural(tui.ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: until})
+	}
 	defer e.closeLocalAPI()
 
 	if e.events == nil {
@@ -1347,6 +1351,13 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		}
 	}
 
+	// Forge-unreachable hold (#2393): do not stretch the idle interval while held,
+	// so recovery is noticed within about one poll.
+	if !e.backoffRateLimitLow && effectiveInterval > configuredInterval && e.forgeHeld() {
+		e.logf(0, "poll", "next poll capped to %v: GitHub unreachable, probing for recovery\n", configuredInterval)
+		effectiveInterval = configuredInterval
+	}
+
 	// Notify webhook manager of any new repos discovered during this poll.
 	if e.webhookMgr != nil && result.SeenRepos != nil {
 		e.webhookMgr.UpdateRepos(result.SeenRepos)
@@ -1484,11 +1495,12 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v; running batch as fallback\n", gateErr)
 		}
 		if gateErr != nil || updatedAt.After(e.lastProjectUpdatedAt) {
+			sweepStart := time.Now()
 			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
 			if err != nil {
 				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
 			} else {
-				c.ApplyStatusBatch(updates)
+				c.ApplyStatusBatchAt(updates, sweepStart)
 				if gateErr == nil {
 					e.lastProjectUpdatedAt = updatedAt
 				}
@@ -1980,6 +1992,10 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	e.settleClaudeLimitClearRequests(board)
 	e.settleClaudeLimitLabelSweep(board)
 
+	// Decision-state hygiene (#2349): drop persisted counters and gap budgets for items
+	// that closed or left the board so they never accumulate.
+	e.pruneDecisionState(board)
+
 	// Pending-decision anchors (#2120): reads, once per item, the GitHub time of
 	// the label a suspended item's age is anchored on, so the cache-only
 	// attention classifier can report an honest age after a restart. Poll
@@ -2227,6 +2243,28 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		procListErr     error
 	)
 
+	// Forge-unreachable hold (#2393): start nothing. Every candidate is handed
+	// back for re-admission like a slot-deferred one, with nothing recorded
+	// against it (no WorkerEntered, cooldown, label or counter), so it is picked
+	// up by the first poll after the hold lifts.
+	if e.forgeHeld() && board != nil && board.ProjectID != "" {
+		// Recovery probe: one cheap read per poll while held, so the hold lifts
+		// the moment the forge answers even when nothing else in this poll made a
+		// live call (a board served from the cache). Its outcome reaches the
+		// tracker through the client's result observer.
+		_, _ = e.client.FetchProjectUpdatedAt(board.ProjectID)
+	}
+	if e.forgeHeld() {
+		held := make([]string, 0, len(deepFetchCandidates))
+		for _, item := range deepFetchCandidates {
+			held = append(held, issueKey(item, e.defaultRepo()))
+		}
+		if len(held) > 0 {
+			e.logf(0, "forge-hold", "GitHub is unreachable; holding dispatch of %d candidate(s) until a GitHub call succeeds\n", len(held))
+		}
+		return 0, held
+	}
+
 	for _, item := range e.orderDispatchCandidates(deepFetchCandidates) {
 		if ctx.Err() != nil {
 			return dispatched, deferredKeys
@@ -2433,6 +2471,34 @@ func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
 		Number: item.Number,
 		Reason: "sentinel-live",
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
+}
+
+// lockWriteRetryReason is the admission-cooldown reason recorded when a worker
+// was refused because its lock (or fabrik:editing) label could not be written
+// (#2393, ADR 2393).
+const lockWriteRetryReason = "lock-write-failed"
+
+// lockWriteRetryInterval is the short cooldown after a refused dispatch: one
+// poll, floored at a second. The entry is consumed on admission (ADR 2096), so a
+// persistent failure costs one failed label write per poll, never a model run.
+func (e *Engine) lockWriteRetryInterval() time.Duration {
+	d := time.Duration(e.cfg.PollSeconds) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// recordLockWriteCooldown re-admits an item whose dispatch was refused because
+// the lock write failed (#2393). It records nothing else: no StageAttempted, no
+// retry or breaker charge.
+func (e *Engine) recordLockWriteCooldown(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: lockWriteRetryReason,
+		Until:  e.now().Add(e.lockWriteRetryInterval()),
 	})
 }
 

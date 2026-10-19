@@ -93,11 +93,11 @@ func TestEvalTrialCI_DirtyWithoutProbeOrWithSeamIsRed(t *testing.T) {
 func TestRecordTrialIfCounts_StaleIsNotCharged(t *testing.T) {
 	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	p := trialParams{trainKey: "owner/repo:main"}
-	eng.recordTrialIfCounts(context.Background(), p, TrainCIStale, nil)
+	eng.recordTrialIfCounts(context.Background(), p, nil, TrainCIStale, nil)
 	if got := trialCount(eng, p.trainKey); got != 0 {
 		t.Errorf("stale charged the runaway guard %d time(s), want 0", got)
 	}
-	eng.recordTrialIfCounts(context.Background(), p, TrainCIRed, nil)
+	eng.recordTrialIfCounts(context.Background(), p, nil, TrainCIRed, nil)
 	if got := trialCount(eng, p.trainKey); got != 1 {
 		t.Errorf("red charged %d, want 1 (control)", got)
 	}

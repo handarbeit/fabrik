@@ -257,6 +257,12 @@ type Engine struct {
 	// stay single-goroutine; their write sites also publish here. Zero-value
 	// ready.
 	health daemonHealth
+	// forge tracks the unbroken run of GitHub transport failures behind the
+	// account-wide forge-unreachable hold (#2393, forge_hold.go). Zero-value ready.
+	forge forgeHealth
+	// lockWriteRefusalDisabled is the test seam that restores the pre-#2393
+	// "spawn the worker unlocked" behaviour (forge_hold.go).
+	lockWriteRefusalDisabled atomic.Bool
 	// localAPI is the local read API server (#1967); nil until Run() binds it
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex
@@ -309,7 +315,8 @@ type Engine struct {
 	trainRunsLoadOnce                     sync.Once                                 // loads persisted run records on the first settleTrainRuns
 	mergeTrainInFlight                    sync.Map                                  // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                                // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", consecutive-ejection count per member against the PR head in mergeTrainEjectionHeads (#2349) — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time. Persisted under .fabrik/state/engine-decisions/ (decision_state.go)
+	mergeTrainEjectionHeads               map[string]string                         // key: "owner/repo#N", the PR head SHA the count was earned against (#2349); a different non-empty head restarts the count. Guarded by mergeTrainEjectionsMu
 	invalidate                            invalidateState                           // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
 	overlap                               overlapState                              // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
 	mergeTrainCIDeferredMu                sync.Mutex                                // guards mergeTrainCIDeferred
@@ -364,7 +371,7 @@ type Engine struct {
 	flakeReruns                           map[string]*prFlakeState                  // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled                    bool                                      // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
 	feedbackGapMu                         sync.Mutex                                // guards feedbackGaps
-	feedbackGaps                          map[string]int                            // key: "owner/repo#N:<sorted held feedback IDs>"; value: how many times the feedback gate repaired the dispatcher's input for exactly that gap (#2160, ADR 2160) — in memory only, so a restart may grant a fresh budget
+	feedbackGaps                          map[string]feedbackGapState               // key: "owner/repo#N"; value: the gap IDs and PR head the gate last repaired the dispatcher's input for, and how many repairs that gap has had (#2160, ADR 2160; per-item and reset on a gap/head change or a gate clear since #2349) — in memory only, so a restart may grant a fresh budget
 	mergeTrainRunawayMu                   sync.Mutex                                // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
 	mergeTrainRunawayAlerted              map[string]int                            // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu                  sync.Mutex                                // guards queuedReviewEjects
@@ -413,6 +420,14 @@ type Engine struct {
 	// autoRepair is the red-singleton auto-repair state (#2045): attempt counts, spent R3
 	// requeues and pending repair contexts, shared by the train worker and the poll goroutine.
 	autoRepair autoRepairState
+	// decisionStore persists the merge-train caps and the usage-limit hold (#2349); nil on
+	// NewWithDeps engines. decisionWrite serialises the persist step; usageLimitFileAtStart
+	// records that a usable hold file was found at startup (it is then authoritative and the
+	// label-based seeding never runs); usageLimitSeedChecked makes the seeding one-shot.
+	decisionStore         *decisionStore
+	decisionWrite         decisionPersist
+	usageLimitFileAtStart bool
+	usageLimitSeedChecked atomic.Bool
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See
@@ -717,6 +732,7 @@ func New(cfg Config) (*Engine, error) {
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
 		trainSem:                  newTrainSlot(cfg),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainEjectionHeads:   make(map[string]string),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
@@ -732,6 +748,9 @@ func New(cfg Config) (*Engine, error) {
 	// #2051: the production engine runs the asynchronous merge-train driver — trial state
 	// is persisted under .fabrik/state/merge-train/ and evaluated per poll.
 	eng.trainRuns = newTrainRunStore(trainRunStateDir(fabrikDir))
+	// #2349: the merge-train caps and the usage-limit hold survive a restart.
+	eng.decisionStore = newDecisionStore(decisionStateDir(fabrikDir))
+	eng.loadDecisionState()
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API
@@ -809,6 +828,11 @@ func New(cfg Config) (*Engine, error) {
 	// global would race.
 	claudeLogf = eng.logf
 
+	// Every HTTP outcome of the engine's client feeds the forge-unreachable
+	// hold tracker (#2393). NewWithDeps engines have no github.Client; the sim
+	// wires its fault table to ObserveForgeResult instead.
+	ghClient.SetResultObserver(eng.ObserveForgeResult)
+
 	return eng, nil
 }
 
@@ -834,6 +858,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainEjectionHeads:   make(map[string]string),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),

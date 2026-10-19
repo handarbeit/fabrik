@@ -28,6 +28,9 @@ type pendingFeedback struct {
 	// cache-sourced view of the item lacks (#2160). Non-empty means the board
 	// cache is lagging GitHub and Phase 1 cannot dispatch what the gate holds on.
 	DispatcherGap []gh.Comment
+	// GapUnread is set when the dispatcher-view read failed, so an empty DispatcherGap means
+	// "unknown", not "no gap": the spent repair budget must not be reset on it (#2349).
+	GapUnread bool
 }
 
 func (p pendingFeedback) empty() bool {
@@ -70,7 +73,7 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 	threads, reviews := e.dropCatchUpFeedback(item, e.currentHeadReviewThreadComments(item), reviews)
 	pf.Threads = threads
 	pf.Bodies = e.buildReviewBodyCommentsFromReviews(item, reviews)
-	pf.DispatcherGap = e.dispatcherGap(orig, pf)
+	pf.DispatcherGap, pf.GapUnread = e.dispatcherGap(orig, pf)
 	return pf
 }
 
@@ -99,6 +102,7 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 	pf := e.unprocessedFeedback(item, alreadyLive)
 	if pf.empty() && pf.Live {
 		e.noteGateClear(item, gateFeedback)
+		e.resetFeedbackGapBudget(item)
 		return false
 	}
 	if pf.empty() {
@@ -117,6 +121,8 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 	})
 	if len(pf.DispatcherGap) > 0 {
 		e.repairDispatcherBlindness(item, pf.DispatcherGap)
+	} else if !pf.empty() && !pf.GapUnread {
+		e.resetFeedbackGapBudget(item) // held on feedback the dispatcher sees: the gap is gone (#2349)
 	}
 	return true
 }

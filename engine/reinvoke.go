@@ -69,6 +69,12 @@ const (
 	// didNotRunBranchDiverged: the issue branch and its remote diverged (#2295), so the
 	// worktree sync refused to set it up and the item was paused before any work.
 	didNotRunBranchDiverged didNotRunKind = "branch-diverged"
+	// didNotRunEditingWrite: the fabrik:editing label could not be written
+	// (#2393, ADR 2393), so no worker was spawned. Uncharged for every cause.
+	didNotRunEditingWrite didNotRunKind = "editing-write-failed"
+	// didNotRunForgeHeld: the forge-unreachable hold is engaged (#2393), so no
+	// worker was spawned.
+	didNotRunForgeHeld didNotRunKind = "forge-held"
 )
 
 // commentRunBlockedOnInput is the sentinel kind processCommentsClassified returns
@@ -192,6 +198,16 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
+	// Forge-unreachable hold (#2393): no worker, no label write. The caller
+	// charged the cycle synchronously before this call, so refund it — nothing
+	// ran. The level-triggered handler that dispatched this re-evaluates it on a
+	// later poll, once the hold lifts.
+	if e.forgeHeld() {
+		e.logf(item.Number, "forge-hold", "GitHub is unreachable; not starting %s re-invocation for stage %q\n", opts.tag, stage.Name)
+		e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, didNotRunForgeHeld, opts.cycle)
+		return
+	}
+
 	// Claim the item via the Store so the dispatch guard (snap.Worker() != nil) blocks
 	// double-dispatch before the goroutine starts — as a QUEUED worker: it holds no
 	// worker slot until the goroutine acquires e.sem, and until then status and
@@ -207,16 +223,39 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		Queued:      true,
 		QueuedSince: queuedAt,
 	})
+	// Register a cancel handle on the shared per-issue map (#2349, R3), as stage-run
+	// dispatch does, so a stop request or a daemon shutdown reaches this worker too —
+	// including while it is still queued for a slot. The context also carries the
+	// kill-reason holder runClaude's cmd.Cancel reads.
+	holder := &killReasonHolder{}
+	ctx, cancelReinvoke := context.WithCancel(context.WithValue(ctx, killReasonCtxKey{}, holder))
+	iKey := issueKey(item, e.defaultRepo())
+	e.issueCtxs.Store(iKey, issueCtxEntry{cancel: cancelReinvoke, holder: holder})
 	e.wg.Add(1)
 
 	go func() {
 		defer e.wg.Done()
 		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
+		// Deregister on every exit path; holder equality keeps a late exit from removing
+		// a successor's entry.
+		defer func() {
+			if current, ok := e.issueCtxs.Load(iKey); ok && current.(issueCtxEntry).holder == holder {
+				e.issueCtxs.Delete(iKey)
+			}
+			cancelReinvoke()
+		}()
 
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
-			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired\n")
+			// Stopped while queued: no pass ran, so refund the pre-dispatch charge
+			// (#2349). Repeated stop/resume must not exhaust the cycle cap.
+			if opts.cycle.refund != nil {
+				for _, m := range opts.cycle.refund(itemRepo, item.Number, stage.Name) {
+					e.store.Apply(m)
+				}
+			}
+			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired — refunded %s cycle counter\n", opts.cycle.label)
 			return
 		case <-e.drainGateCh():
 			// #2259: queued but not started — abandon; the new process re-dispatches.
@@ -275,7 +314,17 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		// converge: refund the pre-dispatch cycle charge and skip opts.after,
 		// whose HEAD-based logic (CI no-op-SHA debounce, rebase auto-merge
 		// re-enable, #1045 no-op refund) is meaningless when nothing ran.
-		if kind == commentRunBlockedOnInput || kind == commentRunCompletionSuppressed {
+		if kind == "" && ctx.Err() != nil {
+			// Stopped (user stop, shutdown, drain): the pass was cancelled, not a
+			// convergence attempt. Refund the pre-dispatch charge and skip opts.after,
+			// whose HEAD-based hooks are wrong after a stop (#2349).
+			if opts.cycle.refund != nil {
+				for _, m := range opts.cycle.refund(itemRepo, item.Number, stage.Name) {
+					e.store.Apply(m)
+				}
+			}
+			e.logf(item.Number, opts.tag, "invocation cancelled — refunding %s cycle counter for stage %q (#2349)\n", opts.cycle.label, stage.Name)
+		} else if kind == commentRunBlockedOnInput || kind == commentRunCompletionSuppressed {
 			// The run executed and paused the item for a human answer (#2280).
 			// Refund the cycle so the bound is free once the human replies, record
 			// no did-not-run state, and skip opts.after: its HEAD-based hooks (CI

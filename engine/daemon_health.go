@@ -54,6 +54,13 @@ type daemonHealth struct {
 	draining   bool
 	drainSince time.Time
 	drainLeft  int
+
+	// Forge-unreachable hold (#2393): set while new model work is held back
+	// because GitHub calls keep failing on transport errors.
+	forgeHeld      bool
+	forgeSince     time.Time
+	forgeFailures  int
+	forgeLastError string
 }
 
 // backoffMirror is a copy of the poll loop's backoff state.
@@ -90,6 +97,26 @@ type healthSnapshot struct {
 	Draining   bool
 	DrainSince time.Time
 	DrainLeft  int
+
+	// ForgeHeld is true while the forge-unreachable hold is engaged (#2393).
+	ForgeHeld      bool
+	ForgeSince     time.Time
+	ForgeFailures  int
+	ForgeLastError string
+}
+
+// setForgeHold publishes the forge-unreachable hold state (#2393).
+func (h *daemonHealth) setForgeHold(since time.Time, failures int, lastErr string) {
+	h.mu.Lock()
+	h.forgeHeld, h.forgeSince, h.forgeFailures, h.forgeLastError = true, since, failures, lastErr
+	h.mu.Unlock()
+}
+
+// clearForgeHold publishes that the forge answered and the hold lifted.
+func (h *daemonHealth) clearForgeHold() {
+	h.mu.Lock()
+	h.forgeHeld, h.forgeSince, h.forgeFailures, h.forgeLastError = false, time.Time{}, 0, ""
+	h.mu.Unlock()
 }
 
 // setDraining publishes the SIGHUP drain state (#2259).
@@ -248,5 +275,9 @@ func (h *daemonHealth) snapshot() healthSnapshot {
 		Draining:        h.draining,
 		DrainSince:      h.drainSince,
 		DrainLeft:       h.drainLeft,
+		ForgeHeld:       h.forgeHeld,
+		ForgeSince:      h.forgeSince,
+		ForgeFailures:   h.forgeFailures,
+		ForgeLastError:  h.forgeLastError,
 	}
 }

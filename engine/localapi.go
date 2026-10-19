@@ -1235,6 +1235,9 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		// by awaitDrain, which starts once the poll in progress at the SIGHUP returns.
 		res.Draining = &localapi.DrainHealth{Since: localapi.KnownTime(h.DrainSince), WorkersRemaining: len(b.e.drainWorkers())}
 	}
+	if h.ForgeHeld {
+		res.ForgeHold = &localapi.ForgeHoldHealth{Since: localapi.KnownTime(h.ForgeSince), Failures: h.ForgeFailures, LastError: h.ForgeLastError}
+	}
 	return res, nil
 }
 

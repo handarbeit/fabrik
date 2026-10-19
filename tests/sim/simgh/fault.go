@@ -117,6 +117,57 @@ type FaultTable struct {
 	// fault rules. Not carried through Sim snapshots (a hook closes over live
 	// test state).
 	nthHooks map[string][]*hookRule
+	// failWrites / failAll are the blanket faults (FailAllWrites, FailAll): when
+	// set, every mutating call (or every call) fails with the error, ahead of the
+	// per-method rules. Not carried through Sim snapshots.
+	failWrites error
+	failAll    error
+	// observer, when set, is told the outcome of every intercepted call (the
+	// injected error, or nil for a call let through) — the sim's stand-in for the
+	// production client's HTTP result observer (#2393).
+	observer func(error)
+}
+
+// SetResultObserver installs fn (nil clears it) to be told the outcome of every
+// intercepted call: the injected error, or nil when the call proceeds. The
+// engine's forge-unreachable hold tracker consumes it (#2393); production feeds
+// the same tracker from the github.Client's HTTP observer, and both share one
+// classifier (github.IsTransportError).
+func (f *FaultTable) SetResultObserver(fn func(error)) {
+	f.mu.Lock()
+	f.observer = fn
+	f.mu.Unlock()
+}
+
+// FailAllWrites makes every mutating call (the instrumented methods flagged as
+// mutations: label, comment, status, PR and issue writes) fail with err until
+// ClearBlanket, while reads still succeed — the "forge reachable for reads,
+// every write fails" shape. A nil err panics, like every other fault.
+func (f *FaultTable) FailAllWrites(err error) {
+	if err == nil {
+		panic("simgh: FailAllWrites with a nil error is indistinguishable from success")
+	}
+	f.mu.Lock()
+	f.failWrites = err
+	f.mu.Unlock()
+}
+
+// FailAll makes every intercepted call, reads and writes, fail with err until
+// ClearBlanket — the forge-unreachable shape.
+func (f *FaultTable) FailAll(err error) {
+	if err == nil {
+		panic("simgh: FailAll with a nil error is indistinguishable from success")
+	}
+	f.mu.Lock()
+	f.failAll = err
+	f.mu.Unlock()
+}
+
+// ClearBlanket removes the FailAllWrites and FailAll faults.
+func (f *FaultTable) ClearBlanket() {
+	f.mu.Lock()
+	f.failWrites, f.failAll = nil, nil
+	f.mu.Unlock()
 }
 
 // hookRule runs fn once, immediately before the onCall-th call to a method.
@@ -292,7 +343,18 @@ func (f *FaultTable) FiredCount(method string) int {
 // next records a call against method and returns the error to fail it with, or
 // nil to let it through. Every intercepted call goes through here exactly
 // once, before the underlying Sim call.
-func (f *FaultTable) next(method string, args Args) error {
+func (f *FaultTable) next(method string, args Args, mutation bool) error {
+	err := f.nextInner(method, args, mutation)
+	f.mu.Lock()
+	obs := f.observer
+	f.mu.Unlock()
+	if obs != nil {
+		obs(err)
+	}
+	return err
+}
+
+func (f *FaultTable) nextInner(method string, args Args, mutation bool) error {
 	f.runHooks(method, args)
 
 	f.mu.Lock()
@@ -312,6 +374,12 @@ func (f *FaultTable) next(method string, args Args) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.failAll != nil {
+		return f.failAll
+	}
+	if mutation && f.failWrites != nil {
+		return f.failWrites
+	}
 	for _, r := range f.rules[method] {
 		if r.match != nil && !r.match(args) {
 			continue
@@ -401,6 +469,11 @@ func ErrTooManyRequests() error { return ghfault.TooManyRequests() }
 
 // ErrServerError returns a GitHub 5xx in the engine's REST framing.
 func ErrServerError() error { return ghfault.ServerError() }
+
+// ErrDeadlineExceeded returns the error a GitHub call that outlived the HTTP
+// client's timeout fails with (#2393): a *url.Error wrapping
+// context.DeadlineExceeded, the exact shape of the #2388 outage.
+func ErrDeadlineExceeded() error { return ghfault.DeadlineExceeded() }
 
 // ErrConnectionReset returns a transport-layer connection reset.
 func ErrConnectionReset() error { return ghfault.ConnectionReset() }

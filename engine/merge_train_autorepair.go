@@ -22,9 +22,11 @@ import (
 // Validate dispatch from the poll loop: the train worker never starts Claude for it and never
 // holds a slot for it.
 //
-// All state here is in memory (like mergeTrainEjectionCounts); a daemon restart resets the
-// attempt counts — at worst one extra repair per member per base SHA — and drops any pending
-// diagnostic, in which case Validate still runs without the context file.
+// The attempt counts and spent requeues are persisted with the other merge-train caps
+// (#2349, decision_state.go) so a restart cannot grant a fresh repair budget; they stay keyed
+// to the pinned base SHA — a repair pushes, so keying to the member head would reset the cap
+// after every repair. The pending diagnostic is deliberately a transient in-memory hand-off:
+// a restart drops it, in which case Validate still runs without the context file.
 
 const (
 	// mergeTrainRepairFile is the context file the repair's Validate dispatch reads.
@@ -99,7 +101,6 @@ func (e *Engine) autoRepairAttemptsAt(key, baseSHA string) int {
 func (e *Engine) recordAutoRepairAttempt(key string, a repairAttempt) {
 	s := &e.autoRepair
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.attempts == nil {
 		s.attempts = make(map[string][]repairAttempt)
 	}
@@ -108,6 +109,8 @@ func (e *Engine) recordAutoRepairAttempt(key string, a repairAttempt) {
 		h = h[len(h)-repairHistoryMax:]
 	}
 	s.attempts[key] = h
+	s.mu.Unlock()
+	e.persistTrainCaps()
 }
 
 // takeRequeue spends the member's one R3 requeue for baseSHA. It reports false when it was
@@ -116,9 +119,9 @@ func (e *Engine) recordAutoRepairAttempt(key string, a repairAttempt) {
 func (e *Engine) takeRequeue(key, baseSHA string) bool {
 	s := &e.autoRepair
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, sha := range s.requeued[key] {
 		if sha == baseSHA {
+			s.mu.Unlock()
 			return false
 		}
 	}
@@ -130,6 +133,8 @@ func (e *Engine) takeRequeue(key, baseSHA string) bool {
 		r = r[len(r)-repairHistoryMax:]
 	}
 	s.requeued[key] = r
+	s.mu.Unlock()
+	e.persistTrainCaps()
 	return true
 }
 
@@ -184,10 +189,11 @@ func (e *Engine) resetAutoRepair(owner, repo string, num int) {
 	key := autoRepairKey(owner, repo, num)
 	s := &e.autoRepair
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.attempts, key)
 	delete(s.requeued, key)
 	delete(s.pending, key)
+	s.mu.Unlock()
+	e.persistTrainCaps()
 }
 
 // renderRepairAttemptHistory lists the member's recorded repairs for the pause comment

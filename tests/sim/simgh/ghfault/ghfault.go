@@ -33,8 +33,10 @@
 package ghfault
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 )
 
 // RateLimit returns GitHub's REST primary rate-limit exhaustion error.
@@ -138,4 +140,19 @@ func Wrap(sentinel error, msg string) error {
 		return errors.New(msg)
 	}
 	return fmt.Errorf("%s: %w", msg, sentinel)
+}
+
+// DeadlineExceeded returns the error a GitHub call that outlived the HTTP
+// client's timeout fails with (#2393): a *url.Error wrapping
+// context.DeadlineExceeded, wrapped the way the github package wraps it
+// ("executing request: ..."). This is the exact shape of the #2388 outage. The
+// engine's forge-unreachable hold classifies it by type (github.IsTransportError);
+// isTransientError's substring list deliberately does not match it, which is why
+// it is a real error value rather than a string.
+func DeadlineExceeded() error {
+	return fmt.Errorf("executing request: %w", &url.Error{
+		Op:  "Post",
+		URL: "https://ghe.example.com/api/graphql",
+		Err: context.DeadlineExceeded,
+	})
 }

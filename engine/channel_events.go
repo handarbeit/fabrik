@@ -102,7 +102,9 @@ type channelEvents struct {
 	// pollEp / partEp are the open pipeline stall episodes (#2124); in memory
 	// only, so a still-stalled daemon re-raises after a restart.
 	pollEp stallEpisode
-	partEp map[string]*stallEpisode
+	// forgeEp is the open forge-unreachable stall episode (#2393).
+	forgeEp stallEpisode
+	partEp  map[string]*stallEpisode
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 

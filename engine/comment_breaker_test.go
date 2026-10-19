@@ -443,11 +443,13 @@ func TestCommentBreaker_PauseNotStrippedByBotComment(t *testing.T) {
 // processComments through each of the three setup-failure early-return paths
 // to the configured threshold and assert the breaker trips there instead.
 
-// TestCommentBreaker_TripsOnEditingLabelSetupFailure verifies that a
-// persistently failing "fabrik:editing" label add — the first of the three
-// setup steps — is recorded and evaluated by the circuit breaker, and trips
-// it at the configured threshold instead of looping forever.
-func TestCommentBreaker_TripsOnEditingLabelSetupFailure(t *testing.T) {
+// TestCommentBreaker_EditingLabelFailure_IsUncharged pins ADR 2393's
+// supersession of ADR 1413 for the fabrik:editing write: when the label cannot
+// be written no worker is spawned, nothing is charged to either breaker, no 👀
+// reaction is left behind, and the item gets a short admission cooldown. The
+// loop ADR 1413 bounded with a charge is bounded by that cooldown instead; the
+// other two setup failures (base branch, worktree) keep the ADR 1413 charge.
+func TestCommentBreaker_EditingLabelFailure_IsUncharged(t *testing.T) {
 	skipIfNoGit(t)
 	client := &mockGitHubClient{
 		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
@@ -461,45 +463,53 @@ func TestCommentBreaker_TripsOnEditingLabelSetupFailure(t *testing.T) {
 	eng := testEngineWithRepo(t, client, claude)
 	eng.cfg.MaxCommentCyclesPerWindow = 3
 	eng.cfg.CommentCycleWindow = time.Hour
+	eng.cfg.PollSeconds = 30
 
 	item := gh.ProjectItem{Number: 50, Body: "spec"}
 	comments := []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "some-bot", Body: "still stuck?"}}
 
-	for i := 0; i < 3; i++ {
-		if err := eng.processComments(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Review", Order: 1}, comments); err == nil {
-			t.Fatalf("processComments call %d: expected error from failing editing-label add, got nil", i)
+	for i := 0; i < 6; i++ {
+		kind, err := eng.processCommentsClassified(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Review", Order: 1}, comments)
+		if err != nil || kind != didNotRunEditingWrite {
+			t.Fatalf("call %d: kind=%q err=%v, want didNotRunEditingWrite and no error", i, kind, err)
 		}
 	}
-
-	var paused, awaitingInput bool
+	if got := eng.commentBreakerCount(item); got != 0 {
+		t.Errorf("commentBreakerCount = %d, want 0 (uncharged)", got)
+	}
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:paused" {
-			paused = true
-		}
-		if c.labelName == "fabrik:awaiting-input" {
-			awaitingInput = true
+		if c.labelName == "fabrik:paused" || c.labelName == "fabrik:awaiting-input" {
+			t.Errorf("unexpected pause label %q: a refused editing write must not trip a breaker", c.labelName)
 		}
 	}
-	if !paused || !awaitingInput {
-		t.Fatalf("expected fabrik:paused + fabrik:awaiting-input after trip; addLabelCalls=%v", client.addLabelCalls)
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("unexpected comments: %v", client.addCommentCalls)
 	}
-	// Claude must never have been invoked — the failure is at setup, before step 4.
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Errorf("👀 reactions left behind by a refused pass: %v", client.addCommentReactionCalls)
+	}
 	if len(claude.calls) != 0 || len(claude.forCommentsCalls) != 0 {
-		t.Error("claude should never be invoked when the editing-label add fails at setup")
+		t.Error("claude must never be invoked when the editing-label add fails")
 	}
+	snap, err := eng.store.Get("owner/repo", 50)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CooldownAt(lockWriteRetryReason).IsZero() {
+		t.Error("no lock-write-failed admission cooldown recorded")
+	}
+}
 
-	var tripComments int
-	for _, c := range client.addCommentCalls {
-		if strings.Contains(c.body, "circuit breaker") {
-			tripComments++
-			if !strings.Contains(c.body, "the fabrik:editing label add failed") {
-				t.Errorf("trip comment missing setup-failure reason: %q", c.body)
-			}
-		}
-	}
-	if tripComments != 1 {
-		t.Fatalf("expected exactly 1 trip comment, got %d", tripComments)
-	}
+// newBaseBranchFailureEngine builds an engine whose comment passes fail at the
+// base-branch-resolution setup step (wm.baseDir is a non-git directory), for the
+// ADR 1413 breaker tests that need a charged setup failure.
+func newBaseBranchFailureEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
+	t.Helper()
+	wm := NewWorktreeManagerWithRoot(t.TempDir(), t.TempDir())
+	return NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "testuser", Token: "token", MaxConcurrent: 5, Stages: testStages()},
+		client, claude, wm,
+	)
 }
 
 // TestCommentBreaker_TripsOnBaseBranchFailure verifies that a persistently
@@ -636,16 +646,9 @@ func TestCommentBreaker_TripsOnEnsureWorktreeFailure(t *testing.T) {
 // moving the record point back down after setup (#1413).
 func TestCommentBreaker_PinnedTripCount_SetupFailure(t *testing.T) {
 	skipIfNoGit(t)
-	client := &mockGitHubClient{
-		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
-			if labelName == "fabrik:editing" {
-				return errors.New("simulated setup failure")
-			}
-			return nil
-		},
-	}
+	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngineWithRepo(t, client, claude)
+	eng := newBaseBranchFailureEngine(t, client, claude)
 	const threshold = 5
 	eng.cfg.MaxCommentCyclesPerWindow = threshold
 	eng.cfg.CommentCycleWindow = time.Hour
@@ -727,13 +730,13 @@ func TestCommentBreaker_SetupFailureThenSuccess_NoPoisonedCounter(t *testing.T) 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	stage := &stages.Stage{Name: "Implement", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
 
-	// Cycle 1: the editing-label add fails transiently — recorded, breaker
-	// checked, but well below threshold so no trip.
-	if err := eng.processComments(context.Background(), board, item, stage, comments); err == nil {
-		t.Fatal("cycle 1: expected error from the transient editing-label failure")
+	// Cycle 1: the editing-label add fails transiently — since #2393 the pass is
+	// refused uncharged (no error, nothing recorded).
+	if err := eng.processComments(context.Background(), board, item, stage, comments); err != nil {
+		t.Fatalf("cycle 1: unexpected error from the refused pass: %v", err)
 	}
-	if got := eng.commentBreakerCount(item); got != 1 {
-		t.Fatalf("commentBreakerCount after cycle 1 = %d, want 1", got)
+	if got := eng.commentBreakerCount(item); got != 0 {
+		t.Fatalf("commentBreakerCount after cycle 1 = %d, want 0", got)
 	}
 
 	// Cycle 2: the label add succeeds this time, and Claude makes forward

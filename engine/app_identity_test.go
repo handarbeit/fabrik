@@ -177,7 +177,7 @@ func TestAcquireLock_AppMode_LabelAndTieBreak(t *testing.T) {
 			},
 		}
 		eng.client = client
-		release, _, done, ok := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", eng.lockLabel())
+		release, _, done, ok, _ := eng.acquireLockAndVerify(context.Background(), item, stage, "owner", "repo", "owner/repo", eng.lockLabel())
 		if done != nil {
 			close(done)
 		}
