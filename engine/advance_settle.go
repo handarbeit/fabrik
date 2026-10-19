@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -136,6 +137,10 @@ func (e *Engine) awaitingAdvanceResetIfUnpaused(item gh.ProjectItem) {
 // label/comment/retry side effects around the same call.
 func (e *Engine) recordAdvanceOutcome(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) error {
 	err := e.advanceToNextStage(board, item, stage)
+	if errors.Is(err, errProjectIDUnknown) {
+		// A deferral, not a failed advance: no label, comment or retry budget (#2396).
+		return err
+	}
 	if err != nil {
 		e.markAdvanceFailureOutstanding(item, stage, err)
 		return err

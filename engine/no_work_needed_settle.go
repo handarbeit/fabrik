@@ -180,8 +180,12 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			e.recordNoWorkNeededRetry(item)
 			return
 		}
+		projectID, pidErr := e.writeProjectID(board)
+		if pidErr != nil {
+			return // deferred, not a failed attempt: no retry budget spent (#2396)
+		}
 		e.logf(item.Number, "advance", "moving no-work-needed issue to Done\n")
-		if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 			e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
 			e.recordNoWorkNeededRetry(item)
 			return

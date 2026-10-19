@@ -92,7 +92,7 @@ func (in *Instrumented) Log() *MutationLog { return in.log }
 // do0 intercepts a method returning only an error.
 func do0(in *Instrumented, method string, mutation bool, args Args, fn func() error) error {
 	seq := in.log.reserve(method, mutation, args, in.sim.now())
-	if err := in.faults.next(method, args); err != nil {
+	if err := in.faults.next(method, args, mutation); err != nil {
 		in.log.complete(seq, err, true)
 		return err
 	}
@@ -104,7 +104,7 @@ func do0(in *Instrumented, method string, mutation bool, args Args, fn func() er
 // do1 intercepts a method returning one value and an error.
 func do1[T any](in *Instrumented, method string, mutation bool, args Args, fn func() (T, error)) (T, error) {
 	seq := in.log.reserve(method, mutation, args, in.sim.now())
-	if err := in.faults.next(method, args); err != nil {
+	if err := in.faults.next(method, args, mutation); err != nil {
 		var zero T
 		in.log.complete(seq, err, true)
 		return zero, err
@@ -117,7 +117,7 @@ func do1[T any](in *Instrumented, method string, mutation bool, args Args, fn fu
 // do2 intercepts a method returning two values and an error.
 func do2[A, B any](in *Instrumented, method string, mutation bool, args Args, fn func() (A, B, error)) (A, B, error) {
 	seq := in.log.reserve(method, mutation, args, in.sim.now())
-	if err := in.faults.next(method, args); err != nil {
+	if err := in.faults.next(method, args, mutation); err != nil {
 		var zeroA A
 		var zeroB B
 		in.log.complete(seq, err, true)

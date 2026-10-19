@@ -168,6 +168,12 @@ type EnvOptions struct {
 	// restart behaviour sets this true (a RestartEnv engine always has it on).
 	ValidateSHARebuild bool
 
+	// ForgeHold feeds every simgh call outcome to the engine's forge-unreachable
+	// hold tracker (#2393), the sim's stand-in for the production HTTP observer.
+	// Off by default so scenarios that inject transport-shaped faults on purpose
+	// are unaffected.
+	ForgeHold bool
+
 	// StartTime seeds the shared Clock. Default 2026-01-01 00:00:00 UTC — an
 	// arbitrary fixed instant, deliberately not time.Now(), so a scenario
 	// asserting durations never depends on wall-clock reality.
@@ -203,6 +209,12 @@ type EnvOptions struct {
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
 	// for every engine.Config field a future scenario might need.
 	ConfigureCfg func(*engine.Config)
+
+	// AllowEmptyProjectIDWrites exempts the Env from the suite-wide cleanup check
+	// that no UpdateProjectItemStatus call carried an empty project ID (#2396).
+	// Only the scenario that neutralises the fix to reproduce the old behaviour
+	// sets it.
+	AllowEmptyProjectIDWrites bool
 
 	// BoardCache, when true, wires a real boardcache.CacheImpl into the engine
 	// (Engine.UseBoardCacheForTest) so poll() runs the probe-driven refresh, and
@@ -423,6 +435,12 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	if opts.ForgeHold {
+		// Opt-in: existing scenarios inject transport-shaped faults (ServerError,
+		// ConnectionReset, IOTimeout) for many polls on purpose, and must not
+		// engage the forge-unreachable hold (#2393) by accident.
+		inst.Faults().SetResultObserver(eng.ObserveForgeResult)
+	}
 	if !opts.ValidateSHARebuild {
 		eng.SetValidateSHARebuildDisabledForTest()
 	}
@@ -431,6 +449,16 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	var wake <-chan struct{}
 	if opts.BoardCache {
 		boardCache, wake = eng.UseBoardCacheForTest()
+	}
+
+	if !opts.AllowEmptyProjectIDWrites {
+		t.Cleanup(func() {
+			for _, e := range inst.Log().ByMethod("UpdateProjectItemStatus") {
+				if e.Args.ID == "" {
+					t.Errorf("UpdateProjectItemStatus #%d was sent with an empty project ID (#2396)", e.Seq)
+				}
+			}
+		})
 	}
 
 	return &Env{

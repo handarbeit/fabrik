@@ -345,8 +345,12 @@ func (e *Engine) moveItemToValidate(board *gh.ProjectBoard, item gh.ProjectItem)
 			targetStatus, mapKeys(e.statusField.Options))
 	}
 
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return pidErr
+	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
+	err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID)
 	if err == nil {
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), targetStatus)

@@ -763,6 +763,14 @@ func (e *Engine) inheritChildLabels(parent gh.ProjectItem, parentOwner, parentRe
 func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock, resumable bool) ([]string, bool, error) {
 	e.logf(item.Number, "spawn", "found %d child(ren) to spawn\n", len(blocks))
 
+	// Resolve the project ID before any GitHub mutation (#2396): without one no
+	// child could be registered on the board. Nothing has been created yet, so
+	// the spawn is simply deferred (no pause) and retried on a later poll.
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return nil, false, fmt.Errorf("spawn: %w", pidErr)
+	}
+
 	// Validate DEPENDS_ON headers upfront, before any GitHub mutation. This is
 	// purely structural (no created-issue data needed) so an invalid index
 	// fails loud and cheap, with zero orphaned issues — "Created so far: none"
@@ -952,7 +960,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		var childItemID, existingStatus string
 		addedAlready := false
 		if resuming {
-			id, status, lerr := e.client.LookupIssueProjectItem(board.ProjectID, block.Repo, childNumber)
+			id, status, lerr := e.client.LookupIssueProjectItem(projectID, block.Repo, childNumber)
 			if lerr != nil {
 				e.logf(item.Number, "warn", "spawn resume: could not check existing board membership for %s#%d: %v — attempting AddProjectV2ItemById anyway\n", block.Repo, childNumber, lerr)
 			} else if id != "" {
@@ -960,7 +968,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			}
 		}
 		if !addedAlready {
-			id, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
+			id, err := e.client.AddProjectV2ItemById(projectID, childNodeID)
 			if err != nil {
 				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\n%s",
 					childOwner, childRepo, childNumber, err, formatSpawnedList(spawned), spawnRetryInstruction)
@@ -1045,7 +1053,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		if resuming && existingStatus != "" {
 			e.logf(item.Number, "spawn", "resume: %s#%d already has project status %q — leaving placement alone\n", block.Repo, childNumber, existingStatus)
 		} else if optionID := resolveSpecifyOptionID(sf, e.cfg.Stages); optionID != "" {
-			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
+			if err := e.client.UpdateProjectItemStatus(projectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
 				e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
 			}

@@ -1351,6 +1351,13 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		}
 	}
 
+	// Forge-unreachable hold (#2393): do not stretch the idle interval while held,
+	// so recovery is noticed within about one poll.
+	if !e.backoffRateLimitLow && effectiveInterval > configuredInterval && e.forgeHeld() {
+		e.logf(0, "poll", "next poll capped to %v: GitHub unreachable, probing for recovery\n", configuredInterval)
+		effectiveInterval = configuredInterval
+	}
+
 	// Notify webhook manager of any new repos discovered during this poll.
 	if e.webhookMgr != nil && result.SeenRepos != nil {
 		e.webhookMgr.UpdateRepos(result.SeenRepos)
@@ -1558,6 +1565,14 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	if board.ProjectID != "" {
 		e.boardProjectID = board.ProjectID
 	}
+	e.mu.Unlock()
+	if board.ProjectID != "" {
+		e.noteProjectIDKnown()
+	}
+	// A board that arrived without a project ID gets the engine's last seen one,
+	// so every board-threaded write site sees it (#2396).
+	e.fillBoardProjectID(board)
+	e.mu.Lock()
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.readClient.FetchStatusField(board.ProjectID)
 		if err != nil {
@@ -2228,6 +2243,28 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		procListErr     error
 	)
 
+	// Forge-unreachable hold (#2393): start nothing. Every candidate is handed
+	// back for re-admission like a slot-deferred one, with nothing recorded
+	// against it (no WorkerEntered, cooldown, label or counter), so it is picked
+	// up by the first poll after the hold lifts.
+	if e.forgeHeld() && board != nil && board.ProjectID != "" {
+		// Recovery probe: one cheap read per poll while held, so the hold lifts
+		// the moment the forge answers even when nothing else in this poll made a
+		// live call (a board served from the cache). Its outcome reaches the
+		// tracker through the client's result observer.
+		_, _ = e.client.FetchProjectUpdatedAt(board.ProjectID)
+	}
+	if e.forgeHeld() {
+		held := make([]string, 0, len(deepFetchCandidates))
+		for _, item := range deepFetchCandidates {
+			held = append(held, issueKey(item, e.defaultRepo()))
+		}
+		if len(held) > 0 {
+			e.logf(0, "forge-hold", "GitHub is unreachable; holding dispatch of %d candidate(s) until a GitHub call succeeds\n", len(held))
+		}
+		return 0, held
+	}
+
 	for _, item := range e.orderDispatchCandidates(deepFetchCandidates) {
 		if ctx.Err() != nil {
 			return dispatched, deferredKeys
@@ -2434,6 +2471,34 @@ func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
 		Number: item.Number,
 		Reason: "sentinel-live",
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
+}
+
+// lockWriteRetryReason is the admission-cooldown reason recorded when a worker
+// was refused because its lock (or fabrik:editing) label could not be written
+// (#2393, ADR 2393).
+const lockWriteRetryReason = "lock-write-failed"
+
+// lockWriteRetryInterval is the short cooldown after a refused dispatch: one
+// poll, floored at a second. The entry is consumed on admission (ADR 2096), so a
+// persistent failure costs one failed label write per poll, never a model run.
+func (e *Engine) lockWriteRetryInterval() time.Duration {
+	d := time.Duration(e.cfg.PollSeconds) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// recordLockWriteCooldown re-admits an item whose dispatch was refused because
+// the lock write failed (#2393). It records nothing else: no StageAttempted, no
+// retry or breaker charge.
+func (e *Engine) recordLockWriteCooldown(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: lockWriteRetryReason,
+		Until:  e.now().Add(e.lockWriteRetryInterval()),
 	})
 }
 
@@ -2884,8 +2949,14 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 		return
 	}
 	e.ensureQueuedBaseReposReady(ctx, board.Items, hs.Name)
+	// The train's reroutes and landings move board Status, which needs a project
+	// ID; with none known the batch is deferred to a later poll (#2396).
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return
+	}
 	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
-		e.routeQueuedGroup(ctx, g, board.ProjectID)
+		e.routeQueuedGroup(ctx, g, projectID)
 	}
 }
 

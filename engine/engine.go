@@ -189,28 +189,31 @@ type cloneCall struct {
 }
 
 type Engine struct {
-	cfg                   Config
-	client                GitHubClient
-	releaseClient         GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
-	appIdent              *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
-	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
-	skillResolver         *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
-	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
-	claude                ClaudeInvoker
-	statusField           *gh.StatusField
-	boardProjectID        string                      // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
-	worktreeManagers      map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	fabrikDir             string                      // directory containing .fabrik/ (always os.Getwd() at startup)
-	mu                    sync.Mutex
-	store                 *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
-	totalTokens           TokenUsage               // accumulated token usage since process start
-	lastReportedCost      float64                  // cost at last [stats] report; skip repeat prints when unchanged
-	mayNeedWork           map[string]bool          // key: issueKey; items that have changed since the last poll cycle
-	mayNeedWorkMu         sync.Mutex               // guards mayNeedWork
-	seededRepos           map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
-	checkedAutoMergeRepos map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
-	repoAccess            map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
+	cfg                                Config
+	client                             GitHubClient
+	releaseClient                      GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient                         *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	appIdent                           *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
+	ghAppAuth                          *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	skillResolver                      *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
+	readClient                         boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	claude                             ClaudeInvoker
+	statusField                        *gh.StatusField
+	boardProjectID                     string // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
+	projectIDUnknownLogged             bool   // a project-ID-unknown episode has been logged (guarded by projectIDEpisodeMu, #2396)
+	projectIDEpisodeMu                 sync.Mutex
+	projectIDWriteGuardDisabledForTest atomic.Bool                 // neutralises writeProjectID/fillBoardProjectID (#2396)
+	worktreeManagers                   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	fabrikDir                          string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	mu                                 sync.Mutex
+	store                              *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
+	totalTokens                        TokenUsage               // accumulated token usage since process start
+	lastReportedCost                   float64                  // cost at last [stats] report; skip repeat prints when unchanged
+	mayNeedWork                        map[string]bool          // key: issueKey; items that have changed since the last poll cycle
+	mayNeedWorkMu                      sync.Mutex               // guards mayNeedWork
+	seededRepos                        map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	checkedAutoMergeRepos              map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
+	repoAccess                         map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
 	// appAccessibleRepos, appAccessibleReposTrunc, and appAccessibleReposReady
 	// are the App-auth counterpart of the PAT-mode permissions.push signal
 	// resolveRepoAccess otherwise reads (#1750): under App auth, permissions.push
@@ -255,6 +258,12 @@ type Engine struct {
 	// stay single-goroutine; their write sites also publish here. Zero-value
 	// ready.
 	health daemonHealth
+	// forge tracks the unbroken run of GitHub transport failures behind the
+	// account-wide forge-unreachable hold (#2393, forge_hold.go). Zero-value ready.
+	forge forgeHealth
+	// lockWriteRefusalDisabled is the test seam that restores the pre-#2393
+	// "spawn the worker unlocked" behaviour (forge_hold.go).
+	lockWriteRefusalDisabled atomic.Bool
 	// localAPI is the local read API server (#1967); nil until Run() binds it
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex
@@ -821,6 +830,11 @@ func New(cfg Config) (*Engine, error) {
 	// builds many engines concurrently in tests, where writing this package
 	// global would race.
 	claudeLogf = eng.logf
+
+	// Every HTTP outcome of the engine's client feeds the forge-unreachable
+	// hold tracker (#2393). NewWithDeps engines have no github.Client; the sim
+	// wires its fault table to ObserveForgeResult instead.
+	ghClient.SetResultObserver(eng.ObserveForgeResult)
 
 	return eng, nil
 }

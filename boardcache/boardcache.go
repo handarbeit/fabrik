@@ -256,6 +256,30 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 	return pi
 }
 
+// noteProjectID records the board's project ID. An empty ID is ignored, so a
+// known ID is never blanked (#2396). Never call it with c.mu held.
+func (c *CacheImpl) noteProjectID(id string) {
+	if id == "" || c.projectIDRecordingDisabledForTest.Load() {
+		return
+	}
+	c.mu.Lock()
+	c.projectID = id
+	c.mu.Unlock()
+}
+
+// NoteProjectID records the project ID a probe or board returned. Empty is a no-op.
+func (c *CacheImpl) NoteProjectID(id string) { c.noteProjectID(id) }
+
+// SetProjectIDRecordingDisabledForTest neutralises project-ID recording (#2396).
+func (c *CacheImpl) SetProjectIDRecordingDisabledForTest(v bool) {
+	c.projectIDRecordingDisabledForTest.Store(v)
+}
+
+// SetEmptyIDBoardGuardDisabledForTest neutralises the empty-ID board guard (#2396).
+func (c *CacheImpl) SetEmptyIDBoardGuardDisabledForTest(v bool) {
+	c.emptyIDBoardGuardDisabledForTest.Store(v)
+}
+
 // CacheImpl is a goroutine-safe in-memory board cache. Webhook delta functions write
 // to it; the poll loop reads from it via the ReadClient interface. Falls back to a
 // fallback ReadClient on cache miss.
@@ -284,6 +308,15 @@ type CacheImpl struct {
 	// Set by the engine once resolved; resolved lazily from the fallback client
 	// by the first Status edit that finds it unknown.
 	statusFieldID string
+
+	// projectIDRecordingDisabledForTest is the neutralisation seam for project-ID
+	// recording (#2396): when set, noteProjectID records nothing.
+	projectIDRecordingDisabledForTest atomic.Bool
+
+	// emptyIDBoardGuardDisabledForTest is the neutralisation seam for the
+	// FetchProjectBoard guard against serving a cached board with an empty
+	// ProjectID (#2396).
+	emptyIDBoardGuardDisabledForTest atomic.Bool
 
 	// projectFieldFilterDisabledForTest is the neutralisation seam for the
 	// projects_v2_item project and field filters (#2345): when set,
@@ -432,8 +465,8 @@ func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID stri
 	// Reset Store atomically — clears all prior item state and indexes.
 	c.store.Reset(syntheticItems)
 
+	c.noteProjectID(projectID)
 	c.mu.Lock()
-	c.projectID = projectID
 	// projectTitle and projectOwnerType are not available from probe results;
 	// they remain empty until the next Reconcile. The engine reads OwnerType
 	// from e.cfg.OwnerType directly, not from cache, so this is safe.
@@ -521,8 +554,8 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 		}
 	}
 
+	c.noteProjectID(board.ProjectID)
 	c.mu.Lock()
-	c.projectID = board.ProjectID
 	c.projectTitle = board.Title
 	c.projectOwnerType = board.OwnerType
 	c.mu.Unlock()
@@ -866,11 +899,33 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 		if len(snaps) == 0 {
 			c.logFn("[cache] miss: FetchProjectBoard not yet bootstrapped — fetching from GitHub\n")
 		}
-		return c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
+		board, err := c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
+		if err == nil && board != nil {
+			// Remember the ID the board carries (#2396): the first board of a
+			// start whose virgin probe failed arrives here, and the cache would
+			// otherwise serve an empty ID once the store fills.
+			c.noteProjectID(board.ProjectID)
+		}
+		return board, err
 	}
 
 	c.mu.RLock()
 	projectID := c.projectID
+	c.mu.RUnlock()
+
+	if projectID == "" && !c.emptyIDBoardGuardDisabledForTest.Load() {
+		// The store holds items but no project ID was ever recorded: a cached board
+		// would carry ProjectID "" and every board write would fail (#2396). Read
+		// GitHub for this poll and remember the ID it returns.
+		c.logFn("[cache] miss: FetchProjectBoard has no project ID — fetching from GitHub\n")
+		board, err := c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
+		if err == nil && board != nil {
+			c.noteProjectID(board.ProjectID)
+		}
+		return board, err
+	}
+
+	c.mu.RLock()
 	projectTitle := c.projectTitle
 	projectOwnerType := c.projectOwnerType
 	// Snapshot localDeltaAt for consistent max(UpdatedAt, deltaAt) computation.
@@ -1569,6 +1624,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 		return 0, nil, nil, err
 	}
 	freshBoard.FetchedAt = fetchStart
+	c.noteProjectID(freshBoard.ProjectID)
 
 	// Snapshot current cache items AFTER the fetch, so an engine write made
 	// during the fetch is visible to the comparison (#2159 R2). Store.All()

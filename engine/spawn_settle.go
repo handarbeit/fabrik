@@ -62,7 +62,11 @@ func (e *Engine) settleChildPlacement(board *gh.ProjectBoard, item gh.ProjectIte
 		return
 	}
 
-	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, sf.FieldID, optionID); err != nil {
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return // deferred, not a failed attempt: no retry budget spent (#2396)
+	}
+	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, sf.FieldID, optionID); err != nil {
 		e.logf(item.Number, "warn", "child placement settle: could not set project status on %s/%s#%d: %v\n", owner, repo, item.Number, err)
 		e.recordChildPlacementRetry(item)
 		return

@@ -245,7 +245,7 @@ default-base batch.
 
 `settleAndMerge`'s own loop never inspects `pr.State` — if this trial's PR is open when `findIntegrationPR` returns it but closes (unmerged) mid-wait, it is a narrower, deliberately out-of-scope variant of the same defect: the loop simply runs out its bound (members remain in Queued for a fresh retry) rather than routing to the escalation path above, since it can't misattribute a landing the way the fixed bug could.
 
-**State threading**: `board.ProjectID` is threaded from `handleMergeTrainBatch` → `dispatchMergeTrainWorker(ctx, batch, projectID)` → `mergeTrainWorkerState.projectID` (immutable after dispatch, no mutex needed). Inside `landMergeTrainBatch`, a minimal `&gh.ProjectBoard{ProjectID: projectID}` is constructed for the `advanceToNextStage` call.
+**State threading**: `board.ProjectID` is threaded from `handleMergeTrainBatch` → `dispatchMergeTrainWorker(ctx, batch, projectID)` → `mergeTrainWorkerState.projectID` (immutable after dispatch, no mutex needed). Inside `landMergeTrainBatch`, a minimal `&gh.ProjectBoard{ProjectID: projectID}` is constructed for the `advanceToNextStage` call. The ID handed to `dispatchMergeTrainWorker` is resolved through `Engine.writeProjectID` (see "Board project ID" in the cache section below), so a train is never dispatched with an empty one.
 
 **`mergeTrainInFlight` lifecycle**: set at `dispatchMergeTrainWorker` entry (LoadOrStore), keyed on the composite `mergeTrainKey(owner/repo, base)` — not bare `owner/repo` — since #1648, so two partitions of the same repo each get their own independent claim/clear lifecycle. Cleared by `finishTrain` — the single ADR-067-mandated clear point, called from `prepareTrainWorker`'s own-failure defer and from the run's `finish()` when the episode ends (landed, dissolved, ejected, abandoned). **Since #2051 the claim lives as long as the RUN, not as long as a goroutine** (ADR 2051 amends ADR-067): while a trial waits on CI no goroutine exists but the claim persists, so the duplicate-launch guard, ADR-1208's pending-eject routing (`mergeTrainBatchMembers`) and the `invalidateConflictingQueued` gate behave exactly as they did with a live worker. The Store liveness registry (`Store.ExitRepoWorker`, same composite key, §9.2, issue #1222) now means "a step goroutine is executing" — assembly, a Claude conflict resolution, a landing: it is set when a step is launched and cleared by `leaveStep` when the step returns without finishing the run (the claim stays). So an open trial that is merely waiting on CI does **not** block the auto-upgrade idle guard (a restart resumes it), while a step in progress still does. `mergeTrainWorkerActiveForRepo` (`closed_item_advance_settle.go`) answers "live" for either a Store marker or an open run. `mergeTrainInFlight` is the atomic duplicate-launch claim plus the `assembling`/`bisecting`/`CIResult`/`prNum`/`trialName` sub-state; the Store registry is the liveness answer the auto-upgrade idle guard reads (repo-wide, via `Store.RepoWorkerActiveForAnyBase`'s prefix scan).
 
@@ -5096,6 +5096,53 @@ SIGHUP is the graceful restart, and it drains before it restarts (amends ADR-139
 
 **Unchanged:** the idle-only self-upgrade re-exec, SIGINT/SIGTERM behaviour and Windows (no SIGHUP; the drain state is untagged). Seams (per-Engine): `SetSighupDrainDisabledForTest`, `SetDrainDispatchGateDisabledForTest`, `SetDrainLogIntervalForTest`, `SetDrainPollIntervalForTest`, `SetRunCtxHookForTest`. Tests: `engine/sighup_drain_test.go`.
 
+### 7.21 Lock-Write Refusal and the Forge-Unreachable Hold (#2393, ADR 2393)
+
+**Why.** A worker spawned while GitHub cannot be written has no lock, no worker record and no
+`in_progress` label, and its results cannot be recorded, so the next poll dispatches the item again
+(#2388: ~150 runs of one stage in ~21 hours). Two independent rules close this at dispatch admission.
+
+**Lock-write refusal.** `acquireLockAndVerify` returns the lock-label write error instead of
+carrying on. `processItem` then spawns nothing: no worker handle, no heartbeat, no `in_progress`
+write, no `StageAttempted`, no retry or failure counter. It logs one `[lock] could not add lock
+label …` line and records the admission cooldown `lock-write-failed` (one `PollSeconds`; consumed on
+admission, ADR 2096; in `shortAdmissionCooldownReasons`, so the idle interval never sleeps past it).
+It applies to any cause, including a 4xx; a persistent failure retries once per poll. The
+comment-review path takes `fabrik:editing` first, before the comment breaker is charged and before the
+👀 reactions: a failed write returns `didNotRunEditingWrite` (uncharged for every cause, superseding
+ADR 1413 for this write; `dispatchReinvoke` refunds the pre-charged cycle; the comments stay
+unprocessed) and records the same cooldown. The base-branch and worktree setup failures keep the
+ADR 1413 breaker charge. Neutralisation seam: `SetLockWriteRefusalDisabledForTest`.
+
+**Dispatch-site audit.** Exactly three sites call the model: stage dispatch (`processItem`, takes the
+lock label), the comment-review family (`processCommentsClassified`, takes `fabrik:editing`) and
+merge-train `resolveConflictWithClaude` (takes no label: its claim is the in-memory
+`ConflictResolutionSet` plus a worker slot, so only the hold gates it).
+
+**Forge-unreachable hold.** `forgeHealth` (`engine/forge_hold.go`) is told the outcome of every
+GitHub call through `github.Client.SetResultObserver` (the two HTTP choke points) wired in `New()`;
+the sim wires `simgh.FaultTable.SetResultObserver` to the same `Engine.ObserveForgeResult`. A
+*transport error* is a timeout or `context.DeadlineExceeded`, a dial/connection error, a truncated
+response or a 5xx (`github.IsTransportError`); 4xx, rate limits and `context.Canceled` are not. The
+hold **engages** after an unbroken run of ≥ 5 transport failures spanning ≥ 2 minutes on `e.now()`
+(a run with no failure for 10 minutes lapses) and **lifts** at the first outcome that proves the
+forge answered: a success, a 4xx, a rate limit or a GraphQL error (`github.IsForgeAnswer`). An error
+that never reached the forge (`context.Canceled`, a local request-build failure) is ignored: it
+neither lifts an engaged hold nor resets a run in progress. While held: `dispatchCandidates` starts nothing and hands every candidate back for
+re-admission with nothing recorded; `dispatchReinvoke` refunds its pre-charged cycle and returns;
+`processItem`, `processCommentsClassified` (`didNotRunForgeHeld`) and `resolveConflictWithClaude`
+(`errForgeHeldNotAttempted`, read by `trainCancelled` as an uncharged "not attempted") re-check as
+backstops. Running workers are untouched. Recovery: one `FetchProjectUpdatedAt` probe per poll while
+held, and the idle poll interval is capped at the configured interval. A forge where only *writes*
+fail never engages the hold (reads succeed); the lock-write refusal covers that. In memory only.
+Seams: `SetForgeHoldDisabledForTest`, `SetForgeHoldThresholdsForTest`.
+
+**Visibility.** Warnings panel entry `forge_unreachable:github` (§7.11) reported once on engage with a
+stable fingerprint and resolved on lift; `fabrik_health.forge_hold {since, consecutive_failures,
+last_error}` while held (§7.13); `pipeline-stalled` / `pipeline-resumed` with `scope=forge`,
+`cause=forge-unreachable`, one pair per episode, derived from the health mirror only, included in
+catch-up (§7.14). Sim twin: `tests/sim/forge_hold_test.go` over `simgh` `FailAllWrites` / `FailAll`.
+
 ## 8. Invalid / Unexpected States
 
 The engine handles unexpected label combinations (from manual human manipulation) through its guard chain. The behavior is defined by the order of checks in `itemMayNeedWork()`, `itemNeedsWork()`, and `processItem()`.
@@ -6120,6 +6167,8 @@ The cache is bootstrapped via `ProbeProjectBoard → BootstrapFromProbe`. Both s
 1. **Webhook startup path** — when `--webhooks` is enabled, before `wm.Start()` is called (before the webhook listener binds), the engine calls `e.client.ProbeProjectBoard(...)` and feeds the results to `cacheImpl.BootstrapFromProbe(probeItems, projectID)`. After `BootstrapFromProbe` returns, `e.seedTerminalFromProbeItems(probeItems)` seeds `Terminal=true` for qualifying items (see below). This pre-bootstrap closes the gap between webhook subprocess start and the first poll cycle, so deltas don't land in an empty cache. If the probe returns zero items (transient indexer hiccup), the cache is left virgin and the first poll retries.
 
 2. **First-poll path** — when the cache is not yet bootstrapped (webhooks disabled, or webhook-startup probe failed), the first `poll()` cycle calls `ProbeProjectBoard` and passes the results to `BootstrapFromProbe`, then calls `seedTerminalFromProbeItems`. On subsequent polls (cache already bootstrapped), the probe-and-refresh path (`runProbeAndDeepFetch`) replaces the bootstrap; see D.4.
+
+**Board project ID (#2396, ADR 2396).** The cache records the project ID from every board or probe it sees, through one guarded recorder (`noteProjectID`, exported as `NoteProjectID`): the board served from the fallback in `FetchProjectBoard`, every probe in `runProbeAndDeepFetch` (which formerly discarded the ID the probe returned), `LightReconcile` right after its fetch (so zero drift records it too), `BootstrapFromProbe` and `Reconcile`. **An empty incoming ID never overwrites a known one.** `FetchProjectBoard` never serves a cached board with an empty `ProjectID` while the store holds items: it reads GitHub for that poll, records the returned ID and returns that board unchanged (the store is not reconciled from it). The incident this closes: the virgin probe failed, the board fetch succeeded and was served from the fallback without recording its ID, the deep fetch filled the store, and every later poll built its board from the cache with `ProjectID: ""`, so each `UpdateProjectItemStatus` failed with "Could not resolve to a node with the global id of ''" until a reconcile found drift or the daemon restarted. An empty cache ID also silently disabled the Layer 2 status sweep and made `projects_v2_item` webhooks drop every delivery; with the ID recorded both run. On the engine side `pollCycle` fills an empty `board.ProjectID` from `Engine.boardProjectID`, and every board mutation that takes the project ID (`advanceToQueued`, `advanceToNextStage`, the no-work-needed, landing-verification, closed-item-advance, child-placement and archive-Done settle scans, `spawnChildren`, the Queued review scan and the merge-train batch dispatch) takes it from `Engine.writeProjectID(board)`: the board's, else the engine's own, else `errProjectIDUnknown` ("project ID unknown") — nothing is sent. That error is a **deferral**: settle scans return without `recordSettleRetry`, `recordAdvanceOutcome` writes no marker label or comment, and nothing escalates to `fabrik:paused`. It is logged once per episode (`Engine.projectIDUnknownLogged`, cleared when an ID is next resolved), not through `logfThrottled`. `TestBoardWritesTakeProjectIDFromTheGuard` forbids `board.ProjectID` as a mutation argument in non-test engine code. A virgin-probe branch that sees zero items still does not bootstrap and records nothing itself (unchanged), but the board fetch that follows in the same poll is served by the `FetchProjectBoard` fallback, which records the ID it carries (the incident path itself: the store is empty at fetch time); the next poll then takes the probe-refresh branch, which seeds and deep-fetches unseen items against an empty store. Seams: `CacheImpl.SetProjectIDRecordingDisabledForTest`, `CacheImpl.SetEmptyIDBoardGuardDisabledForTest`, `Engine.SetProjectIDWriteGuardDisabledForTest`; sim twin `tests/sim/project_id_empty_test.go`, and every sim `Env` fails its cleanup if any `UpdateProjectItemStatus` carried an empty project ID (`EnvOptions.AllowEmptyProjectIDWrites` opts the one non-vacuity scenario out).
 
 `BootstrapFromProbe` calls `Store.Reset` with synthetic items constructed from probe results. After `Store.Reset`, the engine calls `seedTerminalFromProbeItems`, which applies `TerminalFlagSet{Terminal: true}` for each item that is closed, in a cleanup stage (`CleanupWorktree: true`), **and has no on-disk worktree**. The worktree-presence check prevents stranding cleanup work: if the worktree still exists (the Done stage's `cleanup_worktree` action hasn't run yet), the item must not be treated as terminal — it must proceed through `processItem` so cleanup can execute. Seeding the terminal flag for worktree-absent items prevents `runProbeAndDeepFetch` from calling `FetchItemDetails` on already-cleaned Done items. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on the first active-item probe cycle.
 

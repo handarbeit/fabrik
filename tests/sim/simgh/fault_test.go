@@ -312,3 +312,67 @@ func TestBeforeCallOnAnUnknownMethodPanics(t *testing.T) {
 	}()
 	in.Faults().BeforeCall("NoSuchMethod", func(Args) {})
 }
+
+// FailAllWrites fails every mutating call and leaves reads alone (#2393).
+func TestFailAllWritesFailsOnlyMutations(t *testing.T) {
+	in, _ := newInstrumented(t)
+	in.Faults().FailAllWrites(ErrDeadlineExceeded())
+
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "fabrik:paused"); err == nil {
+		t.Fatal("a write succeeded under FailAllWrites")
+	}
+	if _, err := in.FetchLabels("acme", "widgets", 7); err != nil {
+		t.Fatalf("a read failed under FailAllWrites: %v", err)
+	}
+	labels, _ := in.Sim().FetchLabels("acme", "widgets", 7)
+	if contains(labels, "fabrik:paused") {
+		t.Error("the faulted write reached the model")
+	}
+
+	in.Faults().ClearBlanket()
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "fabrik:paused"); err != nil {
+		t.Fatalf("write still failing after ClearBlanket: %v", err)
+	}
+}
+
+// FailAll fails reads too, until cleared.
+func TestFailAllFailsEverythingUntilCleared(t *testing.T) {
+	in, _ := newInstrumented(t)
+	in.Faults().FailAll(ErrDeadlineExceeded())
+	if _, err := in.FetchLabels("acme", "widgets", 7); err == nil {
+		t.Fatal("a read succeeded under FailAll")
+	}
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "x"); err == nil {
+		t.Fatal("a write succeeded under FailAll")
+	}
+	in.Faults().ClearBlanket()
+	if _, err := in.FetchLabels("acme", "widgets", 7); err != nil {
+		t.Fatalf("read still failing after ClearBlanket: %v", err)
+	}
+}
+
+// The result observer is told each call's outcome: the injected error, or nil.
+func TestResultObserverSeesEveryOutcome(t *testing.T) {
+	in, _ := newInstrumented(t)
+	var got []error
+	in.Faults().SetResultObserver(func(err error) { got = append(got, err) })
+	in.Faults().FailOnce("AddLabelToIssue", ErrServerError())
+
+	_ = in.AddLabelToIssue("acme", "widgets", 7, "a")
+	_ = in.AddLabelToIssue("acme", "widgets", 7, "a")
+	if len(got) != 2 || got[0] == nil || got[1] != nil {
+		t.Fatalf("observer saw %v, want [injected error, nil]", got)
+	}
+}
+
+// Every method is either a read or a write for the blanket faults: FailAllWrites
+// covers exactly the methods the instrumented layer flags as mutations, so a new
+// interface method cannot silently escape it.
+func TestBlanketFaultsCoverEveryFaultableMethod(t *testing.T) {
+	for _, m := range InterfaceMethods() {
+		if unfaultableMethods[m] {
+			continue
+		}
+		validateMethod(m) // panics on a method the blanket faults could never reach
+	}
+}
