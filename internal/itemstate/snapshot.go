@@ -26,6 +26,8 @@ type Snapshot struct {
 //   - ItemState.Comments
 //   - ItemState.BlockedBy
 //   - ItemState.Milestone (pointer)
+//   - ItemState.SubIssues
+//   - ItemState.ParentIssue (pointer)
 //   - ItemState.CooldownAt
 //   - ItemState.LabelAppliedAt
 //   - ItemState.EngineWriteAt
@@ -59,6 +61,13 @@ func newSnapshot(s ItemState) Snapshot {
 	if s.Milestone != nil {
 		ms := *s.Milestone
 		c.Milestone = &ms
+	}
+	if s.SubIssues != nil {
+		c.SubIssues = append([]IssueRef(nil), s.SubIssues...)
+	}
+	if s.ParentIssue != nil {
+		p := *s.ParentIssue
+		c.ParentIssue = &p
 	}
 	c.CooldownAt = copyMap(s.CooldownAt)
 	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)

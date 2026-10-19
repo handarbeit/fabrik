@@ -154,6 +154,10 @@ func (s *Store) Apply(m Mutation) (Snapshot, []Change, error) {
 		return s.applyProjectV2ItemEdited(v)
 	case CheckRunCompleted:
 		return s.applyCheckRunCompleted(v)
+	case RepoLabelChanged:
+		return s.applyRepoLabelChanged(v)
+	case RepoMilestoneChanged:
+		return s.applyRepoMilestoneChanged(v)
 	default:
 		return s.applySingleItem(m)
 	}
@@ -445,6 +449,9 @@ func (s *Store) getOrCreate(key string) *ItemState {
 // applyToItem applies a single-item mutation to item in-place and returns ChangeFlags.
 // Must be called with s.mu held for writing.
 func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
+	if flags, ok := s.applyWebhookFact(item, m); ok {
+		return flags
+	}
 	switch v := m.(type) {
 
 	case IssueOpened:

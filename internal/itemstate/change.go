@@ -107,6 +107,10 @@ const (
 	// "dep-blocked" admission cooldown was made due so a dependency change is
 	// re-read promptly. Unlike DeepFetchChanged it is in wakeChFlags/cycleSetFlags.
 	DependenciesInvalidatedChanged
+	// SubIssueLinksChanged indicates ItemState.SubIssues or ParentIssue changed
+	// (#2352). An informational fact no engine code dispatches on; intentionally
+	// excluded from wakeChFlags/cycleSetFlags so a link change never wakes the poll.
+	SubIssueLinksChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

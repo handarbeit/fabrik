@@ -52,9 +52,27 @@ func observedReviewSubmitKey(author string) string {
 	return observedReviewsKey + ":submitted:" + author
 }
 
-// observedLabelRetention is how long a per-label record is kept. Single-valued
-// records are bounded by the number of facts and never expire.
+// Per-subject records written by the #2352 webhook deltas: one comment's edit,
+// one review thread's resolve/unresolve, one sub-issue link. Like per-label
+// records they are unbounded in number, so they expire after
+// observedLabelRetention.
+const (
+	observedCommentPfx = "comment:"
+	observedThreadPfx  = "thread:"
+	observedSubLinkPfx = "sublink:"
+)
+
+// observedLabelRetention is how long a per-label (or other per-subject) record is
+// kept. Single-valued records are bounded by the number of facts and never expire.
 const observedLabelRetention = 10 * time.Minute
+
+// expiringObservedKey reports whether key is a per-subject record that expires.
+func expiringObservedKey(k string) bool {
+	return strings.HasPrefix(k, engineWriteLabelPfx) ||
+		strings.HasPrefix(k, observedCommentPfx) ||
+		strings.HasPrefix(k, observedThreadPfx) ||
+		strings.HasPrefix(k, observedSubLinkPfx)
+}
 
 // recordedAt returns the later of the engine-write and observed records for key,
 // zero when the fact has never been observed.
@@ -150,7 +168,7 @@ func (s *Store) observe(item *ItemState, key string, auth time.Time) {
 // returns the map to nil when empty so equality checks stay stable.
 func pruneObserved(item *ItemState, now time.Time) {
 	for k, t := range item.ObservedAt {
-		if strings.HasPrefix(k, engineWriteLabelPfx) && now.Sub(t) > observedLabelRetention {
+		if expiringObservedKey(k) && now.Sub(t) > observedLabelRetention {
 			delete(item.ObservedAt, k)
 		}
 	}

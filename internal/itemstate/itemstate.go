@@ -116,6 +116,14 @@ type ItemState struct {
 	Milestone      *gh.Milestone
 	MilestoneKnown bool
 
+	// SubIssues are the issues linked below this one and ParentIssue the issue it
+	// is linked under (#2352). Written only by the sub_issues webhook deltas, which
+	// deliver every change twice (once per endpoint), so each side is set from
+	// either delivery. Informational: nothing dispatches on them, and no fetch
+	// populates them, so absence means "not heard of", not "none".
+	SubIssues   []IssueRef
+	ParentIssue *IssueRef
+
 	// LinkedPR is the state of the closing PR; nil if none.
 	LinkedPR *LinkedPRState
 
@@ -687,4 +695,10 @@ type TokenUsage struct {
 	CostUSD             float64
 	TurnsUsed           int
 	MaxTurns            int
+}
+
+// IssueRef names an issue by repository ("owner/repo") and number.
+type IssueRef struct {
+	Repo   string
+	Number int
 }
