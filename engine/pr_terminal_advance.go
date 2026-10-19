@@ -128,7 +128,7 @@ func (e *Engine) classifyLinkedPRTerminal(owner, repo string, number int, tag st
 	// a PR the engine just merged (e.g. the direct-merge fallback) gets misread as
 	// "closed without merging" and the issue is wrongly paused.
 	if !pr.Merged && pr.State == "closed" {
-		merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+		merged, mErr := e.livePRMerged(owner, repo, number, pr.Number)
 		if mErr != nil {
 			e.logf(number, tag, "PR #%d closed; could not confirm merged state: %v — skipping (re-check next poll)\n", pr.Number, mErr)
 			return pr, linkedPRReadErr

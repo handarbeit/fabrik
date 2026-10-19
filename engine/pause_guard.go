@@ -97,7 +97,7 @@ func (e *Engine) refuseIfPausedLive(item gh.ProjectItem, site string) bool {
 		return false
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	labels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil && e.pauseGuardUnreadOK.Load() {
 		return false
 	}

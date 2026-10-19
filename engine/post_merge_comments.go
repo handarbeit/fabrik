@@ -80,7 +80,7 @@ func (e *Engine) itemPRAlreadyLanded(item gh.ProjectItem) (bool, int) {
 		return true, pr.Number
 	}
 	if pr.State == "closed" {
-		merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+		merged, mErr := e.livePRMerged(owner, repo, item.Number, pr.Number)
 		if mErr != nil {
 			e.logf(item.Number, "warn", "post-merge guard: could not confirm PR #%d merged state: %v — processing normally\n", pr.Number, mErr)
 			return false, 0

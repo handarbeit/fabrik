@@ -83,7 +83,7 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 // callers pass the result to pausedOrUnread and fail closed.
 func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) (live bool) {
 	owner, repo := itemOwnerRepo(*item, e.defaultRepo())
-	freshLabels, err := e.client.FetchLabels(owner, repo, item.Number)
+	freshLabels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "refreshAutonomyLabels: could not re-fetch labels for %s/%s#%d: %v\n", owner, repo, item.Number, err)
 		return false
@@ -456,7 +456,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// window guard 1 below already re-fetches live data in.
 	fresh := item
 	liveRead := true
-	if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
+	if ferr := e.liveItem(&fresh); ferr != nil {
 		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
 		liveRead = false
 	} else {

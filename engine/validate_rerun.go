@@ -73,7 +73,7 @@ func (e *Engine) readValidateRerunState(item gh.ProjectItem) (pending, complete 
 		return false, false, nil
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	labels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil {
 		return false, false, err
 	}

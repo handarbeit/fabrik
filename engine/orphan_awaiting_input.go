@@ -31,7 +31,7 @@ func (e *Engine) clearOrphanAwaitingInput(item gh.ProjectItem) {
 		return
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	labels, err := e.client.FetchLabels(owner, repo, item.Number)
+	labels, err := e.liveLabels(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "clearOrphanAwaitingInput: could not fetch labels: %v\n", err)
 		return

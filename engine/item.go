@@ -1151,7 +1151,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		time.Sleep(lockVerifyDelay)
 		// Lock verification needs live labels, not cached state — another instance
 		// may have written its lock label in the window since we read from cache.
-		labels, err := e.client.FetchLabels(owner, repo, item.Number)
+		labels, err := e.liveLabels(owner, repo, item.Number)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
 		} else {

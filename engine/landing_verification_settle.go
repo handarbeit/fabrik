@@ -169,7 +169,7 @@ func (e *Engine) settleLandingVerificationItem(board *gh.ProjectBoard, item gh.P
 		creditedPR = pr.Number
 	}
 
-	merged, err := e.client.FetchPRMerged(owner, repo, creditedPR)
+	merged, err := e.livePRMerged(owner, repo, item.Number, creditedPR)
 	if err != nil {
 		e.logf(item.Number, "landing-verification", "could not confirm merge state of credited PR #%d: %v — inconclusive, retrying\n", creditedPR, err)
 		e.recordLandingVerificationRetry(item)
