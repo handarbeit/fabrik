@@ -79,7 +79,7 @@ The engine can be restarted at any time, including by self-upgrade or SIGHUP re-
 
 ### User Story 4 - A re-dispatch with nothing new does not resume a large session (Priority: P2)
 
-When a stage is re-dispatched and nothing it depends on has changed (same head SHA, issue body and comment set), resuming a big saved session only re-pays a large context for no new information. In that case the saved session is not resumed once its measured context exceeds `resume_threshold_tokens`.
+When a stage is re-dispatched and nothing it depends on has changed (same head SHA, issue body and comment set), resuming a big saved session only re-pays a large context for no new information. In that case the saved session is not resumed once its measured context exceeds `resume_threshold_tokens`. As built, this applies to re-entry after a *closed* run only (the last stage run emitted `FABRIK_STAGE_COMPLETE`, the #2388 shape); an unclosed session is a continuation (for example a time slice) and keeps resuming under #2300.
 
 **Why this priority**: It limits the per-run cost growth within the cap. It is secondary to the cap, which is the hard bound, and it reuses the #2300 size measure.
 
@@ -88,8 +88,9 @@ When a stage is re-dispatched and nothing it depends on has changed (same head S
 **Acceptance Scenarios**:
 
 1. **Given** a saved session with measured context above `resume_threshold_tokens` and a re-dispatch with the same head SHA, issue body and comment set as the previous run, **When** the resume decision is made, **Then** the session is not resumed.
-2. **Given** the same session but any one of the head SHA, issue body or comment set has changed, **When** the resume decision is made, **Then** the #2300 rule applies as before, including the continuation exemption.
+2. **Given** the same session but any one of the head SHA, issue body or comment set has changed, **When** the resume decision is made, **Then** the #2300 rule applies as before.
 3. **Given** a saved session whose measured context is at or below the threshold, or unknown, **When** a re-dispatch has unchanged inputs, **Then** the session is resumed as it is today.
+4. **Given** an unclosed (continuation) session whose measured context is above the threshold, **When** a re-dispatch has unchanged inputs, **Then** the session is still resumed under the #2300 continuation rule, so a time-sliced read-only stage that commits nothing can converge.
 
 ---
 
@@ -108,16 +109,16 @@ When a stage is re-dispatched and nothing it depends on has changed (same head S
 ### Functional Requirements
 
 - **FR-001**: The engine keeps a dispatch counter per item and per stage for the current stage episode. Every stage-run dispatch increments it, whatever the run's outcome (complete, incomplete, failed, time-sliced, or complete-but-unrecorded).
-- **FR-002**: The counter is reset when the stage's completion is durably recorded, when the item changes column, or when a human comment resumes a paused item.
+- **FR-002**: The counter is reset when the stage's completion is durably recorded, when the item changes column, or when a paused item is resumed (a human comment, or the pause labels being removed, both of which clear the engine pause record; a paused dispatch record that meets an unpaused item starts a new episode).
 - **FR-003**: `max_stage_dispatches` sets the per-episode cap. It is configurable by flag `--max-stage-dispatches`, environment variable `FABRIK_MAX_STAGE_DISPATCHES`, and a YAML config key. A value of 0 disables the cap. Negative or non-integer values are refused.
-- **FR-004**: The default value of `max_stage_dispatches` is a documented positive number, chosen to sit above the dispatch count of ordinary healthy episodes (including time-sliced ones). It is fixed during Plan, with 10 as the working figure.
+- **FR-004**: The default value of `max_stage_dispatches` is a documented positive number, chosen to sit above the dispatch count of ordinary healthy episodes (including time-sliced ones). It was fixed during Plan at 25: a healthy episode can legitimately reach about 14 dispatches (`max_slice_retries` slices plus `max_retries` failures plus the final run), so the working figure of 10 would pause it. Operators can raise the value or set 0 (ADR 2395).
 - **FR-005**: When an item's counter reaches `max_stage_dispatches`, the engine pauses the item with `fabrik:paused` and `fabrik:awaiting-input` and posts one comment. It dispatches no further run of that stage for the item until a human resumes it.
 - **FR-006**: The pause comment names the stage, the dispatch count, and the outcomes of the most recent dispatches, and tells the human how to resume.
 - **FR-007**: The pause comment is posted at most once per pause. An item that is already paused is not paused or commented on again by the cap.
 - **FR-008**: The dispatch counter persists across engine restarts, including the self-upgrade re-exec and SIGHUP restart. A restart does not reset it, and a restart does not cause a dispatch to be double-counted or lost.
 - **FR-009**: The session resume decision treats a stage re-dispatch as "unchanged" when the head SHA, the issue body and the comment set are the same as at the previous run of that stage on that item.
-- **FR-010**: For an unchanged re-dispatch whose saved session has measured context above `resume_threshold_tokens`, the engine does not resume the saved session and starts fresh. This applies even to a session that is otherwise a continuation under #2300.
-- **FR-011**: When the inputs have changed, when the previous run's inputs are unknown, or when the saved session's measured context is at or below the threshold or unknown, the resume decision is exactly the #2300 decision.
+- **FR-010**: For an unchanged re-dispatch whose saved session has measured context above `resume_threshold_tokens`, the engine does not resume the saved session and starts fresh. This applies only when the saved session's last stage run was closed (it emitted `FABRIK_STAGE_COMPLETE`); a session whose last stage run was not closed is a continuation under #2300 and still resumes (ADR 2395).
+- **FR-011**: When the inputs have changed, when the previous run's inputs are unknown, when the saved session is an unclosed continuation, or when the saved session's measured context is at or below the threshold or unknown, the resume decision is exactly the #2300 decision.
 - **FR-012**: The resume-decision log line for a fresh start caused by FR-010 states that the cause is an unchanged re-dispatch with an oversized session.
 - **FR-013**: The new cap and the unchanged-input exemption each have a neutralisation seam usable from the sim bed, so the sim twin can show the behaviour with and without them.
 - **FR-014**: A sim twin covers a stage that completes but is never recorded: with the cap active it stops at the cap and pauses, and with the cap neutralised it runs past the cap. A second sim scenario covers persistence across `RestartEnv`.
@@ -141,11 +142,11 @@ When a stage is re-dispatched and nothing it depends on has changed (same head S
 
 ## Assumptions
 
-- The default cap is a small positive number (working figure 10), chosen in Plan against the dispatch counts of healthy episodes including time-sliced ones.
+- The default cap is 25, chosen in Plan against the dispatch counts of healthy episodes including time-sliced ones (the specification's working figure was 10).
 - Only dispatches that start a stage run count. Dispatches skipped before a worker is spawned (usage-limit hold, unresolved skill, and similar) do not.
 - "Comment set" means the set of comments on the item as seen by the previous run, so a new human or bot comment makes the inputs "changed".
 - The measured session context and `resume_threshold_tokens` are those introduced by #2300; this issue adds no new size measurement or threshold setting.
-- A human comment resumes a paused item per the existing rule (a human comment at or after the pause), and that resume is what resets the counter. A label removal alone is not assumed to reset it.
+- A human comment resumes a paused item per the existing rule (a human comment at or after the pause), and that resume resets the counter. Removing the pause labels by hand also resets it, because the engine pause record is cleared on any unpause.
 - Pausing uses the engine's existing pause pair and comment-deduplication behaviour; no new label is introduced.
 
 ## Out of Scope *(optional)*
