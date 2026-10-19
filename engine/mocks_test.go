@@ -16,6 +16,12 @@ import (
 type mockGitHubClient struct {
 	mu sync.Mutex
 
+	// issueWriteStampFn / itemWriteStampFn make the mock a WriteStampSource
+	// (#1945): the GitHub time of the engine's last write to an issue / a
+	// project item. nil reports zero ("GitHub gave no timestamp").
+	issueWriteStampFn func(repo string, number int) time.Time
+	itemWriteStampFn  func(itemID string) time.Time
+
 	fetchProjectBoardFn           func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
 	probeProjectBoardFn           func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error)
 	fetchLabelsFn                 func(owner, repo string, issueNumber int) ([]string, error)
@@ -1217,4 +1223,34 @@ func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages
 		return fallback(stage, issue, comments, false, workDir, opts)
 	}
 	return "mock comment output", false, TokenUsage{}, nil
+}
+
+// IssueWriteStamp implements WriteStampSource (#1945).
+func (m *mockGitHubClient) IssueWriteStamp(repo string, number int) time.Time {
+	m.mu.Lock()
+	fn := m.issueWriteStampFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(repo, number)
+	}
+	return time.Time{}
+}
+
+// ProjectItemWriteStamp implements WriteStampSource (#1945).
+func (m *mockGitHubClient) ProjectItemWriteStamp(itemID string) time.Time {
+	m.mu.Lock()
+	fn := m.itemWriteStampFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(itemID)
+	}
+	return time.Time{}
+}
+
+// fixedWriteStamps makes every write report the given GitHub time.
+func (m *mockGitHubClient) fixedWriteStamps(at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.issueWriteStampFn = func(string, int) time.Time { return at }
+	m.itemWriteStampFn = func(string) time.Time { return at }
 }

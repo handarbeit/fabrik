@@ -216,7 +216,7 @@ func TestAdmission_PausedReadsThroughCache(t *testing.T) {
 		UpdatedAt: updatedAt, IssueLayerUpdatedAt: updatedAt,
 		IssueCommentTotal: 1, IssueCommentTotalKnown: true,
 	}})
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75}) // the pause write
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75, At: updatedAt.Add(time.Second)}) // the pause write (GitHub time)
 
 	step := 0
 	pollN := func(n int) int {
@@ -240,7 +240,7 @@ func TestAdmission_PausedReadsThroughCache(t *testing.T) {
 	// A human replies just before the engine's next self-write: the comment total
 	// moves while no updatedAt does.
 	total = 2
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75})
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75, At: updatedAt.Add(2 * time.Second)})
 	if got := pollN(20); got != 1 {
 		t.Fatalf("20 polls after a masked reply: %d live fetches, want 1", got)
 	}
@@ -437,7 +437,7 @@ func TestAdmission_CycleSetAdmittedFailedFetchIsRearmedAndRecovers(t *testing.T)
 	key := issueKey(item, eng.defaultRepo())
 	interval := eng.githubRecheckInterval()
 	// Known to the store with no cooldown, as a slot-deferred item is.
-	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 76})
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 76, At: start})
 
 	cands, _ := eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{key: true}, map[string]bool{})
 	if len(cands) != 0 {

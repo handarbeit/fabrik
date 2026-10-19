@@ -527,6 +527,11 @@ func TestPauseIssue_RemoveAutoMerge(t *testing.T) {
 	}
 }
 
+// githubWriteAt is the GitHub-side stamp the mock reports for an engine write
+// (#1945). It is deliberately far from the host clock, so an assertion that the
+// baseline equals it cannot be satisfied by a time.Now() fallback.
+var githubWriteAt = time.Date(2026, 10, 19, 4, 0, 7, 0, time.UTC)
+
 // ── SelfWriteObserved probe-staleness baseline (#1090) ───────────────────────
 //
 // These tests exercise the same three engine/mutate.go call sites as above,
@@ -537,14 +542,14 @@ func TestPauseIssue_RemoveAutoMerge(t *testing.T) {
 
 func TestApplyLabelAdd_AdvancesStaleness(t *testing.T) {
 	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	before := time.Now()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelAdd(item, "fabrik:paused", true)
 
-	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful label add", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.Equal(githubWriteAt) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v after a successful label add", got, githubWriteAt)
 	}
 }
 
@@ -568,15 +573,15 @@ func TestApplyLabelAdd_ErrorDoesNotAdvanceStaleness(t *testing.T) {
 // path (echo=true), where syncLabelRemoval must advance the baseline.
 func TestApplyLabelRemove_SuccessAdvancesStaleness(t *testing.T) {
 	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:blocked")
-	before := time.Now()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelRemove(item, "fabrik:blocked", true)
 
-	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful label removal", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.Equal(githubWriteAt) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v after a successful label removal", got, githubWriteAt)
 	}
 }
 
@@ -607,16 +612,16 @@ func TestPostComment_SuccessAdvancesStaleness(t *testing.T) {
 			return 42, nil
 		},
 	}
+	client.fixedWriteStamps(githubWriteAt)
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	before := time.Now()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	if _, err := eng.postComment(item, "hello", false, true); err != nil {
 		t.Fatalf("postComment: %v", err)
 	}
 
-	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v after a successful comment post", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.Equal(githubWriteAt) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v after a successful comment post", got, githubWriteAt)
 	}
 }
 
@@ -643,15 +648,15 @@ func TestPostComment_ErrorDoesNotAdvanceStaleness(t *testing.T) {
 // must not be gated on e.webhookMgr, unlike the adjacent RegisterEcho call.
 func TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr(t *testing.T) {
 	client := &mockGitHubClient{}
+	client.fixedWriteStamps(githubWriteAt)
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	eng.webhookMgr = nil // polling-only mode
-	before := time.Now()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelAdd(item, "fabrik:paused", true)
 
-	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); got.Before(before) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v in polling-only mode (webhookMgr == nil)", got, before)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.Equal(githubWriteAt) {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v in polling-only mode (webhookMgr == nil)", got, githubWriteAt)
 	}
 }
 
@@ -771,5 +776,32 @@ func TestAddLabelCheckedBy_RegistersEchoWithRequester(t *testing.T) {
 	ok, via := wm.MatchEchoVia("issues", "labeled", "owner/repo#1+fabrik:cruise")
 	if !ok || via != "x" {
 		t.Fatalf("MatchEchoVia = %v, %q", ok, via)
+	}
+}
+
+// A write that yields no GitHub timestamp must not advance the baseline, and
+// must never fall back to the host clock (#1945, FR-003, SC-005).
+func TestSelfWrite_NoGitHubStampLeavesBaseline(t *testing.T) {
+	client := &mockGitHubClient{} // reports a zero stamp
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.applyLabelAdd(item, "fabrik:paused", true)
+	if _, err := eng.postComment(item, "hello", false, true); err != nil {
+		t.Fatalf("postComment: %v", err)
+	}
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want zero when GitHub reported no stamp", got)
+	}
+}
+
+// A client without the WriteStampSource capability behaves as "no stamp".
+func TestSelfWrite_ClientWithoutCapabilityLeavesBaseline(t *testing.T) {
+	inner := &mockGitHubClient{}
+	inner.fixedWriteStamps(githubWriteAt)
+	eng, _ := testEngineWithCache(t, inner, &mockClaudeInvoker{})
+	eng.client = struct{ GitHubClient }{inner} // hides the stamp methods
+	eng.applyLabelAdd(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:paused", true)
+	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.IsZero() {
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want zero for a client with no WriteStampSource", got)
 	}
 }

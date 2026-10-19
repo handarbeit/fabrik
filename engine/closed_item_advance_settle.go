@@ -3,7 +3,6 @@ package engine
 import (
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -128,7 +127,7 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 	}
 	// Advances the probe staleness baseline (#1090) — the status move above just
 	// bumped the item's real GitHub updatedAt via the project-item mutation.
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	}
