@@ -19,6 +19,13 @@ type delivery struct {
 	Payload   []byte
 	// Transport names the carrier ("webhook", "hookdeck", …), for logs.
 	Transport string
+	// ReceivedAt is when the intake received the delivery, stamped by Submit
+	// before the ledger check. The apply function orders a delivery that carries
+	// no GitHub time by this, not by apply time: a delivery waits behind its
+	// item's queue and an apply slot, and its apply makes network calls, so apply
+	// time can lag receipt by seconds and would otherwise look newer than reads
+	// and engine writes made while it waited (#2351, amending #2348).
+	ReceivedAt time.Time
 }
 
 // Intake bounds. Variables (not constants) so tests can shrink them.
@@ -41,6 +48,9 @@ var (
 	intakeConcurrency = 8
 	// intakeCloseGrace is how long Close waits for in-flight applies.
 	intakeCloseGrace = 5 * time.Second
+	// intakeQuiesceGrace is how long a self-upgrade exec waits for queued and
+	// in-flight deliveries before it flushes the ledger and execs anyway.
+	intakeQuiesceGrace = 10 * time.Second
 )
 
 // intake is the transport-neutral delivery stage (#2351, ADR 2351). Every
@@ -58,8 +68,16 @@ var (
 type intake struct {
 	ledger *deliveryLedger
 	apply  func(eventType string, payload []byte)
-	logf   func(format string, args ...any)
-	now    func() time.Time
+	// applyAt, when set, is used instead of apply and also receives the
+	// delivery's receipt time.
+	applyAt func(eventType string, payload []byte, receivedAt time.Time)
+	logf    func(format string, args ...any)
+	now     func() time.Time
+	// receivedNow is the clock that stamps delivery.ReceivedAt. It is the WALL
+	// clock (nil = time.Now), not `now`: the Store compares receipt time with the
+	// times of reads and engine writes, which are wall-clock stamps, while `now`
+	// is the engine clock the sim bed replaces with a fake one.
+	receivedNow func() time.Time
 	// note is called once per Submit before dedupe, so liveness counters see
 	// every arriving delivery, duplicates included.
 	note func()
@@ -72,7 +90,10 @@ type intake struct {
 	// bytes is the payload bytes of every delivery counted in total.
 	bytes  int
 	closed bool
-	wg     sync.WaitGroup
+	// quiesced refuses new work like closed, but reversibly (Resume): it is the
+	// state of a process about to exec, which must survive a failed exec.
+	quiesced bool
+	wg       sync.WaitGroup
 	// idle is signalled whenever total drops to zero (drain).
 	idle *sync.Cond
 }
@@ -107,8 +128,13 @@ func (in *intake) Submit(d delivery) bool {
 		in.note()
 	}
 	now := in.now()
+	if in.receivedNow != nil {
+		d.ReceivedAt = in.receivedNow()
+	} else {
+		d.ReceivedAt = time.Now()
+	}
 	in.mu.Lock()
-	if in.closed {
+	if in.closed || in.quiesced {
 		in.mu.Unlock()
 		return false
 	}
@@ -120,7 +146,7 @@ func (in *intake) Submit(d delivery) bool {
 	key := deliveryKey(d.EventType, d.Payload)
 
 	in.mu.Lock()
-	if in.closed {
+	if in.closed || in.quiesced {
 		in.mu.Unlock()
 		in.ledger.Forget(d.ID)
 		return false
@@ -195,7 +221,10 @@ func (in *intake) run(d delivery) {
 			in.log("panic applying %s delivery %s: %v\n%s", d.EventType, d.ID, r, debug.Stack())
 		}
 	}()
-	if in.apply != nil {
+	switch {
+	case in.applyAt != nil:
+		in.applyAt(d.EventType, d.Payload, d.ReceivedAt)
+	case in.apply != nil:
 		in.apply(d.EventType, d.Payload)
 	}
 }
@@ -233,6 +262,49 @@ func (in *intake) Close(grace time.Duration) {
 		in.log("intake close: gave up waiting for in-flight deliveries after %v\n", grace)
 	}
 	in.ledger.Close()
+}
+
+// Quiesce refuses new deliveries (they are acknowledged by their transport and
+// healed by the next reconcile, and never recorded in the ledger) and waits until
+// nothing is queued or in flight, or until grace expires. It reports whether the
+// intake drained. It is the step before an exec: a delivery the ledger already
+// records as seen but that is still queued or applying would otherwise be lost to
+// the exec while its redelivery stays suppressed. The wait is bounded and nothing
+// is torn down, so a failed exec leaves a process that Resume returns to service.
+func (in *intake) Quiesce(grace time.Duration) bool {
+	if in == nil {
+		return true
+	}
+	in.mu.Lock()
+	in.quiesced = true
+	expired := false
+	timer := time.AfterFunc(grace, func() {
+		in.mu.Lock()
+		expired = true
+		in.idle.Broadcast()
+		in.mu.Unlock()
+	})
+	for in.total > 0 && !expired {
+		in.idle.Wait()
+	}
+	pending := in.total
+	in.mu.Unlock()
+	timer.Stop()
+	if pending > 0 {
+		in.log("intake quiesce: %d delivery(ies) still queued or applying after %v — proceeding; reconcile will heal them\n", pending, grace)
+		return false
+	}
+	return true
+}
+
+// Resume accepts deliveries again after a Quiesce whose exec did not happen.
+func (in *intake) Resume() {
+	if in == nil {
+		return
+	}
+	in.mu.Lock()
+	in.quiesced = false
+	in.mu.Unlock()
 }
 
 // Flush persists the ledger without closing (before an exec).

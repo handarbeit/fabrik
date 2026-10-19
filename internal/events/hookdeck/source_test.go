@@ -315,6 +315,34 @@ func TestSource_DedupesDuplicateDeliveryID(t *testing.T) {
 	}
 }
 
+// With DisableDedupe the source leaves duplicate suppression to its consumer
+// (the engine's delivery ledger, #2351): one delivery ID sent twice reaches the
+// sink twice. The default (Pruefer's) still dedupes — see the test above.
+func TestSource_DisableDedupePassesDuplicatesThrough(t *testing.T) {
+	m := newMockHookdeckServer(t)
+	sink := &recordingSink{}
+	cfg := testConfig(m)
+	cfg.DisableDedupe = true
+	src := NewSource(cfg)
+	runSourceInBackground(t, src, sink)
+
+	conn := m.nextConn(t)
+	body := prOpenedBody(t, 7)
+	sig := signBody(body, testWebhookSecret)
+	sendAttempt(t, conn, "attempt-1", "delivery-dup", body, sig)
+	readAck(t, conn)
+	sendAttempt(t, conn, "attempt-2", "delivery-dup", body, sig)
+	readAck(t, conn)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for sink.count() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := sink.count(); got != 2 {
+		t.Errorf("sink.count() = %d, want 2 (DisableDedupe must not suppress a repeated delivery ID)", got)
+	}
+}
+
 // TestSource_MalformedRetryDoesNotBurnDeliveryID guards against dedupe
 // marking a delivery ID as seen before normalization has proven the
 // payload well-formed: a malformed first attempt must not cause Hookdeck's

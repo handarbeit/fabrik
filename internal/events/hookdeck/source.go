@@ -102,6 +102,16 @@ type Config struct {
 	// websocket.DefaultDialer. Injectable for tests.
 	Dialer *websocket.Dialer
 
+	// DisableDedupe turns the source's own in-memory delivery-ID ring off, for a
+	// consumer that owns a stronger dedupe of its own. The engine's persisted
+	// delivery ledger (engine/delivery_ledger.go, #2351) is the authority there,
+	// and a ring in front of it would defeat the ledger's forget-on-overflow: a
+	// delivery dropped for queue overflow is forgotten by the ledger so its
+	// redelivery is accepted, but the ring would still have it marked seen and
+	// drop the redelivery at the source. Pruefer has no ledger and leaves this
+	// false, keeping the ring.
+	DisableDedupe bool
+
 	// minBackoff/maxBackoff bound the reconnect backoff; both default
 	// (1s / 60s) when zero. Unexported — only hookdeck-package-internal
 	// tests need to tune these for speed.
@@ -235,8 +245,16 @@ func NewSource(cfg Config) *Source {
 	if cfg.writeWait <= 0 {
 		cfg.writeWait = defaultWriteWait
 	}
-	return &Source{cfg: cfg, dedupe: events.NewDedupe(0)}
+	src := &Source{cfg: cfg}
+	if !cfg.DisableDedupe {
+		src.dedupe = events.NewDedupe(0)
+	}
+	return src
 }
+
+// DedupeEnabled reports whether the source suppresses repeated delivery IDs
+// itself (false when Config.DisableDedupe was set).
+func (s *Source) DedupeEnabled() bool { return s.dedupe != nil }
 
 func (s *Source) emitHealth(state events.HealthState, err error) {
 	if s.cfg.OnHealth == nil {
@@ -566,7 +584,7 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 	// seen before it's known to be well-formed would permanently drop every
 	// future retry of that same delivery, even ones that would otherwise
 	// parse fine (Hookdeck retries resend the identical delivery ID).
-	if s.dedupe.SeenBefore(deliveryID) {
+	if s.dedupe != nil && s.dedupe.SeenBefore(deliveryID) {
 		s.emitDrop(events.DropDedupe)
 		return
 	}

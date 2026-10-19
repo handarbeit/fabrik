@@ -41,6 +41,9 @@ type ReleaseConfig struct {
 	// point a caller can flush state an exec would otherwise lose. It must not
 	// tear anything down: if the exec fails the process keeps running.
 	PreExecHook func()
+	// ExecFailedHook, if non-nil, runs when the re-exec returned an error, so a
+	// caller that paused work in PreExecHook can resume it.
+	ExecFailedHook func()
 }
 
 // PerformReleaseUpgrade fetches the latest release from GitHub, compares it to
@@ -190,6 +193,9 @@ func PerformReleaseUpgrade(cfg ReleaseConfig) error {
 		cfg.PreExecHook()
 	}
 	if err := execFn(exe, os.Args, env); err != nil {
+		if cfg.ExecFailedHook != nil {
+			cfg.ExecFailedHook()
+		}
 		cfg.Logf("CRITICAL: upgrade succeeded (binary replaced with %s on disk) but re-exec failed: %v — process is still running the OLD binary; restart manually (e.g. kill -HUP %d) or the daemon will remain silently stale\n", latestTag, err, os.Getpid())
 		return fmt.Errorf("re-executing upgraded binary: %w", err)
 	}

@@ -19,18 +19,19 @@ import (
 func (e *Engine) EnableDeliveryIntakeForTest(dir string) {
 	cache := e.cache()
 	e.echo = newEchoRegistry()
-	var apply func(string, []byte)
+	var applyAt func(string, []byte, time.Time)
 	if cache != nil {
 		cache.SetMatchEchoFn(e.echo.MatchEcho)
 		cache.SetMatchEchoReportedFn(e.echo.MatchEchoReported)
 		cache.SetMatchEchoViaFn(e.echo.MatchEchoVia)
-		apply = cache.ApplyDelta
+		applyAt = cache.ApplyDeltaAt
 	}
 	path := ""
 	if dir != "" {
 		path = filepath.Join(dir, deliveryLedgerFileName)
 	}
-	e.intake = newIntake(newDeliveryLedger(path, e.now(), nil), apply, nil, e.now)
+	e.intake = newIntake(newDeliveryLedger(path, e.now(), nil), nil, nil, e.now)
+	e.intake.applyAt = applyAt
 }
 
 // SubmitDeliveryForTest hands a delivery to the intake as a transport would and

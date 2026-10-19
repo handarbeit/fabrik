@@ -14,19 +14,34 @@ import (
 // ApplyDelta dispatches a webhook payload to the appropriate typed delta function.
 // It is a no-op when the cache is paused (stream unhealthy).
 func (c *CacheImpl) ApplyDelta(eventType string, payload []byte) {
+	c.ApplyDeltaAt(eventType, payload, time.Now())
+}
+
+// ApplyDeltaAt is ApplyDelta for a delivery the daemon received at receivedAt
+// (#2351, amending the receipt-time rule of #2348). A delivery that carries no
+// GitHub time is ordered by when the daemon RECEIVED it; the engine's intake
+// queues a delivery behind its item's earlier ones and an apply slot, and the
+// apply itself makes network calls, so apply time can lag receipt by seconds. A
+// receipt time taken at apply would then look newer than reads and engine writes
+// made while the delivery waited, and could overwrite fresher state. A zero
+// receivedAt means "now".
+func (c *CacheImpl) ApplyDeltaAt(eventType string, payload []byte, receivedAt time.Time) {
 	if c.IsPaused() {
 		return
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
 	}
 
 	switch eventType {
 	case "issue_comment":
 		c.applyIssueCommentDelta(payload)
 	case "issues":
-		c.applyIssuesDelta(payload)
+		c.applyIssuesDelta(payload, receivedAt)
 	case "pull_request":
-		c.applyPullRequestDelta(payload)
+		c.applyPullRequestDelta(payload, receivedAt)
 	case "pull_request_review":
-		c.applyPullRequestReviewDelta(payload)
+		c.applyPullRequestReviewDelta(payload, receivedAt)
 	case "pull_request_review_comment":
 		c.applyPullRequestReviewCommentDelta(payload)
 	case "check_run":
@@ -37,7 +52,7 @@ func (c *CacheImpl) ApplyDelta(eventType string, payload []byte) {
 		// the per-run Name, Conclusion, and SHA needed for the CI gate.
 		c.applyCheckSuite(payload)
 	case "projects_v2_item":
-		c.applyProjectsV2ItemDelta(payload)
+		c.applyProjectsV2ItemDelta(payload, receivedAt)
 	}
 }
 
@@ -231,13 +246,13 @@ func editedStatusName(to json.RawMessage) string {
 // none or an unparseable one. Receipt order is never allowed to look older than a
 // real GitHub time, because the daemon's clock is compared with GitHub's only
 // through the Store's rule (see itemstate/observed.go).
-func observedTime(ts lenientString) time.Time {
+func observedTime(ts lenientString, receivedAt time.Time) time.Time {
 	if ts != "" {
 		if t, err := time.Parse(time.RFC3339, string(ts)); err == nil {
 			return t
 		}
 	}
-	return time.Now()
+	return receivedAt
 }
 
 // lenientString decodes a JSON string and yields "" for any other JSON type
@@ -444,7 +459,7 @@ func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 	c.bumpLocalDeltaAt(key)
 }
 
-func (c *CacheImpl) applyIssuesDelta(payload []byte) {
+func (c *CacheImpl) applyIssuesDelta(payload []byte, receivedAt time.Time) {
 	var p issuesPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyIssuesDelta: unmarshal payload: %v\n", err)
@@ -488,7 +503,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		// BlockedByEdgeAdded write (spawnChildren, #1783) — e.g. for a child
 		// issue this same engine just created — must not wipe it back to
 		// empty (#1783 follow-up).
-		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi, PreserveBlockedBy: true, Partial: true, At: observedTime(p.Issue.UpdatedAt)})
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi, PreserveBlockedBy: true, Partial: true, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -499,7 +514,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -510,7 +525,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(reopened): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueReopened{Repo: fullRepo, Number: issNum, At: observedTime(p.Issue.UpdatedAt)})
+		_, changes, _ := c.store.Apply(itemstate.IssueReopened{Repo: fullRepo, Number: issNum, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -560,11 +575,11 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 
 	case "labeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "labeled", p.Label.Name,
-			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
+			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 
 	case "unlabeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "unlabeled", p.Label.Name,
-			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt)})
+			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 
 	case "milestoned", "demilestoned":
 		// issue.milestone is the post-event value: the new milestone on
@@ -586,7 +601,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(%s): #%d not in store; skipping (next reconcile captures its milestone)\n", p.Action, issNum)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms, At: observedTime(p.Issue.UpdatedAt)})
+		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms, At: observedTime(p.Issue.UpdatedAt, receivedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -649,7 +664,7 @@ func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum 
 	c.bumpLocalDeltaAt(key)
 }
 
-func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
+func (c *CacheImpl) applyPullRequestDelta(payload []byte, receivedAt time.Time) {
 	var p pullRequestPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyPullRequestDelta: unmarshal payload: %v\n", err)
@@ -694,7 +709,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 			State:    lpr.State,
 			Merged:   lpr.Merged,
 			Draft:    false,
-			At:       observedTime(p.PullRequest.UpdatedAt),
+			At:       observedTime(p.PullRequest.UpdatedAt, receivedAt),
 		})
 		c.bumpLocalDeltaAt(issKey)
 		return
@@ -727,7 +742,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 			State:    lpr.State,
 			Merged:   lpr.Merged,
 			Draft:    true,
-			At:       observedTime(p.PullRequest.UpdatedAt),
+			At:       observedTime(p.PullRequest.UpdatedAt, receivedAt),
 		})
 		c.bumpLocalDeltaAt(issKey)
 		return
@@ -798,7 +813,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		c.matchEchoFn("pull_request", p.Action, prKey(repo, prNum))
 	}
 	sha := p.PullRequest.Head.SHA
-	prAt := observedTime(p.PullRequest.UpdatedAt)
+	prAt := observedTime(p.PullRequest.UpdatedAt, receivedAt)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -875,7 +890,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 }
 
-func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
+func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte, receivedAt time.Time) {
 	var p pullRequestReviewPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyPullRequestReviewDelta: unmarshal payload: %v\n", err)
@@ -900,9 +915,9 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	// event, but an "edited" or "dismissed" one happens later and carries no time
 	// of its own, so it is ordered by receipt: stamped with the old submission time
 	// it would look older than any read made since, and be dropped.
-	reviewAt := time.Now()
+	reviewAt := receivedAt
 	if p.Action == "submitted" {
-		reviewAt = observedTime(p.Review.SubmittedAt)
+		reviewAt = observedTime(p.Review.SubmittedAt, receivedAt)
 	}
 	review := gh.PRReview{
 		Author:     p.Review.User.Login,
@@ -1200,7 +1215,7 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 // why check_suite is skipped; this stub exists only so the call site compiles.
 func (c *CacheImpl) applyCheckSuite(_ []byte) {}
 
-func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
+func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte, receivedAt time.Time) {
 	var p projectsV2ItemPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyProjectsV2ItemDelta: unmarshal payload: %v\n", err)
@@ -1263,7 +1278,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		// Record the board-side item ID (PVTI_xxx) so that subsequent
 		// projects_v2_item.edited/deleted/archived events can resolve via itemIDToKey.
 		pi.ItemID = itemID
-		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi, Partial: true, At: observedTime(p.ProjectsV2Item.UpdatedAt)})
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi, Partial: true, At: observedTime(p.ProjectsV2Item.UpdatedAt, receivedAt)})
 		if len(changes) == 0 {
 			return
 		}
@@ -1336,7 +1351,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		if t, err := time.Parse(time.RFC3339, string(p.ProjectsV2Item.UpdatedAt)); err == nil {
 			edit.At = t
 		}
-		edit.Observed = observedTime(p.ProjectsV2Item.UpdatedAt)
+		edit.Observed = observedTime(p.ProjectsV2Item.UpdatedAt, receivedAt)
 		snap, changes, _ := c.store.Apply(edit)
 		if len(changes) == 0 {
 			return

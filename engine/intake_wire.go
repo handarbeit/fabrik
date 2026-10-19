@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 )
@@ -33,10 +34,10 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	e.echo = newEchoRegistry()
 	e.echo.setSubscribed(set.SubscribesTo)
 
-	var apply func(eventType string, payload []byte)
+	var applyAt func(eventType string, payload []byte, receivedAt time.Time)
 	if cacheImpl != nil {
-		apply = func(eventType string, payload []byte) {
-			cacheImpl.ApplyDelta(eventType, payload)
+		applyAt = func(eventType string, payload []byte, receivedAt time.Time) {
+			cacheImpl.ApplyDeltaAt(eventType, payload, receivedAt)
 			e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
 		}
 		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming
@@ -48,9 +49,10 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	ledger := newDeliveryLedger(deliveryLedgerPath(e.fabrikDir), e.now(), func(format string, args ...any) {
 		e.logf(0, "webhook", format, args...)
 	})
-	in := newIntake(ledger, apply, func(format string, args ...any) {
+	in := newIntake(ledger, nil, func(format string, args ...any) {
 		e.logf(0, "webhook", format, args...)
 	}, e.now)
+	in.applyAt = applyAt
 	// Liveness counters see every arriving delivery, duplicates included.
 	in.note = func() { e.health.noteWebhookEvent(e.now()) }
 	e.intake = in

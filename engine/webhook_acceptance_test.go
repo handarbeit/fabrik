@@ -196,3 +196,58 @@ func cancelsBefore(lines []string, i int, v string) bool {
 	}
 	return false
 }
+
+// A delivery that carries no GitHub time is ordered by when the intake RECEIVED
+// it (#2351, amending #2348): one queued behind a slow apply loses to an engine
+// write that landed while it waited, instead of being stamped at apply time and
+// overwriting that fresher state.
+func TestIntake_QueuedDeliveryLosesToALaterEngineWrite(t *testing.T) {
+	const labelKey = "owner/repo#1"
+	run := func(t *testing.T, useReceiptTime bool) (labelSurvived bool) {
+		eng, cache := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+		// Deliveries are received "a minute ago" by the intake's clock, so they are
+		// older than the engine write below however fast the test runs.
+		in := newIntake(newDeliveryLedger("", time.Now(), nil), nil, nil, time.Now)
+		in.receivedNow = func() time.Time { return time.Now().Add(-time.Minute) }
+		eng.intake = in
+
+		gate := make(chan struct{})
+		var first sync.Once
+		wait := func() { first.Do(func() { <-gate }) }
+		if useReceiptTime {
+			in.applyAt = func(et string, p []byte, rcv time.Time) { wait(); cache.ApplyDeltaAt(et, p, rcv) }
+		} else {
+			in.apply = func(et string, p []byte) { wait(); cache.ApplyDelta(et, p) }
+		}
+		mk := func(action, label string) []byte {
+			return []byte(`{"action":"` + action + `","repository":{"full_name":"owner/repo"},"issue":{"number":1},"label":{"name":"` + label + `"},"sender":{"login":"alice"}}`)
+		}
+		// D1 holds the item's queue; D2 (unlabeled x) waits behind it.
+		in.Submit(delivery{ID: "d1", EventType: "issues", Payload: mk("labeled", "other")})
+		in.Submit(delivery{ID: "d2", EventType: "issues", Payload: mk("unlabeled", "x")})
+
+		// The engine adds x while D2 is still queued, then the queue moves on.
+		cache.ApplyLabelAdded(labelKey, "x")
+		close(gate)
+		in.Drain()
+
+		snap, ok := eng.store.Peek("owner/repo", 1)
+		if !ok {
+			t.Fatal("item missing from the store")
+		}
+		for _, l := range snap.State().Labels {
+			if l == "x" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !run(t, true) {
+		t.Fatal("a delivery queued behind a slow apply, received before an engine write, removed the label that write added")
+	}
+	// Non-vacuity: stamped at apply time the same delivery wins.
+	if run(t, false) {
+		t.Fatal("non-vacuity: an apply-time stamped delivery should have removed the label")
+	}
+}

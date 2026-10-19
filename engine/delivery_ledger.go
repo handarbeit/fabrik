@@ -139,10 +139,15 @@ func (l *deliveryLedger) pruneLocked(now time.Time) {
 	if cut == 0 {
 		return
 	}
-	for _, en := range l.entries[:cut] {
-		delete(l.seen, en.ID)
+	for i := range l.entries[:cut] {
+		delete(l.seen, l.entries[i].ID)
+		l.entries[i] = deliveryEntry{} // release the ID string; the slot is dead
 	}
-	l.entries = append([]deliveryEntry(nil), l.entries[cut:]...)
+	// Reslice rather than copy: this runs under l.mu on every Accept once the
+	// ledger is full (every accepted delivery then evicts one entry), and copying
+	// ~10k entries each time would add latency to the ack path. The dead prefix is
+	// reclaimed when append next reallocates, which copies only the live entries.
+	l.entries = l.entries[cut:]
 	l.dirty = true
 }
 

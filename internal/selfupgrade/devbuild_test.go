@@ -1064,3 +1064,32 @@ func TestCheckAndRebuildDev_PreExecHookRunsImmediatelyBeforeExec(t *testing.T) {
 		t.Errorf("PreExecHook calls = %d, exec called = %v, logs: %v", calls, *execCalled, *logs)
 	}
 }
+
+// TestCheckAndRebuildDev_ExecFailedHookRunsOnlyWhenExecReturns verifies that a
+// caller which paused work in PreExecHook is told to resume when the exec fails
+// (an exec that succeeds never returns, so the hook cannot run then).
+func TestCheckAndRebuildDev_ExecFailedHookRunsOnlyWhenExecReturns(t *testing.T) {
+	skipIfNoGit(t)
+	for _, tc := range []struct {
+		name     string
+		execErr  error
+		wantHook int
+	}{
+		{"exec succeeded path returns nil", nil, 0},
+		{"exec failed", fmt.Errorf("exec format error"), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := initDevSourceCheckout(t, "handarbeit/fabrik")
+			cfg, _, _, _ := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
+			origExecFn := execFn
+			execFn = func(string, []string, []string) error { return tc.execErr }
+			t.Cleanup(func() { execFn = origExecFn })
+			var hook int
+			cfg.ExecFailedHook = func() { hook++ }
+			CheckAndRebuildDev(cfg)
+			if hook != tc.wantHook {
+				t.Errorf("ExecFailedHook calls = %d, want %d", hook, tc.wantHook)
+			}
+		})
+	}
+}

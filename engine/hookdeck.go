@@ -137,6 +137,10 @@ func newHookdeckManager(
 		OnHealth:         hm.handleHealth,
 		OnDrop:           hm.recordDrop,
 		OnSignatureDrift: hm.handleSignatureDrift,
+		// The engine's persisted delivery ledger is the dedupe authority (#2351);
+		// the source's own ring would drop the redelivery of a delivery the
+		// intake forgot on overflow.
+		DisableDedupe: true,
 	})
 	return hm
 }

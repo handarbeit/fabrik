@@ -457,3 +457,45 @@ func TestPerformReleaseUpgrade_PreExecHookRunsBeforeExec(t *testing.T) {
 		t.Errorf("PreExecHook calls = %d, exec saw the hook run first = %v", hookCalls, execSawHook)
 	}
 }
+
+// TestPerformReleaseUpgrade_ExecFailedHookRunsWhenExecReturns verifies the hook
+// fires when the re-exec returns an error, so a caller that paused work in
+// PreExecHook can resume it.
+func TestPerformReleaseUpgrade_ExecFailedHookRunsWhenExecReturns(t *testing.T) {
+	dir := t.TempDir()
+	scratchExe := filepath.Join(dir, "fabrik-under-test")
+	if err := os.WriteFile(scratchExe, []byte("old binary content"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	origExecutableFn := executableFn
+	executableFn = func() (string, error) { return scratchExe, nil }
+	defer func() { executableFn = origExecutableFn }()
+	origExecFn := execFn
+	execFn = func(string, []string, []string) error { return fmt.Errorf("exec format error") }
+	defer func() { execFn = origExecFn }()
+
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := os.ReadFile(buildTestTarball(t, t.TempDir(), "new binary content"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(data) //nolint:errcheck
+	}))
+	defer srv.Close()
+	client := &stubReleaseFetcher{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{TagName: "v9.9.9", Assets: []gh.ReleaseAsset{{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"}}}, nil
+		},
+	}
+	cfg := baseReleaseConfig(client, "v0.0.1", func(string, ...any) {})
+	var hook int
+	cfg.ExecFailedHook = func() { hook++ }
+
+	if err := PerformReleaseUpgrade(cfg); err == nil {
+		t.Fatal("a failed exec must be reported as an error")
+	}
+	if hook != 1 {
+		t.Errorf("ExecFailedHook calls = %d, want 1", hook)
+	}
+}
