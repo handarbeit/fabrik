@@ -1634,6 +1634,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	}
 
 	// Check for issue body update markers in stage output.
+	bodyFailed := false
 	if output != "" {
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 			e.logf(item.Number, "edit", "updating issue body from stage output\n")
@@ -1641,6 +1642,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			// baseline advance and echo in one step.
 			if err := e.updateIssueBody(item, owner, repo, updatedBody); err != nil {
 				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+				bodyFailed = true
 			} else if outcomeRec != nil {
 				outcomeRec.BodyDone = true
 				e.persistOutcome(outcomeRec)
@@ -2000,11 +2002,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// Recorded outcome (#2394): the completion signal goes last, only once the comment
 		// and the push have landed. Otherwise the record stays and the publication scan
 		// retries the missing steps in order — the stage is not run again.
-		if outcomeRec != nil && (commentErr != nil || pushFailed) {
+		if outcomeRec != nil && (commentErr != nil || pushFailed || bodyFailed) {
 			keepOutcome = true
 			cause := commentErr
-			if cause == nil {
+			if cause == nil && pushFailed {
 				cause = errors.New("branch push failed")
+			}
+			if cause == nil {
+				cause = errors.New("issue body update failed")
 			}
 			e.logf(item.Number, "outcome", "stage %q finished but its output is not fully published (%v) — recorded, will retry without re-running\n", stage.Name, cause)
 			return

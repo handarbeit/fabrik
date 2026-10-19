@@ -304,3 +304,55 @@ func TestStageOutcome_Sim_CommentPassNeutralisedRedispatches(t *testing.T) {
 		t.Fatalf("with recording neutralised the stage was never re-dispatched — the audit scenario does not reproduce the loss\n\n%s", diagnostics(env))
 	}
 }
+
+// A failed issue-body write on the first attempt keeps the record: the comment, the push and
+// the label all land, but the body update is still retried from the record rather than lost
+// (review finding on #2394). Without the record the update is dropped for good.
+func bodyUpdateEnv(t *testing.T, disabled bool) (*Env, int) {
+	t.Helper()
+	env := stageOutcomeEnv(t)
+	env.Engine.SetStageOutcomeRecordDisabledForTest(disabled)
+	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, c []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		_, done, usage, err := simclaude.DefaultScript(ctx, stage, issue, c, resume, workDir, opts)
+		return "## Findings\n\nThe stage output.\n\nFABRIK_ISSUE_UPDATE_BEGIN\nREWRITTEN SPEC BODY\nFABRIK_ISSUE_UPDATE_END\n\nFABRIK_STAGE_COMPLETE\n", done, usage, err
+	})
+	env.Sim.Faults().FailNTimes("UpdateIssueBody", 1, simgh.ErrDeadlineExceeded())
+	num := FileIssue(t, env, "body write fails (#2394)", "original body", "Specify")
+	return env, num
+}
+
+func TestStageOutcome_Sim_FailedBodyUpdateIsRetriedFromTheRecord(t *testing.T) {
+	t.Parallel()
+	env, num := bodyUpdateEnv(t, false)
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") >= 1 }, 40)
+	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 60)
+	runOutcomePolls(t, env, 6)
+	body, err := env.Sim.GetIssueBody(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("GetIssueBody: %v", err)
+	}
+	if !strings.Contains(body, "REWRITTEN SPEC BODY") {
+		t.Fatalf("the issue body was never updated from the recorded outcome:\n%s\n\n%s", body, diagnostics(env))
+	}
+	if got := env.Claude.StageCallCount("Specify"); got != 1 {
+		t.Fatalf("the stage ran %d times, want exactly 1", got)
+	}
+}
+
+// Neutralised, the failed body write is lost although the stage completed.
+func TestStageOutcome_Sim_FailedBodyUpdateNeutralisedIsLost(t *testing.T) {
+	t.Parallel()
+	env, num := bodyUpdateEnv(t, true)
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") >= 1 }, 40)
+	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 60)
+	runOutcomePolls(t, env, 6)
+	body, err := env.Sim.GetIssueBody(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("GetIssueBody: %v", err)
+	}
+	if strings.Contains(body, "REWRITTEN SPEC BODY") {
+		t.Fatal("the body was updated without the record — the scenario no longer shows the loss the record prevents")
+	}
+}
