@@ -49,21 +49,30 @@ actions, `changes` blocks and every other field are as captured.
 Observed facts the fixtures pin (do not assume otherwise):
 
 - **One dependency change produces two deliveries**, one per side
-  (`blocked_by_*` and `blocking_*`), each carrying both issues, their numeric
-  IDs and `blocking_issue_repo`.
-- **`issue_dependencies_summary` in an `issue_dependencies` payload is the state
-  before the change** (`blocked_by: 0` on `blocked_by_added`, `1` on
-  `blocked_by_removed`). It must not be read as the new state.
-- **Closing a blocking issue produces no `issue_dependencies` delivery.** Only
-  `issues` `closed` arrives, for the blocker.
+  (`blocked_by_*` and `blocking_*`). Both carry both issues and their numeric
+  IDs (`blocked_issue_id`, `blocking_issue_id`). The extra repository object
+  differs by side: `blocked_by_*` carries `blocking_issue_repo`, `blocking_*`
+  carries `blocked_issue_repo`. Read whichever is present; neither is
+  guaranteed.
 - **`sub_issues` likewise produces two deliveries per change**
   (`sub_issue_*` for the parent, `parent_issue_*` for the child).
+- **Embedded objects are not a snapshot at the time of the action.** They
+  reflect the object when GitHub rendered the delivery, which can be later than
+  the action: `label_created` already carries the renamed name,
+  `milestone_created` the edited title, and `parent_issue.sub_issues_summary.total`
+  is 1 on both the `*_added` and `*_removed` deliveries.
+  `issue_dependencies_summary` reads 0 on `blocked_by_added` and 1 on
+  `blocked_by_removed`. Treat every embedded count, summary or name as
+  unordered with respect to the action: act on `action` and the IDs, and read
+  the current state live.
+- **Closing a blocking issue produces no `issue_dependencies` delivery.** Only
+  `issues` `closed` arrives, for the blocker.
 - **Renaming a single-select field option produces no `projects_v2` delivery**
   (`updateProjectV2Field` echoing option IDs, with the org hook subscribed to
   `projects_v2`). `projects_v2` `edited` covers project fields such as the title
   and description only, so a Status option rename cannot be learned from a
   webhook.
 - An `issue_comment` `created` delivery and the first `milestone` `edited`
-  (title only) did not appear in the delivery log; the stored `milestone_edited`
+  (title only) did not appear in the delivery log. The stored `milestone_edited`
   is from a second attempt that changed the title and description, and its
   `changes` names only `title`.
