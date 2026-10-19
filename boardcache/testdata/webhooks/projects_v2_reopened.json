@@ -1,0 +1,55 @@
+{
+  "action": "reopened",
+  "organization": {
+    "login": "example-org",
+    "id": 1,
+    "node_id": "MDEyOk9yZ2FuaXphdGlvbjE="
+  },
+  "projects_v2": {
+    "closed_at": null,
+    "created_at": "2026-10-19T04:59:12Z",
+    "creator": {
+      "login": "octocat",
+      "id": 1,
+      "node_id": "MDQ6VXNlcjE=",
+      "type": "User"
+    },
+    "deleted_at": null,
+    "deleted_by": null,
+    "description": null,
+    "id": 27179869,
+    "node_id": "PVT_kwDOENB0Ac4Bnrtd",
+    "number": 8,
+    "owner": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/282096641?v=4",
+      "events_url": "https://api.github.com/users/handarbeit/events{/privacy}",
+      "followers_url": "https://api.github.com/users/handarbeit/followers",
+      "following_url": "https://api.github.com/users/handarbeit/following{/other_user}",
+      "gists_url": "https://api.github.com/users/handarbeit/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/handarbeit",
+      "id": 282096641,
+      "login": "handarbeit",
+      "node_id": "O_kgDOENB0AQ",
+      "organizations_url": "https://api.github.com/users/handarbeit/orgs",
+      "received_events_url": "https://api.github.com/users/handarbeit/received_events",
+      "repos_url": "https://api.github.com/users/handarbeit/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/handarbeit/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/handarbeit/subscriptions",
+      "type": "Organization",
+      "url": "https://api.github.com/users/handarbeit",
+      "user_view_type": "public"
+    },
+    "public": false,
+    "short_description": "probe edit",
+    "title": "probe-2352 (temporary)",
+    "updated_at": "2026-10-19T04:59:44Z"
+  },
+  "sender": {
+    "login": "octocat",
+    "id": 1,
+    "node_id": "MDQ6VXNlcjE=",
+    "type": "User"
+  }
+}
