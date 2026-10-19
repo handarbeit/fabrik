@@ -77,10 +77,23 @@ func TestIntake_IdenticalLaterHumanEventIsStillHuman(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	// The delivery must have reached the Store: without this the loop below would
+	// pass vacuously for a dropped or stale delivery, whether or not Cancel works.
+	seen := false
 	for _, ch := range *got {
-		if len(ch.LabelDeltas) > 0 && ch.EchoOfEngine {
+		if len(ch.LabelDeltas) == 0 {
+			continue
+		}
+		seen = true
+		if ch.EchoOfEngine {
 			t.Fatal("a failed write's orphan swallowed a later identical human event")
 		}
+	}
+	if !seen {
+		t.Fatal("the human delivery produced no label change; the test proves nothing")
+	}
+	if eng.echo.len() != 0 {
+		t.Fatal("a cancelled reservation was left pending")
 	}
 }
 
