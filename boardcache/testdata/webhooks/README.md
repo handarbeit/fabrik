@@ -21,3 +21,18 @@ Shapes with no capture (a missing `node_id`, a missing `project_node_id`, a
 mistyped field, a top-level `project_node_id`) are derived in test code by
 mutating a capture (`deriveFixture` in `projects_v2_item_capture_test.go`);
 none is stored here.
+
+## `issue_dependencies` captures (captured 2026-10-19, for #1995)
+
+Taken verbatim from the capture branch of #2352 (scrubbed to `example-org/fabrik-test-alpha`).
+
+| Fixture | Action | Trigger |
+|---|---|---|
+| `issue_dependencies_blocked_by_added` / `_blocking_added` | `blocked_by_added` / `blocking_added` | `addBlockedBy` (#8766 blocked by #8767) |
+| `issue_dependencies_blocked_by_removed` / `_blocking_removed` | `blocked_by_removed` / `blocking_removed` | `removeBlockedBy` |
+
+One dependency change produces two deliveries, one per side. `blocked_by_*`
+carries `blocking_issue_repo`; `blocking_*` carries `blocked_issue_repo`. The
+issue objects carry no `repository_url`, only `html_url`. Embedded
+`issue_dependencies_summary` counts are unordered with respect to the action and
+are never read. Closing a blocking issue sends no `issue_dependencies` delivery.
