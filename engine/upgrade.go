@@ -36,6 +36,16 @@ func (e *Engine) checkAndUpgrade() {
 	selfupgrade.CheckAndRebuildDev(e.devBuildConfig())
 }
 
+// flushBeforeExec persists the state that is written lazily and would otherwise
+// be lost to an exec, which runs no deferred cleanup: the channel hub's dedup
+// state and the webhook delivery ledger's debounce window (#2351), so an ID
+// accepted in the last second is still deduplicated after the restart. Nothing
+// is closed because a failed exec leaves this process running.
+func (e *Engine) flushBeforeExec() {
+	e.flushChannelEvents()
+	e.intake.Flush() // nil-safe
+}
+
 // devBuildConfig is the dev-build self-upgrade configuration. PreExecHook flushes
 // the channel hub's coalesced dedup state right before the re-exec (#1968): the
 // exec runs no deferred cleanup, so a settle announced inside the flush delay
@@ -52,7 +62,7 @@ func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 		Logf:           logf,
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
-		PreExecHook:    e.flushChannelEvents,
+		PreExecHook:    e.flushBeforeExec,
 		// A dedicated marker, not FABRIK_AUTO_UPGRADED: that one triggers the
 		// plugin refresh on startup, which PostBuildHook below already did. It
 		// only tells the new process why it started (the fabrik.log banner, #2094).
@@ -123,7 +133,7 @@ func (e *Engine) releaseUpgradeConfig() selfupgrade.ReleaseConfig {
 		Token:       releaseUpgradeToken(e.cfg),
 		ExtraEnv:    []string{"FABRIK_AUTO_UPGRADED=1"},
 		Logf:        logf,
-		PreExecHook: e.flushChannelEvents,
+		PreExecHook: e.flushBeforeExec,
 	}
 }
 

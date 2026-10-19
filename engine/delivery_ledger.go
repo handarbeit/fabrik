@@ -47,6 +47,13 @@ type deliveryLedger struct {
 	window time.Duration
 	max    int
 	logf   func(format string, args ...any)
+	// writeFn persists the snapshot; atomicWriteFile unless a test overrides it.
+	writeFn func(path string, data []byte, perm os.FileMode) error
+
+	// flushMu serialises whole Flush calls (snapshot + write), so a timer-driven
+	// flush and a Close/exec flush can never land out of order and leave an
+	// older snapshot on disk. Lock order: flushMu before mu.
+	flushMu sync.Mutex
 
 	mu      sync.Mutex
 	entries []deliveryEntry // oldest first
@@ -65,11 +72,12 @@ func deliveryLedgerPath(fabrikDir string) string {
 // the load-time clock (expired entries are dropped on load).
 func newDeliveryLedger(path string, now time.Time, logf func(format string, args ...any)) *deliveryLedger {
 	l := &deliveryLedger{
-		path:   path,
-		window: deliveryLedgerWindow,
-		max:    deliveryLedgerMaxEntries,
-		logf:   logf,
-		seen:   make(map[string]struct{}),
+		path:    path,
+		window:  deliveryLedgerWindow,
+		max:     deliveryLedgerMaxEntries,
+		logf:    logf,
+		seen:    make(map[string]struct{}),
+		writeFn: atomicWriteFile,
 	}
 	l.load(now)
 	return l
@@ -210,6 +218,8 @@ func (l *deliveryLedger) Flush() {
 	if l == nil || l.path == "" {
 		return
 	}
+	l.flushMu.Lock()
+	defer l.flushMu.Unlock()
 	l.mu.Lock()
 	if !l.dirty {
 		l.mu.Unlock()
@@ -224,7 +234,7 @@ func (l *deliveryLedger) Flush() {
 		err = os.MkdirAll(filepath.Dir(l.path), 0o755)
 	}
 	if err == nil {
-		err = atomicWriteFile(l.path, data, 0o600)
+		err = l.writeFn(l.path, data, 0o600)
 	}
 	if err != nil {
 		l.mu.Lock()

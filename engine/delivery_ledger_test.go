@@ -202,3 +202,38 @@ func TestDeliveryLedger_NilIsInert(t *testing.T) {
 		t.Fatal("nil ledger has entries")
 	}
 }
+
+// A flush that took its snapshot first but writes last must not clobber a newer
+// flush: Flush serialises snapshot+write, so the second waits for the first.
+func TestDeliveryLedger_ConcurrentFlushesNeverLeaveAStaleSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	now := time.Now()
+	l := newDeliveryLedger(path, now, nil)
+
+	inWrite := make(chan struct{})
+	release := make(chan struct{})
+	var parked atomic.Bool
+	l.writeFn = func(p string, data []byte, perm os.FileMode) error {
+		if parked.CompareAndSwap(false, true) {
+			close(inWrite)
+			<-release // hold the first writer after its snapshot was taken
+		}
+		return atomicWriteFile(p, data, perm)
+	}
+
+	l.Accept("one", now)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); l.Flush() }()
+	<-inWrite // flush A holds snapshot {one} and is parked inside its write
+	l.Accept("two", now)
+	go func() { defer wg.Done(); l.Flush() }() // flush B snapshots {one,two}
+	time.Sleep(100 * time.Millisecond)         // unserialised, B would finish here and A then overwrite it
+	close(release)
+	wg.Wait()
+
+	reloaded := newDeliveryLedger(path, now, nil)
+	if reloaded.Len() != 2 || reloaded.Accept("two", now) {
+		t.Fatalf("disk holds %d entries and lost %q: an older snapshot overwrote a newer one", reloaded.Len(), "two")
+	}
+}
