@@ -66,6 +66,10 @@ type Client struct {
 	// observer is told every request's final outcome (#2393); see
 	// SetResultObserver. Guarded by mu.
 	observer ResultObserver
+
+	// stamps holds the GitHub-reported time of this client's completed engine
+	// writes (#1945). See writeStamps.
+	stamps writeStamps
 }
 
 // RequestStats is a cumulative count of the HTTP requests a Client has issued.
