@@ -57,6 +57,12 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 	if hs == nil {
 		return
 	}
+	// Ejecting a member moves its board Status, which needs a project ID; with
+	// none known the whole scan is deferred to a later poll (#2396).
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return
+	}
 	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
 		// The live run is read once per group and its pointer stamps every signal raised
 		// below (#1557): a signal is only ever acted on by the run it was raised for, so one
@@ -104,7 +110,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 
 			findings := e.queuedReviewFindings(item)
 			if len(findings) == 0 {
-				e.settleQueuedCommentCause(board.ProjectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number], runState)
+				e.settleQueuedCommentCause(projectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number], runState)
 				continue
 			}
 
@@ -114,7 +120,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 				continue
 			}
 			e.logf(item.Number, "queued-review-settle", "%d unprocessed review finding(s) (threads or review bodies) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.trainKey)
-			e.ejectQueuedMemberForReviewFindings(board.ProjectID, item, len(findings))
+			e.ejectQueuedMemberForReviewFindings(projectID, item, len(findings))
 		}
 	}
 }

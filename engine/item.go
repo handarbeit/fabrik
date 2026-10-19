@@ -924,6 +924,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Review and Validate may declare a mid-flight spawn in their output, and
+	// spawnChildren needs a board project ID. Both IDs empty is a deferral, but
+	// discovering that after Claude has run would drop the stage's output, so
+	// defer before invoking (#2396). The engine's ID is never cleared once set,
+	// so a check that passes here cannot fail later in spawnChildren.
+	if stage.Name == "Review" || stage.Name == "Validate" {
+		if _, pidErr := e.writeProjectID(board); pidErr != nil {
+			releaseLock()
+			return nil
+		}
+	}
+
 	// Invoke Claude Code in the issue's worktree.
 	resume := sessDecision.Resume
 	e.applySessionDecision(item, sessDecision)
@@ -1666,6 +1678,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if spawnErr != nil {
 				// spawnChildren already paused the issue and posted its own
 				// failure comment — do not also post this stage's own output.
+				// (A missing project ID is deferred before Claude runs, above,
+				// so it never reaches this branch with output to lose.)
 				releaseLock()
 				return
 			}

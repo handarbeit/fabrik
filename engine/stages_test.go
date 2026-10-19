@@ -945,6 +945,7 @@ func TestHandleStageComplete_EmptyItemRepo_CacheWriteThroughSucceeds(t *testing.
 			},
 		},
 	})
+	cache.NoteProjectID("PVT_1") // a cached board needs a known project ID (#2396)
 	eng.readClient = cache
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}

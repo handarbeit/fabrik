@@ -101,6 +101,7 @@ func memberSetsEqual(a, b []int) bool {
 func TestMergeTrainQueueChurn_UnsortedSelectionVariesAcrossCalls(t *testing.T) {
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
 	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	cache.NoteProjectID("PVT_test") // a cached board needs a known project ID (#2396)
 	eng.readClient = cache
 	seedChurnTestItems(eng, churnTestQueueSize)
 
@@ -139,6 +140,7 @@ func TestMergeTrainQueueChurn_UnsortedSelectionVariesAcrossCalls(t *testing.T) {
 func TestMergeTrainQueueChurn_SortedSelectionIsStable(t *testing.T) {
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
 	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	cache.NoteProjectID("PVT_test") // a cached board needs a known project ID (#2396)
 	eng.readClient = cache
 	seedChurnTestItems(eng, churnTestQueueSize)
 

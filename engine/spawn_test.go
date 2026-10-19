@@ -1090,6 +1090,7 @@ func spawnTestEngineWithCache(t *testing.T, client *mockGitHubClient) (*Engine, 
 	t.Helper()
 	eng := spawnTestEngine(t, client)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.NoteProjectID("PVT_test") // a cached board needs a known project ID (#2396)
 	eng.readClient = cache
 	return eng, cache
 }

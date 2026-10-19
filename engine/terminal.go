@@ -30,7 +30,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	// factsAt stamps the overseer PR facts on the engine clock (#2122), so the
 	// read side compares like with like and a test clock stays coherent.
 	factsAt := e.now()
-	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	probeItems, probeProjectID, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 && (graphqlStats.Remaining == 0 || float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold) {
@@ -57,6 +57,8 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 		return
 	}
+	// Remember the project ID the probe returned (#2396); an empty ID is a no-op.
+	cacheImpl.NoteProjectID(probeProjectID)
 
 	// Guard: 0 probe items with a populated cache indicates a transient indexer
 	// hiccup rather than a genuine board wipe. Skip this cycle; retry on the next

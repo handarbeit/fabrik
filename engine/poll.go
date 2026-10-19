@@ -1565,6 +1565,14 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	if board.ProjectID != "" {
 		e.boardProjectID = board.ProjectID
 	}
+	e.mu.Unlock()
+	if board.ProjectID != "" {
+		e.noteProjectIDKnown()
+	}
+	// A board that arrived without a project ID gets the engine's last seen one,
+	// so every board-threaded write site sees it (#2396).
+	e.fillBoardProjectID(board)
+	e.mu.Lock()
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.readClient.FetchStatusField(board.ProjectID)
 		if err != nil {
@@ -2941,8 +2949,14 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 		return
 	}
 	e.ensureQueuedBaseReposReady(ctx, board.Items, hs.Name)
+	// The train's reroutes and landings move board Status, which needs a project
+	// ID; with none known the batch is deferred to a later poll (#2396).
+	projectID, pidErr := e.writeProjectID(board)
+	if pidErr != nil {
+		return
+	}
 	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
-		e.routeQueuedGroup(ctx, g, board.ProjectID)
+		e.routeQueuedGroup(ctx, g, projectID)
 	}
 }
 
