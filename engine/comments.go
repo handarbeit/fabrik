@@ -247,7 +247,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// any side effect (reactions, labels, worktree setup) so a usage limited cycle is
 	// a full no-op — the comment remains "new" and is retried on the next poll
 	// once dispatch resumes, rather than being consumed by a doomed invocation.
-	if _, usageLimited := e.claudeUsageLimitedUntilTime(e.now()); usageLimited {
+	if e.recordUsageHoldCooldown(item) {
 		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping comment review\n")
 		return didNotRunAccountUsageLimited, nil
 	}
@@ -609,6 +609,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
 			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
+			e.recordUsageHoldCooldown(item) // #2407: re-admit at the lift
 			return didNotRunUsageLimit, nil
 		}
 		// A tool-permission-denial exit (#1523/#1704) is deterministic — a
