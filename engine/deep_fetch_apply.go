@@ -41,6 +41,14 @@ func (e *Engine) applyDeepFetched(repo string, item *gh.ProjectItem) {
 // only (tests/sim); production never calls this.
 func (e *Engine) SetLegacyDeepFetchApplyForTest(on bool) { e.store.SetLegacyDeepFetchApplyForTest(on) }
 
+// SetLegacyLocalClockSelfWriteForTest restores the pre-#1945 SelfWriteObserved
+// apply (the baseline becomes the daemon's time.Now() instead of the GitHub
+// stamp of the write) so a scenario can show its clock-skew assertions bite.
+// Test seam only (tests/sim); production never calls this.
+func (e *Engine) SetLegacyLocalClockSelfWriteForTest(on bool) {
+	e.store.SetLegacyLocalClockSelfWriteForTest(on)
+}
+
 // StoreItemForTest returns the store's record for an item with no GitHub
 // fallback. Test seam only (tests/sim); production never calls this.
 func (e *Engine) StoreItemForTest(repo string, number int) (itemstate.ItemState, bool) {
