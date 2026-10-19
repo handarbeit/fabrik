@@ -102,6 +102,11 @@ const (
 	// (#2122). Display facts for the overseer API; intentionally excluded from
 	// wakeChFlags/cycleSetFlags so a poll-side write never wakes the poll.
 	PRFactsChanged
+	// DependenciesInvalidatedChanged indicates a DependenciesInvalidated mutation
+	// changed the item (#1995): its deep cache was invalidated and/or its
+	// "dep-blocked" admission cooldown was made due so a dependency change is
+	// re-read promptly. Unlike DeepFetchChanged it is in wakeChFlags/cycleSetFlags.
+	DependenciesInvalidatedChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

@@ -975,6 +975,11 @@ func (e *Engine) RegisterObservers() (unregister func()) {
 	}
 	unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
 
+	// DependentRefreshObserver re-evaluates every open dependent that lists a
+	// closing blocker (#1995): closing a blocker sends no issue_dependencies
+	// delivery, and PushUnblockObserver only handles already-labelled items.
+	unsubs = append(unsubs, e.store.Subscribe(&DependentRefreshObserver{Store: e.store}))
+
 	// CommentBreakerObserver resets the comment-processing circuit breaker on
 	// linked-PR state changes (#1089).
 	cbObs := &CommentBreakerObserver{Store: e.store}

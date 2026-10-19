@@ -53,6 +53,8 @@ func (c *CacheImpl) ApplyDeltaAt(eventType string, payload []byte, receivedAt ti
 		c.applyCheckSuite(payload)
 	case "projects_v2_item":
 		c.applyProjectsV2ItemDelta(payload, receivedAt)
+	case "issue_dependencies":
+		c.applyIssueDependenciesDelta(payload, receivedAt)
 	}
 }
 

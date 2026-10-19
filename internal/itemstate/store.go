@@ -3,6 +3,7 @@ package itemstate
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1138,6 +1139,20 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastSeenSourceUpdatedAt = time.Time{}
 		item.LastSeenPRUpdatedAt = time.Time{}
 		return DeepFetchChanged
+
+	case DependenciesInvalidated:
+		var flags ChangeFlags
+		if !item.LastDeepFetchAt.IsZero() || !item.LastSeenSourceUpdatedAt.IsZero() || !item.LastSeenPRUpdatedAt.IsZero() {
+			item.LastDeepFetchAt = time.Time{}
+			item.LastSeenSourceUpdatedAt = time.Time{}
+			item.LastSeenPRUpdatedAt = time.Time{}
+			flags |= DeepFetchChanged | DependenciesInvalidatedChanged
+		}
+		if _, ok := item.CooldownAt[DepBlockedCooldown]; ok && slices.Contains(item.Labels, "fabrik:blocked") {
+			delete(item.CooldownAt, DepBlockedCooldown)
+			flags |= CooldownChanged | DependenciesInvalidatedChanged
+		}
+		return flags
 
 	case SelfWriteObserved:
 		at := v.At

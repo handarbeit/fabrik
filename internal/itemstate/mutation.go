@@ -518,6 +518,29 @@ type DeepFetchInvalidated struct {
 func (DeepFetchInvalidated) isMutation()       {}
 func (m DeepFetchInvalidated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// DepBlockedCooldown is the CooldownAt key the engine records for an item it has
+// left labelled fabrik:blocked (engine/item.go). itemMayNeedWork suppresses the
+// item until it expires.
+const DepBlockedCooldown = "dep-blocked"
+
+// DependenciesInvalidated is applied when a dependency change (an
+// issue_dependencies webhook delivery, or a blocker closing) means an item's
+// cached BlockedBy can no longer be trusted (#1995, ADR 1995). It does what
+// DeepFetchInvalidated does and, in addition, makes the item re-evaluable
+// before the next poll: it returns DependenciesInvalidatedChanged (a wake and
+// cycle-set flag) and, for an item carrying fabrik:blocked, drops the
+// dep-blocked admission cooldown so itemMayNeedWork admits it. It never touches
+// labels: whether the item is (un)blocked is still decided by checkDependencies'
+// live BlockedBy read (ADR 1419). Idempotent: applying it to an item whose deep
+// cache is already invalid and that has no dep-blocked cooldown is a no-op.
+type DependenciesInvalidated struct {
+	Repo   string
+	Number int
+}
+
+func (DependenciesInvalidated) isMutation()       {}
+func (m DependenciesInvalidated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // PRHeadSHAUpdated sets LinkedPR.HeadSHA for the given item and triggers the
 // Store's shaToKey index to be updated. Used by delta handlers when a push event
 // updates the PR's head commit.
