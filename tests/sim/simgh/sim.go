@@ -166,6 +166,11 @@ type Sim struct {
 	// mu guards every field below it. See the package doc's locking invariant.
 	mu sync.Mutex
 
+	// issueWriteStamps / itemWriteStamps hold GitHub's time for the engine's own
+	// writes (writestamp.go, #1945).
+	issueWriteStamps map[string]time.Time
+	itemWriteStamps  map[string]time.Time
+
 	repos    map[string]*repoState    // keyed "owner/repo"
 	projects map[string]*projectState // keyed "owner:projectNum"
 

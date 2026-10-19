@@ -1332,14 +1332,21 @@ func (c *CacheImpl) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return c.fallback.RateLimitStats()
 }
 
-// applyKeyedMutation is the shared preamble for the five key-addressed
-// mutators below: parse key → log and no-op on invalid key → guard against
-// creating a phantom Store entry for a key that was never bootstrapped →
-// apply the mutation built by build(repo, number) → bump the local delta
-// timestamp only if the mutation actually changed anything. opName is used
-// only in the invalid-key log line.
+// applyKeyedMutation is the shared preamble for the key-addressed engine
+// write-through mutators below: parse key → log and no-op on invalid key → guard
+// against creating a phantom Store entry for a key that was never bootstrapped →
+// apply the mutation built by build(repo, number). opName is used only in the
+// invalid-key log line.
+//
+// It does NOT stamp localDeltaAt (#1945, ADR 1945). An engine write-through is a
+// self-write: its effect on GitHub's updatedAt is covered by the GitHub-anchored
+// baseline (SelfWriteObserved), and a daemon-clock stamp here would be compared
+// with that GitHub-clock baseline — it would read as newer than the baseline on
+// every self-write and force the redundant deep fetch #1090 exists to prevent,
+// or, with the clocks skewed the other way, depend on the skew. localDeltaAt
+// stays what its comment says: the record of a *webhook* having touched the item.
 func (c *CacheImpl) applyKeyedMutation(key, opName string, build func(repo string, number int) itemstate.Mutation) {
-	c.applyKeyedMutationBump(key, opName, true, build)
+	c.applyKeyedMutationBump(key, opName, false, build)
 }
 
 // applyKeyedMutationBump is applyKeyedMutation with the local-delta bump

@@ -36,12 +36,14 @@ func (s *Sim) AddComment(owner, repo string, issueNumber int, body string) (int,
 	if iss, ok := r.issues[issueNumber]; ok {
 		iss.comments = append(iss.comments, c)
 		iss.updatedAt = now
+		s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 		return id, nil
 	}
 	if pr, ok := r.prs[issueNumber]; ok {
 		c.fromPR = issueNumber
 		pr.comments = append(pr.comments, c)
 		pr.updatedAt = now
+		s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 		return id, nil
 	}
 	return 0, fmt.Errorf("simgh: no issue or PR %s#%d to comment on", repoKey(owner, repo), issueNumber)

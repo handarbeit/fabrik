@@ -594,6 +594,12 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		// WithLastRunField (#2049).
 		"lastActivityField": fieldSkipped,
 		"lastRunField":      fieldSkipped,
+		// issueWriteStamps / itemWriteStamps model the engine client's in-memory
+		// record of GitHub's time for its own writes (#1945). Production's lives
+		// in *github.Client and is lost with the process, so a restore starts
+		// empty — which is what a restarted engine sees.
+		"issueWriteStamps": fieldSkipped,
+		"itemWriteStamps":  fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,
