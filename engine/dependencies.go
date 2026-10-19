@@ -231,7 +231,9 @@ func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectIt
 	if decisionRead && !alreadyBlocked && e.blockedByFresh(itemRepo, item.Number, depKey) {
 		decisionRead, skippedFresh = false, true
 	}
-	if alreadyBlocked || decisionRead {
+	// depAlreadyLive: the caller has just read the item live and passes that read in
+	// as item, so even an already-blocked item needs no second read.
+	if (alreadyBlocked && mode != depAlreadyLive) || decisionRead {
 		fresh := item
 		if err := e.liveItem(&fresh); err != nil {
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)

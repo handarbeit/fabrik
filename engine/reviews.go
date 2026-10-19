@@ -2182,10 +2182,16 @@ func (e *Engine) SetReviewConfirmLiveDisabledForTest(off bool) { e.reviewConfirm
 
 // mergeLiveReviewState folds a live review read into the cached view the advance
 // gate started from (#2350). The confirmation exists to catch what the cache
-// cannot see, so it only ever adds constraints: a review the live read has for an
-// author replaces the cached one (a dismissal or a newer verdict is seen), an
-// author only the cache knows keeps the cached review, and every review request
-// from either side stands. Gate policy is untouched: the same pure cores decide
+// cannot see, so for review requests it only adds constraints: every request from
+// either side stands, which is what makes a reviewer requested after the cache
+// filled hold the advance. Reviews are a union keyed by author: a review the live
+// read has for an author replaces the cached one (a newer verdict or a changed
+// state is seen), and an author only the cache knows keeps the cached review. That
+// half does NOT only add constraints: a review dismissed or removed on GitHub, which
+// the live read no longer returns, still counts at the advance. This is a
+// deliberate trade-off (the pre-existing review-gate tests model the cached
+// reviews with an empty live read); the landing gate reads live alone and is the
+// authority that corrects it. Gate policy is untouched: the same pure cores decide
 // on the merged view.
 func mergeLiveReviewState(cachedReviews []gh.PRReview, cachedRequests []gh.ReviewRequest, liveReviews []gh.PRReview, liveRequests []gh.ReviewRequest) ([]gh.PRReview, []gh.ReviewRequest) {
 	liveBy := make(map[string]bool, len(liveReviews))

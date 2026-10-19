@@ -91,6 +91,19 @@ func (e *Engine) storeHolds(repo string, number int) bool {
 	return ok
 }
 
+// storeLinkedPRMatches reports whether the Store holds the item and its linked PR
+// is prNumber or not yet recorded. A record naming a different PR (the PR was
+// replaced and the Store has not caught up) must not receive this PR's reviews and
+// review requests, nor a freshness stamp that would make the mixed data trusted.
+func (e *Engine) storeLinkedPRMatches(repo string, number, prNumber int) bool {
+	snap, ok := e.store.Peek(repo, number)
+	if !ok {
+		return false
+	}
+	lpr := snap.LinkedPR()
+	return lpr == nil || lpr.Number == 0 || lpr.Number == prNumber
+}
+
 func (e *Engine) applyLive(m itemstate.Mutation) {
 	if e.liveApplyOff.Load() {
 		return
@@ -179,7 +192,7 @@ func (e *Engine) liveReviews(owner, repo string, issueNumber, prNumber int) ([]g
 		return nil, nil, qerr
 	}
 	repoKey := owner + "/" + repo
-	if issueNumber > 0 && e.storeHolds(repoKey, issueNumber) {
+	if issueNumber > 0 && e.storeLinkedPRMatches(repoKey, issueNumber, prNumber) {
 		e.applyLive(itemstate.PRReviewsRead{Repo: repoKey, Number: issueNumber, PRNumber: prNumber, Reviews: reviews, Requests: requests, FetchedAt: start})
 		e.live.note(liveKey("reviews", repoKey, issueNumber), e.now())
 	}

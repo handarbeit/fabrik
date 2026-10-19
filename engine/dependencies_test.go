@@ -1008,6 +1008,30 @@ func TestCheckDependencies_DecisionPoint_SkipsTheReadAfterAnotherGatesLiveItem(t
 	}
 }
 
+// depAlreadyLive means the caller has just read the item live and passed that read
+// in: even an item already marked fabrik:blocked needs no second read (#2350).
+func TestCheckDependencies_AlreadyLiveMode_DoesNotRepeatTheBlockedReread(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{fetchItemDetailsFn: func(item *gh.ProjectItem) error { reads++; return nil }}
+	eng := depTestEngine(t, client)
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research"}
+
+	if !eng.checkDependenciesMode(board, item, stage, depAlreadyLive) {
+		t.Fatal("the open blocker in the caller's own live read must still block")
+	}
+	if reads != 0 {
+		t.Fatalf("reads = %d, want none: the caller had just read the item", reads)
+	}
+	// Other modes keep the ADR 1419 re-read of an already-blocked item.
+	eng.checkDependenciesMode(board, item, stage, depCacheOnly)
+	if reads != 1 {
+		t.Fatalf("reads = %d, want the already-blocked re-read in cache-only mode", reads)
+	}
+}
+
 // TestCheckDependencies_StaleEmptyCache_ReVerifiesOnResume is requirement 6's
 // regression guard (#1419): a fabrik:blocked item whose cached item.BlockedBy
 // is empty must still get the live re-read on resume, not an automatic

@@ -46,8 +46,12 @@ newer fact.
    removed before `awaiting-review` is applied) to the channel deriver that a poll-start listing
    never showed.
 5. **Review gates.** The landing gate reads live through `liveReviews`. The advance gate confirms
-   live only when its cached view would clear, folding the live read into the cached view so the
-   confirmation can only add constraints; a read within `liveFreshFor()` is not repeated.
+   live only when its cached view would clear, folding the live read into the cached view: review
+   requests from either side stand (the confirmation can only add holds), reviews are a union keyed
+   by author where the live review wins and a cached-only review still counts. The latter is a
+   deliberate trade-off, not a pure "adds constraints" rule: a review dismissed on GitHub that the
+   live read no longer returns keeps counting at the advance, and the landing gate (live alone)
+   is the authority that corrects it. A read within `liveFreshFor()` is not repeated.
    `liveFreshFor()` is one poll interval floored at 30 s (zero when no poll interval is configured),
    deliberately not the ten-interval API-cost knob of ADR 1831: a reviewer or blocker added inside
    the window is invisible to a caller that trusts it, so the window stays short.

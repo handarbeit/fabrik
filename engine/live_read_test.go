@@ -226,3 +226,39 @@ func TestLiveFreshFor_IsOnePollIntervalWithAFloor(t *testing.T) {
 		}
 	}
 }
+
+// A review read of a PR that is not the Store's linked PR (the PR was replaced and
+// the Store has not caught up) is returned to the caller but neither written into
+// the old PR's record nor stamped fresh (#2350).
+func TestLiveReviews_ForAnotherPRIsNotAppliedNorStampedFresh(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(string, string, int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "bob", State: "APPROVED", DatabaseID: 7}}, nil
+		},
+		fetchPRReviewRequestsFn: func(string, string, int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "carol"}}, nil
+		},
+	}
+	eng := liveReadEngine(t, client) // linked PR 10
+	eng.SetLiveFreshForTest(time.Minute)
+
+	reviews, requests, err := eng.liveReviews("owner", "repo", 1, 11)
+	if err != nil || len(reviews) != 1 || len(requests) != 1 {
+		t.Fatalf("the read must still be returned: %v %v %v", reviews, requests, err)
+	}
+	snap, _ := eng.store.Peek("owner/repo", 1)
+	if lpr := snap.LinkedPR(); lpr.Number != 10 || len(lpr.Reviews) != 0 || len(lpr.ReviewRequests) != 0 {
+		t.Fatalf("another PR's reviews were written into the stored linked PR: %+v", lpr)
+	}
+	if eng.liveReviewsFresh("owner/repo", 1) {
+		t.Fatal("a read of another PR must not be stamped fresh")
+	}
+	// The matching PR is applied as before.
+	if _, _, err := eng.liveReviews("owner", "repo", 1, 10); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ = eng.store.Peek("owner/repo", 1)
+	if lpr := snap.LinkedPR(); len(lpr.ReviewRequests) != 1 || !eng.liveReviewsFresh("owner/repo", 1) {
+		t.Fatalf("the matching PR was not applied: %+v", lpr)
+	}
+}
