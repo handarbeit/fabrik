@@ -260,7 +260,8 @@ func (in *intake) Drain() {
 // their IDs are forgotten by the ledger so a redelivery is accepted, and
 // reconcile heals them (the spec accepts that loss) — and the workers exit after
 // the apply each is currently running, so nothing is applied against torn-down
-// state after Close returns. A delivery already applying is left to finish.
+// state after Close returns. A delivery already applying is left to finish, but
+// its ID is forgotten too: the shutdown or exec that follows may cut it off.
 func (in *intake) Close(grace time.Duration) {
 	if in == nil {
 		return
@@ -350,8 +351,11 @@ func (in *intake) forgetPendingLocked() {
 }
 
 // dropQueued discards every delivery that has not started applying, forgetting
-// its ID, and reports how many were dropped. A key keeps its (empty) slot so its
-// worker exits after the apply it is running.
+// its ID, and reports how many were dropped. It also forgets the ID of every
+// delivery still applying (it is left to finish, but the process is shutting down
+// or about to exec, so the apply may be cut off and the ledger flush that follows
+// must not record it as seen). A key keeps its (empty) slot so its worker exits
+// after the apply it is running.
 func (in *intake) dropQueued() int {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -364,6 +368,9 @@ func (in *intake) dropQueued() int {
 			dropped++
 		}
 		in.queues[key] = nil
+	}
+	for _, id := range in.applying {
+		in.ledger.Forget(id)
 	}
 	if in.total == 0 {
 		in.idle.Broadcast()

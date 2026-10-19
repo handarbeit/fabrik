@@ -483,3 +483,26 @@ func TestIntake_QuiesceTimeoutForgetsPendingIDs(t *testing.T) {
 		t.Fatalf("%d deliveries applied after Resume, want 2 (Quiesce must not drop them)", got)
 	}
 }
+
+// A delivery still applying when Close's grace expires keeps running, but its ID
+// is forgotten: the shutdown/exec that follows may cut it off, and the ledger
+// flush must not leave it recorded as seen.
+func TestIntake_CloseForgetsTheIDOfAStuckApply(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) {
+		started <- struct{}{}
+		<-release
+		rec.apply(et, p)
+	})
+	in.Submit(delivery{ID: "stuck", EventType: "issues", Payload: payloadFor("o/r", 1)})
+	<-started
+	in.Close(50 * time.Millisecond)
+
+	if !in.ledger.Accept("stuck", time.Now()) {
+		t.Fatal("the ID of an apply cut off by Close stayed recorded as seen; its redelivery would be suppressed")
+	}
+	close(release)
+	in.wg.Wait()
+}
