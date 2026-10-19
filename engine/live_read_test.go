@@ -187,3 +187,18 @@ func TestFeedbackGate_LiveReadAppliesAnIssueCommentToTheStore(t *testing.T) {
 		t.Fatalf("non-vacuity: held=%v stored=%d, want held but not applied", held, stored)
 	}
 }
+
+// liveFreshFor is one poll interval floored at 30 s (and zero with no interval
+// configured, so every call confirms live) — not the ten-interval API-cost knob.
+func TestLiveFreshFor_IsOnePollIntervalWithAFloor(t *testing.T) {
+	eng := liveReadEngine(t, &mockGitHubClient{})
+	for _, c := range []struct {
+		poll int
+		want time.Duration
+	}{{0, 0}, {10, liveFreshFloor}, {45, 45 * time.Second}} {
+		eng.cfg.PollSeconds = c.poll
+		if got := eng.liveFreshFor(); got != c.want {
+			t.Errorf("PollSeconds=%d: liveFreshFor=%v, want %v", c.poll, got, c.want)
+		}
+	}
+}

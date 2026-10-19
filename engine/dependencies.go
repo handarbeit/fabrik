@@ -222,12 +222,28 @@ func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectIt
 	blockedByList := item.BlockedBy
 	// A cleanup-stage item (worktree reaping) is never deep-fetched.
 	decisionRead := mode == depDecisionPoint && !e.depLiveReadOff.Load() && (stage == nil || !stage.CleanupWorktree)
+	// A decision-point read is skipped while the blockedBy edge list was observed
+	// within liveFreshFor — by this check's own last live read, or by anything
+	// else that stamped the Store's "blockedBy" record (a webhook once #1995
+	// lands). The already-blocked re-read is unconditional (ADR 1419).
+	depKey := liveKey("blockedBy", itemRepo, item.Number)
+	skippedFresh := false
+	if decisionRead && !alreadyBlocked && e.blockedByFresh(itemRepo, item.Number, depKey) {
+		decisionRead, skippedFresh = false, true
+	}
 	if alreadyBlocked || decisionRead {
 		fresh := item
 		if err := e.liveItem(&fresh); err != nil {
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
 		} else {
 			blockedByList = fresh.BlockedBy
+			e.live.note(depKey, e.now())
+		}
+	} else if skippedFresh {
+		// Decide from the Store, which holds what the fresh observation applied,
+		// not from the poll-start copy.
+		if snap, ok := e.store.Peek(itemRepo, item.Number); ok && !snap.LastDeepFetchAt().IsZero() {
+			blockedByList = snap.State().BlockedBy
 		}
 	}
 

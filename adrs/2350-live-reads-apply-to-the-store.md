@@ -44,8 +44,14 @@ newer fact.
 5. **Review gates.** The landing gate reads live through `liveReviews`. The advance gate confirms
    live only when its cached view would clear, folding the live read into the cached view so the
    confirmation can only add constraints; a read within `liveFreshFor()` is not repeated.
+   `liveFreshFor()` is one poll interval floored at 30 s (zero when no poll interval is configured),
+   deliberately not the ten-interval API-cost knob of ADR 1831: a reviewer or blocker added inside
+   the window is invisible to a caller that trusts it, so the window stays short.
 6. **Dependency check.** `checkDependenciesMode`: Phase 1 is cache-only; `processItem` and the
-   stage advance are decision points that read live. Cleanup-stage items are never read.
+   stage advance are decision points that read live, skipped while the edge list was observed within
+   `liveFreshFor()` (the check's own last live read, or any write that stamped the Store's
+   `blockedBy` record such as the #1995 webhook). An already-blocked item is always re-read
+   (ADR 1419). Cleanup-stage items are never read.
 
 ## Alternatives considered
 
@@ -64,12 +70,18 @@ newer fact.
   decision with no second call.
 - A reviewer requested after the cache filled holds the advance; a blocker added after the cache
   filled stops the dispatch. Items that advanced on cached data before now hold (intended).
-- Steady-state reads grow only by one live item read per dispatch and per stage advance, and one
+- Steady-state reads grow only by one live item read per dispatch and per stage advance (at most one
+  per item per `liveFreshFor()` window), and one
   review read pair per clearing advance gate per `liveFreshFor()`.
 - A decision-point live read applies the item's fresh body, comments and edges to the Store, which
   heals staleness the #2346 scenarios used to observe; those non-vacuity tests disable the apply
   (`SetLiveReadApplyDisabledForTest`).
 - Merge-train, overseer and repair reads stay raw by decision (see the scan test).
+- Known gap: the reviewer-requested-after-cache (SC-003) and blocker-added-after-cache (SC-004)
+  scenarios are covered by engine-level tests with mock clients, not sim twins. `simgh` was not
+  checked for whether a review request or `blockedBy` add bumps `updatedAt`, so those tests show the
+  gates' behaviour but not that the sim reproduces the cache staleness itself. Only the dispatch
+  re-read (SC-001) has a sim twin (`tests/sim/dispatch_reread_test.go`).
 
 Seams (per-Engine): `SetDispatchRereadDisabledForTest`, `SetLiveReadApplyDisabledForTest`,
 `SetReviewConfirmLiveDisabledForTest`, `SetDependencyLiveReadDisabledForTest`,

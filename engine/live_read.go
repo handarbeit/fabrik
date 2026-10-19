@@ -52,16 +52,29 @@ func liveKey(fact, repo string, number int) string {
 }
 
 // liveFreshFor is how long a live read of a fact stays trusted by a caller that
-// runs every poll (the advance review gate). One tenth of the API-cost knob of
-// ADR 1831: a stage-complete item that waits for a human does not pay a read per
-// poll, while a transition (an advance, a landing, a dispatch) is always
-// confirmed live by the callers that guard one.
+// runs every poll (the advance review gate, the decision-point dependency
+// check): one poll interval, floored at liveFreshFloor. A stage-complete item
+// that waits for a human does not pay a read per poll beyond that, while a
+// transition (an advance, a landing, a dispatch) is always confirmed live by
+// the callers that guard one. Deliberately not the API-cost knob of ADR 1831
+// (ten poll intervals): a reviewer or blocker added inside the window is
+// invisible to a caller that trusts it, so the window stays short.
 func (e *Engine) liveFreshFor() time.Duration {
 	if e.liveFreshOverride.Load() > 0 {
 		return time.Duration(e.liveFreshOverride.Load())
 	}
-	return e.githubRecheckInterval()
+	d := time.Duration(e.cfg.PollSeconds) * time.Second
+	if d <= 0 {
+		return 0 // no poll interval configured: every call confirms live
+	}
+	if d < liveFreshFloor {
+		d = liveFreshFloor
+	}
+	return d
 }
+
+// liveFreshFloor is the shortest window liveFreshFor returns.
+const liveFreshFloor = 30 * time.Second
 
 // SetLiveFreshForTest overrides liveFreshFor (zero restores it). Test seam only.
 func (e *Engine) SetLiveFreshForTest(d time.Duration) { e.liveFreshOverride.Store(int64(d)) }
@@ -173,4 +186,19 @@ func (e *Engine) liveReviews(owner, repo string, issueNumber, prNumber int) ([]g
 // liveFreshFor, so a per-poll caller can skip repeating the read.
 func (e *Engine) liveReviewsFresh(repoKey string, issueNumber int) bool {
 	return e.live.fresh(liveKey("reviews", repoKey, issueNumber), e.now(), e.liveFreshFor())
+}
+
+// blockedByFresh reports whether the item's blockedBy edges were observed within
+// liveFreshFor: by the dependency check's own last live read (engine clock) or by
+// any other write that stamped the Store's "blockedBy" record.
+func (e *Engine) blockedByFresh(repoKey string, number int, key string) bool {
+	if e.live.fresh(key, e.now(), e.liveFreshFor()) {
+		return true
+	}
+	snap, ok := e.store.Peek(repoKey, number)
+	if !ok {
+		return false
+	}
+	at := snap.ObservedAt("blockedBy")
+	return !at.IsZero() && e.now().Sub(at) < e.liveFreshFor() && !e.now().Before(at)
 }

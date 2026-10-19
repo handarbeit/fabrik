@@ -941,6 +941,41 @@ func TestCheckDependencies_DecisionPoint_NewBlockerStopsDispatch(t *testing.T) {
 	}
 }
 
+// The decision-point read is bounded (#2350, R4/FR-009): a second dispatch or
+// advance decision inside liveFreshFor repeats no read and decides from the Store
+// the first read applied; once the window has passed the edge list is read again.
+func TestCheckDependencies_DecisionPoint_FreshObservationSkipsTheRead(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			reads++
+			item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	eng.cfg.PollSeconds = 10
+	clk := &fakeClock{t: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	eng.SetClock(clk)
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 979, Status: "Research"}})
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Status: "Research"}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research"}
+
+	if !eng.checkDependencies(board, item, stage) || reads != 1 {
+		t.Fatalf("first decision: reads=%d, want a block from one live read", reads)
+	}
+	clk.t = clk.t.Add(5 * time.Second)
+	if !eng.checkDependencies(board, item, stage) || reads != 1 {
+		t.Fatalf("decision inside the window: reads=%d, want no repeated read and the Store's blocker honoured", reads)
+	}
+	clk.t = clk.t.Add(liveFreshFloor + time.Second)
+	eng.checkDependencies(board, item, stage)
+	if reads != 2 {
+		t.Fatalf("decision after the window: reads=%d, want a fresh read", reads)
+	}
+}
+
 // TestCheckDependencies_StaleEmptyCache_ReVerifiesOnResume is requirement 6's
 // regression guard (#1419): a fabrik:blocked item whose cached item.BlockedBy
 // is empty must still get the live re-read on resume, not an automatic
