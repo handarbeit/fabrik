@@ -160,3 +160,30 @@ func TestLiveReviews_AppliesBothHalvesAndAPartialReadAppliesNothing(t *testing.T
 		t.Fatal("a just-made live read must count as fresh")
 	}
 }
+
+// FR-005 / SC-002: an issue comment seen only by the feedback gate's live read is
+// counted as feedback and applied to the Store, so the next decision sees it
+// without another read. With the apply disabled (the pre-#2350 read-and-discard)
+// the Store stays without it.
+func TestFeedbackGate_LiveReadAppliesAnIssueCommentToTheStore(t *testing.T) {
+	run := func(applyOff bool) (held bool, stored int) {
+		client := landingClient()
+		client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+			item.Comments = []gh.Comment{humanComment}
+			return nil
+		}
+		eng := testEngineForMerge(t, client)
+		eng.SetLiveReadApplyDisabledForTest(applyOff)
+		eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 1, Status: "Validate"}})
+		item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
+		held = eng.feedbackGateBlocks(item, false, "advance")
+		snap, _ := eng.store.Peek("owner/repo", 1)
+		return held, len(snap.State().Comments)
+	}
+	if held, stored := run(false); !held || stored != 1 {
+		t.Fatalf("held=%v stored=%d, want the comment held on and applied to the Store", held, stored)
+	}
+	if held, stored := run(true); !held || stored != 0 {
+		t.Fatalf("non-vacuity: held=%v stored=%d, want held but not applied", held, stored)
+	}
+}
