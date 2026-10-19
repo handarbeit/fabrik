@@ -773,16 +773,15 @@ func TestRecordPRLinkage_PreventsAutoHealMismap(t *testing.T) {
 // Phase 3-D: documented no-ops — verify no crash and no state change
 // ---------------------------------------------------------------------------
 
-func TestIssueCommentEditedNoOp(t *testing.T) {
+// An issue_comment edit replaces the cached body (#2352); it used to be a no-op.
+func TestIssueCommentEditedReplacesBody(t *testing.T) {
 	c := seedCache(t)
-	// First add a comment.
 	c.ApplyDelta("issue_comment", issueCommentPayloadJSON("created", "owner/repo", 1, "C1", 1, "original", "alice"))
-	// Edit the comment — must not panic or alter stored comments.
 	c.ApplyDelta("issue_comment", issueCommentPayloadJSON("edited", "owner/repo", 1, "C1", 1, "edited text", "alice"))
 
 	s := testGetState(t, c, "owner/repo", 1)
-	if len(s.Comments) != 1 || s.Comments[0].Body != "original" {
-		t.Errorf("comment edit should be a no-op; got %+v", s.Comments)
+	if len(s.Comments) != 1 || s.Comments[0].Body != "edited text" || s.Comments[0].Author != "alice" {
+		t.Errorf("comment edit should replace only the body; got %+v", s.Comments)
 	}
 }
 
@@ -828,7 +827,8 @@ func TestPRReviewDismissedStoresDismissedState(t *testing.T) {
 	}
 }
 
-func TestPRReviewCommentEditedNoOp(t *testing.T) {
+// A review-comment edit replaces the cached body (#2352); it used to be a no-op.
+func TestPRReviewCommentEditedReplacesBody(t *testing.T) {
 	c := seedCache(t)
 	testSetLinkedPR(c, "owner/repo", 1, 42)
 	c.ApplyDelta("pull_request_review_comment",
@@ -837,8 +837,8 @@ func TestPRReviewCommentEditedNoOp(t *testing.T) {
 		pullRequestReviewCommentPayloadJSON("edited", "owner/repo", 42, 200, "RC_1", "edited", "bob"))
 
 	s := testGetState(t, c, "owner/repo", 1)
-	if s.LinkedPR == nil || len(s.LinkedPR.ThreadComments) != 1 {
-		t.Errorf("want exactly 1 thread comment after edit no-op; got %v", s.LinkedPR)
+	if s.LinkedPR == nil || len(s.LinkedPR.ThreadComments) != 1 || s.LinkedPR.ThreadComments[0].Body != "edited" {
+		t.Errorf("want exactly 1 thread comment with the edited body; got %v", s.LinkedPR)
 	}
 }
 

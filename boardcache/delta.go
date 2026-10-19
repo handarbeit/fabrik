@@ -35,7 +35,7 @@ func (c *CacheImpl) ApplyDeltaAt(eventType string, payload []byte, receivedAt ti
 
 	switch eventType {
 	case "issue_comment":
-		c.applyIssueCommentDelta(payload)
+		c.applyIssueCommentDelta(payload, receivedAt)
 	case "issues":
 		c.applyIssuesDelta(payload, receivedAt)
 	case "pull_request":
@@ -43,7 +43,15 @@ func (c *CacheImpl) ApplyDeltaAt(eventType string, payload []byte, receivedAt ti
 	case "pull_request_review":
 		c.applyPullRequestReviewDelta(payload, receivedAt)
 	case "pull_request_review_comment":
-		c.applyPullRequestReviewCommentDelta(payload)
+		c.applyPullRequestReviewCommentDelta(payload, receivedAt)
+	case "pull_request_review_thread":
+		c.applyReviewThreadDelta(payload, receivedAt)
+	case "label":
+		c.applyLabelDelta(payload, receivedAt)
+	case "milestone":
+		c.applyMilestoneDelta(payload, receivedAt)
+	case "sub_issues":
+		c.applySubIssuesDelta(payload, receivedAt)
 	case "check_run":
 		c.applyCheckRunDelta(payload)
 	case "check_suite":
@@ -69,7 +77,9 @@ type issueCommentPayload struct {
 		DatabaseID int    `json:"id"`
 		Body       string `json:"body"`
 		CreatedAt  string `json:"created_at"`
-		User       struct {
+		// UpdatedAt orders an edit against other edits of the same comment (#2352).
+		UpdatedAt lenientString `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"comment"`
@@ -202,7 +212,8 @@ type pullRequestReviewCommentPayload struct {
 		User         struct {
 			Login string `json:"login"`
 		} `json:"user"`
-		PullRequestURL string `json:"pull_request_url"`
+		PullRequestURL string        `json:"pull_request_url"`
+		UpdatedAt      lenientString `json:"updated_at"`
 	} `json:"comment"`
 	PullRequest struct {
 		Number int `json:"number"`
@@ -411,7 +422,7 @@ func (c *CacheImpl) resolveOrHealPRLinkage(owner, repoName, repo string, prNum i
 // Delta functions
 // ---------------------------------------------------------------------------
 
-func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
+func (c *CacheImpl) applyIssueCommentDelta(payload []byte, receivedAt time.Time) {
 	var p issueCommentPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyIssueCommentDelta: unmarshal payload: %v\n", err)
@@ -421,8 +432,7 @@ func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 	case "created":
 		// handled below
 	case "edited", "deleted":
-		// Comment edits and deletes are not tracked in the cache; the engine
-		// re-fetches comments via FetchItemDetails on the next poll cycle.
+		c.applyIssueCommentEditDelete(p, receivedAt)
 		return
 	default:
 		return
@@ -1003,7 +1013,7 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte, receivedAt time.
 	}
 }
 
-func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
+func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte, receivedAt time.Time) {
 	var p pullRequestReviewCommentPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyPullRequestReviewCommentDelta: unmarshal payload: %v\n", err)
@@ -1013,8 +1023,7 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	case "created":
 		// handled below
 	case "edited", "deleted":
-		// Comment edits and deletes are not tracked in the cache; the engine
-		// re-fetches review thread state via FetchItemDetails on the next poll cycle.
+		c.applyReviewCommentEditDelete(p, receivedAt)
 		return
 	default:
 		return
