@@ -24,7 +24,7 @@ import (
 func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.CacheImpl) func() {
 	wantWebhooks := e.cfg.Webhooks
 	wantHookdeck := e.cfg.EventSource == EventSourceHookdeck
-	if !wantWebhooks && !wantHookdeck {
+	if !wantWebhooks && !wantHookdeck && len(e.extraTransports) == 0 {
 		return func() {}
 	}
 
@@ -90,6 +90,11 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	if wantHookdeck {
 		e.startHookdeckTransport(ctx, set, sink, initialRepos, bootstrap)
 	}
+	// Transports the engine has no built-in knowledge of (a test fake today; the
+	// Funnel receiver of #2143 tomorrow) attach through the very same wiring.
+	for _, t := range e.extraTransports {
+		e.attachTransport(ctx, set, t, sink, bootstrap)
+	}
 
 	if set.Empty() {
 		// Nothing started: poll-only. Drop the intake and echo registry so no
@@ -103,6 +108,23 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 		set.StopAll()
 		in.Close(intakeCloseGrace)
 	}
+}
+
+// attachTransport is the one place a transport is connected to the engine: its
+// deliveries go to the intake sink, its reconnects request a catch-up reconcile,
+// the cache is bootstrapped, and — only once it has started — it joins the set
+// that health, coverage and repo-set updates fan out to. A transport that fails
+// to start is not attached and the others keep running.
+func (e *Engine) attachTransport(ctx context.Context, set *transportSet, t ingestTransport, sink func(delivery), bootstrap func()) bool {
+	t.SetSink(sink)
+	t.SetReconnectHandler(e.requestReconcile)
+	bootstrap()
+	if err := t.Start(ctx); err != nil {
+		e.logf(0, t.Name(), "could not start: %v\n", err)
+		return false
+	}
+	set.Add(t)
+	return true
 }
 
 // startWebhookTransport starts the gh webhook forward transport (PAT mode).
@@ -129,14 +151,10 @@ func (e *Engine) startWebhookTransport(ctx context.Context, set *transportSet, s
 	// after the first poll, at which point the subprocess restarts with the full set.
 	wm := newWebhookManager(e.logf, e.wakeCh, e.emit, initialRepos, e.cfg.WebhookEvents, nil, cleanupFn)
 	wm.SetPort(e.cfg.WebhookPort)
-	wm.SetSink(sink)
-	wm.SetReconnectHandler(e.requestReconcile)
 	wm.SetCoverageCheck(func() { e.checkWebhookHookCoverage(wm) })
-	bootstrap()
-	if err := wm.Start(ctx); err != nil {
+	if !e.attachTransport(ctx, set, wm, sink, bootstrap) {
 		return
 	}
-	set.Add(wm)
 	// Echo misses drive only this transport's health (ADR 042): the "subprocess
 	// looks alive but isn't delivering" failure mode is specific to gh forward.
 	e.echo.setMissFn(wm.noteEchoMisses)
@@ -183,15 +201,10 @@ func (e *Engine) startHookdeckTransport(ctx context.Context, set *transportSet, 
 		return
 	}
 	hm := newHookdeckManager(e.logf, e.emit, initialRepos, nil, apiKey, webhookSecret)
-	hm.SetSink(sink)
-	hm.SetReconnectHandler(e.requestReconcile)
 	hm.SetCoverageCheck(func() { e.checkHookdeckInstallationCoverage(hm) })
-	bootstrap()
-	if err := hm.Start(ctx); err != nil {
-		e.logf(0, "hookdeck", "could not start: %v\n", err)
+	if !e.attachTransport(ctx, set, hm, sink, bootstrap) {
 		return
 	}
-	set.Add(hm)
 	e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnvName, secretEnvName)
 	// R5 startup assertion (#1142): verify the App installation's granted-repo set
 	// covers every managed repo, warning (never failing startup) on any gap — the

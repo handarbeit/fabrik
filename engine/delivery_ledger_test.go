@@ -124,8 +124,11 @@ func TestDeliveryLedger_PersistsAcrossRestart(t *testing.T) {
 		t.Fatal("a new delivery must still be accepted")
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("ledger file mode = %v, err = %v; want 0600", info.Mode().Perm(), err)
+	if err != nil {
+		t.Fatalf("stat ledger file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("ledger file mode = %v; want 0600", info.Mode().Perm())
 	}
 }
 

@@ -407,6 +407,7 @@ type Engine struct {
 	transports                            *transportSet                             // attached event-ingestion transports; nil/empty when none is active (#1142, #2351)
 	echo                                  *echoRegistry                             // engine-level mutation-echo registry; nil when no transport is attached (#2351)
 	intake                                *intake                                   // transport-neutral delivery dedupe/order/ack stage; nil when no transport is attached (#2351)
+	extraTransports                       []ingestTransport                         // transports attached beyond the built-in two (tests; #2143)
 	reconcileReq                          chan struct{}                             // transport-reconnect catch-up reconcile requests, coalescing (#2351)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.

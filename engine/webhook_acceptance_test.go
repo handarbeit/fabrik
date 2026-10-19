@@ -120,6 +120,10 @@ func TestEchoReservationsAreBoundForCancel(t *testing.T) {
 	}
 	call := regexp.MustCompile(`\be\.(echo\.Reserve\w*|reserveLabel\w*|reserveComment)\(`)
 	bound := regexp.MustCompile(`^\s*(\w+(, \w+)* :?= |return )`)
+	// A reservation assigned to a single variable must reach that variable's
+	// Cancel() on the failure path (a helper that returns the reservation, or the
+	// post-create PR echoes, are exempt).
+	boundVar := regexp.MustCompile(`^\s*(\w+) :?= e\.(echo\.Reserve|reserveLabel|reserveComment)`)
 	// file:substring of the call, for the post-create PR echoes.
 	exempt := map[string]string{
 		"pr.go":       `"pull_request", "opened"`,
@@ -133,8 +137,15 @@ func TestEchoReservationsAreBoundForCancel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for i, line := range strings.Split(string(data), "\n") {
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
 			if !call.MatchString(line) || strings.HasPrefix(strings.TrimSpace(line), "//") || strings.Contains(line, "func (e *Engine)") {
+				continue
+			}
+			if m := boundVar.FindStringSubmatch(line); m != nil {
+				if !cancelsBefore(lines, i, m[1]) {
+					t.Errorf("%s:%d: %s is reserved here but never Cancel()led before the next reservation or the end of the function — a failed write would leave an orphan echo: %s", f, i+1, m[1], strings.TrimSpace(line))
+				}
 				continue
 			}
 			if bound.MatchString(line) {
@@ -166,4 +177,22 @@ func TestNoPerTransportEchoOrSingleManagerLeft(t *testing.T) {
 			}
 		}
 	}
+}
+
+// cancelsBefore reports whether lines after index i call v.Cancel() before the
+// variable is reserved again or the enclosing function ends.
+func cancelsBefore(lines []string, i int, v string) bool {
+	reassign := regexp.MustCompile(`^\s*` + regexp.QuoteMeta(v) + ` :?= e\.(echo\.Reserve|reserveLabel|reserveComment)`)
+	for _, l := range lines[i+1:] {
+		if strings.HasPrefix(l, "func ") {
+			return false
+		}
+		if strings.Contains(l, v+".Cancel()") {
+			return true
+		}
+		if reassign.MatchString(l) {
+			return false
+		}
+	}
+	return false
 }

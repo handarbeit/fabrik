@@ -102,17 +102,30 @@ func TestWebhookIntake_DuplicateAppliesOnceAcrossRestart(t *testing.T) {
 	}
 }
 
-// Deliveries about one item apply in arrival order.
+// Deliveries about one item apply in arrival order. The item starts without the
+// label, so the outcome depends on the order: "unlabeled" then "labeled" ends with
+// the label present, while the reverse (or applying nothing) ends without it.
 func TestWebhookIntake_SameItemAppliesInArrivalOrder(t *testing.T) {
 	t.Parallel()
 	env, num := intakeEnv(t)
 	env.Engine.EnableDeliveryIntakeForTest("")
 	const label = "order-label"
 
-	// labeled, unlabeled, labeled, unlabeled: the final state is only "absent" if
-	// they apply in the order they arrived.
-	for i, action := range []string{"labeled", "unlabeled", "labeled", "unlabeled"} {
+	if hasLabel(labelsOf(t, env, num), label) {
+		t.Fatal("precondition: the label must start absent")
+	}
+	for i, action := range []string{"unlabeled", "labeled"} {
 		env.Engine.SubmitDeliveryForTest("webhook", fmt.Sprintf("O%d", i), "issues", labelDelivery(env, num, action, label))
+	}
+	env.Engine.DrainDeliveriesForTest()
+	if !hasLabel(labelsOf(t, env, num), label) {
+		t.Fatal("deliveries were applied out of arrival order (or not at all): the label added last is missing")
+	}
+
+	// And the other way round ends without it, so the first result is not just
+	// "the last labeled event wins regardless of order".
+	for i, action := range []string{"labeled", "unlabeled"} {
+		env.Engine.SubmitDeliveryForTest("webhook", fmt.Sprintf("P%d", i), "issues", labelDelivery(env, num, action, label))
 	}
 	env.Engine.DrainDeliveriesForTest()
 	if hasLabel(labelsOf(t, env, num), label) {

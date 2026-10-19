@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ type fakeTransport struct {
 	healthy     bool
 	disabled    bool
 	started     bool
+	startErr    error
 	stopped     bool
 	hints       []bool
 	hintReasons []string
@@ -40,7 +42,7 @@ func (f *fakeTransport) Start(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.started = true
-	return nil
+	return f.startErr
 }
 func (f *fakeTransport) Stop() {
 	f.mu.Lock()
@@ -223,8 +225,9 @@ func TestReconcileTick_DrivesAnyTransport(t *testing.T) {
 	}
 }
 
-// Two transports run side by side through the ingestion setup: neither blocks the
-// other and a failed start of one leaves the other attached.
+// With no transport configured the engine stays poll-only: no echo registry, no
+// intake. (Several transports side by side are covered by
+// TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne.)
 func TestSetUpIngestion_NoTransportConfiguredIsPollOnly(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	cleanup := eng.setUpIngestion(context.Background(), nil)
@@ -249,5 +252,88 @@ func TestSetUpIngestion_HookdeckWithoutCredentialsIsPollOnly(t *testing.T) {
 	}
 	if eng.echo != nil || eng.intake != nil {
 		t.Fatal("with no transport attached the echo registry and intake must be dropped")
+	}
+}
+
+// US4-2: several transports start side by side through the engine's own ingestion
+// setup. Every one is wired to the shared intake sink and the catch-up reconcile
+// request, one that fails to start is left out without affecting the others, and
+// the echo registry and intake exist for the whole set. Removing any of the
+// SetSink / SetReconnectHandler / set.Add / e.echo / e.intake assignments in
+// setUpIngestion breaks this test.
+func TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	a, b, c := newFakeTransport("a"), newFakeTransport("broken"), newFakeTransport("c")
+	b.startErr = errors.New("cannot bind")
+	eng.extraTransports = []ingestTransport{a, b, c}
+
+	cleanup := eng.setUpIngestion(context.Background(), nil)
+
+	if eng.transports == nil || eng.echo == nil || eng.intake == nil {
+		t.Fatalf("transports=%v echo=%v intake=%v: all three must exist while a transport runs", eng.transports, eng.echo, eng.intake)
+	}
+	for _, f := range []*fakeTransport{a, b, c} {
+		f.mu.Lock()
+		started := f.started
+		f.mu.Unlock()
+		if !started {
+			t.Fatalf("transport %s was never started", f.name)
+		}
+	}
+	// Only the transports that started are in the set; the failed one is not.
+	eng.transports.CheckCoverage()
+	for _, tc := range []struct {
+		f    *fakeTransport
+		want int
+	}{{a, 1}, {b, 0}, {c, 1}} {
+		tc.f.mu.Lock()
+		got := tc.f.coverage
+		tc.f.mu.Unlock()
+		if got != tc.want {
+			t.Errorf("transport %s: %d coverage checks, want %d (the set must hold exactly the started transports)", tc.f.name, got, tc.want)
+		}
+	}
+
+	// Each transport's sink is the shared intake: one ID carried by two of them is
+	// recorded once.
+	if a.sink == nil || c.sink == nil {
+		t.Fatal("a started transport was not given the intake sink")
+	}
+	payload := []byte(`{"action":"opened","repository":{"full_name":"o/r"},"issue":{"number":1}}`)
+	a.sink(delivery{ID: "same", EventType: "issues", Payload: payload, Transport: "a"})
+	c.sink(delivery{ID: "same", EventType: "issues", Payload: payload, Transport: "c"})
+	eng.intake.Drain()
+	if n := eng.intake.ledger.Len(); n != 1 {
+		t.Fatalf("ledger holds %d entries for one delivery ID carried by two transports, want 1", n)
+	}
+
+	// Each transport's reconnect handler requests the catch-up reconcile.
+	for _, f := range []*fakeTransport{a, c} {
+		select {
+		case <-eng.reconcileReq:
+		default:
+		}
+		f.mu.Lock()
+		fn := f.reconnect
+		f.mu.Unlock()
+		if fn == nil {
+			t.Fatalf("transport %s was given no reconnect handler", f.name)
+		}
+		fn()
+		select {
+		case <-eng.reconcileReq:
+		default:
+			t.Fatalf("transport %s: a reconnect did not request a catch-up reconcile", f.name)
+		}
+	}
+
+	cleanup()
+	for _, f := range []*fakeTransport{a, c} {
+		f.mu.Lock()
+		stopped := f.stopped
+		f.mu.Unlock()
+		if !stopped {
+			t.Errorf("transport %s was not stopped by the setup's cleanup", f.name)
+		}
 	}
 }
