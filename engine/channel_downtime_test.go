@@ -202,6 +202,21 @@ func TestFinishEventStampsSourceAndUnverifiedByOrigin(t *testing.T) {
 	}
 }
 
+// A change only a gate's live read saw has no known write or webhook behind it, so
+// its events are marked unverified exactly like a reconcile's or a probe's (#2350).
+func TestUnattributed_CoversLiveReadOrigin(t *testing.T) {
+	for _, o := range []itemstate.ChangeOrigin{itemstate.OriginOther, itemstate.OriginProbe, itemstate.OriginLiveRead} {
+		if !unattributed(o) {
+			t.Errorf("origin %v must be unattributed", o)
+		}
+	}
+	for _, o := range []itemstate.ChangeOrigin{itemstate.OriginEngine, itemstate.OriginWebhook} {
+		if unattributed(o) {
+			t.Errorf("origin %v is backed by a known write or webhook", o)
+		}
+	}
+}
+
 // A close that the first full observation reports as a downtime delta is not
 // reported a second time by the live path when the same mutation also closes the
 // item (the prior record was still pending because the column was unknown).
