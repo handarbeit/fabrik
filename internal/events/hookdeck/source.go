@@ -55,8 +55,13 @@ const (
 	// matching GitHub's own documented webhook payload ceiling — see the
 	// SetReadLimit call site in runOnce for why an unbounded read is a
 	// real risk here.
-	maxFrameBytes = 25 * 1024 * 1024
+	maxFrameBytes = MaxFrameBytes
 )
+
+// MaxFrameBytes is the largest WebSocket frame (one webhook delivery) the source
+// reads: GitHub's documented 25 MB payload ceiling. Exported so the engine's
+// other transport can be pinned to the same figure (#2351).
+const MaxFrameBytes = 25 * 1024 * 1024
 
 // Config configures a Source.
 type Config struct {
