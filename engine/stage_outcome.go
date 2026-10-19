@@ -207,6 +207,12 @@ func (s *stageOutcomeStore) get(key string) *stageOutcomeRecord {
 // put stores rec in the index and writes it to disk atomically. The index is updated even
 // when the write fails (the in-process gate still holds); the error is returned for logging.
 func (s *stageOutcomeStore) put(rec *stageOutcomeRecord) error {
+	return s.write(rec, false)
+}
+
+// write stores rec; with requireLive it does nothing unless the key is still in the index,
+// checked under the same lock as the write so a concurrent remove cannot interleave.
+func (s *stageOutcomeStore) write(rec *stageOutcomeRecord, requireLive bool) error {
 	if s == nil {
 		return nil
 	}
@@ -214,6 +220,9 @@ func (s *stageOutcomeStore) put(rec *stageOutcomeRecord) error {
 	cp := *rec
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, live := s.idx[cp.key()]; requireLive && !live {
+		return nil
+	}
 	s.idx[cp.key()] = &cp
 	data, err := json.MarshalIndent(&cp, "", "  ")
 	if err != nil {
@@ -226,6 +235,12 @@ func (s *stageOutcomeStore) put(rec *stageOutcomeRecord) error {
 		return fmt.Errorf("writing stage outcome: %w", err)
 	}
 	return nil
+}
+
+// update rewrites the record for rec's key only while it is still live; a record that was
+// removed meanwhile is not resurrected. Reports nothing for an absent key.
+func (s *stageOutcomeStore) update(rec *stageOutcomeRecord) error {
+	return s.write(rec, true)
 }
 
 // remove drops the record for key (index and file). Reports whether one existed.
@@ -353,6 +368,16 @@ func (e *Engine) persistOutcome(rec *stageOutcomeRecord) {
 	if rec == nil {
 		return
 	}
+	// An update never re-creates a record: one a concurrent fresh start dropped
+	// (discardOutcomeForFreshStart) or a prune removed must stay gone, or a later scan would
+	// publish the stale outcome it was dropped to prevent (ADR 2394 decision 11).
+	if err := e.stageOutcomes.update(rec); err != nil {
+		e.logf(rec.Number, "outcome", "warn: could not persist recorded outcome: %v\n", err)
+	}
+}
+
+// createOutcome writes a new record (the only path that may insert a key).
+func (e *Engine) createOutcome(rec *stageOutcomeRecord) {
 	if err := e.stageOutcomes.put(rec); err != nil {
 		e.logf(rec.Number, "outcome", "warn: could not persist recorded outcome: %v\n", err)
 	}
@@ -391,7 +416,7 @@ func (e *Engine) beginStageOutcome(p stageOutcomeParams, output string, complete
 		Rerun:      e.runIsForcedRerun(p.item, p.stage.Name),
 		CreatedAt:  e.now(),
 	}
-	e.persistOutcome(rec)
+	e.createOutcome(rec)
 	return rec
 }
 
@@ -417,6 +442,6 @@ func (e *Engine) recordCompletionOutcome(item gh.ProjectItem, stage *stages.Stag
 		LastError: cause.Error(),
 		CreatedAt: e.now(),
 	}
-	e.persistOutcome(rec)
+	e.createOutcome(rec)
 	e.logf(item.Number, "outcome", "stage %q completion not written (%v) — recorded, will retry instead of re-running\n", stage.Name, cause)
 }

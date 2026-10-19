@@ -368,3 +368,35 @@ func TestSettleStageOutcome_LeavesRecordOfInFlightWorkerAlone(t *testing.T) {
 		t.Fatal("with no worker, a record that never reached ready must be discarded")
 	}
 }
+
+// A record dropped while a publication attempt is in flight (a fresh start from a comment
+// worker, reenterValidate, a prune) must not be re-created by that attempt's later persists:
+// it would be published later, completing a forced re-run without the re-run (ADR 2394 d11).
+func TestPersistOutcome_DoesNotResurrectADroppedRecord(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.EnableStageOutcomesForTest(t.TempDir())
+	rec := testOutcomeRecord()
+	eng.createOutcome(rec)
+	if eng.stageOutcomes.get(rec.key()) == nil {
+		t.Fatal("createOutcome must insert the record")
+	}
+	held := *rec // the settle scan's copy
+	eng.dropStageOutcome(rec.key(), rec.Number, "fresh start")
+
+	held.BodyDone = true
+	eng.persistOutcome(&held)
+	if eng.stageOutcomes.get(rec.key()) != nil {
+		t.Fatal("an update re-created a record that had been dropped")
+	}
+	if _, err := os.Stat(filepath.Join(eng.stageOutcomes.dir, stageOutcomeFileName(rec.key()))); err == nil {
+		t.Fatal("an update re-created the record file")
+	}
+
+	// A live record is still updated.
+	eng.createOutcome(rec)
+	held.BodyDone = true
+	eng.persistOutcome(&held)
+	if got := eng.stageOutcomes.get(rec.key()); got == nil || !got.BodyDone {
+		t.Fatal("an update of a live record must be stored")
+	}
+}

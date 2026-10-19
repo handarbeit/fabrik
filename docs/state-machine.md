@@ -5205,6 +5205,10 @@ legitimately outlives the marker because `handleStageComplete` clears it). `reen
 merge-train auto-repair) and `handleValidateSHAInvalidation` drop the item's record next to `markValidateRerun`,
 and `clearFailedStage` / `unblockAwaitingInput` drop it when the stage is deliberately run again
 (`discardOutcomeForFreshStart`), so the order of the settle scan and the strip never matters.
+A drop that lands while a publication attempt is in flight is final: only `createOutcome` (a run recording its
+outcome) may insert a record; every later write of the attempt (`persistOutcome`, `stageOutcomeStore.update`)
+rewrites a record only while its key is still live, checked under the store lock, and a failure note on a dropped
+record escalates nothing.
 
 **Comment-review audit (FR-011).** (a) A comment pass that completes the stage but whose `handleStageComplete`
 fails: `finalizeComments` writes a `completion` record (stage and head only) and the scan retries just

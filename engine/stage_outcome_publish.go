@@ -178,6 +178,10 @@ func (e *Engine) noteOutcomeFailure(item gh.ProjectItem, rec *stageOutcomeRecord
 		rec.Attempts++
 	}
 	e.persistOutcome(rec)
+	if e.stageOutcomes.get(rec.key()) == nil {
+		// A fresh start or prune dropped the record while this attempt ran: nothing to escalate.
+		return
+	}
 	e.logf(item.Number, "outcome", "publishing the recorded outcome of stage %q failed (attempt %d, %s): %v\n",
 		rec.Stage, rec.Attempts, map[bool]string{true: "counted", false: "not counted — GitHub unreachable"}[counted], err)
 	if !counted || e.cfg.MaxRetries <= 0 || rec.Attempts < e.cfg.MaxRetries {

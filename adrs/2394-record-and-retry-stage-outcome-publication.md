@@ -101,6 +101,14 @@ push were lost every time.
     is deliberately run again. Sim twins `TestStageOutcome_Sim_RevalidateReRunsInsteadOfCompletingFromTheRecord`
     and its neutralised twin (`SetOutcomeFreshStartDiscardDisabledForTest`); the explicit drops of (b)/(c) are
     covered by the unit test `TestDiscardOutcomeForFreshStart`, not by a separate sim path.
+12. **A dropped record is never re-created by an in-flight attempt.** The settle scan works on a copy of the
+    record and publishes without holding a lock, so a drop from another goroutine (a comment worker's
+    `unblockAwaitingInput`/`clearFailedStage`, `reenterValidate`, a prune) can land mid-attempt. Only
+    `createOutcome` (`beginStageOutcome`, `recordCompletionOutcome`) may insert a key; `persistOutcome` goes
+    through `stageOutcomeStore.update`, which rewrites a record only while its key is still live, checked under
+    the store lock. A failure note on a record that is no longer live escalates nothing. Otherwise the next
+    persist would bring back a `ready` record whose head still matches, and a later scan would publish the stale
+    outcome decision 11 exists to prevent. Unit test `TestPersistOutcome_DoesNotResurrectADroppedRecord`.
 
 ## Consequences
 
