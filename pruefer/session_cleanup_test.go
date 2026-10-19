@@ -96,6 +96,131 @@ func TestRemoveReviewSessions_LeavesNonEmptyAndUnnamedDirs(t *testing.T) {
 	}
 }
 
+// seedMemoryDir creates the empty memory/ the CLI leaves in a review's folder
+// (#2406) and returns its path.
+func seedMemoryDir(t *testing.T, profile, cwd string) string {
+	t.Helper()
+	d := filepath.Join(profile, "projects", cwd, "memory")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestRemoveReviewSessions_RemovesFolderHoldingOnlyEmptyMemory(t *testing.T) {
+	profile := t.TempDir()
+	_, _ = seedSession(t, profile, cwdPR7, sessA)
+	mem := seedMemoryDir(t, profile, cwdPR7)
+	if _, err := removeReviewSessions(profile, []string{sessA}, removeSessionsOpts{PRNumber: 7}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{mem, filepath.Join(profile, "projects", cwdPR7)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived: %v", p, err)
+		}
+	}
+}
+
+func TestRemoveReviewSessions_KeepsFolderWhenMemoryHoldsAFile(t *testing.T) {
+	profile := t.TempDir()
+	_, _ = seedSession(t, profile, cwdPR7, sessA)
+	mem := seedMemoryDir(t, profile, cwdPR7)
+	f := filepath.Join(mem, "note.md")
+	if err := os.WriteFile(f, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removeReviewSessions(profile, []string{sessA}, removeSessionsOpts{PRNumber: 7}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{f, mem, filepath.Join(profile, "projects", cwdPR7)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: %v", p, err)
+		}
+	}
+}
+
+func TestRemoveReviewSessions_KeepsFolderHoldingAnotherEmptyDir(t *testing.T) {
+	profile := t.TempDir()
+	_, _ = seedSession(t, profile, cwdPR7, sessA)
+	seedMemoryDir(t, profile, cwdPR7)
+	other := filepath.Join(profile, "projects", cwdPR7, "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removeReviewSessions(profile, []string{sessA}, removeSessionsOpts{PRNumber: 7}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{other, filepath.Join(profile, "projects", cwdPR7)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: %v", p, err)
+		}
+	}
+}
+
+func TestRemoveEmptyReviewDir_MemoryGuardsApplyFirst(t *testing.T) {
+	profile := t.TempDir()
+	projects := filepath.Join(profile, "projects")
+	// Another PR's folder and an unrelated one keep their empty memory/.
+	seedMemoryDir(t, profile, cwdPR70)
+	seedMemoryDir(t, profile, cwdOther)
+	removeEmptyReviewDir(projects, filepath.Join(projects, cwdPR70), 7)
+	removeEmptyReviewDir(projects, filepath.Join(projects, cwdOther), 7)
+	// Not a direct child of projects/, though named for the PR.
+	nested := filepath.Join(projects, "group", "x-pruefer-pr-7-1")
+	if err := os.MkdirAll(filepath.Join(nested, "memory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	removeEmptyReviewDir(projects, nested, 7)
+	for _, p := range []string{
+		filepath.Join(projects, cwdPR70, "memory"),
+		filepath.Join(projects, cwdOther, "memory"),
+		filepath.Join(nested, "memory"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was touched despite a failed guard: %v", p, err)
+		}
+	}
+}
+
+func TestRemoveEmptyReviewDir_MemoryFileOrSymlinkIsNotRemoved(t *testing.T) {
+	profile := t.TempDir()
+	projects := filepath.Join(profile, "projects")
+
+	fileDir := filepath.Join(projects, cwdPR7)
+	if err := os.MkdirAll(fileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	memFile := filepath.Join(fileDir, "memory")
+	if err := os.WriteFile(memFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	removeEmptyReviewDir(projects, fileDir, 7)
+	if _, err := os.Stat(memFile); err != nil {
+		t.Errorf("a memory file was removed: %v", err)
+	}
+
+	target := t.TempDir()
+	keep := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(projects, "-y-pruefer-pr-7-2")
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(linkDir, "memory")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	removeEmptyReviewDir(projects, linkDir, 7)
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("a memory symlink was removed: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the symlink target was touched: %v", err)
+	}
+}
+
 func TestRemoveReviewSessions_StagesToolResultsThenDeletes(t *testing.T) {
 	profile := t.TempDir()
 	_, dir := seedSession(t, profile, cwdPR7, sessA)
