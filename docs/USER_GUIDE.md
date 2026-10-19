@@ -701,7 +701,7 @@ hookdeck_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
 
 **Manual prerequisite — this part happens outside Fabrik.** Before `event_source: hookdeck` can deliver anything, you must:
 
-1. Enable the GitHub App's webhook in its own settings page (App settings → General → Webhook), and set the webhook URL to a Hookdeck-provided endpoint plus a webhook secret of your choosing.
+1. Enable the GitHub App's webhook in its own settings page (App settings → General → Webhook), and set the webhook URL to a Hookdeck-provided endpoint plus a webhook secret of your choosing. Under "Subscribe to events", subscribe the App to the events Fabrik applies: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, `projects_v2_item` (organisation-level) and `issue_dependencies`. `issue_dependencies` needs the App's **Issues: read** permission (already held) and makes a "blocked by" link added or removed in GitHub's UI take effect on the next wake instead of after the next poll; without the subscription dependency changes are still picked up, only at the next poll.
 2. Set that same secret as the value of the environment variable named by `hookdeck_webhook_secret_env`.
 3. Obtain a Hookdeck API key from your Hookdeck account and set it as the value of the environment variable named by `hookdeck_api_key_env`.
 
@@ -4916,6 +4916,8 @@ webhooks: true
 
 By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
 
+`issue_dependencies` (a "blocked by" / "blocking" link added or removed) is **not** in the default list: whether `gh webhook forward` accepts it has not been confirmed against a live forwarding session, so by default dependency changes stay poll-driven in PAT mode and reach Fabrik within one poll interval. You can opt in with `--webhook-events` (or `FABRIK_WEBHOOK_EVENTS`, or `webhook_events:`), listing the default events plus `issue_dependencies`; a supported event then makes the change take effect on the next wake. The event is only a trigger — see [Dependency changes](#dependency-changes-issue_dependencies) below.
+
 ### Health States and TUI Indicator
 
 The TUI footer shows a webhook health indicator when webhook mode is enabled:
@@ -4979,6 +4981,15 @@ Fabrik always maintains an in-memory cache of board state — the cache is the u
 **Project Status note:** GitHub webhooks do not deliver project-board Status (column) changes for repo-level project subscriptions, and only conditionally for org-level subscriptions with the right permissions. The Layer 2 status gate (`updatedAt` check + lightweight status batch) runs each poll cycle regardless of webhook health and is the only authoritative delivery path for Status drift.
 
 **Stream-health failover (webhook mode):** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. The per-poll Reconcile remains active throughout and continues to keep state correct.
+
+### Dependency changes (`issue_dependencies`)
+
+You have this problem: someone adds or removes a "blocked by" link in GitHub's UI and nothing happens until the next poll — which, on a quiet board, can be minutes. When Fabrik receives GitHub's `issue_dependencies` delivery (App/Hookdeck mode, or PAT mode when you opted in as described above) it re-reads the two issues the delivery names, and the engine is woken: an item you just blocked is labelled `fabrik:blocked` instead of dispatching, and an item whose last blocker you removed is re-checked at once instead of after the `dep-blocked` cooldown.
+
+- **The delivery is only a trigger.** Fabrik does not read the dependency data carried inside the payload (GitHub renders it unreliably relative to the change). `fabrik:blocked` is added or removed only after a live read of the item's blockers, so a stale, partial or reordered delivery can never unblock an item.
+- **One change, two deliveries.** GitHub sends one delivery for each side of the link; Fabrik handles each affected issue once.
+- **Closing a blocker is signalled by `issues`, not by this event.** GitHub sends no `issue_dependencies` delivery when a blocking issue closes. Fabrik instead re-evaluates every open item whose cached blockers include the closed issue when the `issues` `closed` delivery arrives.
+- Issues Fabrik has not cached are ignored; without webhooks nothing changes — dependency changes are picked up at the next poll.
 
 ### `projects_v2_item` (Board Column Changes)
 
