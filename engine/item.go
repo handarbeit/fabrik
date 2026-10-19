@@ -162,6 +162,12 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// A recorded stage outcome that is not yet published (#2394, ADR 2394): the stage
+	// already ran, so it is published by settleStageOutcomes, never produced again.
+	if e.stageOutcomePending(item, stage) {
+		return false
+	}
+
 	// Holding stages are batch-scoped (handled by handleMergeTrainBatch in poll.go),
 	// not per-item. Never dispatch individual items at a holding stage. Unmanaged
 	// stages (e.g. Backlog) are parking columns Fabrik never dispatches at all —
@@ -286,6 +292,11 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	// settle scan in poll.go (not the normal dispatch path) is the only thing
 	// that may act on the item while this marker is present.
 	if !stage.CleanupWorktree && hasLabel(item.Labels, "fabrik:awaiting-done") {
+		return false, 0
+	}
+
+	// Mirror of the itemMayNeedWork gate: a recorded, unpublished outcome (#2394).
+	if e.stageOutcomePending(item, stage) {
 		return false, 0
 	}
 
@@ -1607,6 +1618,21 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// Capture git metadata for the comment header
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
+	// Recorded stage outcome (#2394, ADR 2394): a run that finished with the completion
+	// marker is recorded durably before its first GitHub write. The record is dropped when
+	// this function leaves it unneeded (everything published, or the item paused/failed
+	// for another reason) and kept only when publication is incomplete, so the next poll
+	// publishes it instead of running the stage again.
+	outcomeRec := e.beginStageOutcome(p, output, completed)
+	keepOutcome := false
+	if outcomeRec != nil {
+		defer func() {
+			if !keepOutcome {
+				e.stageOutcomes.remove(outcomeRec.key())
+			}
+		}()
+	}
+
 	// Check for issue body update markers in stage output.
 	if output != "" {
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
@@ -1615,6 +1641,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			// baseline advance and echo in one step.
 			if err := e.updateIssueBody(item, owner, repo, updatedBody); err != nil {
 				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+			} else if outcomeRec != nil {
+				outcomeRec.BodyDone = true
+				e.persistOutcome(outcomeRec)
 			}
 			// Persist the same canonical body as specs/<N>-<slug>/spec.md (ADR 2034).
 			// Runs on every round that updates the body — including a blocked one —
@@ -1780,6 +1809,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	}
 
 	// Post Claude's output
+	var commentErr error
 	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
 		// Gated to the Plan stage because preImplement only ever reads the
@@ -1796,11 +1826,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		if stage.Name == "Plan" {
 			footer = formatSpawnReceiptNote(postOutput) + footer
 		}
-		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
-		} else {
-			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
-			e.postItemComment(item, comment, true)
+		// The ready checkpoint (#2394): everything the publication needs is now
+		// known, so a retry can post the same comment without Claude.
+		e.readyStageOutcome(outcomeRec, workDir, postOutput, footer, branch, commit, mainSHA, timestamp, prNumber)
+		commentErr = e.postStageOutput(item, stage.Name, stage.PostToPR, postOutput, footer, branch, commit, mainSHA, timestamp, outcomeRec, false)
+	} else {
+		e.readyStageOutcome(outcomeRec, workDir, "", "", branch, commit, mainSHA, timestamp, prNumber)
+		if outcomeRec != nil {
+			outcomeRec.PRCommentDone, outcomeRec.IssueCommentDone = true, true
+			e.persistOutcome(outcomeRec)
 		}
 	}
 
@@ -1847,6 +1881,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// acceptable: queue entry happens at Validate completion, so stages rarely run while
 	// queued. No-op on non-queue repos (FR-3).
 	pushRefused := false
+	pushFailed := false
 	if claudeRan {
 		wm := e.worktreesFor(item.Repo)
 		if pushErr := e.pushBranchUnlessQueued(item, wm); errors.Is(pushErr, ErrPushSkippedPRMerged) {
@@ -1857,6 +1892,11 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 			// The zero-ahead guard (#2089) or the divergence check (#2295) has already paused the item.
 			pushRefused = errors.Is(pushErr, ErrPushRefused)
+			pushFailed = true
+		}
+		if outcomeRec != nil && !pushFailed {
+			outcomeRec.PushDone = true
+			e.persistOutcome(outcomeRec)
 		}
 	}
 
@@ -1957,11 +1997,28 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		releaseLock()
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		// Recorded outcome (#2394): the completion signal goes last, only once the comment
+		// and the push have landed. Otherwise the record stays and the publication scan
+		// retries the missing steps in order — the stage is not run again.
+		if outcomeRec != nil && (commentErr != nil || pushFailed) {
+			keepOutcome = true
+			cause := commentErr
+			if cause == nil {
+				cause = errors.New("branch push failed")
+			}
+			e.logf(item.Number, "outcome", "stage %q finished but its output is not fully published (%v) — recorded, will retry without re-running\n", stage.Name, cause)
+			return
+		}
 		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
 			// Zero-ahead push guard (#2089) paused the item: skip completion.
 			return
 		}
-		e.handleStageComplete(p.ctx, p.board, item, stage)
+		if cerr := e.handleStageComplete(p.ctx, p.board, item, stage); cerr != nil && outcomeRec != nil {
+			keepOutcome = true
+			outcomeRec.LastError = cerr.Error()
+			e.persistOutcome(outcomeRec)
+			e.logf(item.Number, "outcome", "stage %q completion not written (%v) — recorded, will retry without re-running\n", stage.Name, cerr)
+		}
 	} else if blockedOnInput {
 		releaseLock()
 		e.blockOnInput(item, stage, output)

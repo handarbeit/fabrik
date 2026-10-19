@@ -93,6 +93,11 @@ type Env struct {
 	// Engine so the caps and the hold survive the restart. Set by EnableDecisionState.
 	DecisionStateDir string
 
+	// StageOutcomeDir, when non-empty, persists recorded stage outcomes (#2394) there;
+	// RestartEnv hands the same directory to the rebuilt Engine so a finished stage that is
+	// not yet published survives the restart. Set by EnableStageOutcomes.
+	StageOutcomeDir string
+
 	// PollInterval is how far RunPoll advances Clock before each poll cycle
 	// — the engine-local mirror of R3's GitHub-anchored gates: dispatch
 	// cooldowns (itemstate.CooldownAt) are stamped as e.now()+duration, so a

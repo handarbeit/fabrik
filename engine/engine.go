@@ -312,32 +312,36 @@ type Engine struct {
 	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
 	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
 	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
-	trainRuns                             *trainRunStore
-	trainRunsLoadOnce                     sync.Once                                 // loads persisted run records on the first settleTrainRuns
-	mergeTrainInFlight                    sync.Map                                  // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
-	mergeTrainEjectionsMu                 sync.Mutex                                // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", consecutive-ejection count per member against the PR head in mergeTrainEjectionHeads (#2349) — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time. Persisted under .fabrik/state/engine-decisions/ (decision_state.go)
-	mergeTrainEjectionHeads               map[string]string                         // key: "owner/repo#N", the PR head SHA the count was earned against (#2349); a different non-empty head restarts the count. Guarded by mergeTrainEjectionsMu
-	invalidate                            invalidateState                           // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
-	overlap                               overlapState                              // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
-	mergeTrainCIDeferredMu                sync.Mutex                                // guards mergeTrainCIDeferred
-	mergeTrainCIDeferred                  map[string]string                         // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
-	mergeTrainCloneSkipMu                 sync.Mutex                                // guards mergeTrainCloneSkipCounts
-	mergeTrainCloneSkipCounts             map[string]int                            // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor). Deliberately NOT re-keyed by base (#1648): a bare-clone failure is a property of the repo's git remote, shared by every base partition — re-keying would fragment one genuine repo-level failure signal into N spurious per-base ones.
-	mergeTrainTrialsMu                    sync.Mutex                                // guards mergeTrainTrials
-	mergeTrainTrials                      map[string][]time.Time                    // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
-	mergeTrainInfraMu                     sync.Mutex                                // guards mergeTrainInfraCooldown (#2052)
-	mergeTrainInfraCooldown               map[string]time.Time                      // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
-	trainNotPassedAsRed                   atomic.Bool                               // test seam: SetTrainNotPassedAsRedForTest (#2296)
-	trainStaleAsRed                       atomic.Bool                               // test seam: SetTrainStaleAsRedForTest (#2298)
-	landing                               landingState                              // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
-	pushGuardDisabled                     atomic.Bool                               // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
-	issueBodyWriteThroughOff              atomic.Bool                               // test seam: SetIssueBodyWriteThroughDisabledForTest (#2346)
-	pauseGuardOff                         atomic.Bool                               // test seam: SetPauseGuardDisabledForTest (#2341)
-	pauseGuardUnreadOK                    atomic.Bool                               // test seam: SetPauseGuardUnreadFailOpenForTest (#2341)
-	completionMergedCheckOff              atomic.Bool                               // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
-	mergeInFlightGuardOff                 atomic.Bool                               // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
-	mergedPushGuardOff                    atomic.Bool                               // test seam: SetMergedPushGuardDisabledForTest (#2299)
+	trainRuns                 *trainRunStore
+	trainRunsLoadOnce         sync.Once              // loads persisted run records on the first settleTrainRuns
+	mergeTrainInFlight        sync.Map               // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
+	mergeTrainEjectionsMu     sync.Mutex             // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts  map[string]int         // key: "owner/repo#N", consecutive-ejection count per member against the PR head in mergeTrainEjectionHeads (#2349) — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time. Persisted under .fabrik/state/engine-decisions/ (decision_state.go)
+	mergeTrainEjectionHeads   map[string]string      // key: "owner/repo#N", the PR head SHA the count was earned against (#2349); a different non-empty head restarts the count. Guarded by mergeTrainEjectionsMu
+	invalidate                invalidateState        // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
+	overlap                   overlapState           // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
+	mergeTrainCIDeferredMu    sync.Mutex             // guards mergeTrainCIDeferred
+	mergeTrainCIDeferred      map[string]string      // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
+	mergeTrainCloneSkipMu     sync.Mutex             // guards mergeTrainCloneSkipCounts
+	mergeTrainCloneSkipCounts map[string]int         // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor). Deliberately NOT re-keyed by base (#1648): a bare-clone failure is a property of the repo's git remote, shared by every base partition — re-keying would fragment one genuine repo-level failure signal into N spurious per-base ones.
+	mergeTrainTrialsMu        sync.Mutex             // guards mergeTrainTrials
+	mergeTrainTrials          map[string][]time.Time // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
+	mergeTrainInfraMu         sync.Mutex             // guards mergeTrainInfraCooldown (#2052)
+	mergeTrainInfraCooldown   map[string]time.Time   // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
+	trainNotPassedAsRed       atomic.Bool            // test seam: SetTrainNotPassedAsRedForTest (#2296)
+	trainStaleAsRed           atomic.Bool            // test seam: SetTrainStaleAsRedForTest (#2298)
+	landing                   landingState           // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
+	pushGuardDisabled         atomic.Bool            // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	issueBodyWriteThroughOff  atomic.Bool            // test seam: SetIssueBodyWriteThroughDisabledForTest (#2346)
+	pauseGuardOff             atomic.Bool            // test seam: SetPauseGuardDisabledForTest (#2341)
+	pauseGuardUnreadOK        atomic.Bool            // test seam: SetPauseGuardUnreadFailOpenForTest (#2341)
+	completionMergedCheckOff  atomic.Bool            // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
+	mergeInFlightGuardOff     atomic.Bool            // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
+	mergedPushGuardOff        atomic.Bool            // test seam: SetMergedPushGuardDisabledForTest (#2299)
+	// stageOutcomes holds the recorded, not-yet-published stage outcomes (#2394); nil on
+	// NewWithDeps engines. stageOutcomeRecordOff is the SetStageOutcomeRecordDisabledForTest seam.
+	stageOutcomes                         *stageOutcomeStore
+	stageOutcomeRecordOff                 atomic.Bool
 	stageFirstRoutingOff                  atomic.Bool                               // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                               // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                               // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
@@ -754,6 +758,10 @@ func New(cfg Config) (*Engine, error) {
 	// #2349: the merge-train caps and the usage-limit hold survive a restart.
 	eng.decisionStore = newDecisionStore(decisionStateDir(fabrikDir))
 	eng.loadDecisionState()
+	// #2394: a finished stage whose publication has not landed is recorded here and
+	// published on a later poll instead of being run again.
+	eng.stageOutcomes = newStageOutcomeStore(stageOutcomeDir(fabrikDir))
+	eng.loadStageOutcomes()
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API

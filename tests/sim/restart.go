@@ -113,6 +113,10 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 		// The merge-train caps and the usage-limit hold survive a restart (#2349).
 		eng.EnableDecisionStateForTest(env.DecisionStateDir)
 	}
+	if env.StageOutcomeDir != "" {
+		// A recorded stage outcome awaiting publication survives a restart (#2394).
+		eng.EnableStageOutcomesForTest(env.StageOutcomeDir)
+	}
 	// Deliberately does NOT call Engine.RegisterObservers (ADR-1592) — see
 	// NewEnv's own doc comment for why this package leaves it uncalled by
 	// default. A scenario needing reactive-observer behavior on a restarted
@@ -140,7 +144,16 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 
 		TrainStateDir:    env.TrainStateDir,
 		DecisionStateDir: env.DecisionStateDir,
+		StageOutcomeDir:  env.StageOutcomeDir,
 	}
+}
+
+// EnableStageOutcomes switches env's Engine to recorded stage outcomes (#2394) under a fresh
+// temp directory that RestartEnv carries across.
+func EnableStageOutcomes(t *testing.T, env *Env) {
+	t.Helper()
+	env.StageOutcomeDir = t.TempDir()
+	env.Engine.EnableStageOutcomesForTest(env.StageOutcomeDir)
 }
 
 // EnableDecisionState switches env's Engine to persisted decision state (merge-train caps and

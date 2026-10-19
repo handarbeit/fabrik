@@ -89,6 +89,7 @@ var bodyBearingCalls = map[string]int{
 	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
 	"addCommentWithRetry":       4, // (owner, repo string, issueNumber, prNum int, body, what string)
 	"pauseInterruptedIssue":     1, // (item, comment string)
+	"postStageIssueComment":     1, // (item, body string, rec, live) — a recorded stage comment (#2394)
 }
 
 // funnelSkips maps a function name to the single body-bearing call name that
@@ -105,6 +106,7 @@ var funnelSkips = map[string]string{
 	"addLandedCommentWithRetry": "addCommentWithRetry",
 	"addCommentWithRetry":       "AddComment",
 	"pauseInterruptedIssue":     "pauseIssue",
+	"postStageIssueComment":     "postComment",
 }
 
 // checkAddCommentBody walks a function body, finds all AddComment (and

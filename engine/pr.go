@@ -332,38 +332,140 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) (pushRefused bool
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
 func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, branch, commit, mainSHA, timestamp string) {
+	_ = e.postStageOutput(item, stageName, true, output, footer, branch, commit, mainSHA, timestamp, nil, false) // failures already logged
+}
+
+// postStageOutput publishes a stage's output comment(s): on the linked PR with a summary on
+// the issue when postToPR, else on the issue alone. It is the one implementation behind the
+// first publication attempt and the retries of a recorded outcome (#2394).
+//
+// With rec == nil it behaves exactly as postOutputToPR always did: every write is attempted,
+// failures are logged, and the first error is returned only for the caller that cares. With
+// a record, each comment carries a hidden marker naming the record's nonce, a landed comment
+// sets its flag on rec (and persists it), a failed one stops publication so a retry posts
+// the comments in order, and live asks for a read of the thread first so a comment whose
+// flag was lost (a crash between the post and the flag write) is not posted twice.
+func (e *Engine) postStageOutput(item gh.ProjectItem, stageName string, postToPR bool, output, footer, branch, commit, mainSHA, timestamp string, rec *stageOutcomeRecord, live bool) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	if !postToPR {
+		if rec != nil {
+			rec.PRCommentDone = true
+		}
+		return e.postStageIssueComment(item, formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp), rec, live)
+	}
+
 	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not find PR: %v\n", err)
+		if rec != nil {
+			// A lookup failure is not "no PR": falling back to the issue would post the
+			// detailed output in the wrong place. Retry the lookup.
+			return err
+		}
 	}
 
 	if prNumber > 0 {
-		// Post detailed output on the PR
-		// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
-		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
-			e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
-		} else {
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
+		var firstErr error
+		if rec == nil || !rec.PRCommentDone {
+			// Post detailed output on the PR
+			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
+			comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
+			skip := false
+			if rec != nil {
+				marker := outcomeMarker(rec.Nonce, "pr")
+				if live {
+					found, ferr := e.commentWithMarkerExists(owner, repo, prNumber, marker)
+					if ferr != nil {
+						return ferr
+					}
+					skip = found
+				}
+				comment += "\n\n" + marker
 			}
-			e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			if skip {
+				rec.PRCommentDone = true
+				e.persistOutcome(rec)
+			} else if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
+				e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
+				firstErr = err
+			} else {
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
+				}
+				e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
+				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+				}
+				if rec != nil {
+					rec.PRCommentDone = true
+					e.persistOutcome(rec)
+				}
 			}
+		}
+		if firstErr != nil && rec != nil {
+			return firstErr
 		}
 
 		// Post brief summary on the issue
-		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp)
-		e.postItemComment(item, summary, true)
-	} else {
-		// No PR found — fall back to posting on the issue
-		e.logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
-		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		e.postItemComment(item, comment, true)
+		if err := e.postStageIssueComment(item, formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp), rec, live); err != nil {
+			return err
+		}
+		return firstErr
 	}
+
+	// No PR found — fall back to posting on the issue
+	e.logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
+	if rec != nil {
+		rec.PRCommentDone = true
+	}
+	return e.postStageIssueComment(item, formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp), rec, live)
+}
+
+// postStageIssueComment posts body (a formatted stage comment) on the issue unless rec
+// already has it. With a record it appends the record's hidden marker, checks the live
+// thread first on a retry, and flags the step on rec once it landed.
+func (e *Engine) postStageIssueComment(item gh.ProjectItem, body string, rec *stageOutcomeRecord, live bool) error {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if rec != nil {
+		if rec.IssueCommentDone {
+			return nil
+		}
+		marker := outcomeMarker(rec.Nonce, "issue")
+		if live {
+			if found, err := e.commentWithMarkerExists(owner, repo, item.Number, marker); err != nil {
+				return err
+			} else if found {
+				rec.IssueCommentDone = true
+				e.persistOutcome(rec)
+				return nil
+			}
+		}
+		body += "\n\n" + marker
+	}
+	if _, err := e.postComment(item, body, true, true); err != nil {
+		return err
+	}
+	if rec != nil {
+		rec.IssueCommentDone = true
+		e.persistOutcome(rec)
+	}
+	return nil
+}
+
+// commentWithMarkerExists reports whether any comment on the issue/PR thread carries marker.
+func (e *Engine) commentWithMarkerExists(owner, repo string, number int, marker string) (bool, error) {
+	comments, err := e.client.FetchIssueComments(owner, repo, number)
+	if err != nil {
+		return false, fmt.Errorf("reading comments on #%d: %w", number, err)
+	}
+	for _, c := range comments {
+		if strings.Contains(c.Body, marker) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // formatOutputComment formats Claude's output as a GitHub comment.
