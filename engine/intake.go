@@ -144,6 +144,17 @@ func (in *intake) Submit(d delivery) bool {
 	return true
 }
 
+// popFront removes the first delivery of q. It zeroes the vacated slot: the
+// reslice alone leaves the consumed delivery — and its payload, up to
+// webhookMaxBodyBytes — referenced by the backing array until an append
+// reallocates or the key drains, which would hold memory the byte cap already
+// considers released.
+func popFront(q []delivery) (delivery, []delivery) {
+	d := q[0]
+	q[0] = delivery{}
+	return d, q[1:]
+}
+
 // work drains one key's queue in order, then exits (a goroutine per ACTIVE key).
 func (in *intake) work(key string) {
 	defer in.wg.Done()
@@ -155,10 +166,10 @@ func (in *intake) work(key string) {
 			in.mu.Unlock()
 			return
 		}
-		d := q[0]
 		// Keep the key present (len>0 slot semantics): shrink, don't delete, so
 		// Submit keeps seeing this key as running until the worker exits.
-		in.queues[key] = q[1:]
+		var d delivery
+		d, in.queues[key] = popFront(q)
 		in.mu.Unlock()
 
 		in.sem <- struct{}{}

@@ -349,3 +349,22 @@ func TestIntake_ByteCapDropsForgetsAndReleases(t *testing.T) {
 	}
 	in.Drain()
 }
+
+// popFront must not leave the consumed delivery's payload referenced by the
+// queue's backing array.
+func TestPopFront_ClearsTheVacatedSlot(t *testing.T) {
+	q := []delivery{
+		{ID: "a", Payload: make([]byte, 1024)},
+		{ID: "b", Payload: []byte("b")},
+	}
+	d, rest := popFront(q)
+	if d.ID != "a" || len(d.Payload) != 1024 {
+		t.Fatalf("popped %+v, want the first delivery intact", d)
+	}
+	if len(rest) != 1 || rest[0].ID != "b" {
+		t.Fatalf("rest = %+v, want only b", rest)
+	}
+	if q[0].ID != "" || q[0].Payload != nil {
+		t.Fatalf("vacated slot still holds %+v: the payload stays reachable through the backing array", q[0])
+	}
+}
