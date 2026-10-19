@@ -252,3 +252,40 @@ func TestHandleStageComplete_WaitForCI_AwaitingCIWriteFailureIsReported(t *testi
 		t.Fatalf("handleStageComplete = %v once the write succeeds, want nil", err)
 	}
 }
+
+// A Validate landing that fails on an outage is a publication to retry (ADR 2394 decision 6):
+// handleStageComplete reports it so the record stays. Any other merge failure keeps its
+// historical effect (nil: no label, Validate runs again).
+func TestHandleStageComplete_ValidateMergeFailure_TransportIsReported(t *testing.T) {
+	// The feedback gate reads the linked PR first and defers on a failure; the landing
+	// itself reads it later. failFrom is the call from which every read fails, so the
+	// error reaches attemptMergeOnValidate's own read.
+	run := func(failFrom int, prErr error) error {
+		calls := 0
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+				calls++
+				if calls >= failFrom {
+					return nil, prErr
+				}
+				return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
+			},
+		}
+		eng := testEngineWithStages(t, client, testStagesWithValidate())
+		item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
+		return eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Validate"})
+	}
+	reported := false
+	for failFrom := 2; failFrom <= 6; failFrom++ {
+		if run(failFrom, context.DeadlineExceeded) != nil {
+			reported = true
+			if err := run(failFrom, &gh.StatusError{Code: 422}); err != nil {
+				t.Errorf("a non-transport landing failure returned %v, want nil (historical effect)", err)
+			}
+			break
+		}
+	}
+	if !reported {
+		t.Error("a transport failure while landing was never reported — the record would be dropped and the stage re-run")
+	}
+}

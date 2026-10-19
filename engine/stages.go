@@ -194,6 +194,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			autoMergeEnabled, landingDeferred, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
 			if mergeErr != nil {
 				e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
+				// An outage is not a verdict on the merge: report it so a recorded
+				// outcome (#2394) keeps its record and the merge is retried, instead of
+				// the stage re-running. Any other failure keeps its historical effect
+				// (no label, Validate runs again).
+				if gh.IsTransportError(mergeErr) {
+					completionErr = fmt.Errorf("landing the Validate PR: %w", mergeErr)
+				}
 				return
 			}
 		}
