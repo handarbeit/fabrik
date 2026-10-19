@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1248,4 +1251,94 @@ func TestWebhookManager_SubscribesToFollowsTheLiveSubscription(t *testing.T) {
 	if res := r.ReserveIfSubscribed("issues", "labeled", "k"); res == nil || r.len() != 1 {
 		t.Fatal("ReserveIfSubscribed must still reserve for a subscribed event")
 	}
+}
+
+// #2352: the four new events are in the default subscription.
+func TestDefaultWebhookEventsIncludeTheStateFactEvents(t *testing.T) {
+	for _, ev := range []string{"sub_issues", "pull_request_review_thread", "label", "milestone"} {
+		if !containsEvent(defaultWebhookEvents, ev) {
+			t.Errorf("defaultWebhookEvents lacks %q", ev)
+		}
+		if !containsEvent(optionalWebhookEvents, ev) {
+			t.Errorf("%q must be optional (a rejection drops only it)", ev)
+		}
+	}
+	// projects_v2 is deliberately not subscribed: it carries no Status option
+	// renames and the engine reads no project-level fact (ADR 2352).
+	if containsEvent(defaultWebhookEvents, "projects_v2") {
+		t.Error("projects_v2 must not be in the default subscription")
+	}
+	for _, ev := range optionalWebhookEvents {
+		if !containsEvent(defaultWebhookEvents, ev) {
+			t.Errorf("optional event %q is not a default event", ev)
+		}
+	}
+}
+
+func TestRejectedOptionalEvents(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"single new event", "These events are not allowed for this hook: label", []string{"label"}},
+		{"several in one message", "These events are not allowed for this hook: sub_issues, milestone", []string{"sub_issues", "milestone"}},
+		{"projects_v2_item stays", "These events are not allowed for this hook: projects_v2_item", []string{"projects_v2_item"}},
+		{"thread is not review", "These events are not allowed for this hook: pull_request_review_thread", []string{"pull_request_review_thread"}},
+		{"review alone is not optional", "These events are not allowed for this hook: pull_request_review", nil},
+		{"word boundary", "invalid event: relabeled", nil},
+		{"no rejection phrase", "forwarding label events", nil},
+		{"empty", "", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rejectedOptionalEvents(tc.line)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("rejectedOptionalEvents(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// A hook that rejects one of the new events drops only that event and keeps the
+// rest of the subscription; it must not reach the 422 circuit breaker.
+func TestStartSubprocessDropsOnlyTheRejectedOptionalEvent(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'These events are not allowed for this hook: label' >&2\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.events = append([]string(nil), defaultWebhookEvents...)
+	wm.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd, stderrCh, err := wm.startSubprocessInternal(ctx, []string{"webhook", "forward"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	wm.mu.Lock()
+	wm.currentCmd = cmd
+	wm.mu.Unlock()
+	select {
+	case <-stderrCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stderr watcher did not react to the rejection")
+	}
+	if wm.SubscribesTo("label") {
+		t.Error("the rejected event must be dropped")
+	}
+	for _, ev := range defaultWebhookEvents {
+		if ev != "label" && !wm.SubscribesTo(ev) {
+			t.Errorf("event %q was dropped but was not rejected", ev)
+		}
+	}
+	_ = cmd.Wait()
 }

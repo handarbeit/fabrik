@@ -71,6 +71,25 @@ var defaultWebhookEvents = []string{
 	"check_run",
 	"check_suite",
 	"projects_v2_item",
+	// Added by #2352 (ADR 2352): facts the engine uses that no event above carries.
+	"sub_issues",
+	"pull_request_review_thread",
+	"label",
+	"milestone",
+}
+
+// optionalWebhookEvents are the default events a rejection of which must drop
+// only that event, never take the transport down. projects_v2_item has always
+// been one (an org hook may not allow it); the four #2352 events are new and it
+// is unverified that every hook shape (notably gh webhook forward --org) accepts
+// them, so a "not allowed for this hook: label" must not feed the quick-exit /
+// 422 circuit breaker that switches webhook mode off.
+var optionalWebhookEvents = []string{
+	"projects_v2_item",
+	"sub_issues",
+	"pull_request_review_thread",
+	"label",
+	"milestone",
 }
 
 // webhookManager manages the gh webhook forward subprocess lifecycle,
@@ -355,16 +374,54 @@ func isAuthShapedError(s string) bool {
 // wording, including the actual GitHub error ("These events are not allowed for
 // this hook: projects_v2_item").
 func isProjectsV2ItemRejection(line string) bool {
-	if !strings.Contains(line, "projects_v2_item") {
-		return false
+	for _, ev := range rejectedOptionalEvents(line) {
+		if ev == "projects_v2_item" {
+			return true
+		}
 	}
+	return false
+}
+
+// rejectedOptionalEvents returns the optional events (optionalWebhookEvents) the
+// stderr line names as rejected: it must carry a rejection phrase and mention the
+// event as a whole word, so "label" in unrelated prose or "pull_request_review"
+// inside "pull_request_review_thread" does not match. One GitHub message can name
+// several events ("not allowed for this hook: sub_issues, label"); all are
+// returned so a single restart drops them together.
+func rejectedOptionalEvents(line string) []string {
 	lower := strings.ToLower(line)
-	return strings.Contains(lower, "invalid") ||
+	if !(strings.Contains(lower, "invalid") ||
 		strings.Contains(lower, "unknown") ||
 		strings.Contains(lower, "not recognized") ||
 		strings.Contains(lower, "unsupported") ||
 		strings.Contains(lower, "bad request") ||
-		strings.Contains(lower, "not allowed")
+		strings.Contains(lower, "not allowed")) {
+		return nil
+	}
+	var out []string
+	for _, ev := range optionalWebhookEvents {
+		if mentionsWord(lower, ev) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// mentionsWord reports whether s contains word delimited by non-identifier
+// characters on both sides (identifier characters: a-z, 0-9, underscore).
+func mentionsWord(s, word string) bool {
+	isIdent := func(b byte) bool { return b == '_' || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') }
+	for i := 0; ; {
+		j := strings.Index(s[i:], word)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(word)
+		if (start == 0 || !isIdent(s[start-1])) && (end == len(s) || !isIdent(s[end])) {
+			return true
+		}
+		i = start + 1
+	}
 }
 
 // applyRepoAuthFailure processes a subprocess exit in per-repo mode.
@@ -433,6 +490,14 @@ func (wm *webhookManager) IsDisabled() bool {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 	return wm.disabled
+}
+
+// optionalEventFallback says what covers for a dropped optional event.
+func optionalEventFallback(ev string) string {
+	if ev == "projects_v2_item" {
+		return "board-column changes caught by safety-net poll only (up to 60 min delay)"
+	}
+	return "its facts are learned from the next deep fetch or reconcile instead"
 }
 
 // containsEvent reports whether name is in the events slice.
@@ -1113,12 +1178,16 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 			n, readErr := stderr.Read(buf)
 			if n > 0 {
 				line := strings.TrimRight(string(buf[:n]), "\n\r")
-				// Detect projects_v2_item rejection using the shared helper.
-				if isProjectsV2ItemRejection(line) {
-					wm.logFn(0, "webhook", "WARNING: projects_v2_item event not supported by gh webhook forward — "+
-						"board-column changes caught by safety-net poll only (up to 60 min delay)\n")
+				// Detect a rejected optional event using the shared helper; only the
+				// named events are dropped, the rest of the subscription is kept.
+				if rejected := rejectedOptionalEvents(line); len(rejected) > 0 {
+					for _, ev := range rejected {
+						wm.logFn(0, "webhook", "WARNING: %s event not supported by gh webhook forward — %s\n", ev, optionalEventFallback(ev))
+					}
 					wm.mu.Lock()
-					wm.events = filterOutEvent(wm.events, "projects_v2_item")
+					for _, ev := range rejected {
+						wm.events = filterOutEvent(wm.events, ev)
+					}
 					c := wm.currentCmd
 					wm.mu.Unlock()
 					if c != nil {
