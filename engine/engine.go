@@ -265,6 +265,9 @@ type Engine struct {
 	// lockWriteRefusalDisabled is the test seam that restores the pre-#2393
 	// "spawn the worker unlocked" behaviour (forge_hold.go).
 	lockWriteRefusalDisabled atomic.Bool
+	// usageHoldReinvokeGateDisabled is the test seam that restores the pre-#2407
+	// behaviour (usage_hold_admission.go).
+	usageHoldReinvokeGateDisabled atomic.Bool
 	// localAPI is the local read API server (#1967); nil until Run() binds it
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex

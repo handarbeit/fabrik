@@ -55,11 +55,11 @@ func (e *Engine) activateClaudeUsageLimit(issueNumber int, limitErr *claudeUsage
 
 	switch source {
 	case usageLimitSourceExact:
-		e.logf(issueNumber, "claude-limit", "account usage-limit hit; holding Claude dispatch account-wide until %s (structured reset from CLI rate_limit_event)", deadline.Format(time.RFC3339))
+		e.logf(issueNumber, "claude-limit", "account usage-limit hit; holding Claude dispatch account-wide until %s (structured reset from CLI rate_limit_event)\n", deadline.Format(time.RFC3339))
 	case usageLimitSourceClamped:
-		e.logf(issueNumber, "claude-limit", "account usage-limit hit; structured reset %s is beyond the %s ceiling, clamping — holding Claude dispatch account-wide until %s", limitErr.ResetAt.Format(time.RFC3339), usageLimitMaxResetHorizon, deadline.Format(time.RFC3339))
+		e.logf(issueNumber, "claude-limit", "account usage-limit hit; structured reset %s is beyond the %s ceiling, clamping — holding Claude dispatch account-wide until %s\n", limitErr.ResetAt.Format(time.RFC3339), usageLimitMaxResetHorizon, deadline.Format(time.RFC3339))
 	default:
-		e.logf(issueNumber, "claude-limit", "account usage-limit hit; no usable structured reset (reason=%s), falling back to a %s hold on Claude dispatch account-wide until %s", reason, claudeUsageLimitFallbackBackoff, deadline.Format(time.RFC3339))
+		e.logf(issueNumber, "claude-limit", "account usage-limit hit; no usable structured reset (reason=%s), falling back to a %s hold on Claude dispatch account-wide until %s\n", reason, claudeUsageLimitFallbackBackoff, deadline.Format(time.RFC3339))
 	}
 	e.emitStructural(tui.ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: deadline})
 	e.channelNudge() // observation only (#1968): re-check account-wide state
@@ -87,7 +87,7 @@ func (e *Engine) clearClaudeUsageLimit(reason string) {
 	if !wasActive {
 		return
 	}
-	e.logf(0, "claude-limit", "clearing account-wide Claude dispatch hold: %s", reason)
+	e.logf(0, "claude-limit", "clearing account-wide Claude dispatch hold: %s\n", reason)
 	e.emitStructural(tui.ClaudeUsageLimitAlertEvent{UsageLimited: false})
 	e.channelNudge() // observation only (#1968)
 }

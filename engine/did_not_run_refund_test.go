@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,4 +389,57 @@ func lastCommentBody(c *mockGitHubClient) string {
 		return ""
 	}
 	return c.addCommentCalls[len(c.addCommentCalls)-1].body
+}
+
+// #2407: under the account-wide usage-limit hold a re-invocation enters no
+// worker (so its exit cannot wake the poll into a refusal loop), is refunded,
+// and leaves the item an admission path: a retry-backoff cooldown expiring at the
+// hold's lift, and a re-armed periodic re-evaluation.
+func TestReviewReinvoke_UsageHold_NoWorkerAndAdmissionPathKept(t *testing.T) {
+	for _, neutralised := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fix", true: "neutralised"}[neutralised], func(t *testing.T) {
+			var calls int
+			eng, _, stgs := newDidNotRunReviewEngine(t, nil, &calls)
+			eng.SetUsageHoldReinvokeGateDisabledForTest(neutralised)
+			eng.activateClaudeUsageLimit(1, nil, time.Now())
+			hold, held := eng.claudeUsageLimitedUntilTime(eng.now())
+			if !held {
+				t.Fatal("usage-limit hold not active")
+			}
+			var workerChanges atomic.Int32
+			eng.SubscribeStoreForTest(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) {
+				if c.Number == 31 && c.Fields&itemstate.WorkerLifecycleChanged != 0 {
+					workerChanges.Add(1)
+				}
+			}))
+
+			dispatchReviewRound(t, eng, stgs[0], 3170)
+
+			snap, _ := eng.store.Get("owner/repo", 31)
+			if calls != 0 {
+				t.Fatalf("Claude invoked %d times under the hold, want 0", calls)
+			}
+			if got := snap.ReviewCycles("Implement"); got != 0 {
+				t.Errorf("ReviewCycles = %d, want 0 (refunded)", got)
+			}
+			gotWorker := workerChanges.Load() != 0
+			gotRetry := snap.CooldownAt("retry-backoff").Equal(hold)
+			gotPeriodic := !snap.CooldownAt("periodic-re-eval").IsZero()
+			if neutralised {
+				if !gotWorker || gotRetry || gotPeriodic {
+					t.Fatalf("neutralised: worker=%v retry=%v periodic=%v, want the pre-#2407 shape (worker, no cooldowns)", gotWorker, gotRetry, gotPeriodic)
+				}
+				return
+			}
+			if gotWorker {
+				t.Errorf("a worker was entered under the hold (its exit wakes the poll: the #2407 hot loop)")
+			}
+			if !gotRetry {
+				t.Errorf("retry-backoff cooldown = %v, want the hold's lift %v", snap.CooldownAt("retry-backoff"), hold)
+			}
+			if !gotPeriodic {
+				t.Errorf("no periodic-re-eval cooldown re-armed after the did-not-run refund")
+			}
+		})
+	}
 }
