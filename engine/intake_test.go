@@ -368,3 +368,37 @@ func TestPopFront_ClearsTheVacatedSlot(t *testing.T) {
 		t.Fatalf("vacated slot still holds %+v: the payload stays reachable through the backing array", q[0])
 	}
 }
+
+// When Close's grace expires with applies stuck, the deliveries still queued are
+// dropped (and forgotten) and the workers exit after the apply they are running:
+// nothing is applied after Close returns.
+func TestIntake_CloseDropsQueuedDeliveriesWhenTheGraceExpires(t *testing.T) {
+	release := make(chan struct{})
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) { <-release; rec.apply(et, p) })
+
+	for i := 1; i <= 3; i++ { // one key: #1 applies (blocked), #2 and #3 queue behind it
+		if !in.Submit(delivery{ID: fmt.Sprintf("d%d", i), EventType: "issues", Payload: payloadFor("o/r", 1)}) {
+			t.Fatalf("delivery d%d was not queued", i)
+		}
+	}
+	in.Close(100 * time.Millisecond) // the first apply is stuck: the grace expires
+
+	close(release)
+	in.Drain()
+	in.wg.Wait() // the key's worker must exit, not drain the dropped queue
+	if got := len(rec.list()); got != 1 {
+		t.Fatalf("%d deliveries applied, want 1 (only the one already applying); queued ones must be dropped at Close", got)
+	}
+	in.mu.Lock()
+	total, held := in.total, in.bytes
+	in.mu.Unlock()
+	if total != 0 || held != 0 {
+		t.Fatalf("total=%d bytes=%d after the drop, want 0", total, held)
+	}
+	// The dropped IDs were forgotten, so a redelivery (after a restart) is accepted;
+	// the one that was applying stays recorded.
+	if !in.ledger.Accept("d2", time.Now()) || !in.ledger.Accept("d3", time.Now()) {
+		t.Fatal("a dropped delivery's ID stayed in the ledger and its redelivery would be suppressed")
+	}
+}

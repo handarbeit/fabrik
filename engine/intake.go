@@ -241,9 +241,12 @@ func (in *intake) Drain() {
 	in.mu.Unlock()
 }
 
-// Close stops accepting, waits up to grace for in-flight applies and flushes
-// the ledger. Deliveries still queued after the grace are dropped — the spec
-// accepts that loss (reconcile heals it).
+// Close stops accepting, waits up to grace for queued and in-flight applies and
+// flushes the ledger. If the grace expires, deliveries still QUEUED are dropped —
+// their IDs are forgotten by the ledger so a redelivery is accepted, and
+// reconcile heals them (the spec accepts that loss) — and the workers exit after
+// the apply each is currently running, so nothing is applied against torn-down
+// state after Close returns. A delivery already applying is left to finish.
 func (in *intake) Close(grace time.Duration) {
 	if in == nil {
 		return
@@ -259,7 +262,8 @@ func (in *intake) Close(grace time.Duration) {
 	select {
 	case <-done:
 	case <-time.After(grace):
-		in.log("intake close: gave up waiting for in-flight deliveries after %v\n", grace)
+		dropped := in.dropQueued()
+		in.log("intake close: gave up waiting for in-flight deliveries after %v — dropped %d queued delivery(ies); reconcile will heal them\n", grace, dropped)
 	}
 	in.ledger.Close()
 }
@@ -305,6 +309,28 @@ func (in *intake) Resume() {
 	in.mu.Lock()
 	in.quiesced = false
 	in.mu.Unlock()
+}
+
+// dropQueued discards every delivery that has not started applying, forgetting
+// its ID, and reports how many were dropped. A key keeps its (empty) slot so its
+// worker exits after the apply it is running.
+func (in *intake) dropQueued() int {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	dropped := 0
+	for key, q := range in.queues {
+		for _, d := range q {
+			in.ledger.Forget(d.ID)
+			in.total--
+			in.bytes -= len(d.Payload)
+			dropped++
+		}
+		in.queues[key] = nil
+	}
+	if in.total == 0 {
+		in.idle.Broadcast()
+	}
+	return dropped
 }
 
 // Flush persists the ledger without closing (before an exec).
