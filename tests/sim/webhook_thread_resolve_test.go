@@ -122,7 +122,7 @@ func TestWebhookThreadUnresolve_InvalidatesTheDeepCache(t *testing.T) {
 	env, issue, pr, thread := threadEnv(t)
 	st, _ := env.Engine.StoreItemForTest(env.OwnerRepo, issue)
 	if st.LastDeepFetchAt.IsZero() {
-		t.Skip("item was not deep fetched; nothing to invalidate")
+		t.Fatalf("item was not deep fetched; the unresolved-thread invalidation would be checked vacuously")
 	}
 	env.BoardCache.ApplyDelta("pull_request_review_thread", capturedDelivery(t, "pull_request_review_thread_unresolved", func(d map[string]any) {
 		d["thread"].(map[string]any)["node_id"] = thread
@@ -169,7 +169,13 @@ func TestWebhookCommentEditDelete_SeenWithoutRefetch(t *testing.T) {
 	before := readCalls(env)
 	env.BoardCache.ApplyDelta("issue_comment", capturedDelivery(t, "issue_comment_edited", rewrite))
 	st, _ := env.Engine.StoreItemForTest(env.OwnerRepo, issue)
-	if len(st.Comments) == 0 || st.Comments[0].Body != "probe comment edited" {
+	edited := false
+	for _, c := range st.Comments {
+		if c.DatabaseID == dbID && c.Body == "probe comment edited" {
+			edited = true
+		}
+	}
+	if !edited {
 		t.Fatalf("edit not applied: %+v", st.Comments)
 	}
 	env.BoardCache.ApplyDelta("issue_comment", capturedDelivery(t, "issue_comment_deleted", rewrite))
