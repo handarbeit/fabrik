@@ -2426,6 +2426,14 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// Safe to reuse after the TerminalFlagSet Apply below: that mutation only
 		// touches the Terminal field, which none of the later reuses inspect.
 		admitSnap, admitErr := e.store.Get(repo, item.Number)
+		// An engine with no board cache has no listing path, so an item that skips the
+		// deep fetch below would keep labels older than this poll's listing in the Store —
+		// and the dispatch re-read (refreshDispatchItem, #2350) overlays the Store onto the
+		// candidate. Apply the listing for items the Store already holds; unknown items stay
+		// unrecorded so admission (e) is unchanged.
+		if admitErr == nil && e.cache() == nil {
+			e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: repo, Number: item.Number, Item: item})
+		}
 		// Terminal skip: skip items flagged terminal while still in the same cleanup
 		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
 		// bumps updatedAt but Fabrik has nothing left to do for them.
