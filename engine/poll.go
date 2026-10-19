@@ -2133,9 +2133,26 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		item := item
 		iKey := issueKey(item, e.defaultRepo())
 		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+		// Re-read the candidate from the Store (#2350): Phase 1/2 and the settle
+		// scans of this poll may have paused, relabelled or revalidated it since
+		// the copy was captured. The refreshed item is what is decided on and what
+		// processItem receives.
+		polled := item
+		item, rereadChanged := e.refreshDispatchItem(item)
 		// Full check including comments (populated by deep fetch above).
 		needs, retryIn := e.itemNeedsWorkRetryAt(item)
 		if !needs {
+			if rereadChanged {
+				if staleNeeds, _ := e.itemNeedsWorkRetryAt(polled); staleNeeds {
+					// An earlier phase of this poll took the item out of dispatch.
+					// Nothing is recorded against it (no worker, slot, requeue or
+					// cooldown); the periodic re-evaluation is re-armed so it is not
+					// forgotten if that decision is later reversed (ADR 2096).
+					e.logf(item.Number, "dispatch", "skipping dispatch: %s earlier in this poll\n", dispatchSkipReason(polled, item))
+					e.rearmPeriodicReEval(item)
+					continue
+				}
+			}
 			e.recordRetryBackoffCooldown(item, retryIn)
 			continue
 		}

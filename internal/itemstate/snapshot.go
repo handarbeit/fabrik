@@ -515,3 +515,7 @@ func (s Snapshot) ObservedAt(fact string) time.Time {
 
 // LastDeepFetchAt returns when a deep fetch was last applied, zero if never.
 func (s Snapshot) LastDeepFetchAt() time.Time { return s.state.LastDeepFetchAt }
+
+// LabelsKnown reports whether the Store holds a label set for the item (a
+// populated one, as opposed to a probe-seeded record that carries none).
+func (s Snapshot) LabelsKnown() bool { return s.state.LabelsKnown }
