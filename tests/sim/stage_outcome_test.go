@@ -251,3 +251,56 @@ func TestStageOutcome_Sim_MovedHeadDiscardsTheRecord(t *testing.T) {
 	// completion write still failing, that second run records afresh.
 	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") >= 2 }, 40)
 }
+
+// seedCommentPassCompletion files an item whose Specify stage already ran (its stage comment
+// is there, the completion label is not) with a human comment pending: the comment pass
+// completes the stage, the audit case of ADR 2394.
+func seedCommentPassCompletion(t *testing.T, env *Env) int {
+	t.Helper()
+	num := FileIssue(t, env, "comment pass completes (#2394)", "body", "Specify")
+	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "fabrik-bot", "🏭 **Fabrik — stage: Specify**\n\nEarlier output that asked a question.")
+	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "maintainer", "here is the answer")
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("SeedComment: %v", err)
+	}
+	return num
+}
+
+// Audit finding (a), FR-011: a comment pass that completes the stage but cannot write the
+// completion label must not make the whole stage run again.
+func TestStageOutcome_Sim_CommentPassCompletionIsRecordedNotRerun(t *testing.T) {
+	t.Parallel()
+	env := stageOutcomeEnv(t)
+	failCompletionLabel(env, simgh.ErrDeadlineExceeded())
+	num := seedCommentPassCompletion(t, env)
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.CommentCallCount("Specify") >= 1 }, 40)
+	runOutcomePolls(t, env, 10)
+	if got := env.Claude.StageCallCount("Specify"); got != 0 {
+		t.Fatalf("the stage was dispatched %d time(s) after its comment pass completed it, want 0\n\n%s", got, diagnostics(env))
+	}
+	if got := env.Claude.CommentCallCount("Specify"); got != 1 {
+		t.Fatalf("%d comment pass(es), want exactly 1", got)
+	}
+
+	env.Sim.Faults().ClearAll()
+	WaitForIssueLabel(t, env, num, "stage:Specify:complete", 40)
+	if got := env.Claude.StageCallCount("Specify"); got != 0 {
+		t.Fatalf("the stage was dispatched %d time(s), want 0", got)
+	}
+}
+
+// Neutralised, the same comment-pass completion loss re-dispatches the stage.
+func TestStageOutcome_Sim_CommentPassNeutralisedRedispatches(t *testing.T) {
+	t.Parallel()
+	env := stageOutcomeEnv(t)
+	env.Engine.SetStageOutcomeRecordDisabledForTest(true)
+	failCompletionLabel(env, simgh.ErrDeadlineExceeded())
+	seedCommentPassCompletion(t, env)
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.CommentCallCount("Specify") >= 1 }, 40)
+	runOutcomePolls(t, env, 10)
+	if got := env.Claude.StageCallCount("Specify"); got < 1 {
+		t.Fatalf("with recording neutralised the stage was never re-dispatched — the audit scenario does not reproduce the loss\n\n%s", diagnostics(env))
+	}
+}

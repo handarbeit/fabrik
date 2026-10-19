@@ -88,5 +88,5 @@ Exactly three non-test sites invoke the model.
   fails, cache-served poll) covers the hold.
 - A lock write that timed out but reached the forge leaves a stray `fabrik:locked:<id>`; the
   existing stale-lock sweeps remove it. No best-effort remove is attempted (it would likely fail).
-- Out of scope, unchanged: recording a run that finished during the outage, and capping
+- Out of scope here, delivered by ADR 2394: recording a run that finished during the outage. Still out of scope: capping
   re-dispatches.

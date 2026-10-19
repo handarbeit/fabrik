@@ -348,8 +348,8 @@ func TestPushGuard_MarkPRReadyCallersActOnRefusal(t *testing.T) {
 			}
 		}
 	}
-	if calls != 3 {
-		t.Errorf("expected 3 production markPRReady call sites, found %d — update this test and docs/state-machine.md", calls)
+	if calls != 4 {
+		t.Errorf("expected 4 production markPRReady call sites, found %d — update this test and docs/state-machine.md", calls)
 	}
 }
 
