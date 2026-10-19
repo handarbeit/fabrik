@@ -334,6 +334,7 @@ type Engine struct {
 	landing                   landingState           // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
 	pushGuardDisabled         atomic.Bool            // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
 	issueBodyWriteThroughOff  atomic.Bool            // test seam: SetIssueBodyWriteThroughDisabledForTest (#2346)
+	cachelessWriteThroughOff  atomic.Bool            // test seam: SetCachelessWriteThroughDisabledForTest (#2350)
 	pauseGuardOff             atomic.Bool            // test seam: SetPauseGuardDisabledForTest (#2341)
 	pauseGuardUnreadOK        atomic.Bool            // test seam: SetPauseGuardUnreadFailOpenForTest (#2341)
 	completionMergedCheckOff  atomic.Bool            // test seam: SetCompletionMergedCheckDisabledForTest (#2299)

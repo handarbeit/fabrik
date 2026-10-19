@@ -443,7 +443,7 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
 		return // preserve fabrik:awaiting-ci so the next poll retries
-	} else if c := e.cache(); c != nil {
+	} else if c := e.localWriter(); c != nil {
 		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 	}
 	if stage.Name == "Validate" {

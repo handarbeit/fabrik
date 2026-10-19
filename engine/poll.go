@@ -745,7 +745,7 @@ func (e *Engine) cleanupLockedIssues() {
 			if errors.Is(err, gh.ErrNotFound) {
 				// Already removed on GitHub: success, like applyLabelRemove.
 				e.logf(num, "shutdown", "lock label already absent on GitHub\n")
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
 				}
 			} else {
@@ -753,7 +753,7 @@ func (e *Engine) cleanupLockedIssues() {
 			}
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
 			}
 		}
@@ -781,7 +781,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 			}
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lockLabel)
 			}
 		}
@@ -880,7 +880,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
 				if errors.Is(err, gh.ErrNotFound) {
 					// Label already absent on GitHub — desired state achieved; sync cache.
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 					}
 					// #1314: this sweep bypasses syncLabelRemoval (it does its own
@@ -894,7 +894,7 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 				}
 			} else {
 				e.logf(num, "poll", "removed transient label %q from closed issue\n", label)
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
 				e.clearLabelAppliedAtNow(item, label)

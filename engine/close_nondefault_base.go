@@ -90,7 +90,7 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 		e.logf(item.Number, "pr-terminal", "explicit close of #%d failed: %v\n", item.Number, err)
 		return
 	}
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
 }

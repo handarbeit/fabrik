@@ -77,14 +77,14 @@ func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
 				res.Cancel()
 				if errors.Is(rerr, gh.ErrNotFound) {
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 					}
 				} else {
 					e.logf(item.Number, "warn", "revalidate: could not remove label from non-Validate issue: %v\n", rerr)
 				}
 			} else {
-				if c := e.cache(); c != nil {
+				if c := e.localWriter(); c != nil {
 					c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 				}
 			}

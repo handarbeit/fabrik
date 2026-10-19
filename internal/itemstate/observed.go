@@ -484,13 +484,22 @@ func unionRecentComments(cur, read []gh.Comment, cutoff time.Time) []gh.Comment 
 	if len(cur) == 0 {
 		return read
 	}
-	have := make(map[string]bool, len(read))
+	haveID := make(map[string]bool, len(read))
+	haveDB := make(map[int]bool, len(read))
 	for _, c := range read {
-		have[c.ID] = true
+		if c.ID != "" {
+			haveID[c.ID] = true
+		}
+		if c.DatabaseID != 0 {
+			haveDB[c.DatabaseID] = true
+		}
 	}
 	var extra []gh.Comment
 	for _, c := range cur {
-		if !have[c.ID] && !c.CreatedAt.IsZero() && !c.CreatedAt.Before(cutoff) {
+		// An engine-written comment carries only its database ID, a read one
+		// both: match on either so the same comment is never held twice.
+		seen := (c.ID != "" && haveID[c.ID]) || (c.DatabaseID != 0 && haveDB[c.DatabaseID])
+		if !seen && !c.CreatedAt.IsZero() && !c.CreatedAt.Before(cutoff) {
 			extra = append(extra, c)
 		}
 	}

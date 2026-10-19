@@ -3682,7 +3682,7 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 		pausedRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:paused")
 		}
 	}
@@ -3691,7 +3691,7 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 		inputRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	} else {
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
 		}
 	}

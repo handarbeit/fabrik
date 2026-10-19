@@ -334,7 +334,7 @@ func (e *Engine) runStartupCleanup() {
 					e.logf(number, "warn", "could not remove stale in_progress label %q: %v\n", label, err)
 				} else {
 					e.logf(number, "startup", "removed stale label %q\n", label)
-					if c := e.cache(); c != nil {
+					if c := e.localWriter(); c != nil {
 						c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
 					}
 				}
@@ -472,7 +472,7 @@ func (e *Engine) runStartupCleanup() {
 				e.logf(number, "warn", "could not restore label %q: %v\n", completeLabel, err)
 				continue
 			}
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repoName, number), completeLabel)
 			}
 		}
@@ -480,7 +480,7 @@ func (e *Engine) runStartupCleanup() {
 			e.logf(number, "warn", "could not remove stale reworking label: %v\n", err)
 			continue
 		}
-		if c := e.cache(); c != nil {
+		if c := e.localWriter(); c != nil {
 			c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), reworkingLabel)
 		}
 		cleanedReworking++
@@ -545,7 +545,7 @@ func (e *Engine) runStartupOrphanedInProgressScan() {
 				continue
 			}
 			e.logf(number, "startup", "removed stale label %q\n", label)
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
 			}
 			cleaned++
@@ -628,7 +628,7 @@ func (e *Engine) runStartupBareInProgressScan() {
 				continue
 			}
 			e.logf(number, "startup", "removed bare in_progress label %q (no lock, no terminal sibling)\n", label)
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
 			}
 			cleaned++

@@ -141,7 +141,7 @@ func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
 // engine-autonomous write.
 func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, requester string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyLabelAddedBy(boardcache.ItemKey(owner+"/"+repo, item.Number), label, requester)
 	}
 	// Reaching this point means the caller's GitHub label-add mutation already
@@ -309,7 +309,7 @@ func (e *Engine) syncLabelRemoval(item gh.ProjectItem, label string, echo bool) 
 // syncLabelAddBy (#2125).
 func (e *Engine) syncLabelRemovalBy(item gh.ProjectItem, label string, echo bool, requester string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyLabelRemovedBy(boardcache.ItemKey(owner+"/"+repo, item.Number), label, requester)
 	}
 	e.clearLabelAppliedAtNow(item, label)
@@ -393,7 +393,7 @@ func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool)
 		e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 		return 0, err
 	}
-	if c := e.cache(); c != nil {
+	if c := e.localWriter(); c != nil {
 		c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 			DatabaseID: dbID, Body: body, Author: e.selfLogin(), CreatedAt: time.Now(),
 		})

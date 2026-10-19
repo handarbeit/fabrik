@@ -147,3 +147,19 @@ func TestLiveDeepFetch_KeepsCommentRecordedAfterReadStarted(t *testing.T) {
 		t.Fatalf("non-live apply must replace wholesale: %v", snap.State().Comments)
 	}
 }
+
+func TestLiveDeepFetch_EngineCommentWithOnlyDatabaseIDIsNotDuplicated(t *testing.T) {
+	s := liveReadStore(t)
+	start := time.Now()
+	// The engine's write-through comment has a database ID but no node ID; the
+	// live read returns the same comment with both.
+	s.Apply(LocalCommentAdded{Repo: orderRepo, Number: 1, Comment: gh.Comment{DatabaseID: 77, CreatedAt: start.Add(time.Second)}})
+	fresh := testProjectItem(orderRepo, 1)
+	fresh.DeepFetchLive = true
+	fresh.DeepFetchStartedAt = start
+	fresh.Comments = []gh.Comment{{ID: "IC_77", DatabaseID: 77, CreatedAt: start.Add(time.Second)}}
+	snap, _, _ := s.Apply(ItemDeepFetched{Repo: orderRepo, Number: 1, FreshState: fresh})
+	if n := len(snap.State().Comments); n != 1 {
+		t.Fatalf("comment held %d times, want once: %+v", n, snap.State().Comments)
+	}
+}

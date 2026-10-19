@@ -263,7 +263,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		if existing != nil && existing.Body != newComment {
 			if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, newComment); err != nil {
 				e.logf(item.Number, "warn", "could not update blocked comment: %v\n", err)
-			} else if c := e.cache(); c != nil {
+			} else if c := e.localWriter(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(itemRepo, item.Number), gh.Comment{
 					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.selfLogin(), CreatedAt: time.Now(),
 				})
@@ -295,14 +295,14 @@ func (e *Engine) removeBlockedIfResolved(owner, repo string, issueNumber int) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:blocked")
 		if err == nil {
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
 			}
 			return
 		}
 		if errors.Is(err, gh.ErrNotFound) {
 			// Label already absent — treat as success and sync cache.
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
 			}
 			return

@@ -113,7 +113,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 			res.Cancel()
 			e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
 		} else {
-			if c := e.cache(); c != nil {
+			if c := e.localWriter(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: comment, Author: e.selfLogin(),
 				})
