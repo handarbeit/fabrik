@@ -86,7 +86,11 @@ type intake struct {
 
 	mu     sync.Mutex
 	queues map[string][]delivery
-	total  int
+	// applying maps a sequence number to the ID of each delivery whose apply has
+	// started and not finished (they are counted in total but no longer queued).
+	applying map[uint64]string
+	applySeq uint64
+	total    int
 	// bytes is the payload bytes of every delivery counted in total.
 	bytes  int
 	closed bool
@@ -100,12 +104,13 @@ type intake struct {
 
 func newIntake(ledger *deliveryLedger, apply func(eventType string, payload []byte), logf func(format string, args ...any), now func() time.Time) *intake {
 	in := &intake{
-		ledger: ledger,
-		apply:  apply,
-		logf:   logf,
-		now:    now,
-		sem:    make(chan struct{}, intakeConcurrency),
-		queues: make(map[string][]delivery),
+		ledger:   ledger,
+		apply:    apply,
+		logf:     logf,
+		now:      now,
+		sem:      make(chan struct{}, intakeConcurrency),
+		queues:   make(map[string][]delivery),
+		applying: make(map[uint64]string),
 	}
 	in.idle = sync.NewCond(&in.mu)
 	return in
@@ -182,27 +187,36 @@ func popFront(q []delivery) (delivery, []delivery) {
 }
 
 // work drains one key's queue in order, then exits (a goroutine per ACTIVE key).
+// It takes an apply slot BEFORE popping: a delivery waiting for a slot stays in
+// its queue, where dropQueued (Close) and forgetPending (Quiesce) can see it. A
+// popped delivery is therefore always one whose apply is starting, never one
+// parked on the semaphore.
 func (in *intake) work(key string) {
 	defer in.wg.Done()
 	for {
+		in.sem <- struct{}{}
 		in.mu.Lock()
 		q := in.queues[key]
 		if len(q) == 0 {
 			delete(in.queues, key)
 			in.mu.Unlock()
+			<-in.sem
 			return
 		}
 		// Keep the key present (len>0 slot semantics): shrink, don't delete, so
 		// Submit keeps seeing this key as running until the worker exits.
 		var d delivery
 		d, in.queues[key] = popFront(q)
+		in.applySeq++
+		seq := in.applySeq
+		in.applying[seq] = d.ID
 		in.mu.Unlock()
 
-		in.sem <- struct{}{}
 		in.run(d)
 		<-in.sem
 
 		in.mu.Lock()
+		delete(in.applying, seq)
 		in.total--
 		in.bytes -= len(d.Payload)
 		if in.total == 0 {
@@ -275,6 +289,9 @@ func (in *intake) Close(grace time.Duration) {
 // records as seen but that is still queued or applying would otherwise be lost to
 // the exec while its redelivery stays suppressed. The wait is bounded and nothing
 // is torn down, so a failed exec leaves a process that Resume returns to service.
+// If the grace expires with work still pending, the IDs of those deliveries are
+// forgotten in the ledger (the deliveries keep running) so the flush that follows
+// does not persist as seen a delivery the new process never applied.
 func (in *intake) Quiesce(grace time.Duration) bool {
 	if in == nil {
 		return true
@@ -292,10 +309,18 @@ func (in *intake) Quiesce(grace time.Duration) bool {
 		in.idle.Wait()
 	}
 	pending := in.total
+	if pending > 0 {
+		// Whatever is still queued or applying may be lost to the exec, and the
+		// caller flushes the ledger next: forget those IDs so the flush does not
+		// persist deliveries the new process never applied (their redelivery is
+		// then accepted, as after a Close drop). The deliveries themselves keep
+		// running, so a failed exec that Resumes loses nothing.
+		in.forgetPendingLocked()
+	}
 	in.mu.Unlock()
 	timer.Stop()
 	if pending > 0 {
-		in.log("intake quiesce: %d delivery(ies) still queued or applying after %v — proceeding; reconcile will heal them\n", pending, grace)
+		in.log("intake quiesce: %d delivery(ies) still queued or applying after %v — proceeding; their IDs are forgotten and reconcile will heal them\n", pending, grace)
 		return false
 	}
 	return true
@@ -309,6 +334,19 @@ func (in *intake) Resume() {
 	in.mu.Lock()
 	in.quiesced = false
 	in.mu.Unlock()
+}
+
+// forgetPendingLocked forgets in the ledger the ID of every queued and applying
+// delivery. in.mu must be held.
+func (in *intake) forgetPendingLocked() {
+	for _, q := range in.queues {
+		for _, d := range q {
+			in.ledger.Forget(d.ID)
+		}
+	}
+	for _, id := range in.applying {
+		in.ledger.Forget(id)
+	}
 }
 
 // dropQueued discards every delivery that has not started applying, forgetting

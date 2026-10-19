@@ -402,3 +402,84 @@ func TestIntake_CloseDropsQueuedDeliveriesWhenTheGraceExpires(t *testing.T) {
 		t.Fatal("a dropped delivery's ID stayed in the ledger and its redelivery would be suppressed")
 	}
 }
+
+// Slots saturated by stuck applies on two keys; deliveries on two more keys wait
+// for a slot. When Close's grace expires those waiting deliveries are still
+// queued, so they are dropped and forgotten: nothing but the two applies already
+// running may run after Close returns.
+func TestIntake_CloseDropsDeliveriesWaitingForASlot(t *testing.T) {
+	old := intakeConcurrency
+	intakeConcurrency = 2
+	t.Cleanup(func() { intakeConcurrency = old })
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) {
+		started <- struct{}{}
+		<-release
+		rec.apply(et, p)
+	})
+	for i := 1; i <= 4; i++ { // keys 1 and 2 take the two slots; 3 and 4 wait
+		if !in.Submit(delivery{ID: fmt.Sprintf("d%d", i), EventType: "issues", Payload: payloadFor("o/r", i)}) {
+			t.Fatalf("delivery d%d was not queued", i)
+		}
+		if i <= 2 {
+			<-started
+		}
+	}
+	in.Close(100 * time.Millisecond)
+
+	close(release)
+	in.wg.Wait()
+	if got := len(rec.list()); got != 2 {
+		t.Fatalf("%d deliveries applied, want 2 (only those already applying); ones waiting for a slot must be dropped at Close", got)
+	}
+	in.mu.Lock()
+	total, held := in.total, in.bytes
+	in.mu.Unlock()
+	if total != 0 || held != 0 {
+		t.Fatalf("total=%d bytes=%d after the drop, want 0", total, held)
+	}
+	if !in.ledger.Accept("d3", time.Now()) || !in.ledger.Accept("d4", time.Now()) {
+		t.Fatal("a dropped delivery's ID stayed in the ledger and its redelivery would be suppressed")
+	}
+}
+
+// When Quiesce's grace expires with deliveries pending, their IDs are forgotten
+// before the caller flushes the ledger, so the flush does not persist as seen
+// deliveries the exec'd process never applied. The deliveries keep running.
+func TestIntake_QuiesceTimeoutForgetsPendingIDs(t *testing.T) {
+	old := intakeConcurrency
+	intakeConcurrency = 1
+	t.Cleanup(func() { intakeConcurrency = old })
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 4)
+	rec := &recorder{}
+	in := newTestIntake(func(et string, p []byte) {
+		started <- struct{}{}
+		<-release
+		rec.apply(et, p)
+	})
+	in.Submit(delivery{ID: "applying", EventType: "issues", Payload: payloadFor("o/r", 1)})
+	<-started
+	in.Submit(delivery{ID: "queued", EventType: "issues", Payload: payloadFor("o/r", 2)})
+
+	if in.Quiesce(50 * time.Millisecond) {
+		t.Fatal("Quiesce reported drained with a blocked apply")
+	}
+	for _, id := range []string{"applying", "queued"} {
+		if !in.ledger.Accept(id, time.Now()) {
+			t.Fatalf("%s stayed recorded as seen after a timed-out Quiesce", id)
+		}
+		in.ledger.Forget(id)
+	}
+
+	in.Resume()
+	close(release)
+	in.Drain()
+	if got := len(rec.list()); got != 2 {
+		t.Fatalf("%d deliveries applied after Resume, want 2 (Quiesce must not drop them)", got)
+	}
+}
