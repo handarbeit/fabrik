@@ -344,6 +344,13 @@ func TestRefreshDispatchItem_CachelessEngineSeesCompletionLabelRemoval(t *testin
 		t.Fatalf("dispatch re-read kept the stripped completion label: changed=%v labels=%v", changed, got.Labels)
 	}
 
+	// The add that restores it is mirrored too (else the Store would keep reading the
+	// stage as incomplete and the item would be re-dispatched).
+	eng.addLabel(item, "stage:Validate:complete")
+	if snap, _ := eng.store.Peek("owner/repo", 1); !hasLabel(snap.State().Labels, "stage:Validate:complete") {
+		t.Fatalf("completion-label add did not reach the cacheless Store: %v", snap.State().Labels)
+	}
+
 	// An add of a gate label is not mirrored into a cacheless Store.
 	eng.addLabel(item, "fabrik:awaiting-ci")
 	snap, _ := eng.store.Peek("owner/repo", 1)

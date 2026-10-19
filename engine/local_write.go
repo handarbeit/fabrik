@@ -78,7 +78,7 @@ func (w storeWriter) apply(key string, build func(repo string, number int) items
 
 func (w storeWriter) ApplyLabelAdded(key, label string) { w.ApplyLabelAddedBy(key, label, "") }
 func (w storeWriter) ApplyLabelAddedBy(key, label, requester string) {
-	if !cachelessMirroredLabel(label) {
+	if !cachelessMirroredLabel(label) && !isStageCompleteLabel(label) {
 		return
 	}
 	w.apply(key, func(repo string, n int) itemstate.Mutation {
@@ -106,9 +106,11 @@ func (w storeWriter) ApplyCommentAdded(key string, comment gh.Comment) {
 }
 
 // isStageCompleteLabel reports whether label is a stage completion label
-// (stage:<name>:complete). Its REMOVAL is mirrored into a cacheless Store (a phase
-// of the poll that strips it, e.g. handleValidateSHAInvalidation, must be seen by
-// the dispatch re-read, FR-003); its ADD is not, for the reason below.
+// (stage:<name>:complete). Both its removal and its add are mirrored into a
+// cacheless Store: a phase of the poll that strips it (handleValidateSHAInvalidation,
+// the rework bracket) must be seen by the dispatch re-read (FR-003), and the add that
+// restores it must be seen too, or the Store would keep reading the stage as
+// incomplete and the item would be re-dispatched.
 func isStageCompleteLabel(label string) bool {
 	return strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":complete")
 }
@@ -116,11 +118,11 @@ func isStageCompleteLabel(label string) bool {
 // cachelessMirroredLabel reports whether a label write reaches the Store of an
 // engine with no board cache. Only the labels that decide whether an item still
 // needs work are mirrored: the pause pair, the dependency marker and the
-// revalidation trigger. The gate labels (awaiting-ci, awaiting-review, the stage
-// completion labels) keep reaching the Store at the next poll's listing, as they
-// did before; mirroring them at the instant of the write exposes transient
-// intermediate label states to the channel deriver that a poll-start listing
-// never showed (#2350).
+// revalidation trigger, plus stage completion labels (isStageCompleteLabel). The
+// gate labels (awaiting-ci, awaiting-review) keep reaching the Store at the next
+// poll's listing, as they did before; mirroring them at the instant of the write
+// exposes transient intermediate label states to the channel deriver that a
+// poll-start listing never showed (#2350).
 func cachelessMirroredLabel(label string) bool {
 	switch label {
 	case "fabrik:paused", "fabrik:awaiting-input", "fabrik:blocked", "fabrik:revalidate":
