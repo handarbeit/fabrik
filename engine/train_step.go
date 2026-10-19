@@ -410,7 +410,14 @@ func appendEjected(ejected []int, input, survivors []trainMember) []int {
 // recordTrialIfCounts is the runaway-guard accounting assembleAndValidate does after a
 // trial: every trial except a green one, a CI-infrastructure abandon, or a cancelled
 // one counts as "no progress" (#1528, #2052, #2046).
-func (e *Engine) recordTrialIfCounts(ctx context.Context, p trialParams, result TrainCIResult, err error) {
+//
+// A green verdict also breaks the trial members' runs of consecutive ejections (#2349).
+func (e *Engine) recordTrialIfCounts(ctx context.Context, p trialParams, members []trainMember, result TrainCIResult, err error) {
+	if result == TrainCIGreen && err == nil {
+		for _, m := range members {
+			e.resetEjectionCountOnGreen(p.owner, p.repo, m.item.Number)
+		}
+	}
 	if result != TrainCIGreen && result != TrainCIInfra && result != TrainCIStale && !trainCancelled(ctx, err) {
 		e.recordTrial(p.trainKey)
 	}
@@ -510,7 +517,7 @@ func (e *Engine) mainOutcome(ctx context.Context, r *trainRun, trialName string,
 	current := r.current()
 	partitionBase := r.rec.PartitionBase
 
-	e.recordTrialIfCounts(ctx, p, result, aerr)
+	e.recordTrialIfCounts(ctx, p, survivors, result, aerr)
 	r.clearTrial()
 
 	if aerr != nil {
@@ -703,7 +710,7 @@ func (e *Engine) halfOutcome(ctx context.Context, r *trainRun, trialName string,
 	repoKey := p.repoKey()
 	trainKey := p.trainKey
 
-	e.recordTrialIfCounts(ctx, p, result, err)
+	e.recordTrialIfCounts(ctx, p, survivors, result, err)
 	r.clearTrial()
 	r.mu.Lock()
 	if r.rec.Bisect != nil {
@@ -828,7 +835,7 @@ func (e *Engine) ejectPoisoner(ctx context.Context, r *trainRun) stepOut {
 		// isolating run itself always validates the poisoner alone, so "the other batch
 		// members" means who else rode in this train attempt.
 		e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
-		e.ejectMember(p.owner, p.repo, poisoner.item,
+		e.ejectMemberAtHead(p.owner, p.repo, poisoner.item, poisoner.headSHA,
 			fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
 			diag, red, true)
 		ep.notePoisoner(poisoner.item.Number)
@@ -999,7 +1006,7 @@ func (e *Engine) singleOutcome(ctx context.Context, r *trainRun, m trainMember, 
 	repoKey := p.owner + "/" + p.repo
 	trainKey := p.trainKey
 
-	e.recordTrialIfCounts(ctx, p, result, err)
+	e.recordTrialIfCounts(ctx, p, survivors, result, err)
 	r.clearTrial()
 	if trainCancelled(ctx, err) {
 		// #2046: cancelled, not a verdict — stop without touching the rest.

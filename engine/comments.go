@@ -247,7 +247,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// any side effect (reactions, labels, worktree setup) so a usage limited cycle is
 	// a full no-op — the comment remains "new" and is retried on the next poll
 	// once dispatch resumes, rather than being consumed by a doomed invocation.
-	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(e.now()); usageLimited {
 		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping comment review\n")
 		return didNotRunAccountUsageLimited, nil
 	}
@@ -989,7 +989,7 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, e.now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared — a generic,
 			// unrelated error proves nothing about account-wide usage-limit state and must

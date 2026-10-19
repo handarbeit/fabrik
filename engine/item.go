@@ -1158,7 +1158,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	// StallHintPending, so it must not run on a dispatch that will never actually invoke
 	// Claude. Otherwise a detected stall's one-shot corrective hint would be silently
 	// discarded here and never reach any invocation at all.
-	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(e.now()); usageLimited {
 		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping invocation")
 		err = &claudeUsageLimitError{Message: "account usage limit active"}
 		return output, completed, usage, totalMultiple, err
@@ -1278,7 +1278,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, e.now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
 			// "early clear on success"). A generic, unrelated error proves nothing about
@@ -3346,7 +3346,7 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		// Only the item whose invocation hit the limit is written (#2048): the
 		// usage-limit hold is account-wide, but one write per detection keeps volume low
 		// and the per-item label sweep already clears the label.
-		if until, ok := e.claudeUsageLimitedUntilTime(time.Now()); ok {
+		if until, ok := e.claudeUsageLimitedUntilTime(e.now()); ok {
 			e.setStatusLine(item, statusLineClaudeLimit(until))
 		}
 	}

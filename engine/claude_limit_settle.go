@@ -5,6 +5,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // claudeClearLimitLabel is an operator-applied command label, applicable to
@@ -55,18 +56,22 @@ func (e *Engine) settleClaudeLimitClearRequests(board *gh.ProjectBoard) {
 // durable-state leak as the orphaned stage:*:in_progress labels fixed in
 // #1135.
 //
-// The label is purely cosmetic: dispatch is gated by claudeUsageLimitedUntil,
-// not this label (see item.go's claudeUsageLimitedUntilTime call sites), so a
-// failed removal self-heals on the next poll and no retry/escalate
-// machinery is needed here — unlike settleMergeTrainMemberCloses/
-// settleNonDefaultBaseCloses, which guard an outstanding mutation with real
-// consequences.
+// Dispatch is gated by claudeUsageLimitedUntil, not this label. Since #2349 the hold
+// survives a restart (decision_state.go) and the label is the dedupe key for the
+// explanatory comment, so the sweep must not run while the hold's true state is unknown:
+// on the first poll after a start with no persisted hold file but labelled items (state from
+// before the hold was persisted, or a lost file) the hold is seeded from the labels
+// (seedUsageLimitFromLabels) and the sweep is skipped for that poll. A failed removal
+// self-heals on the next poll.
 //
 // Scoped to open items only — cleanupClosedIssueTransientLabels already
 // sweeps fabrik:claude-limit (and other transient lifecycle labels) from
 // closed issues every poll.
 func (e *Engine) settleClaudeLimitLabelSweep(board *gh.ProjectBoard) {
-	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+	if e.seedUsageLimitFromLabels(board) {
+		return
+	}
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(e.now()); usageLimited {
 		return
 	}
 	for _, item := range board.Items {
@@ -75,4 +80,70 @@ func (e *Engine) settleClaudeLimitLabelSweep(board *gh.ProjectBoard) {
 		}
 		e.removeLabel(item, "fabrik:claude-limit")
 	}
+}
+
+// usageLimitSeedMaxReads bounds the label-time reads the one-shot seeding makes.
+const usageLimitSeedMaxReads = 5
+
+// seedUsageLimitFromLabels runs once, on the first poll with a board (#2349). When
+// persistence is on, no usable hold file existed at startup and open items carry
+// fabrik:claude-limit, the account may still be limited: it seeds a hold lasting until the
+// latest label-applied time plus the fallback backoff (bounded by the 8-day ceiling; a read
+// error counts as "applied now", failing closed), persists it, and reports true so the
+// sweep skips this poll. A usable file at startup is authoritative and nothing is seeded.
+func (e *Engine) seedUsageLimitFromLabels(board *gh.ProjectBoard) bool {
+	// An empty board is an unreadable one (pruneDecisionState treats it the same way):
+	// do not spend the one-shot seed on it, or the next poll's sweep would strip the
+	// labels the seed exists to protect.
+	if board == nil || len(board.Items) == 0 {
+		return false
+	}
+	if e.usageLimitSeedChecked.Swap(true) {
+		return false
+	}
+	if e.decisionStore == nil || e.usageLimitFileAtStart {
+		return false
+	}
+	if _, active := e.claudeUsageLimitedUntilTime(e.now()); active {
+		return false
+	}
+	var labelled []gh.ProjectItem
+	for _, item := range board.Items {
+		if !item.IsClosed && hasLabel(item.Labels, "fabrik:claude-limit") {
+			labelled = append(labelled, item)
+		}
+	}
+	if len(labelled) == 0 {
+		return false
+	}
+	now := e.now()
+	var latest time.Time
+	for i, item := range labelled {
+		if i >= usageLimitSeedMaxReads {
+			break
+		}
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		at, err := e.labelAppliedAt(item, owner, repo, "fabrik:claude-limit")
+		if err != nil || at.IsZero() {
+			at = now
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	deadline := latest.Add(claudeUsageLimitFallbackBackoff)
+	if ceiling := now.Add(usageLimitMaxResetHorizon); deadline.After(ceiling) {
+		deadline = ceiling
+	}
+	if !now.Before(deadline) {
+		return false // the evidence says the fallback window has already passed
+	}
+	e.claudeUsageLimitMu.Lock()
+	e.claudeUsageLimitedUntil = deadline
+	e.claudeUsageLimitMu.Unlock()
+	e.persistUsageLimit()
+	e.logf(0, "claude-limit", "%d item(s) carry fabrik:claude-limit with no persisted hold; seeding a Claude dispatch hold until %s and deferring the label sweep\n", len(labelled), deadline.Format(time.RFC3339))
+	e.emitStructural(tui.ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: deadline})
+	e.channelNudge()
+	return true
 }

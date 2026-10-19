@@ -670,6 +670,10 @@ func (e *Engine) Run() error {
 	e.startChannelEvents()
 	defer e.closeChannelEvents()
 	e.startLocalAPI()
+	// #2349: a hold restored from disk is shown like a live one.
+	if until, held := e.claudeUsageLimitedUntilTime(e.now()); held {
+		e.emitStructural(tui.ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: until})
+	}
 	defer e.closeLocalAPI()
 
 	if e.events == nil {
@@ -1491,11 +1495,12 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v; running batch as fallback\n", gateErr)
 		}
 		if gateErr != nil || updatedAt.After(e.lastProjectUpdatedAt) {
+			sweepStart := time.Now()
 			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
 			if err != nil {
 				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
 			} else {
-				c.ApplyStatusBatch(updates)
+				c.ApplyStatusBatchAt(updates, sweepStart)
 				if gateErr == nil {
 					e.lastProjectUpdatedAt = updatedAt
 				}
@@ -1978,6 +1983,10 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// not the label), so a failed removal simply self-heals on the next poll.
 	e.settleClaudeLimitClearRequests(board)
 	e.settleClaudeLimitLabelSweep(board)
+
+	// Decision-state hygiene (#2349): drop persisted counters and gap budgets for items
+	// that closed or left the board so they never accumulate.
+	e.pruneDecisionState(board)
 
 	// Pending-decision anchors (#2120): reads, once per item, the GitHub time of
 	// the label a suspended item's age is anchored on, so the cache-only

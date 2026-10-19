@@ -1164,11 +1164,14 @@ func (m *mockGitHubClient) AddBlockedByIssue(issueNodeID, blockerNodeID string) 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
 // mu protects calls for concurrent-safe access.
 type mockClaudeInvoker struct {
-	mu                  sync.Mutex
-	invokeFn            func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
-	calls               []claudeInvokeCall
-	invokeForCommentsFn func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
-	forCommentsCalls    []commentInvokeCall
+	mu       sync.Mutex
+	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
+	calls    []claudeInvokeCall
+	// invokeForCommentsCtxFn, when set, takes precedence over invokeForCommentsFn and
+	// receives the invocation's context (#2349: stop-request cancellation tests).
+	invokeForCommentsCtxFn func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
+	invokeForCommentsFn    func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
+	forCommentsCalls       []commentInvokeCall
 }
 
 type claudeInvokeCall struct {
@@ -1201,8 +1204,12 @@ func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages
 	m.mu.Lock()
 	m.forCommentsCalls = append(m.forCommentsCalls, commentInvokeCall{stage.Name, issue.Number, workDir, opts})
 	fn := m.invokeForCommentsFn
+	ctxFn := m.invokeForCommentsCtxFn
 	fallback := m.invokeFn
 	m.mu.Unlock()
+	if ctxFn != nil {
+		return ctxFn(ctx, stage, issue, comments, workDir, opts)
+	}
 	if fn != nil {
 		return fn(stage, issue, comments, workDir, opts)
 	}

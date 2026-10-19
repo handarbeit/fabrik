@@ -261,6 +261,10 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				Number:      pi.Number,
 				LinkedPRNum: pi.LinkedPRNumber,
 				SHA:         pi.LinkedPRHeadSHA,
+				// The probe query's start orders the head against newer
+				// observations (#2348).
+				At:             fetchedAt,
+				AtIsFetchStart: true,
 			}})
 		}
 
