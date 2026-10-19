@@ -419,3 +419,53 @@ func TestHandleStageComplete_AwaitingCIArmResetsDispatchCount(t *testing.T) {
 		})
 	}
 }
+
+// The pause is recorded as soon as fabrik:paused is on the item, before the
+// comment: a crash between the label write and the record would otherwise leave
+// the label on with an unpaused record at the cap.
+func TestStageDispatch_PauseRecordedBeforeComment(t *testing.T) {
+	e, client := dispatchTestEngine(t, 2)
+	stage := testStageByName(t, "Research")
+	var pausedAtComment bool
+	client.addCommentFn = func(_, _ string, _ int, _ string) (int, error) {
+		rec, _ := readStageDispatch(e.stageDispatchPath(dispatchTestItem, "Research"))
+		pausedAtComment = rec.Paused
+		return 0, nil
+	}
+	for i := 0; i < 2; i++ {
+		e.recordStageDispatch(dispatchTestItem, "Research", dispatchOutcomeComplete, stageInputs{})
+	}
+	if !e.dispatchLimitReached(dispatchTestItem, stage) {
+		t.Fatal("expected a pause at the cap")
+	}
+	if !pausedAtComment {
+		t.Error("the Paused record must be written before the pause comment is posted")
+	}
+}
+
+func TestRemoveStageDispatches_DropsEveryRecordAndTempFile(t *testing.T) {
+	e, _ := dispatchTestEngine(t, 5)
+	e.recordStageDispatch(dispatchTestItem, "Research", dispatchOutcomeComplete, stageInputs{})
+	e.recordStageDispatch(dispatchTestItem, "Plan", dispatchOutcomeComplete, stageInputs{})
+	tmp := e.stageDispatchPath(dispatchTestItem, "Plan") + ".tmp"
+	if err := os.WriteFile(tmp, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e.removeStageDispatches(dispatchTestItem)
+	for _, p := range []string{e.stageDispatchPath(dispatchTestItem, "Research"), e.stageDispatchPath(dispatchTestItem, "Plan"), tmp} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed (stat err=%v)", p, err)
+		}
+	}
+}
+
+func TestPruneSessions_AgesOutDispatchTempFiles(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	tmp := seedSessionFile(t, filepath.Join(root, "issue-1"), "Research.dispatches.tmp", now.Add(-15*24*time.Hour))
+	noResolve := func(string) (string, bool) { return "", false }
+	pruneSessions(root, 14, now, "owner/repo", noResolve, func(string, int) bool { return false })
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Error("old dispatch temp file should be removed")
+	}
+}

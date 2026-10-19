@@ -2238,13 +2238,16 @@ to resume it.
 > pause labels. A stage that is legitimately re-dispatched many times (turn-cap
 > slices, up to `--max-slice-retries`, plus retries) stays below the default.
 >
-> Separately, a re-dispatch whose inputs are unchanged since the previous run
-> (same head commit, issue body and comments, ignoring Fabrik's own comments) does
+> Separately, a re-dispatch after a run that ended with `FABRIK_STAGE_COMPLETE`
+> (so the completion was not recorded) whose inputs are unchanged since the
+> previous run (same head commit, issue body and comments, ignoring Fabrik's own
+> comments) does
 > not resume a saved session whose measured context is above the stage's
 > `resume_threshold_tokens` (default 250000): it starts a fresh session instead,
 > so the context carried into a looping stage does not grow with the run count.
-> This applies under every `resume_session` mode, including a session that is
-> otherwise a continuation. The log line is `fresh session (unchanged
+> This applies under every `resume_session` mode; a session whose last run was
+> cut short (a turn-cap or wall-time slice) is a continuation and still resumes.
+> The log line is `fresh session (unchanged
 > re-dispatch, saved session <N>k > threshold <T>k)`. See #2395 (mentioned for
 > context: #2388).
 

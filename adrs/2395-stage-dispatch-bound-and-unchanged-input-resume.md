@@ -61,12 +61,18 @@ whose last run did not close is a continuation and always resumes.
    `decideSessionResumeWith` makes a stage dispatch start fresh when its inputs equal the
    previous run's and the saved session's measured size is known and above
    `resume_threshold_tokens`. It is checked after the reset-flag case and before the
-   continuation case, so it **overrides the continuation exemption of ADR 2300 decision 4**
-   and applies in every `resume_session` mode, including the default `resume`. The reason
+   continuation case, and applies in every `resume_session` mode, including the default
+   `resume`. It applies **only to re-entry after a closed run**: the saved meta must record
+   the last stage run as closed (`StageRun && Closed`, the stage emitted
+   `FABRIK_STAGE_COMPLETE`), which is the #2388 loop (the completion write failed and the
+   stage was dispatched again). An unclosed session is a continuation and keeps resuming
+   under ADR 2300 decision 4 — the exemption is not overridden for it. (The first
+   implementation overrode it; review showed that a time-sliced read-only stage —
+   Specify, Research, Plan — commits nothing, so consecutive slices look "unchanged" and,
+   once over the threshold, would restart fresh each slice with its partial work lost.) The reason
    keeps the `fresh session` prefix, which `freshOverSaved` keys on to drop the stale pointer
-   and write `stage-<Stage>.md`. The cost, accepted: a turn-capped no-commit slice whose
-   session is over the threshold restarts fresh each slice (bounded by `max_slice_retries`
-   and the new cap, and the fresh run gets its own previous output as context).
+   and write `stage-<Stage>.md`. A closed re-entry that starts fresh gets
+   its own previous output as context.
 8. **Fingerprint rules.** Comments starting with `🏭 **Fabrik` are excluded — the engine
    posts a fresh stage comment every run, so including them would make every re-dispatch
    look changed and R4 would never fire. Every other comment (human or bot review) is
@@ -83,7 +89,8 @@ whose last run did not close is a continuation and always resumes.
   dispatch count is the bound. A cumulative budget across resumed retries stays #1191.
 - The root cause of an unrecorded completion is not addressed here; this only bounds it.
 - A sidecar write failure loses the bound for that run (logged; never blocks the dispatch).
-- The session janitor ages out `*.dispatches` files (not for in-flight items), so an
+- The Done cleanup removes the item's `*.dispatches` records, and the session janitor ages
+  out `*.dispatches` and leftover `*.dispatches.tmp` files (not for in-flight items), so an
   abandoned loop's record cannot keep an issue's session directory alive.
 
 ## Seams and tests

@@ -194,6 +194,24 @@ func (e *Engine) clearOtherStageDispatches(item gh.ProjectItem, stageName string
 	}
 }
 
+// removeStageDispatches drops every stage dispatch record of the item (and any
+// leftover temp file of an interrupted write). The Done cleanup calls it: the
+// item's episodes are over for good.
+func (e *Engine) removeStageDispatches(item gh.ProjectItem) {
+	dir := filepath.Dir(e.stageDispatchPath(item, "x"))
+	stageDispatchMu.Lock()
+	defer stageDispatchMu.Unlock()
+	for _, pattern := range []string{"*.dispatches", "*.dispatches.tmp"} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			os.Remove(m)
+		}
+	}
+}
+
 // computeStageInputs fingerprints what a stage run is about to see. Fabrik's own
 // comments are excluded: the engine posts a fresh stage comment on every run, so
 // including them would make every re-dispatch look changed.
@@ -312,6 +330,14 @@ func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage,
 		return
 	}
 
+	// Record the pause as soon as the label is on the item, before the comment: a
+	// crash between the label write and the record would otherwise leave the label
+	// on and the record unpaused at count >= cap, so the first human resume would
+	// re-pause at once.
+	e.updateStageDispatch(item, stage.Name, func(r *stageDispatchRecord) { r.Paused = true })
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+
 	// The literal prefix at the call site is what the comment-compliance scan
 	// checks (it never reads through a helper's return value).
 	comment := fmt.Sprintf("🏭 **Fabrik — stage dispatch limit reached**\n\n%s", formatDispatchLimitComment(stage.Name, rec, limit))
@@ -319,10 +345,6 @@ func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage,
 		awaitingInput: true,
 		reactRocket:   true,
 	})
-
-	e.updateStageDispatch(item, stage.Name, func(r *stageDispatchRecord) { r.Paused = true })
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // formatDispatchLimitComment builds the pause comment's body, after its header: the stage, the count, the

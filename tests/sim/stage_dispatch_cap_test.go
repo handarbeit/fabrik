@@ -253,10 +253,10 @@ func TestStageDispatchCap_RecordedCompletionIsNotBounded(t *testing.T) {
 	}
 }
 
-// R4: a re-dispatch with unchanged inputs (same head, body and comments) does not
-// resume a saved session whose measured context is over the threshold — also when
-// the session is otherwise a continuation. Neutralising the exemption resumes it.
-func runUnchangedRedispatch(t *testing.T, disableExemption bool, sessionTokens int) (secondResume bool) {
+// R4: a re-dispatch after a closed run with unchanged inputs (same head, body and
+// comments) does not resume a saved session whose measured context is over the
+// threshold; an unclosed session (a continuation) still does. Neutralising the exemption resumes it.
+func runUnchangedRedispatch(t *testing.T, disableExemption bool, sessionTokens int, closed bool) (secondResume bool) {
 	t.Helper()
 	env := NewEnv(t, EnvOptions{
 		Stages: []*stages.Stage{
@@ -268,6 +268,9 @@ func runUnchangedRedispatch(t *testing.T, disableExemption bool, sessionTokens i
 	})
 	env.Engine.SetSessionDirForTest(t.TempDir())
 	env.Engine.SetUnchangedInputExemptionDisabledForTest(disableExemption)
+	if closed {
+		refuseCompleteLabel(env)
+	}
 	FileIssue(t, env, "unchanged re-dispatch", "body", "Research")
 
 	var mu sync.Mutex
@@ -278,10 +281,16 @@ func runUnchangedRedispatch(t *testing.T, disableExemption bool, sessionTokens i
 		n := len(resumes)
 		mu.Unlock()
 		if n == 1 {
-			// What the real invoker leaves behind: a saved session of this size, and a
-			// run that ended without the completion marker (nothing committed).
-			env.Engine.RecordSessionForTest(issue, stage.Name, "S1", sessionTokens, false)
-			return "still working\n", false, engine.TokenUsage{TurnsUsed: 3, MaxTurns: 50}, nil
+			// What the real invoker leaves behind: a saved session of this size.
+			env.Engine.RecordSessionForTest(issue, stage.Name, "S1", sessionTokens, closed)
+			if !closed {
+				// A time slice: no completion marker, nothing committed.
+				return "still working\n", false, engine.TokenUsage{TurnsUsed: 3, MaxTurns: 50}, nil
+			}
+			// The #2388 loop: the run completes (the engine records the session as
+			// closed) but the completion label write is refused, so it re-dispatches.
+			// It commits nothing, so the next dispatch sees the same head SHA.
+			return "done\nFABRIK_STAGE_COMPLETE\n", true, engine.TokenUsage{TurnsUsed: 3, MaxTurns: 50}, nil
 		}
 		return simclaude.DefaultScript(ctx, stage, issue, newComments, resume, workDir, opts)
 	})
@@ -297,21 +306,28 @@ func runUnchangedRedispatch(t *testing.T, disableExemption bool, sessionTokens i
 
 func TestUnchangedRedispatch_OversizedSessionStartsFresh(t *testing.T) {
 	t.Parallel()
-	if runUnchangedRedispatch(t, false, 5000) {
+	if runUnchangedRedispatch(t, false, 5000, true) {
 		t.Error("an unchanged re-dispatch of an oversized session must start fresh")
 	}
 }
 
 func TestUnchangedRedispatch_SmallSessionResumes(t *testing.T) {
 	t.Parallel()
-	if !runUnchangedRedispatch(t, false, 500) {
+	if !runUnchangedRedispatch(t, false, 500, true) {
 		t.Error("a session within the threshold must resume")
 	}
 }
 
 func TestUnchangedRedispatch_ExemptionNeutralisedResumes(t *testing.T) {
 	t.Parallel()
-	if !runUnchangedRedispatch(t, true, 5000) {
-		t.Error("with the exemption neutralised the continuation must resume (non-vacuity)")
+	if !runUnchangedRedispatch(t, true, 5000, true) {
+		t.Error("with the exemption neutralised the closed session must resume (non-vacuity)")
+	}
+}
+
+func TestUnchangedRedispatch_TimeSlicedUnclosedSessionResumes(t *testing.T) {
+	t.Parallel()
+	if !runUnchangedRedispatch(t, false, 5000, false) {
+		t.Error("a time-sliced (unclosed) oversized session is a continuation and must resume")
 	}
 }

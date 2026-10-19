@@ -382,16 +382,17 @@ func TestDecideSessionResume_UnchangedRedispatchOfOversizedSession(t *testing.T)
 		wantParts string
 	}{
 		{"closed re-entry, default mode", "", true, 450000, &in, in, false, false, "fresh session (unchanged re-dispatch, saved session 450k > threshold 250k)"},
-		{"continuation is overridden", "resume", false, 450000, &in, in, false, false, "unchanged re-dispatch"},
+		{"time-sliced unclosed session with unchanged inputs still resumes", "resume", false, 450000, &in, in, false, true, "(continuation)"},
+		{"unclosed session in default mode still resumes", "", false, 450000, &in, in, false, true, "(continuation)"},
 		{"mode fresh still fresh", "fresh", true, 450000, &in, in, false, false, "unchanged re-dispatch"},
 		{"head changed: #2300 rule (closed, resume)", "resume", true, 450000, &in, stageInputs{HeadSHA: "h2", BodyHash: "b", CommentsHash: "c"}, false, true, "resume_session: resume"},
 		{"body changed: continuation resumes", "resume", false, 450000, &in, stageInputs{HeadSHA: "h1", BodyHash: "b2", CommentsHash: "c"}, false, true, "(continuation)"},
 		{"comments changed: continuation resumes", "resume", false, 450000, &in, stageInputs{HeadSHA: "h1", BodyHash: "b", CommentsHash: "c2"}, false, true, "(continuation)"},
-		{"previous inputs unknown", "resume", false, 450000, nil, in, false, true, "(continuation)"},
-		{"size within threshold", "resume", false, 100000, &in, in, false, true, "(continuation)"},
-		{"size at threshold", "resume", false, 250000, &in, in, false, true, "(continuation)"},
-		{"size unknown", "resume", false, -1, &in, in, false, true, "(continuation)"},
-		{"seam off", "resume", false, 450000, &in, in, true, true, "(continuation)"},
+		{"previous inputs unknown (closed)", "resume", true, 450000, nil, in, false, true, "resume_session: resume"},
+		{"size within threshold (closed)", "resume", true, 100000, &in, in, false, true, "resume_session: resume"},
+		{"size at threshold (closed)", "resume", true, 250000, &in, in, false, true, "resume_session: resume"},
+		{"size unknown (closed)", "resume", true, -1, &in, in, false, true, "resume_session: resume"},
+		{"seam off (closed)", "resume", true, 450000, &in, in, true, true, "resume_session: resume"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -417,11 +418,11 @@ func TestDecideSessionResume_UnchangedRedispatchOfOversizedSession(t *testing.T)
 func TestDecideSessionResume_NoInputsKeepsRule(t *testing.T) {
 	e, _ := sessionTestEngine(t)
 	in := stageInputs{HeadSHA: "h", BodyHash: "b", CommentsHash: "c"}
-	e.RecordSessionForTest(sessionTestItem, "Implement", "S1", 450000, false)
+	e.RecordSessionForTest(sessionTestItem, "Implement", "S1", 450000, true)
 	e.recordStageDispatch(sessionTestItem, "Implement", dispatchOutcomeComplete, in)
 	d := e.decideSessionResume(sessionTestItem, sessionTestStage("", 0), sessionStageDispatch, true)
-	if !d.Resume || !strings.Contains(d.Reason, "(continuation)") {
-		t.Errorf("Resume=%v Reason=%q, want the continuation resume", d.Resume, d.Reason)
+	if !d.Resume || !strings.Contains(d.Reason, "resume_session: resume") {
+		t.Errorf("Resume=%v Reason=%q, want the #2300 resume", d.Resume, d.Reason)
 	}
 }
 

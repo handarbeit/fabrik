@@ -1007,6 +1007,8 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 		}
 	}
 
+	e.removeStageDispatches(item)
+
 	e.addLabel(item, completeLabel)
 
 	// Called unconditionally (not guarded by hasLabel) because cleanup items are

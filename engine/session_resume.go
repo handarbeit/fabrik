@@ -118,7 +118,7 @@ func formatTokensK(tokens int) string {
 //
 // Stage dispatch, saved session present:
 //  1. reset flag set            → fresh (explicit state reset, one-shot)
-//     unchanged re-dispatch of an oversized session → fresh (#2395)
+//     unchanged re-dispatch of an oversized session after a closed run → fresh (#2395)
 //  2. no stage-run outcome      → legacy: continuation iff legacyContinuation
 //  3. last run not closed       → continuation: resume, whatever the option says
 //  4. last run closed (re-entry) → governed by resume_session
@@ -173,8 +173,8 @@ func (e *Engine) decideSessionResumeWith(item gh.ProjectItem, stage *stages.Stag
 	return e.governedSessionDecision(d, stage, id, sessFile)
 }
 
-// unchangedOversized is the #2395 case: a stage re-dispatched with the same
-// head SHA, issue body and comment set as the previous run gains nothing from
+// unchangedOversized is the #2395 case: a stage re-dispatched after a closed run
+// (the last stage run ended with FABRIK_STAGE_COMPLETE) with the same head SHA, issue body and comment set as the previous run gains nothing from
 // resuming a session whose measured context is over resume_threshold_tokens, and
 // pays that context again on every loop iteration. It sets d to a fresh decision
 // and reports true; an unknown size, unknown or changed inputs, or a size within
@@ -182,6 +182,13 @@ func (e *Engine) decideSessionResumeWith(item gh.ProjectItem, stage *stages.Stag
 // session" prefix, which freshOverSaved keys on.
 func (e *Engine) unchangedOversized(item gh.ProjectItem, stage *stages.Stage, sessFile string, inputs *stageInputs, d *sessionDecision) bool {
 	if inputs == nil || e.unchangedInputExemptionOff.Load() {
+		return false
+	}
+	// Only a closed run: the stage emitted FABRIK_STAGE_COMPLETE and was dispatched
+	// again (the #2388 loop). An unclosed session is a continuation — a time-sliced
+	// read-only stage commits nothing, so consecutive slices look "unchanged", and
+	// its partial work lives only in that session.
+	if meta, found := readSessionMeta(sessFile); !found || !meta.StageRun || !meta.Closed {
 		return false
 	}
 	if !inputs.unchangedSince(e.previousStageInputs(item, stage.Name)) {
