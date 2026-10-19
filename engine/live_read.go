@@ -99,9 +99,12 @@ func (e *Engine) applyLive(m itemstate.Mutation) {
 }
 
 // liveLabels reads the item's labels from GitHub, applies the full set to the
-// Store and returns the Store's view: the read, except where the engine wrote a
-// label after the read began (the engine-write protection keeps that write). It
-// returns the raw read when the Store does not hold the item.
+// Store and returns the raw read. The caller decides on what GitHub said, never on
+// the Store's merged view: the engine-write protection keeps an engine write made
+// shortly before the read in the Store, which would hide a label a human changed
+// right after it (a re-pause after an engine unpause) from a fail-closed guard
+// that exists to be the last true live read before an irreversible write (#2341).
+// The Store still receives the read, so the next decision from the Store sees it.
 func (e *Engine) liveLabels(owner, repo string, number int) ([]string, error) {
 	start := time.Now()
 	labels, err := e.client.FetchLabels(owner, repo, number)
@@ -109,12 +112,8 @@ func (e *Engine) liveLabels(owner, repo string, number int) ([]string, error) {
 		return nil, err
 	}
 	repoKey := owner + "/" + repo
-	if e.liveApplyOff.Load() || !e.storeHolds(repoKey, number) {
-		return labels, nil
-	}
-	e.applyLive(itemstate.LabelsRead{Repo: repoKey, Number: number, Labels: labels, FetchedAt: start})
-	if snap, ok := e.store.Peek(repoKey, number); ok && snap.LabelsKnown() {
-		return snap.Labels(), nil
+	if !e.liveApplyOff.Load() && e.storeHolds(repoKey, number) {
+		e.applyLive(itemstate.LabelsRead{Repo: repoKey, Number: number, Labels: labels, FetchedAt: start})
 	}
 	return labels, nil
 }

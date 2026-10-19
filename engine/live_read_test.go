@@ -25,7 +25,7 @@ func liveReadEngine(t *testing.T, client *mockGitHubClient) *Engine {
 	return eng
 }
 
-func TestLiveLabels_AppliesTheReadAndReturnsTheStoreView(t *testing.T) {
+func TestLiveLabels_AppliesTheReadAndReturnsTheRawRead(t *testing.T) {
 	var calls atomic.Int32
 	client := &mockGitHubClient{fetchLabelsFn: func(string, string, int) ([]string, error) {
 		calls.Add(1)
@@ -47,6 +47,30 @@ func TestLiveLabels_AppliesTheReadAndReturnsTheStoreView(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("FetchLabels called %d times, want 1", calls.Load())
+	}
+}
+
+// The guard's regression: the engine removed fabrik:paused (an unpause) and a human
+// re-paused on GitHub inside the engine-write grace. The Store keeps the engine's
+// removal, but the live read returned to a fail-closed guard must still show the
+// pause, so refuseIfPausedLive refuses.
+func TestLiveLabels_ReturnsGitHubsAnswerNotTheEngineProtectedView(t *testing.T) {
+	client := &mockGitHubClient{fetchLabelsFn: func(string, string, int) ([]string, error) {
+		return []string{"stage:Validate:complete", "fabrik:paused", "fabrik:awaiting-input"}, nil
+	}}
+	eng := liveReadEngine(t, client)
+	eng.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:paused"})
+	eng.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:paused"})
+
+	got, err := eng.liveLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasLabel(got, "fabrik:paused") {
+		t.Fatalf("the guard must see GitHub's pause, got %v", got)
+	}
+	if !eng.refuseIfPausedLive(gh.ProjectItem{Repo: "owner/repo", Number: 1}, "test") {
+		t.Fatal("refuseIfPausedLive must refuse when the live read shows fabrik:paused")
 	}
 }
 
