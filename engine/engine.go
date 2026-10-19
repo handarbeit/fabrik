@@ -342,6 +342,7 @@ type Engine struct {
 	// NewWithDeps engines. stageOutcomeRecordOff is the SetStageOutcomeRecordDisabledForTest seam.
 	stageOutcomes                         *stageOutcomeStore
 	stageOutcomeRecordOff                 atomic.Bool
+	stageOutcomeFreshStartOff             atomic.Bool
 	stageFirstRoutingOff                  atomic.Bool                               // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	sessionForcedResumeOff                atomic.Bool                               // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
 	continuationExemptionOff              atomic.Bool                               // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry

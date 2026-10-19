@@ -2517,6 +2517,7 @@ func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Sta
 // resets both the failure and slice counters so the stage can be attempted again.
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
+	e.discardOutcomeForFreshStart(item, stage.Name, "the stage is re-run after a manual unpause")
 
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	e.removeLabel(item, failedLabel)
@@ -2560,6 +2561,9 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	if !e.markValidateRerun(item) {
 		return false
 	}
+	// The re-run replaces any finished-but-unpublished Validate outcome (ADR 2394): replaying
+	// it would complete Validate without the re-run.
+	e.discardOutcomeForFreshStart(item, "Validate", "Validate is re-run (fabrik:revalidate / auto-repair)")
 	blockingLabels := []string{
 		"stage:Validate:complete",
 		"stage:Validate:failed",
@@ -2630,6 +2634,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	if !e.markValidateRerun(item) {
 		return false
 	}
+	e.discardOutcomeForFreshStart(item, "Validate", "the head moved after Validate completed, so Validate is re-run")
 	// stage:Validate:complete is last: it's the scan sentinel. If any prior removal
 	// fails we break early, keeping stage:Validate:complete on GitHub so the next
 	// poll re-runs the scan and retries — no permanently-stuck partial state.
@@ -2757,6 +2762,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
 	// and reset retry/pause state that may have accumulated before the block.
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.discardOutcomeForFreshStart(item, stage.Name, "the stage resumes after a human comment lifted its pause")
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.markSessionReset(item, stage.Name)
 	e.resetStageDispatches(item, stage.Name)

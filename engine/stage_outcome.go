@@ -63,6 +63,10 @@ type stageOutcomeRecord struct {
 	// partial publication can tell them from an earlier run's.
 	Nonce      string `json:"nonce"`
 	BaseBranch string `json:"base_branch,omitempty"`
+	// Rerun is set when the run was itself a forced Validate re-run (fabrik:validate-rerun was
+	// on the item when it finished). Such a record legitimately outlives the marker's
+	// presence: the marker is cleared by the very handleStageComplete the record retries.
+	Rerun bool `json:"rerun,omitempty"`
 
 	// Output is the stage's raw output, from which the issue-body update and the PR summary
 	// are taken.
@@ -261,6 +265,14 @@ func (e *Engine) SetStageOutcomeRecordDisabledForTest(disabled bool) {
 	e.stageOutcomeRecordOff.Store(disabled)
 }
 
+// SetOutcomeFreshStartDiscardDisabledForTest neutralises only the forced-re-run rule (ADR 2394
+// decision 11): a record is no longer discarded when fabrik:revalidate / fabrik:validate-rerun
+// is on the item, and the fresh-start sites no longer drop it. A forced Validate re-run is then
+// completed from the record without the re-run, so a test can show its assertions bite.
+func (e *Engine) SetOutcomeFreshStartDiscardDisabledForTest(disabled bool) {
+	e.stageOutcomeFreshStartOff.Store(disabled)
+}
+
 // EnableStageOutcomesForTest turns on outcome recording under dir and loads whatever is
 // there. Two engines pointed at the same dir model a daemon restart. Test-only; production
 // gets the store from New().
@@ -305,6 +317,37 @@ func (e *Engine) dropStageOutcome(key string, number int, reason string) {
 	}
 }
 
+// runIsForcedRerun reports whether the run that just finished was a forced Validate re-run:
+// fabrik:validate-rerun was on the item. The poll-start snapshot in item can predate the
+// marker (the revalidate scan adds it in the same poll that dispatches the re-run, and a
+// cacheless engine has no write-through to repair it), so a Validate run reads the labels
+// live. The read fails closed (an unreadable set counts as a re-run): the only cost of a
+// wrong "true" is that the marker-based backstop in outcomeDiscardReason does not fire for
+// this record; the fresh-start sites still drop it explicitly.
+func (e *Engine) runIsForcedRerun(item gh.ProjectItem, stageName string) bool {
+	if stageName != "Validate" || e.stageOutcomeFreshStartOff.Load() {
+		return false
+	}
+	return hasLabel(item.Labels, validateRerunLabel) || e.validateRerunPending(item)
+}
+
+// discardOutcomeForFreshStart drops the item's record for stageName when the engine is
+// about to run that stage again on purpose (a forced Validate re-run, a manual unpause, a
+// comment that resumes a paused stage). Publishing the old outcome would complete the stage
+// without the re-run the operator or the engine asked for (ADR 2394 decision 11, ADR 2378).
+// Called next to the StageLastAttemptCleared / markValidateRerun writes so the order in which
+// the settle scan and the fresh start run never matters.
+func (e *Engine) discardOutcomeForFreshStart(item gh.ProjectItem, stageName, why string) {
+	if e.stageOutcomes == nil || e.stageOutcomeFreshStartOff.Load() {
+		return
+	}
+	key := issueKey(item, e.defaultRepo())
+	if rec := e.stageOutcomes.get(key); rec == nil || rec.Stage != stageName {
+		return
+	}
+	e.dropStageOutcome(key, item.Number, why)
+}
+
 // persistOutcome writes rec, logging (never failing on) a write error.
 func (e *Engine) persistOutcome(rec *stageOutcomeRecord) {
 	if rec == nil {
@@ -345,6 +388,7 @@ func (e *Engine) beginStageOutcome(p stageOutcomeParams, output string, complete
 		Output:     output,
 		BodyUpdate: extractUpdatedBody(output),
 		BodyBefore: p.item.Body,
+		Rerun:      e.runIsForcedRerun(p.item, p.stage.Name),
 		CreatedAt:  e.now(),
 	}
 	e.persistOutcome(rec)

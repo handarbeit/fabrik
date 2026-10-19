@@ -5180,7 +5180,8 @@ it refuses). Per record, in order:
 1. completion signal already on the item → remove (`published`);
 2. discard, with one `[outcome]` log line naming the reason (R3): the item is closed or left the board, carries
    `fabrik:paused`, moved to another column, the record is not `ready`, or the worktree is missing/unreadable or its
-   `HEAD` differs from the recorded SHA;
+   `HEAD` differs from the recorded SHA; for a Validate record also `fabrik:revalidate` on the item, or
+   `fabrik:validate-rerun` on it when the record is not the forced re-run's own (see *Forced re-runs* below);
 3. skip the poll while a worker for the item is in flight, `fabrik:editing` is present, or `forgeHeld()` (§7.21);
 4. otherwise `publishStageOutcome` (never calls `EnsureWorktree`): issue body (written only if the live body still
    equals the body it replaces — a human edit made during the outage is never overwritten), stage comment(s)
@@ -5192,12 +5193,22 @@ failure (`gh.IsTransportError`, or `isTransientError` for git/exec errors), whic
 exhaust it. At `MaxRetries` the item is paused (`fabrik:paused` + `fabrik:awaiting-input`, a comment naming the
 error and saying the stage re-runs on resume) and the record is discarded.
 
+**Forced re-runs (ADR 2394 decision 11, ADR 2378).** A recorded outcome never completes a forced Validate
+re-run. `outcomeDiscardReason` discards a Validate record when `fabrik:revalidate` is on the item (this rule is
+load-bearing: a live record keeps the item out of the dispatch candidates, so `settleRevalidateScan` would not see
+the label otherwise) or when `fabrik:validate-rerun` is on it and the record is not the re-run's own
+(`stageOutcomeRecord.Rerun`, set from a live label read when the run finished; the re-run's own record
+legitimately outlives the marker because `handleStageComplete` clears it). `reenterValidate` (operator label and
+merge-train auto-repair) and `handleValidateSHAInvalidation` drop the item's record next to `markValidateRerun`,
+and `clearFailedStage` / `unblockAwaitingInput` drop it when the stage is deliberately run again
+(`discardOutcomeForFreshStart`), so the order of the settle scan and the strip never matters.
+
 **Comment-review audit (FR-011).** (a) A comment pass that completes the stage but whose `handleStageComplete`
 fails: `finalizeComments` writes a `completion` record (stage and head only) and the scan retries just
 `handleStageComplete`. (b) A failed 🚀 reaction followed by a restart repeats one capped comment pass; this is a
 reaction, not a stage outcome, and is deliberately not fixed here.
 
-Seams: `SetStageOutcomeRecordDisabledForTest`, `EnableStageOutcomesForTest`. Sim twins:
+Seams: `SetStageOutcomeRecordDisabledForTest`, `SetOutcomeFreshStartDiscardDisabledForTest`, `EnableStageOutcomesForTest`. Sim twins:
 `tests/sim/stage_outcome_test.go` (`Env.StageOutcomeDir`, carried by `RestartEnv`).
 
 ## 8. Invalid / Unexpected States

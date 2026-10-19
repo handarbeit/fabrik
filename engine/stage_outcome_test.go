@@ -104,6 +104,7 @@ func TestStageOutcomeStore_NilStoreRecordsNothing(t *testing.T) {
 func TestOutcomeDiscardReason(t *testing.T) {
 	research := &stages.Stage{Name: "Research"}
 	plan := &stages.Stage{Name: "Plan"}
+	validate := &stages.Stage{Name: "Validate"}
 	live := func() gh.ProjectItem { return gh.ProjectItem{Number: 7, Status: "Research"} }
 	cases := []struct {
 		name    string
@@ -121,6 +122,20 @@ func TestOutcomeDiscardReason(t *testing.T) {
 		{"interrupted before checkpoint", func(r *stageOutcomeRecord, _ *gh.ProjectItem) { r.Phase = outcomePhaseRecorded }, research, "abc123def456", nil, "interrupted"},
 		{"head moved", nil, research, "ffff00001111", nil, "no longer matches"},
 		{"worktree gone", nil, research, "", errors.New("no worktree"), "cannot be read"},
+		{"revalidate requested", func(r *stageOutcomeRecord, i *gh.ProjectItem) {
+			r.Stage, i.Status, i.Labels = "Validate", "Validate", []string{"fabrik:revalidate"}
+		}, validate, "abc123def456", nil, "fabrik:revalidate"},
+		{"forced re-run outstanding", func(r *stageOutcomeRecord, i *gh.ProjectItem) {
+			r.Stage, i.Status, i.Labels = "Validate", "Validate", []string{validateRerunLabel}
+		}, validate, "abc123def456", nil, "re-run is outstanding"},
+		// A record written by the forced re-run itself outlives the marker's presence: the
+		// marker is cleared by the very handleStageComplete it retries.
+		{"record of the re-run itself", func(r *stageOutcomeRecord, i *gh.ProjectItem) {
+			r.Stage, r.Rerun, i.Status, i.Labels = "Validate", true, "Validate", []string{validateRerunLabel}
+		}, validate, "abc123def456", nil, ""},
+		{"re-run labels only matter for Validate", func(_ *stageOutcomeRecord, i *gh.ProjectItem) {
+			i.Labels = []string{"fabrik:revalidate", validateRerunLabel}
+		}, research, "abc123def456", nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,7 +143,7 @@ func TestOutcomeDiscardReason(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(rec, &item)
 			}
-			got := outcomeDiscardReason(rec, item, tc.stage, tc.head, tc.headErr)
+			got := outcomeDiscardReason(rec, item, tc.stage, tc.head, tc.headErr, true)
 			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
 				t.Fatalf("reason = %q, want %q", got, tc.want)
 			}
@@ -288,4 +303,37 @@ func TestHandleStageComplete_ValidateMergeFailure_TransportIsReported(t *testing
 	if !reported {
 		t.Error("a transport failure while landing was never reported — the record would be dropped and the stage re-run")
 	}
+}
+
+// ADR 2394 decision 11: a deliberate fresh start of a stage drops its record, and the rule
+// is switched off by the neutralisation seam.
+func TestDiscardOutcomeForFreshStart(t *testing.T) {
+	e := &Engine{stageOutcomes: newStageOutcomeStore(t.TempDir())}
+	item := gh.ProjectItem{Number: 7, Repo: "owner/repo"}
+	put := func(stage string) {
+		rec := testOutcomeRecord()
+		rec.Stage = stage
+		if err := e.stageOutcomes.put(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := func() bool { return e.stageOutcomes.get("owner/repo#7") != nil }
+
+	put("Research")
+	e.discardOutcomeForFreshStart(item, "Validate", "other stage")
+	if !live() {
+		t.Fatal("a fresh start of another stage must leave the record alone")
+	}
+	e.SetOutcomeFreshStartDiscardDisabledForTest(true)
+	e.discardOutcomeForFreshStart(item, "Research", "neutralised")
+	if !live() {
+		t.Fatal("the neutralisation seam must keep the record")
+	}
+	e.SetOutcomeFreshStartDiscardDisabledForTest(false)
+	e.discardOutcomeForFreshStart(item, "Research", "fresh start")
+	if live() {
+		t.Fatal("a fresh start of the recorded stage must drop the record")
+	}
+	var nilEngine Engine
+	nilEngine.discardOutcomeForFreshStart(item, "Research", "no store") // must not panic
 }

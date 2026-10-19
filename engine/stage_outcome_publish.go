@@ -34,12 +34,16 @@ func (e *Engine) readyStageOutcome(rec *stageOutcomeRecord, workDir, postOutput,
 
 // outcomeDiscardReason returns why rec must be discarded rather than published, or "" when it
 // may proceed (R3). head/headErr describe the worktree's current HEAD.
-func outcomeDiscardReason(rec *stageOutcomeRecord, item gh.ProjectItem, stage *stages.Stage, head string, headErr error) string {
+func outcomeDiscardReason(rec *stageOutcomeRecord, item gh.ProjectItem, stage *stages.Stage, head string, headErr error, freshStartGuard bool) string {
 	switch {
 	case item.IsClosed:
 		return "the item is closed"
 	case hasLabel(item.Labels, "fabrik:paused"):
 		return "the item is paused"
+	case freshStartGuard && rec.Stage == "Validate" && hasLabel(item.Labels, "fabrik:revalidate"):
+		return "a forced Validate re-run was requested (fabrik:revalidate)"
+	case freshStartGuard && rec.Stage == "Validate" && !rec.Rerun && hasLabel(item.Labels, validateRerunLabel):
+		return "a forced Validate re-run is outstanding (" + validateRerunLabel + ")"
 	case stage == nil || stage.Name != rec.Stage:
 		return fmt.Sprintf("the item moved to column %q (recorded for stage %q)", item.Status, rec.Stage)
 	case rec.Phase != outcomePhaseReady:
@@ -119,7 +123,7 @@ func (e *Engine) settleStageOutcome(ctx context.Context, board *gh.ProjectBoard,
 	} else {
 		head, headErr = gitRevParse(dir, "HEAD")
 	}
-	if reason := outcomeDiscardReason(rec, item, stage, head, headErr); reason != "" {
+	if reason := outcomeDiscardReason(rec, item, stage, head, headErr, !e.stageOutcomeFreshStartOff.Load()); reason != "" {
 		e.dropStageOutcome(rec.key(), rec.Number, reason)
 		return
 	}

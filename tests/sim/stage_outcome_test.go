@@ -356,3 +356,119 @@ func TestStageOutcome_Sim_FailedBodyUpdateNeutralisedIsLost(t *testing.T) {
 		t.Fatal("the body was updated without the record — the scenario no longer shows the loss the record prevents")
 	}
 }
+
+// ADR 2394 decision 11 / ADR 2378: a recorded Validate outcome must not complete a forced
+// re-run. The failing path: Validate's completion write fails (record kept), an operator
+// applies fabrik:revalidate while the outage lasts (the strip adds fabrik:validate-rerun and
+// removes the completion label), the forge recovers, and the record is replayed — completing
+// Validate and clearing the marker without the re-run ever happening.
+
+func validateRerunEnv(t *testing.T, freshStartGuardOff bool) (*Env, int) {
+	t.Helper()
+	noAdvance := false
+	env := NewEnv(t, EnvOptions{
+		Stages: []*stages.Stage{
+			{Name: "Validate", Order: 1, AutoAdvance: &noAdvance},
+			{Name: "Done", Order: 2, CleanupWorktree: true},
+		},
+		StartTime: time.Now(),
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.RetryBackoff = time.Millisecond
+			cfg.MaxRetries = 3
+		},
+	})
+	EnableStageOutcomes(t, env)
+	env.Engine.SetOutcomeFreshStartDiscardDisabledForTest(freshStartGuardOff)
+	env.Claude.ForStage("Validate", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, c []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		_, done, usage, err := simclaude.DefaultScript(ctx, stage, issue, c, resume, workDir, opts)
+		return "Validation report: all requirements met.\n\nFABRIK_STAGE_COMPLETE\n", done, usage, err
+	})
+	env.Sim.Faults().FailWhen("AddLabelToIssue", func(a simgh.Args) bool {
+		return a.Label == "stage:Validate:complete"
+	}, simgh.Always, simgh.ErrDeadlineExceeded())
+	num := FileIssue(t, env, "validate completion write fails (#2394)", "body", "Validate")
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Validate") >= 1 }, 40)
+	runOutcomePolls(t, env, 2)
+	if env.Engine.StageOutcomeRecordsForTest() != 1 {
+		t.Fatalf("setup: want exactly 1 live record, got %d\n\n%s", env.Engine.StageOutcomeRecordsForTest(), diagnostics(env))
+	}
+	// The operator forces a re-run while the outage lasts.
+	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, num, "fabrik:revalidate"); err != nil {
+		t.Fatalf("applying fabrik:revalidate: %v", err)
+	}
+	return env, num
+}
+
+func TestStageOutcome_Sim_RevalidateReRunsInsteadOfCompletingFromTheRecord(t *testing.T) {
+	t.Parallel()
+	env, num := validateRerunEnv(t, false)
+
+	// The forced re-run happens: Validate is dispatched again although a record was live.
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Validate") >= 2 }, 60)
+
+	// The re-run's own completion write still fails; its record (written under the marker)
+	// is replayed once the forge recovers, and clears the marker.
+	env.Sim.Faults().ClearAll()
+	WaitForIssueLabel(t, env, num, "stage:Validate:complete", 60)
+	if got := env.Claude.StageCallCount("Validate"); got != 2 {
+		t.Fatalf("Validate ran %d times, want exactly 2 (the original run and the forced re-run)", got)
+	}
+	for i := 0; i < 40 && hasLabel(IssueLabels(t, env, num), "fabrik:validate-rerun"); i++ {
+		pollTolerant(t, env, 30*time.Second)
+	}
+	if hasLabel(IssueLabels(t, env, num), "fabrik:validate-rerun") {
+		t.Fatal("fabrik:validate-rerun was not cleared after the re-run's completion was published")
+	}
+}
+
+// Neutralised, the record from before the forced re-run completes Validate with no re-run
+// (the ADR 2378 hole), so the test above bites.
+func TestStageOutcome_Sim_RevalidateNeutralisedCompletesFromTheRecord(t *testing.T) {
+	t.Parallel()
+	env, num := validateRerunEnv(t, true)
+
+	runOutcomePolls(t, env, 4) // the revalidate scan strips the labels and sets the marker
+	env.Sim.Faults().ClearAll()
+	WaitForIssueLabel(t, env, num, "stage:Validate:complete", 60)
+	if got := env.Claude.StageCallCount("Validate"); got != 1 {
+		t.Fatalf("with the fresh-start rule neutralised Validate ran %d times, want 1 (completed from the record) — the scenario no longer reproduces the hole\n\n%s", got, diagnostics(env))
+	}
+}
+
+// The wait_for_ci arm: when the fabrik:awaiting-ci write fails, the outcome is replayed from
+// the record rather than the stage being run again.
+func TestStageOutcome_Sim_AwaitingCIWriteFailsPublishedWithoutRerun(t *testing.T) {
+	t.Parallel()
+	noAdvance, waitCI := false, true
+	env := NewEnv(t, EnvOptions{
+		Stages: []*stages.Stage{
+			{Name: "Specify", Order: 1, AutoAdvance: &noAdvance, WaitForCI: &waitCI},
+			{Name: "Done", Order: 2, CleanupWorktree: true},
+		},
+		StartTime: time.Now(),
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.RetryBackoff = time.Millisecond
+			cfg.MaxRetries = 3
+		},
+	})
+	EnableStageOutcomes(t, env)
+	env.Sim.Faults().FailWhen("AddLabelToIssue", func(a simgh.Args) bool {
+		return a.Label == "fabrik:awaiting-ci"
+	}, simgh.Always, simgh.ErrDeadlineExceeded())
+	num := FileIssue(t, env, "awaiting-ci write fails (#2394)", "body", "Specify")
+
+	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") >= 1 }, 40)
+	runOutcomePolls(t, env, 8)
+	if got := env.Claude.StageCallCount("Specify"); got != 1 {
+		t.Fatalf("the stage ran %d times while the fabrik:awaiting-ci write failed, want exactly 1\n\n%s", got, diagnostics(env))
+	}
+	if hasLabel(IssueLabels(t, env, num), "fabrik:awaiting-ci") {
+		t.Fatal("fabrik:awaiting-ci landed although every write of it fails — the scenario is vacuous")
+	}
+	env.Sim.Faults().ClearAll()
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 40)
+	if got := env.Claude.StageCallCount("Specify"); got != 1 {
+		t.Fatalf("the stage ran %d times in total, want exactly 1", got)
+	}
+}

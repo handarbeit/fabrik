@@ -82,6 +82,26 @@ push were lost every time.
     there, so existing tests are unchanged); `tests/sim` `Env.StageOutcomeDir` is carried by `RestartEnv`.
     Sim twins: `tests/sim/stage_outcome_test.go`.
 
+11. **A forced re-run discards the record (ADR 2378).** `fabrik:revalidate`, the merge train's auto-repair
+    (`reenterValidate`) and the head-moved scan (`handleValidateSHAInvalidation`) strip
+    `stage:Validate:complete` and add the durable `fabrik:validate-rerun` marker so that only a Validate
+    *stage run* restores the label. A live record for Validate would replay `handleStageComplete` and
+    complete Validate — clearing the marker — without the re-run. Three rules close that (found in Validate
+    review): (a) `outcomeDiscardReason` discards a Validate record when `fabrik:revalidate` is on the item,
+    or when `fabrik:validate-rerun` is on it and the record is not itself the re-run's
+    (`stageOutcomeRecord.Rerun`, set from a live label read when the run finished — the poll-start
+    snapshot can predate the marker, and the re-run's own record legitimately outlives it, since the marker
+    is cleared by the very `handleStageComplete` the record retries). The `fabrik:revalidate` rule is
+    load-bearing, not a backstop: a live record keeps the item out of the dispatch candidates, so
+    `settleRevalidateScan` would never see the label otherwise. (b) `discardOutcomeForFreshStart` drops the
+    item's record for the stage next to `markValidateRerun` in `reenterValidate` and
+    `handleValidateSHAInvalidation`, so the order of the settle scan and the strip never matters (the train
+    auto-repair calls `reenterValidate` directly). (c) The other fresh-start sites that clear
+    `StageLastAttemptCleared` — `clearFailedStage` and `unblockAwaitingInput` — drop it too, since the stage
+    is deliberately run again. Sim twins `TestStageOutcome_Sim_RevalidateReRunsInsteadOfCompletingFromTheRecord`
+    and its neutralised twin (`SetOutcomeFreshStartDiscardDisabledForTest`); the explicit drops of (b)/(c) are
+    covered by the unit test `TestDiscardOutcomeForFreshStart`, not by a separate sim path.
+
 ## Consequences
 
 - A stage that completes while GitHub writes fail makes exactly one Claude invocation; its comment, push
