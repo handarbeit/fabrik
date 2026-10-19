@@ -380,6 +380,7 @@ func (a *overseerActor) SetAutonomy(p localapi.SetAutonomyParams) (*localapi.Act
 	// changed" while GitHub differs. A failed read refuses, as promote and
 	// revalidate do.
 	owner, repo := itemOwnerRepo(t.item, e.defaultRepo())
+	// live-read-audited: overseer guard reads live to refuse; applies nothing by design (ADR 1966-c)
 	liveLabels, err := e.client.FetchLabels(owner, repo, t.st.Number)
 	if err != nil {
 		return nil, localapi.Refused(a.refusalState(&t.st), "could not confirm %s's labels live (%v); refusing rather than set autonomy from a possibly stale cache", t.ref, err)
@@ -508,6 +509,7 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 	// since the cache last refreshed would be lifted by this label. Re-read the
 	// labels live and fail closed, for the same reason the column is.
 	owner, repo := itemOwnerRepo(t.item, e.defaultRepo())
+	// live-read-audited: overseer guard reads live to refuse; applies nothing by design (ADR 1966-c)
 	liveLabels, err := e.client.FetchLabels(owner, repo, t.st.Number)
 	if err != nil {
 		return nil, refuse("could not confirm %s's labels live (%v); refusing rather than risk lifting a pause the cache has not seen", t.ref, err)

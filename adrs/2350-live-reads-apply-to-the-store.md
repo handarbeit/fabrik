@@ -27,8 +27,9 @@ newer fact.
    authority time. New narrow mutations: `LabelsRead`, `PRReviewsRead`, `LinkedPRStateObserved`
    (State/Merged only, so Title and Draft are never blanked). A failed read is never applied. The
    apply is wrapped in `FromLiveRead` (`OriginLiveRead`), which the wake observer ignores, so a gate's
-   own read cannot request a poll. A scan test forbids the raw client calls elsewhere, with an
-   audited exception list.
+   own read cannot request a poll. A scan test forbids the raw client calls elsewhere; each remaining raw call
+   is audited per call site with a `// live-read-audited: <reason>` marker (only `live_read.go` is
+   exempt as a file), so a new raw read in a file that already has an audited one still fails.
 2. **Comments** carry no observed-at record, so a live deep fetch keeps a Store comment the read
    lacks when it was created at or after the read began (matched by node or database ID), rather than
    adding a comment record kind.

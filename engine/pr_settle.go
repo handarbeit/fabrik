@@ -173,6 +173,7 @@ func (e *Engine) settlePRMergeStateInner(item gh.ProjectItem, stage *stages.Stag
 			e.logf(item.Number, "settle", "PR #%d reads closed inside the CI-retrigger window — transient\n", pr.Number)
 			return PRSettleResult{Status: PRMergeUnsettled, Reason: "PR closed inside the CI-retrigger window", PR: pr}
 		}
+		// live-read-audited: settlePRMergeState's terminal confirmation on the settle result's own PR; the result carries it to the caller
 		merged, mErr := e.readClient.FetchPRMerged(owner, repo, pr.Number)
 		if mErr != nil {
 			// Don't pause on an unconfirmable closed state — re-evaluate next poll.

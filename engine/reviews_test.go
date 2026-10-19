@@ -3794,6 +3794,37 @@ func TestCheckReviewGate_ReviewerRequestedAfterCacheFilled_HoldsAdvance(t *testi
 	}
 }
 
+// A fresh live-read stamp is trusted only while the Store still holds the item's
+// review state for this PR. When it does not (item evicted, linked PR changed),
+// the gate confirms live instead of clearing on the stale cache.
+func TestCheckReviewGate_FreshStampWithoutStoreReviewState_StillConfirmsLive(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			reads++
+			return []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "late-reviewer"}}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	eng.SetLiveFreshForTest(time.Minute)
+	eng.live.note(liveKey("reviews", "owner/repo", 10), eng.now()) // stamped, but the Store holds no item 10
+	item := gh.ProjectItem{
+		Number: 10, Repo: "owner/repo", LinkedPRNumber: 77,
+		LinkedPRReviews: []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+	blocked, _, _, _ := eng.checkReviewGate(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	if reads != 1 {
+		t.Fatalf("live review reads = %d, want 1: a fresh stamp with no Store review state must not skip the confirmation", reads)
+	}
+	if !blocked {
+		t.Fatal("the live-requested reviewer must hold the advance")
+	}
+}
+
 // ---- #1460 R2/AC1/AC2: pauseForReviewCycleLimit resumability ----
 
 // TestReviewCycleLimit_UnpauseResetsCounterAndAllowsMultipleCycles is the

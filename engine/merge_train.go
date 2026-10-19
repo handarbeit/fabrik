@@ -1833,6 +1833,7 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 
 	var contradictions []string
 	for _, m := range members {
+		// live-read-audited: batch-member labels at formation; the train avoids Store-sourced member state (ADR 1208, 1773)
 		labels, err := e.client.FetchLabels(owner, repo, m.item.Number)
 		if err != nil {
 			contradictions = append(contradictions, fmt.Sprintf("#%d (label read failed: %v)", m.item.Number, err))

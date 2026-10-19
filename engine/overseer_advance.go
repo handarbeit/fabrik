@@ -189,6 +189,7 @@ func (a *overseerActor) Advance(p localapi.AdvanceParams) (*localapi.ActionResul
 
 	// 3. Live labels: completion, pause, block and engine-owned waits.
 	owner, repo := itemOwnerRepo(t.item, e.defaultRepo())
+	// live-read-audited: overseer advance gate reads live to refuse; a refused action writes nothing (ADR 2126)
 	labels, err := e.client.FetchLabels(owner, repo, t.st.Number)
 	if err != nil {
 		return nil, refuse("could not confirm %s's labels live (%v); refusing rather than advance from a possibly stale cache", t.ref, err)
@@ -205,6 +206,7 @@ func (a *overseerActor) Advance(p localapi.AdvanceParams) (*localapi.ActionResul
 	if t.st.LinkedPR != nil {
 		gateItem.LinkedPRNumber = t.st.LinkedPR.Number
 	}
+	// live-read-audited: overseer advance gate reads live to refuse; a refused action writes nothing (ADR 2126)
 	if err := e.client.FetchItemDetails(&gateItem); err != nil {
 		return nil, refuse("could not read %s's dependencies and comments live (%v); refusing rather than skip a gate the engine applies", t.ref, err)
 	}

@@ -215,11 +215,14 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if !fetchFailed && !e.reviewConfirmLiveOff.Load() && prNumber > 0 && !(itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) &&
 		e.reviewGateWouldClear(item, stage, outstanding, hasReviews) {
 		repoKey := owner + "/" + repo
-		if e.liveReviewsFresh(repoKey, item.Number) {
-			if sr, sq, ok := e.storeReviewState(repoKey, item.Number, prNumber); ok {
-				reviews, reviewRequests = sr, sq
-				outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
-			}
+		// A fresh stamp is trusted only if the Store still holds the item's review
+		// state for this PR (the item may have been evicted or its linked PR may
+		// have changed since the stamp); otherwise the gate confirms live, so the
+		// "confirm before clearing" guarantee never silently falls back to the cache.
+		storeReviews, storeRequests, storeOK := e.storeReviewState(repoKey, item.Number, prNumber)
+		if storeOK && e.liveReviewsFresh(repoKey, item.Number) {
+			reviews, reviewRequests = storeReviews, storeRequests
+			outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
 		} else if lr, lq, err := e.liveReviews(owner, repo, item.Number, prNumber); err != nil {
 			e.logf(item.Number, "warn", "checkReviewGate: live confirmation read failed: %v — deciding on the cached review data\n", err)
 		} else {
@@ -1398,6 +1401,7 @@ func (e *Engine) resolveReviewsForFeedbackChecked(item gh.ProjectItem) ([]gh.PRR
 			}
 			prNumber = pr.Number
 		}
+		// live-read-audited: feedback-body review read: builds comments, not a gate verdict
 		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		if err != nil {
 			return nil, fmt.Errorf("FetchPRReviews failed: %w", err)
@@ -1637,6 +1641,7 @@ func (e *Engine) resolvedReviewData(item gh.ProjectItem) (prNumber int, reviews 
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
 			prNumber = pr.Number
+			// live-read-audited: feedback-body review read: builds comments, not a gate verdict
 			if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 				reviews = restReviews
 			}
@@ -1766,6 +1771,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			if prNumber == 0 {
 				if pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil && pr.Number != 0 {
 					prNumber = pr.Number
+					// live-read-audited: timeout-message review read: builds wording, not a gate verdict
 					if restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber); err == nil {
 						reviews = restReviews
 						_, hasReviews = reviewGateOutstanding(nil, reviews)
