@@ -58,13 +58,14 @@ func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *En
 	}()
 }
 
-// performSighupRestart stops the webhook manager, releases the lockfile, and
+// performSighupRestart stops the transports, releases the lockfile, and
 // re-execs the current binary in place. On success, this function never returns.
 // On exec failure, it logs the error and returns so Run() can exit cleanly.
 func performSighupRestart(e *Engine, locks *instanceLocks) {
-	if e.webhookMgr != nil {
-		e.webhookMgr.Stop()
-	}
+	e.transports.StopAll()
+	// An exec skips deferred cleanup: stop taking deliveries and persist the
+	// dedupe record first (#2351). Bounded, so it cannot extend the SIGHUP drain.
+	e.intake.Close(intakeCloseGrace)
 	// An exec never runs deferred cleanup: close the local API (unlinking its
 	// socket) first. The next process also replaces a stale socket at startup.
 	e.closeLocalAPI()

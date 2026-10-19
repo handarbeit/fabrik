@@ -946,8 +946,7 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}, "PVT_1")
 	eng.readClient = cache
 
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	member := makeTrainItem(5, "Problem Issue")
 
@@ -968,11 +967,8 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 	if !labelSet["fabrik:awaiting-input"] {
 		t.Error("expected fabrik:awaiting-input to be write-through applied to the cache")
 	}
-
-	wm.mu.Lock()
-	_, pausedEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:paused")]
-	_, awaitingEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:awaiting-input")]
-	wm.mu.Unlock()
+	pausedEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:paused"))
+	awaitingEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:awaiting-input"))
 	if !pausedEcho {
 		t.Error("expected fabrik:paused webhook echo to be registered")
 	}
@@ -1250,8 +1246,7 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	}, "PVT_1")
 	eng.readClient = cache
 
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	member := makeTrainItem(7, "Runaway Issue")
 	eng.fireRunawayGuard(context.Background(), "owner", "repo", "main", []gh.ProjectItem{member}, 20)
@@ -1270,11 +1265,8 @@ func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
 	if !labelSet["fabrik:awaiting-input"] {
 		t.Error("expected fabrik:awaiting-input to be write-through applied to the cache")
 	}
-
-	wm.mu.Lock()
-	_, pausedEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:paused")]
-	_, awaitingEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:awaiting-input")]
-	wm.mu.Unlock()
+	pausedEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:paused"))
+	awaitingEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:awaiting-input"))
 	if !pausedEcho {
 		t.Error("expected fabrik:paused webhook echo to be registered")
 	}

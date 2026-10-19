@@ -108,16 +108,15 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 		// (unlike postComment, which always stamps time.Now()) to preserve this
 		// site's pre-existing behavior exactly; using e.cache() directly here
 		// (rather than postComment/postItemComment) keeps that omission intact.
+		res := e.reserveComment(item)
 		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+			res.Cancel()
 			e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
 		} else {
 			if c := e.cache(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: comment, Author: e.selfLogin(),
 				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {

@@ -30,8 +30,8 @@ func newTestHookdeckManager(t *testing.T) (*hookdeckManager, chan tui.Event) {
 	return hm, events
 }
 
-func TestHookdeckManager_ImplementsEventIngestionManager(t *testing.T) {
-	var _ eventIngestionManager = (*hookdeckManager)(nil)
+func TestHookdeckManager_ImplementsIngestTransport(t *testing.T) {
+	var _ ingestTransport = (*hookdeckManager)(nil)
 }
 
 func TestHookdeckManager_IsDisabledAlwaysFalse(t *testing.T) {
@@ -41,14 +41,15 @@ func TestHookdeckManager_IsDisabledAlwaysFalse(t *testing.T) {
 	}
 }
 
-func TestHookdeckManager_EchoMethodsAreNoOps(t *testing.T) {
+// Echo matching works for Hookdeck like every transport (#2351): the registry is
+// engine-level, so the transport only needs to report that it receives the event.
+func TestHookdeckManager_SubscribesToEveryEvent(t *testing.T) {
 	hm, _ := newTestHookdeckManager(t)
-	// These must not panic and must have no observable effect — there is no
-	// pending-echo state on hookdeckManager to assert against; the absence
-	// of a field to mutate is itself the point (Decision #3).
-	hm.RegisterEcho("issues", "edited", "key")
-	hm.RegisterEchoIfSubscribed("projects_v2_item", "edited", "key")
-	hm.MatchEcho("issues", "edited", "key")
+	for _, ev := range []string{"issues", "projects_v2_item", "check_run"} {
+		if !hm.SubscribesTo(ev) {
+			t.Errorf("hookdeckManager.SubscribesTo(%q) = false, want true", ev)
+		}
+	}
 }
 
 func TestHookdeckManager_HealthTransitions(t *testing.T) {

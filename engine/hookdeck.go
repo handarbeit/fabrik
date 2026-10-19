@@ -15,7 +15,7 @@ import (
 )
 
 // hookdeckManager is the App-auth-only Hookdeck ingestion transport (#1142),
-// implementing eventIngestionManager alongside webhookManager (PAT mode) —
+// implementing ingestTransport alongside webhookManager (PAT mode) —
 // see engine/ingestion.go. It wraps a *hookdeck.Source (internal/events/
 // hookdeck, extracted from Pruefer's already-tested implementation, R1) and
 // feeds normalized events into the exact same deltaFn closure poll.go
@@ -29,17 +29,25 @@ import (
 // installation is granted (#1722), so there is nothing here analogous to
 // gh webhook forward's --repo flags, UpdateRepos-triggered subprocess
 // restarts, or the 422 circuit-breaker (IsDisabled is always false).
-// RegisterEcho/RegisterEchoIfSubscribed/MatchEcho are no-ops: the
-// echo-check mechanism exists to infer "the subprocess looks alive but
-// isn't delivering," a failure mode Hookdeck doesn't have since OnHealth
-// reports genuine WebSocket connectivity directly (Decision #3,
-// adrs/1142-hookdeck-ingestion-for-app-auth.md).
+// Echo matching works for Hookdeck like every transport (#2351): the echo
+// registry is engine-level. Only the echo-MISS health signal stays gh-forward
+// specific, since OnHealth reports genuine WebSocket connectivity directly.
 type hookdeckManager struct {
 	mu sync.Mutex
 
 	logFn   func(issueNumber int, tag, format string, args ...any)
 	emitFn  func(tui.Event)
-	deltaFn func(eventType string, payload []byte) // nil when board cache disabled
+	deltaFn func(eventType string, payload []byte) // nil when board cache disabled; used only when sink is nil
+
+	// sink is the engine's delivery intake (#2351); it replaces deltaFn.
+	sink func(delivery)
+	// reconnectFn requests a catch-up reconcile when the WebSocket re-connects
+	// after a disconnect (R5).
+	reconnectFn func()
+	// connectedBefore is true once the source has connected at least once.
+	connectedBefore bool
+	// coverageFn is the periodic installation-coverage re-check, injected by the engine.
+	coverageFn func()
 
 	source *hookdeck.Source
 	cancel context.CancelFunc
@@ -145,7 +153,7 @@ func sortedRepoList(repos map[string]bool) []string {
 // mirroring webhookManager.supervise's fire-and-forget lifecycle shape:
 // Source.Run retries every transient transport failure internally and only
 // returns on ctx cancellation (or a genuinely fatal error, logged here).
-func (hm *hookdeckManager) Start(ctx context.Context) {
+func (hm *hookdeckManager) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	hm.cancel = cancel
 	hm.transitionHealthState(WebhookStreamStartingUp, "")
@@ -154,7 +162,54 @@ func (hm *hookdeckManager) Start(ctx context.Context) {
 			hm.logFn(0, "hookdeck", "event source exited: %v\n", err)
 		}
 	}()
+	return nil
 }
+
+// Name implements ingestTransport.
+func (hm *hookdeckManager) Name() string { return "hookdeck" }
+
+// SetSink implements ingestTransport.
+func (hm *hookdeckManager) SetSink(sink func(delivery)) {
+	hm.mu.Lock()
+	hm.sink = sink
+	hm.mu.Unlock()
+}
+
+// SetReconnectHandler implements ingestTransport.
+func (hm *hookdeckManager) SetReconnectHandler(fn func()) {
+	hm.mu.Lock()
+	hm.reconnectFn = fn
+	hm.mu.Unlock()
+}
+
+// SetCoverageCheck installs the periodic installation-coverage re-check.
+func (hm *hookdeckManager) SetCoverageCheck(fn func()) {
+	hm.mu.Lock()
+	hm.coverageFn = fn
+	hm.mu.Unlock()
+}
+
+// CheckCoverage implements ingestTransport.
+func (hm *hookdeckManager) CheckCoverage() {
+	hm.mu.Lock()
+	fn := hm.coverageFn
+	hm.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// TransitionHealth implements ingestTransport by routing through reconcileHint,
+// which re-derives health from hm's own connHealth/sigDriftActive rather than
+// accepting reconcile's "no drift" signal as an unconditional override (a clean
+// tick must not clear an active signature-drift escalation).
+func (hm *hookdeckManager) TransitionHealth(healthy bool, reason string) {
+	hm.reconcileHint(healthy, reason)
+}
+
+// SubscribesTo implements ingestTransport: an App-level Hookdeck webhook
+// receives every event type the App is subscribed to.
+func (hm *hookdeckManager) SubscribesTo(string) bool { return true }
 
 // Stop cancels the source's context, causing its Run goroutine to return.
 func (hm *hookdeckManager) Stop() {
@@ -200,15 +255,6 @@ func (hm *hookdeckManager) ManagedRepos() []string {
 	return out
 }
 
-// RegisterEcho, RegisterEchoIfSubscribed, and MatchEcho implement
-// eventIngestionManager as no-ops — see the type doc comment above.
-func (hm *hookdeckManager) RegisterEcho(eventType, action, key string)               {}
-func (hm *hookdeckManager) RegisterEchoIfSubscribed(eventType, action, key string)   {}
-func (hm *hookdeckManager) RegisterEchoVia(eventType, action, key, requester string) {}
-func (hm *hookdeckManager) RegisterEchoIfSubscribedVia(eventType, action, key, requester string) {
-}
-func (hm *hookdeckManager) MatchEcho(eventType, action, key string) {}
-
 // Handle implements events.EventSink, feeding normalized events into the
 // exact same deltaFn closure the PAT-mode transport uses (poll.go).
 func (hm *hookdeckManager) Handle(ctx context.Context, ev events.GitHubEvent) {
@@ -216,6 +262,14 @@ func (hm *hookdeckManager) Handle(ctx context.Context, ev events.GitHubEvent) {
 	hm.eventCounts[ev.EventType]++
 	hm.mu.Unlock()
 	hm.emitCurrentState()
+	d := delivery{ID: ev.DeliveryID, EventType: ev.EventType, Payload: ev.Payload, Transport: "hookdeck"}
+	hm.mu.Lock()
+	sink := hm.sink
+	hm.mu.Unlock()
+	if sink != nil {
+		sink(d)
+		return
+	}
 	if hm.deltaFn != nil {
 		hm.deltaFn(ev.EventType, ev.Payload)
 	}
@@ -230,8 +284,21 @@ func (hm *hookdeckManager) handleHealth(ev events.HealthEvent) {
 	}
 	hm.mu.Lock()
 	hm.connHealth = newConnHealth
+	// R5 (#2351): a transition into Connected after a prior connection means
+	// events were missed while the socket was down; ask for a catch-up reconcile.
+	// The very first connect is not a reconnect.
+	reconnected := false
+	if ev.State == events.HealthConnected {
+		reconnected = hm.connectedBefore
+		hm.connectedBefore = true
+	}
+	reconnectFn := hm.reconnectFn
 	hm.mu.Unlock()
 	hm.recomputeHealthState()
+	if reconnected && reconnectFn != nil {
+		hm.logFn(0, "hookdeck", "reconnected — requesting a catch-up reconcile\n")
+		reconnectFn()
+	}
 	// The cause is logged after the transition line, independent of whether a
 	// transition happened: errors arriving while already unhealthy (or while a
 	// drift condition masks the state) are still coalesced and reported.
@@ -285,8 +352,7 @@ func (hm *hookdeckManager) recomputeHealthState() {
 
 // transitionHealthState updates hm.state to newState if it differs, logs
 // the transition, and re-emits the current state — mirroring
-// webhookManager.transitionHealthState exactly (called via reconcileLoop's
-// transitionMgrHealthState type-switch, engine/reconcile.go).
+// webhookManager.transitionHealthState exactly.
 func (hm *hookdeckManager) transitionHealthState(newState WebhookHealthState, reason string) {
 	hm.mu.Lock()
 	prev := hm.state
@@ -477,5 +543,3 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	}
 	hm.setInstallationCoverageNote(missing, truncated)
 }
-
-var _ eventIngestionManager = (*hookdeckManager)(nil)

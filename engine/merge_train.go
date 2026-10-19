@@ -3677,24 +3677,22 @@ func (e *Engine) ejectMemberAtHead(owner, repo string, memberItem gh.ProjectItem
 // rerouting the member off Queued, so its pause lands on a reachable, non-HoldingStage
 // column instead.
 func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
+	pausedRes := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:paused")
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:paused"); err != nil {
+		pausedRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:paused: %v\n", err)
 	} else {
 		if c := e.cache(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:paused")
 		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:paused")
-		}
 	}
+	inputRes := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:awaiting-input")
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:awaiting-input"); err != nil {
+		inputRes.Cancel()
 		e.logf(issueNumber, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	} else {
 		if c := e.cache(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:awaiting-input")
 		}
 	}
 }
@@ -3787,7 +3785,9 @@ func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.Project
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "merge-train", "cannot reroute off holding stage — status move to %s failed: %v\n", target.Name, err)
 		return false
 	}
@@ -3798,9 +3798,6 @@ func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.Project
 	// advanceToNextStage — the status move above just bumped the item's real GitHub
 	// updatedAt via the project-item mutation.
 	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-	}
 
 	e.logf(item.Number, "merge-train", "rerouted off %s to %s\n", hs.Name, target.Name)
 	// Off the train: the old line is stale. A pause that follows writes its own,

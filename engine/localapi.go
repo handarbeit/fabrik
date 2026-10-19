@@ -1273,17 +1273,7 @@ func (b localAPIBackend) fillPollLiveness(p *localapi.PollHealth, h healthSnapsh
 }
 
 func (b localAPIBackend) webhookMode() string {
-	m := b.e.webhookMgr
-	switch {
-	case m == nil:
-		return "off"
-	case m.IsDisabled():
-		return "disabled"
-	case m.IsHealthyOrStartingUp():
-		return "healthy"
-	default:
-		return "unhealthy"
-	}
+	return b.e.transports.Mode()
 }
 
 // partitions lists every (repo, base) partition that has members or a worker,

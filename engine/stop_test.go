@@ -129,17 +129,17 @@ func TestHandleStopRequest_NoWorkerEntry(t *testing.T) {
 	}
 }
 
-// TestHandleStopRequest_NilWebhookMgr verifies that stop works without panicking
-// when webhookMgr is nil (non-webhook mode or test environments).
-func TestHandleStopRequest_NilWebhookMgr(t *testing.T) {
+// TestHandleStopRequest_NoTransport verifies that stop works without panicking
+// when no transport is attached (non-webhook mode or test environments).
+func TestHandleStopRequest_NoTransport(t *testing.T) {
 	client := &mockGitHubClient{}
 	client.addLabelToIssueFn = func(owner, repo string, issueNumber int, label string) error { return nil }
 	client.addCommentFn = func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil }
 
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	// webhookMgr is nil by default in testEngine.
-	if eng.webhookMgr != nil {
-		t.Fatal("precondition: testEngine must not have webhookMgr set")
+	// transports is nil by default in testEngine.
+	if eng.transports != nil {
+		t.Fatal("precondition: testEngine must not have transports set")
 	}
 
 	// Must not panic.

@@ -480,172 +480,19 @@ func (e *Engine) Run() error {
 	unregisterObservers := e.RegisterObservers()
 	defer unregisterObservers()
 
-	// Start webhook manager when enabled. Failures are non-fatal: the engine
-	// continues in polling-only mode.
-	if e.cfg.Webhooks {
-		// Seed the known-repo set so the first subprocess invocation has at least
-		// one --repo arg. Multi-repo boards discover additional repos via UpdateRepos
-		// after the first poll, at which point the subprocess restarts with the full set.
-		var initialRepos map[string]bool
-		if e.cfg.Owner != "" && e.cfg.Repo != "" {
-			initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
-		}
-		var deltaFn func(string, []byte)
-		if cacheImpl != nil {
-			deltaFn = func(eventType string, payload []byte) {
-				e.health.noteWebhookEvent(e.now())
-				cacheImpl.ApplyDelta(eventType, payload)
-				e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
-			}
-		}
-		cleanupFn := func(repos []string) error {
-			var firstErr error
-			for _, r := range repos {
-				owner, repo := parseOwnerRepo(r)
-				if owner == "" {
-					e.logf(0, "webhook", "skipping malformed repo in cleanup: %q\n", r)
-					continue
-				}
-				if err := e.client.DeleteForwardingHooks(owner, repo); err != nil {
-					e.logf(0, "webhook", "orphan hook cleanup failed for %s/%s: %v\n", owner, repo, err)
-					if firstErr == nil {
-						firstErr = err
-					}
-				}
-			}
-			return firstErr
-		}
-		wm := newWebhookManager(
-			e.logf,
-			e.wakeCh,
-			e.emit,
-			initialRepos,
-			e.cfg.WebhookEvents,
-			deltaFn,
-			cleanupFn,
-		)
-		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming webhooks.
-		if cacheImpl != nil {
-			cacheImpl.SetMatchEchoFn(wm.MatchEcho)
-			cacheImpl.SetMatchEchoReportedFn(wm.MatchEchoReported)
-			cacheImpl.SetMatchEchoViaFn(wm.MatchEchoVia)
-		}
-		// Bootstrap the cache before accepting webhook events so no delta is
-		// dropped into an empty cache during the startup window.
-		// Probe-based bootstrap costs ~250 GraphQL nodes (vs ~2350 for a full
-		// shallow fetch). Terminal seeding for closed cleanup-stage items happens
-		// via seedTerminalFromProbeItems after bootstrap, preventing the first
-		// poll from re-deep-fetching every closed Done item.
-		if cacheImpl != nil {
-			probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-			if probeErr != nil {
-				e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
-			} else if projectID != "" && len(probeItems) > 0 {
-				cacheImpl.BootstrapFromProbe(probeItems, projectID)
-				e.seedTerminalFromProbeItems(probeItems)
-			} else if projectID != "" {
-				e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
-			}
-		}
-		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
-			e.webhookMgr = wm
-			defer wm.Stop()
-			// R5 startup assertion (#1142): verify a forwarding hook actually
-			// exists for each managed repo, warning (never failing startup) on
-			// any gap. Best-effort here — on a fresh multi-repo board, wm's repo
-			// set isn't populated until the first UpdateRepos call during poll,
-			// so this startup pass only reliably covers single-repo boards; the
-			// periodic reconcileLoop check (engine/reconcile.go) re-runs it once
-			// the full managed set is known and on every tick thereafter.
-			e.checkWebhookHookCoverage(wm)
-		}
-		// NOTE: the reconcile ticker is intentionally NOT started here. It is the
-		// poll-only correctness backstop and must run whether or not the webhook
-		// manager started (#955) — it is launched unconditionally below.
-	} else if e.cfg.EventSource == EventSourceHookdeck {
-		// event_source: hookdeck (#1142) — the App-auth-only alternative
-		// transport. Mutually exclusive with the cfg.Webhooks branch above:
-		// RefuseHookdeckWithWebhooks (engine/github_app_auth.go) refuses the
-		// combination at startup, so this is a clean if/else-if rather than
-		// a fallthrough that could ever run both.
-		// apiKeyEnvName/secretEnvName hold the *names* of the environment
-		// variables, never their values: the secrets themselves (apiKey,
-		// webhookSecret below) go only to newHookdeckManager and are never
-		// logged. The explicit "...Name" suffix keeps that distinction plain
-		// to readers, and to CodeQL, whose clear-text-logging heuristic read
-		// the earlier apiKeyEnv/secretEnv spellings as sensitive values
-		// flowing into the log call below - a false positive, since what is
-		// logged is the variable name (e.g. "$HOOKDECK_API_KEY").
-		apiKeyEnvName := e.cfg.HookdeckAPIKeyEnv
-		if apiKeyEnvName == "" {
-			apiKeyEnvName = DefaultHookdeckAPIKeyEnv
-		}
-		secretEnvName := e.cfg.HookdeckWebhookSecretEnv
-		if secretEnvName == "" {
-			secretEnvName = DefaultHookdeckWebhookSecretEnv
-		}
-		apiKey := os.Getenv(apiKeyEnvName)
-		webhookSecret := os.Getenv(secretEnvName)
-		if apiKey == "" || webhookSecret == "" {
-			var missing []string
-			if apiKey == "" {
-				missing = append(missing, apiKeyEnvName)
-			}
-			if webhookSecret == "" {
-				missing = append(missing, secretEnvName)
-			}
-			e.logf(0, "hookdeck", "event_source: hookdeck requires %s to be set — falling back to polling only\n",
-				strings.Join(missing, " and "))
-		} else {
-			var initialRepos map[string]bool
-			if e.cfg.Owner != "" && e.cfg.Repo != "" {
-				initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
-			}
-			var deltaFn func(string, []byte)
-			if cacheImpl != nil {
-				deltaFn = func(eventType string, payload []byte) {
-					e.health.noteWebhookEvent(e.now())
-					cacheImpl.ApplyDelta(eventType, payload)
-					e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
-				}
-			}
-			hm := newHookdeckManager(e.logf, e.emit, initialRepos, deltaFn, apiKey, webhookSecret)
-			// Bootstrap the cache before accepting events, mirroring the
-			// cfg.Webhooks branch above so no delta is dropped into an empty
-			// cache during the startup window.
-			if cacheImpl != nil {
-				probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-				if probeErr != nil {
-					e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
-				} else if projectID != "" && len(probeItems) > 0 {
-					cacheImpl.BootstrapFromProbe(probeItems, projectID)
-					e.seedTerminalFromProbeItems(probeItems)
-				} else if projectID != "" {
-					e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
-				}
-			}
-			hm.Start(ctx)
-			e.webhookMgr = hm
-			defer hm.Stop()
-			e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnvName, secretEnvName)
-			// R5 startup assertion (#1142): verify the App installation's
-			// granted-repo set covers every managed repo, warning (never
-			// failing startup) on any gap — the App-mode analogue of the
-			// cfg.Webhooks branch's checkWebhookHookCoverage call above.
-			e.checkHookdeckInstallationCoverage(hm)
-		}
-		// NOTE: as with the cfg.Webhooks branch, the reconcile ticker is
-		// intentionally NOT started here — it is launched unconditionally below.
-	}
+	// Start the event-ingestion transports (gh webhook forward, Hookdeck, …) that
+	// are configured, behind one transport-neutral intake (#2351). Failures are
+	// non-fatal: the engine continues in polling-only mode.
+	defer e.setUpIngestion(ctx, cacheImpl)()
 
 	// Reconcile ticker: the poll-only correctness backstop that re-syncs the cache
 	// from GitHub on drift — notably fabrik-managed label state, whose divergence
 	// (e.g. a store missing fabrik:awaiting-ci while GitHub has it) otherwise
 	// strands an item at a gate forever. This MUST run independent of webhooks
 	// (#955): webhooks are an optimization, not a requirement, so drift repair may
-	// not be gated on the webhook manager starting. e.webhookMgr is nil when
-	// webhooks are disabled or failed to start; reconcileLoop skips health-state
-	// signaling in that case.
+	// not be gated on a transport starting. e.transports is empty when no
+	// transport is configured or all failed to start; reconcileLoop skips
+	// health-state signaling in that case.
 	//
 	// TEST-ONLY (#1978): the bed's poll hold/trigger seam is built here, before
 	// reconcileLoop starts, because reconcileLoop consults it. nil in production.
@@ -653,7 +500,7 @@ func (e *Engine) Run() error {
 		e.pollSeam = newPollSeam(e, e.cfg.PollControlFile)
 	}
 	if cacheImpl != nil {
-		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
+		go e.reconcileLoop(ctx, cacheImpl, e.transports)
 	}
 	if e.events != nil {
 		go e.runWorkerSlotsPublisher(ctx, workerSlotsSampleInterval) // #2115: display-only slot readout
@@ -661,7 +508,7 @@ func (e *Engine) Run() error {
 	}
 
 	// Local read API (#1967): bound after the instance lock is held (so a
-	// leftover socket is provably stale) and after e.webhookMgr is final, and
+	// leftover socket is provably stale) and after e.transports is final, and
 	// before the first poll. Closed when Run() returns, and explicitly before a
 	// SIGHUP re-exec (performSighupRestart).
 	// Channel events (#1968) start first so the socket's streaming methods can
@@ -1335,8 +1182,8 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 	if !e.idleStart.IsZero() {
 		idleDuration = time.Since(e.idleStart)
 	}
-	webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
-	if e.webhookMgr != nil && e.webhookMgr.IsDisabled() {
+	webhookHealthy := e.transports.Healthy()
+	if e.transports.Disabled() {
 		e.logf(0, "webhook", "poll-only mode active — webhook subscription disabled; restart Fabrik to retry\n")
 	}
 	effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, e.backoffRateLimitRatio, webhookHealthy)
@@ -1359,8 +1206,8 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 	}
 
 	// Notify webhook manager of any new repos discovered during this poll.
-	if e.webhookMgr != nil && result.SeenRepos != nil {
-		e.webhookMgr.UpdateRepos(result.SeenRepos)
+	if result.SeenRepos != nil {
+		e.transports.UpdateRepos(result.SeenRepos)
 	}
 
 	// Log backoff level transitions.

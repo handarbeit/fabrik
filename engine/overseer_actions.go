@@ -221,16 +221,15 @@ func (e *Engine) moveItemToStatus(projectID string, item gh.ProjectItem, field *
 		return errors.New("project id not available")
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.echo.ReserveIfSubscribedVia("projects_v2_item", "edited", item.ItemID, requester)
 	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, field.FieldID, optionID); err != nil {
+		res.Cancel()
 		return err
 	}
 	if c := e.cache(); c != nil {
 		c.UpdateItemStatusBy(boardcache.ItemKey(owner+"/"+repo, item.Number), targetName, requester)
 	}
 	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoIfSubscribedVia("projects_v2_item", "edited", item.ItemID, requester)
-	}
 	return nil
 }
 

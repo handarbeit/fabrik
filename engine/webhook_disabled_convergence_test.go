@@ -62,7 +62,7 @@ func TestWebhooksDisabled_ConvergesAcrossDriftCategories(t *testing.T) {
 		defer cancel()
 		// eng.webhookMgr is nil (never assigned) and cfg.Webhooks is false —
 		// the whole point: convergence must not depend on either.
-		go eng.reconcileLoop(ctx, cache, eng.webhookMgr)
+		go eng.reconcileLoop(ctx, cache, eng.transports)
 
 		deadline := time.Now().Add(2 * time.Second)
 		for {

@@ -310,23 +310,6 @@ func RefuseHookdeckWithoutGitHubApp(eventSource string, appAuthConfigured bool) 
 		"use PAT-mode --webhooks or plain polling instead")
 }
 
-// RefuseHookdeckWithWebhooks refuses event_source: hookdeck (#1142)
-// combined with --webhooks (FABRIK_WEBHOOKS) outright: the two are mutually
-// exclusive ingestion transports (R6/R7 of #1142) — gh webhook forward is
-// PAT-mode-only and Hookdeck is App-auth-only, so a config enabling both is
-// always contradictory, never additive. Mirrors RefuseWebhooksWithGitHubApp's
-// shape exactly: nil for the compatible case, a descriptive error otherwise
-// naming both settings and both ways out.
-func RefuseHookdeckWithWebhooks(eventSource string, webhooksEnabled bool) error {
-	if eventSource != EventSourceHookdeck || !webhooksEnabled {
-		return nil
-	}
-	return fmt.Errorf("event_source: hookdeck (FABRIK_EVENT_SOURCE) cannot be combined with --webhooks " +
-		"(FABRIK_WEBHOOKS) — they are mutually exclusive ingestion transports (gh webhook forward is PAT-mode-" +
-		"only; Hookdeck is App-auth-only). Remove --webhooks to use event_source: hookdeck, or remove " +
-		"event_source to use --webhooks instead")
-}
-
 // FormatPermissionShortfalls renders R3's "name each missing permission"
 // requirement as one human-readable, deterministically-ordered string —
 // checkGrantedPermissions already sorts shortfalls by permission name.

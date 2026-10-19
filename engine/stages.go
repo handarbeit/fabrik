@@ -131,16 +131,17 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// fabrik:paused (bypassing unblockAwaitingInput), the label can survive through
 	// subsequent stage runs. Clean it up on every completion path.
 	if hasLabel(item.Labels, "fabrik:awaiting-input") {
+		unlabelEcho := e.echo.Reserve("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 			!errors.Is(err, gh.ErrNotFound) {
+			unlabelEcho.Cancel()
 			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 		} else if err == nil {
 			if c := e.cache(); c != nil {
 				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
 			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-			}
+		} else {
+			unlabelEcho.Cancel() // already absent on GitHub: no unlabeled webhook will follow
 		}
 	}
 
@@ -223,7 +224,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		// stands does the dispatch count of the episode end.
 		completionDurable := alreadyAwaitingCI
 		if !alreadyAwaitingCI {
+			labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
+				labelEcho.Cancel()
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
 				// awaiting-ci is this stage's completion signal: report its loss so a
 				// recorded outcome (#2394) is retried rather than dropped as published.
@@ -232,9 +235,6 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				awaitingCIArmed = true
 				if c := e.cache(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-ci")
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
 				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
 				completionDurable = true
@@ -261,7 +261,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	}
 
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 		completionErr = fmt.Errorf("adding %s: %w", completeLabel, err)
 	} else {
@@ -269,9 +271,6 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		e.resetStageDispatches(item, stage.Name)
 		if c := e.cache(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 		}
 		if stage.Name == "Validate" {
 			// The completion label is the durable signal of this Validate stage
@@ -356,14 +355,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				}
 			}
 			if !alreadyWaiting {
+				labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
+					labelEcho.Cancel()
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
 				} else {
 					if c := e.cache(); c != nil {
 						c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-review")
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
 					}
 					e.recordLabelAppliedAtNow(item, "fabrik:awaiting-review")
 				}
@@ -685,14 +683,13 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		// of the linked issue reaches the store and before any close tracking.
 		e.emitLanded(item, pr.Number)
 		// Apply idempotency guard and convergence anchor after successful direct merge.
+		labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+			labelEcho.Cancel()
 			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 		} else {
 			if c := e.cache(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 			}
 			e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 		}
@@ -701,14 +698,13 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 	}
 
 	// Apply fabrik:auto-merge-enabled as idempotency guard and budget-start anchor.
+	labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
 		if c := e.cache(); c != nil {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
 		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
@@ -759,7 +755,9 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 	if err := e.client.EnqueuePullRequest(owner, repo, prNumber, headSHA); err != nil {
 		return false, fmt.Errorf("enqueue PR #%d: %w", prNumber, err)
 	}
+	labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
 		if c := e.cache(); c != nil {
@@ -768,9 +766,6 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 			// and the write-through actually lands on the right item — consistent with
 			// the webhook-echo key below.
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
 		e.recordLabelAppliedAtNow(item, "fabrik:auto-merge-enabled")
 	}
@@ -799,15 +794,14 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	if !hasLabel(item.Labels, "fabrik:awaiting-done") && e.feedbackGateBlocks(item, false, "no-work-needed") {
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		if !hasLabel(item.Labels, completeLabel) {
+			labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+				labelEcho.Cancel()
 				e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 			} else {
 				e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
 				if c := e.cache(); c != nil {
 					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 				}
 			}
 		}
@@ -815,15 +809,14 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 
 	if !hasLabel(item.Labels, "fabrik:awaiting-done") {
+		labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-done")
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {
+			labelEcho.Cancel()
 			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
 			e.resetStageDispatches(item, stage.Name) // durable completion ends the episode (#2395)
 			if c := e.cache(); c != nil {
 				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-done")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-done")
 			}
 		}
 	}
@@ -884,7 +877,9 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 		return fmt.Errorf("move to %s: %w", hs.Name, pidErr)
 	}
 	e.logf(item.Number, "merge-train", "advancing to %s for merge train batching\n", hs.Name)
+	statusEcho := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	if err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		statusEcho.Cancel()
 		return fmt.Errorf("move to %s: %w", hs.Name, err)
 	}
 	if c := e.cache(); c != nil {
@@ -893,21 +888,17 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 	// Advances the probe staleness baseline (#1090) — the status move above just
 	// bumped the item's real GitHub updatedAt via the project-item mutation.
 	e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-	}
 
 	// Add stage:Validate:complete so the Phase 2 catch-up loop does not re-dispatch Validate.
 	completeLabel := "stage:Validate:complete"
+	labelEcho := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
+		labelEcho.Cancel()
 		e.logf(item.Number, "warn", "advanced to %s but could not add %s label: %v — will retry on next poll\n", hs.Name, completeLabel, lerr)
 		return fmt.Errorf("add %s label: %w", completeLabel, lerr)
 	}
 	if c := e.cache(); c != nil {
 		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 	}
 
 	e.logf(item.Number, "merge-train", "holding in %s — waiting for batch\n", hs.Name)
@@ -940,7 +931,11 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
 	// write-through: already covered by c.UpdateItemStatus call in the else block below
+	statusEcho := e.echo.ReserveIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	err := e.client.UpdateProjectItemStatus(projectID, item.ItemID, e.statusField.FieldID, optionID)
+	if err != nil {
+		statusEcho.Cancel()
+	}
 	if err == nil {
 		if c := e.cache(); c != nil {
 			c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), next.Name)
@@ -948,9 +943,6 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 		// Advances the probe staleness baseline (#1090) — the status move above
 		// just bumped the item's real GitHub updatedAt via the project-item mutation.
 		e.observeStatusMoveWrite(owner, repo, item.Number, item.ItemID)
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-		}
 		// The item left its stage: whatever line described the old one is stale.
 		// This is the single funnel for Done moves (merge-train landings, the
 		// ordinary merge, no-work-needed, closed-item advance), so it is also the

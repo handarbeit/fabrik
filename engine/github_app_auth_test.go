@@ -287,34 +287,6 @@ func TestRefuseHookdeckWithoutGitHubApp(t *testing.T) {
 	}
 }
 
-func TestRefuseHookdeckWithWebhooks(t *testing.T) {
-	tests := []struct {
-		name            string
-		eventSource     string
-		webhooksEnabled bool
-		wantErr         bool
-	}{
-		{name: "hookdeck alone: allowed", eventSource: EventSourceHookdeck, webhooksEnabled: false, wantErr: false},
-		{name: "webhooks alone: allowed", eventSource: EventSourcePoll, webhooksEnabled: true, wantErr: false},
-		{name: "neither: allowed", eventSource: "", webhooksEnabled: false, wantErr: false},
-		{name: "hookdeck + webhooks: refused", eventSource: EventSourceHookdeck, webhooksEnabled: true, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := RefuseHookdeckWithWebhooks(tt.eventSource, tt.webhooksEnabled)
-			if tt.wantErr && err == nil {
-				t.Fatal("expected an error refusing event_source: hookdeck + --webhooks combination")
-			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("RefuseHookdeckWithWebhooks(%q, %v) = %v, want nil", tt.eventSource, tt.webhooksEnabled, err)
-			}
-			if tt.wantErr && (!strings.Contains(err.Error(), "hookdeck") || !strings.Contains(err.Error(), "webhooks")) {
-				t.Errorf("error %q does not name both event_source: hookdeck and --webhooks", err.Error())
-			}
-		})
-	}
-}
-
 func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
 	shortfalls := []githubauth.RequiredPermissionShortfall{
 		{Permission: "issues", Required: "write", Granted: "read"},

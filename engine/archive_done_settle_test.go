@@ -266,8 +266,7 @@ func TestSettleArchiveDoneItems_SuccessfulArchive_NoWebhookEchoRegistered(t *tes
 	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 		return time.Now().Add(-1 * time.Second), nil
 	}
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -281,9 +280,7 @@ func TestSettleArchiveDoneItems_SuccessfulArchive_NoWebhookEchoRegistered(t *tes
 	if len(client.archiveProjectItemCalls) != 1 {
 		t.Fatalf("expected 1 archive call, got %d", len(client.archiveProjectItemCalls))
 	}
-	wm.mu.Lock()
-	pending := len(wm.pendingEchoes)
-	wm.mu.Unlock()
+	pending := eng.echo.len()
 	if pending != 0 {
 		t.Errorf("expected no pending webhook echo after archive (would expire unmatched), got %d", pending)
 	}

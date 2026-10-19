@@ -61,18 +61,58 @@ func (e *Engine) observeStatusMoveWrite(owner, repo string, number int, itemID s
 // nothing. The caller owns the error log text and whatever follows (persistSpec,
 // push, breaker reset).
 func (e *Engine) updateIssueBody(item gh.ProjectItem, owner, repo, body string) error {
+	key := boardcache.ItemKey(owner+"/"+repo, item.Number)
+	res := e.echo.Reserve("issues", "edited", key)
 	if err := e.client.UpdateIssueBody(owner, repo, item.Number, body); err != nil {
+		res.Cancel()
 		return err
 	}
-	key := boardcache.ItemKey(owner+"/"+repo, item.Number)
 	if c := e.cache(); c != nil && !e.issueBodyWriteThroughOff.Load() {
 		c.ApplyIssueBodyUpdated(key, body)
 	}
 	e.observeSelfWrite(owner, repo, item.Number)
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "edited", key)
-	}
 	return nil
+}
+
+// Echo reservation (#2351, ADR 2351). Every engine write that GitHub echoes back
+// as a webhook reserves its echo BEFORE the write and cancels the reservation if
+// the write fails (echo_registry.go). The reserve* helpers below build the
+// composite keys the cache's matchers expect; each returns nil (a no-op
+// reservation) when no transport is attached.
+
+// reserveLabelAdd reserves the issues/labeled echo for adding label to item.
+// requester is the overseer subscriber behind the write ("" = engine).
+func (e *Engine) reserveLabelAdd(item gh.ProjectItem, label, requester string) *echoReservation {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	return e.echo.ReserveVia("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
+}
+
+// reserveLabelRemoval reserves the issues/unlabeled echo for removing label.
+func (e *Engine) reserveLabelRemoval(item gh.ProjectItem, label, requester string) *echoReservation {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	return e.echo.ReserveVia("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
+}
+
+// reserveComment reserves the issue_comment/created echo for a comment on item.
+func (e *Engine) reserveComment(item gh.ProjectItem) *echoReservation {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	return e.echo.Reserve("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+}
+
+// reserveLabelAddIf and reserveLabelRemovalIf reserve only when echo is true —
+// the shape of the sync* helpers' echo flag.
+func (e *Engine) reserveLabelAddIf(echo bool, item gh.ProjectItem, label string) *echoReservation {
+	if !echo {
+		return nil
+	}
+	return e.reserveLabelAdd(item, label, "")
+}
+
+func (e *Engine) reserveLabelRemovalIf(echo bool, item gh.ProjectItem, label string) *echoReservation {
+	if !echo {
+		return nil
+	}
+	return e.reserveLabelRemoval(item, label, "")
 }
 
 // SetIssueBodyWriteThroughDisabledForTest skips only the Store write-through of
@@ -82,20 +122,23 @@ func (e *Engine) SetIssueBodyWriteThroughDisabledForTest(disabled bool) {
 	e.issueBodyWriteThroughOff.Store(disabled)
 }
 
-// syncLabelAdd mirrors a label addition into the cache and, when echo is
-// true, registers a webhook echo. Split out from applyLabelAdd, symmetric to
-// syncLabelRemoval, so callers that must perform the GitHub mutation
-// themselves (e.g. lock/in-progress label sites that gate further side
-// effects on success) can still share the write-through + echo tail instead
-// of re-typing it.
+// syncLabelAdd mirrors a label addition into the cache. Split out from
+// applyLabelAdd, symmetric to syncLabelRemoval, so callers that must perform the
+// GitHub mutation themselves (e.g. lock/in-progress label sites that gate
+// further side effects on success) can still share the write-through tail
+// instead of re-typing it. echo is true when the mutation really happened; the
+// webhook echo itself is NOT registered here — the caller reserves it before its
+// write (reserveLabelAdd, #2351), because registering after the write loses to a
+// fast echo.
 func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
 	e.syncLabelAddBy(item, label, echo, "")
 }
 
 // syncLabelAddBy is syncLabelAdd for a write requested by an overseer session:
-// requester (the sanitised subscriber name) rides the write-through mutation and
-// the echo entry so the resulting channel event is attributed to the overseer
-// rather than the engine (#2125, ADR 2125). "" is an engine-autonomous write.
+// requester (the sanitised subscriber name) rides the write-through mutation (and,
+// via reserveLabelAdd, the echo reservation) so the resulting channel event is
+// attributed to the overseer rather than the engine (#2125, ADR 2125). "" is an
+// engine-autonomous write.
 func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, requester string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if c := e.cache(); c != nil {
@@ -106,9 +149,6 @@ func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, re
 	// signal available here, so the probe staleness baseline advances
 	// unconditionally (#1090).
 	e.observeSelfWrite(owner, repo, item.Number)
-	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoVia("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
-	}
 }
 
 // applyLabelAdd performs the three-beat label-add idiom: GitHub mutation ->
@@ -132,7 +172,9 @@ func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, re
 // via labelAppliedAt.
 func (e *Engine) applyLabelAdd(item gh.ProjectItem, label string, echo bool) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.reserveLabelAddIf(echo, item, label)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "could not add label %q: %v\n", label, err)
 		return
 	}
@@ -243,7 +285,9 @@ func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
 // failed GitHub call returns before either, so nothing is left pending.
 func (e *Engine) addLabelCheckedBy(item gh.ProjectItem, label, requester string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.reserveLabelAdd(item, label, requester)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
+		res.Cancel()
 		return err
 	}
 	e.syncLabelAddBy(item, label, true, requester)
@@ -251,11 +295,12 @@ func (e *Engine) addLabelCheckedBy(item gh.ProjectItem, label, requester string)
 	return nil
 }
 
-// syncLabelRemoval mirrors a label removal into the cache and, when echo is
-// true, registers a webhook echo. It is split out from applyLabelRemove so
-// callers that must perform the GitHub mutation themselves (e.g.
-// removeEditingLabel's retry-with-backoff loop) can still share the
-// write-through + echo tail instead of re-typing it.
+// syncLabelRemoval mirrors a label removal into the cache. It is split out from
+// applyLabelRemove so callers that must perform the GitHub mutation themselves
+// (e.g. removeEditingLabel's retry-with-backoff loop) can still share the
+// write-through tail instead of re-typing it. echo is true when the mutation
+// really removed something; the webhook echo is reserved by the caller before its
+// write (reserveLabelRemoval, #2351).
 func (e *Engine) syncLabelRemoval(item gh.ProjectItem, label string, echo bool) {
 	e.syncLabelRemovalBy(item, label, echo, "")
 }
@@ -270,13 +315,10 @@ func (e *Engine) syncLabelRemovalBy(item gh.ProjectItem, label string, echo bool
 	e.clearLabelAppliedAtNow(item, label)
 	// echo is only true when the underlying RemoveLabelFromIssue call actually
 	// removed something on GitHub (not gh.ErrNotFound) — the same "real mutation
-	// happened" signal RegisterEcho below relies on, so the staleness baseline
-	// advances under the identical condition (#1090).
+	// happened" signal the caller's echo reservation relies on, so the staleness
+	// baseline advances under the identical condition (#1090).
 	if echo {
 		e.observeSelfWrite(owner, repo, item.Number)
-	}
-	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoVia("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
 	}
 }
 
@@ -287,7 +329,13 @@ func (e *Engine) syncLabelRemovalBy(item gh.ProjectItem, label string, echo bool
 // matching removeEditingLabel's pre-existing ErrNotFound behavior.
 func (e *Engine) applyLabelRemove(item gh.ProjectItem, label string, echo bool) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.reserveLabelRemovalIf(echo, item, label)
 	err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
+	if err != nil {
+		// A failed removal and an already-absent label (ErrNotFound) both mean no
+		// unlabeled webhook will arrive: drop the reservation.
+		res.Cancel()
+	}
 	if err != nil && !errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove label %q: %v\n", label, err)
 		return
@@ -309,7 +357,11 @@ func (e *Engine) removeLabelChecked(item gh.ProjectItem, label string) error {
 // (#2125); see addLabelCheckedBy.
 func (e *Engine) removeLabelCheckedBy(item gh.ProjectItem, label, requester string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	res := e.reserveLabelRemoval(item, label, requester)
 	err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
+	if err != nil {
+		res.Cancel()
+	}
 	if err != nil && !errors.Is(err, gh.ErrNotFound) {
 		return err
 	}
@@ -331,8 +383,13 @@ func (e *Engine) removeLabel(item gh.ProjectItem, label string) {
 // didn't echo their pause comment.
 func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool) (int, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	var res *echoReservation
+	if echo {
+		res = e.reserveComment(item)
+	}
 	dbID, err := e.client.AddComment(owner, repo, item.Number, body)
 	if err != nil {
+		res.Cancel()
 		e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 		return 0, err
 	}
@@ -345,9 +402,6 @@ func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool)
 	// staleness baseline advances unconditionally, same as the cache
 	// write-through above (#1090).
 	e.observeSelfWrite(owner, repo, item.Number)
-	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-	}
 	if react {
 		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -379,8 +433,8 @@ func (e *Engine) postItemComment(item gh.ProjectItem, body string, react bool) i
 type pauseOpts struct {
 	awaitingInput   bool // add fabrik:awaiting-input alongside fabrik:paused
 	reactRocket     bool // rocket-react the posted comment
-	labelEcho       bool // RegisterEcho after the paused/awaiting-input/auto-merge label writes
-	commentEcho     bool // RegisterEcho after the comment write
+	labelEcho       bool // reserve an echo for the paused/awaiting-input/auto-merge label writes
+	commentEcho     bool // reserve an echo for the comment write
 	removeAutoMerge bool // also remove fabrik:auto-merge-enabled
 	// labelFirst preserves call-site ordering: the 10 Pattern-A pauseFor*
 	// functions historically posted their comment before adding fabrik:paused,

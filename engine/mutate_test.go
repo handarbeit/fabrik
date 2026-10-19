@@ -42,8 +42,7 @@ func TestCache_ReturnsCacheImplWhenWired(t *testing.T) {
 func TestApplyLabelAdd_WriteThroughAndEcho(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelAdd(item, "fabrik:paused", true)
@@ -55,10 +54,7 @@ func TestApplyLabelAdd_WriteThroughAndEcho(t *testing.T) {
 	if !containsLabel(labels, "fabrik:paused") {
 		t.Errorf("expected fabrik:paused in cache, got %v", labels)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
 	if !gotEcho {
 		t.Error("expected webhook echo to be registered when echo=true")
 	}
@@ -67,8 +63,7 @@ func TestApplyLabelAdd_WriteThroughAndEcho(t *testing.T) {
 func TestApplyLabelAdd_NoEchoWhenSuppressed(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelAdd(item, "fabrik:paused", false)
@@ -80,10 +75,7 @@ func TestApplyLabelAdd_NoEchoWhenSuppressed(t *testing.T) {
 	if !containsLabel(labels, "fabrik:paused") {
 		t.Errorf("expected cache write-through regardless of echo, got %v", labels)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
 	if gotEcho {
 		t.Error("expected no webhook echo when echo=false")
 	}
@@ -131,8 +123,7 @@ func TestAddLabel_UsesResolvedRepoNotItemRepo(t *testing.T) {
 func TestApplyLabelRemove_WriteThroughAndEcho(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:blocked")
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
@@ -145,10 +136,7 @@ func TestApplyLabelRemove_WriteThroughAndEcho(t *testing.T) {
 	if containsLabel(labels, "fabrik:blocked") {
 		t.Errorf("expected fabrik:blocked removed from cache, got %v", labels)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issues", "unlabeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:blocked")]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issues", "unlabeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:blocked"))
 	if !gotEcho {
 		t.Error("expected webhook echo to be registered on successful removal")
 	}
@@ -161,8 +149,7 @@ func TestApplyLabelRemove_ErrNotFoundSyncsCacheButNeverEchoes(t *testing.T) {
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:editing")
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
@@ -177,10 +164,7 @@ func TestApplyLabelRemove_ErrNotFoundSyncsCacheButNeverEchoes(t *testing.T) {
 	if containsLabel(labels, "fabrik:editing") {
 		t.Errorf("expected cache synced (label absent) on ErrNotFound idempotent removal, got %v", labels)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issues", "unlabeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:editing")]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issues", "unlabeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:editing"))
 	if gotEcho {
 		t.Error("expected no webhook echo on ErrNotFound removal, even with echo=true requested")
 	}
@@ -216,8 +200,7 @@ func TestPostComment_WriteThroughEchoAndReact(t *testing.T) {
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	// Warm up the deep-fetch cache so FetchItemDetails returns from cache after
@@ -240,10 +223,7 @@ func TestPostComment_WriteThroughEchoAndReact(t *testing.T) {
 	if !containsCommentByID(itemAfter.Comments, 42) {
 		t.Errorf("expected comment 42 in cache, got %v", itemAfter.Comments)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1)))
 	if !gotEcho {
 		t.Error("expected webhook echo to be registered when echo=true")
 	}
@@ -260,17 +240,13 @@ func TestPostComment_NoEchoNoReactWhenSuppressed(t *testing.T) {
 		},
 	}
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	if _, err := eng.postComment(item, "hello", false, false); err != nil {
 		t.Fatalf("postComment: %v", err)
 	}
-
-	wm.mu.Lock()
-	_, gotEcho := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
-	wm.mu.Unlock()
+	gotEcho := eng.echo.has(echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1)))
 	if gotEcho {
 		t.Error("expected no webhook echo when echo=false")
 	}
@@ -327,8 +303,7 @@ func TestPauseIssue_PatternA(t *testing.T) {
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.pauseIssue(item, "paused message", pauseOpts{
@@ -345,11 +320,8 @@ func TestPauseIssue_PatternA(t *testing.T) {
 	if len(client.addCommentReactionCalls) != 1 {
 		t.Errorf("expected 1 rocket-react call, got %d", len(client.addCommentReactionCalls))
 	}
-
-	wm.mu.Lock()
-	_, labelEchoed := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	_, commentEchoed := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
-	wm.mu.Unlock()
+	labelEchoed := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
+	commentEchoed := eng.echo.has(echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1)))
 	if labelEchoed {
 		t.Error("Pattern A must not echo label writes")
 	}
@@ -375,8 +347,7 @@ func TestPauseIssue_PatternB(t *testing.T) {
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.pauseIssue(item, "escalation message", pauseOpts{
@@ -398,11 +369,8 @@ func TestPauseIssue_PatternB(t *testing.T) {
 	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
 		t.Errorf("Pattern B must add fabrik:paused before posting the comment, got order %v", order)
 	}
-
-	wm.mu.Lock()
-	_, labelEchoed := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	_, commentEchoed := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
-	wm.mu.Unlock()
+	labelEchoed := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
+	commentEchoed := eng.echo.has(echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1)))
 	if !labelEchoed {
 		t.Error("Pattern B must echo the label write")
 	}
@@ -428,8 +396,7 @@ func TestPauseIssue_PatternC(t *testing.T) {
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.pauseIssue(item, "broken linkage message", pauseOpts{
@@ -454,11 +421,8 @@ func TestPauseIssue_PatternC(t *testing.T) {
 	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
 		t.Errorf("Pattern C must add fabrik:paused before posting the comment, got order %v", order)
 	}
-
-	wm.mu.Lock()
-	_, labelEchoed := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
-	_, commentEchoed := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
-	wm.mu.Unlock()
+	labelEchoed := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
+	commentEchoed := eng.echo.has(echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1)))
 	if !labelEchoed {
 		t.Error("Pattern C must still echo the label write")
 	}
@@ -645,18 +609,18 @@ func TestPostComment_ErrorDoesNotAdvanceStaleness(t *testing.T) {
 
 // TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr verifies the "must work
 // identically in polling-only mode" requirement (#1090): the baseline advance
-// must not be gated on e.webhookMgr, unlike the adjacent RegisterEcho call.
+// must not be gated on a transport being attached, unlike the echo reservation.
 func TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr(t *testing.T) {
 	client := &mockGitHubClient{}
 	client.fixedWriteStamps(githubWriteAt)
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	eng.webhookMgr = nil // polling-only mode
+	eng.echo = nil // polling-only mode (no transport attached)
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	eng.applyLabelAdd(item, "fabrik:paused", true)
 
 	if got := lastSeenSourceUpdatedAt(t, eng, "owner/repo", 1); !got.Equal(githubWriteAt) {
-		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v in polling-only mode (webhookMgr == nil)", got, githubWriteAt)
+		t.Errorf("LastSeenSourceUpdatedAt = %v; want GitHub's stamp %v in polling-only mode (no transport)", got, githubWriteAt)
 	}
 }
 
@@ -746,34 +710,24 @@ func TestRemoveLabelCheckedBy_NotFoundRegistersNoEcho(t *testing.T) {
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error { return gh.ErrNotFound },
 	}
 	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	wm.mu.Lock()
-	wm.state = WebhookStreamHealthy
-	wm.mu.Unlock()
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	if err := eng.removeLabelCheckedBy(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:yolo", "x"); err != nil {
 		t.Fatal(err)
 	}
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if len(wm.pendingEchoes) != 0 || len(wm.echoVia) != 0 {
-		t.Fatalf("echo registered for an already-absent label: %v %v", wm.pendingEchoes, wm.echoVia)
+	if eng.echo.len() != 0 {
+		t.Fatalf("echo left pending for an already-absent label: %d", eng.echo.len())
 	}
 }
 
 func TestAddLabelCheckedBy_RegistersEchoWithRequester(t *testing.T) {
 	eng, _ := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-	wm, _ := newTestWebhookManager(t)
-	wm.mu.Lock()
-	wm.state = WebhookStreamHealthy
-	wm.mu.Unlock()
-	eng.webhookMgr = wm
+	eng.echo = newEchoRegistry()
 
 	if err := eng.addLabelCheckedBy(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:cruise", "x"); err != nil {
 		t.Fatal(err)
 	}
-	ok, via := wm.MatchEchoVia("issues", "labeled", "owner/repo#1+fabrik:cruise")
+	ok, via := eng.echo.MatchEchoVia("issues", "labeled", "owner/repo#1+fabrik:cruise")
 	if !ok || via != "x" {
 		t.Fatalf("MatchEchoVia = %v, %q", ok, via)
 	}
