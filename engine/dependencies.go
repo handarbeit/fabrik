@@ -237,7 +237,6 @@ func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectIt
 			e.logf(item.Number, "warn", "checkDependencies: live re-read of blockedBy failed (%v) — using possibly-stale cached list\n", err)
 		} else {
 			blockedByList = fresh.BlockedBy
-			e.live.note(depKey, e.now())
 		}
 	} else if skippedFresh {
 		// Decide from the Store, which holds what the fresh observation applied,

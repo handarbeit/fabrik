@@ -109,6 +109,52 @@ func TestLinkedPRStateObserved_LaggingListCannotRevert(t *testing.T) {
 	}
 }
 
+// A merge just confirmed by a single-PR read is not dropped because a webhook or PR
+// update was recorded in the 30 s before the read began (#2350, FR-006): the read is
+// a direct GET, judged by its own start.
+func TestLinkedPRStateObserved_NotDroppedByARecordInsideTheGraceWindow(t *testing.T) {
+	s := liveReadStore(t)
+	now := time.Now()
+	// A PR update recorded at its own (unshifted) time, inside the grace window
+	// before the read starts.
+	s.Apply(PRDetailsUpdated{Repo: orderRepo, Number: 1, PRNumber: orderPR, Title: "T", State: "open", At: now.Add(-testGrace / 2)})
+	snap, _, _ := s.Apply(LinkedPRStateObserved{Repo: orderRepo, Number: 1, PRNumber: orderPR, State: "closed", Merged: true, At: now})
+	if lpr := snap.LinkedPR(); !lpr.Merged {
+		t.Fatalf("a confirmed merge was dropped behind a record inside the grace window: %+v", lpr)
+	}
+	// Still ordered: a read that started before that record is dropped.
+	s2 := liveReadStore(t)
+	s2.Apply(PRDetailsUpdated{Repo: orderRepo, Number: 1, PRNumber: orderPR, Title: "T", State: "open", At: now})
+	snap, _, _ = s2.Apply(LinkedPRStateObserved{Repo: orderRepo, Number: 1, PRNumber: orderPR, State: "closed", Merged: true, At: now.Add(-time.Second)})
+	if lpr := snap.LinkedPR(); lpr.Merged {
+		t.Fatalf("a read older than a recorded observation was applied: %+v", lpr)
+	}
+}
+
+// The same for the review read: a reviewer's review recorded by a webhook in the
+// 30 s before the read began does not outrank the read, which started later and
+// sees the reviewer's newer verdict (#2350).
+func TestPRReviewsRead_NotOutrankedByAReviewRecordedInsideTheGraceWindow(t *testing.T) {
+	s := liveReadStore(t)
+	now := time.Now()
+	earlier := now.Add(-testGrace / 2)
+	s.Apply(PRReviewSubmitted{Repo: orderRepo, Number: 1, At: earlier,
+		Review: gh.PRReview{Author: "bob", State: "APPROVED", DatabaseID: 1, SubmittedAt: earlier}})
+	snap, _, _ := s.Apply(PRReviewsRead{
+		Repo: orderRepo, Number: 1, PRNumber: orderPR,
+		Reviews:   []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED", DatabaseID: 2, SubmittedAt: now.Add(-time.Second)}},
+		Requests:  []gh.ReviewRequest{{Login: "late-reviewer"}},
+		FetchedAt: now,
+	})
+	lpr := snap.LinkedPR()
+	if lpr == nil || len(lpr.Reviews) != 1 || lpr.Reviews[0].State != "CHANGES_REQUESTED" {
+		t.Fatalf("the read's newer verdict lost to a webhook record inside the grace window: %+v", lpr)
+	}
+	if len(lpr.ReviewRequests) != 1 || lpr.ReviewRequests[0].Login != "late-reviewer" {
+		t.Fatalf("review requests not applied: %+v", lpr.ReviewRequests)
+	}
+}
+
 func TestFromLiveRead_TagsOriginAndWakesNothing(t *testing.T) {
 	s := liveReadStore(t)
 	var got Change

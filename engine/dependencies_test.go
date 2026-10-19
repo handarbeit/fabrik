@@ -976,6 +976,38 @@ func TestCheckDependencies_DecisionPoint_FreshObservationSkipsTheRead(t *testing
 	}
 }
 
+// Another gate's live item read (the feedback gate's, say) in the same poll leaves
+// the edges in the Store and stamps them fresh, so the decision-point dependency
+// check repeats no read (#2350). The Store's own "blockedBy" record is the fetch
+// start minus the listing-lag allowance and could never satisfy this window.
+func TestCheckDependencies_DecisionPoint_SkipsTheReadAfterAnotherGatesLiveItem(t *testing.T) {
+	var reads int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			reads++
+			item.BlockedBy = []gh.Dependency{{Number: 976, State: "OPEN", Repo: "owner/repo"}}
+			item.DeepFetchLive = true
+			item.DeepFetchStartedAt = time.Now()
+			return nil
+		},
+	}
+	eng := depTestEngine(t, client)
+	eng.cfg.PollSeconds = 10
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 979, Status: "Research"}})
+	item := gh.ProjectItem{Number: 979, Repo: "owner/repo", Status: "Research"}
+
+	other := item
+	if err := eng.liveItem(&other); err != nil || reads != 1 {
+		t.Fatalf("setup: err=%v reads=%d", err, reads)
+	}
+	if !eng.checkDependencies(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Research"}) {
+		t.Fatal("the blocker applied by the other gate's read must stop the dispatch")
+	}
+	if reads != 1 {
+		t.Fatalf("reads = %d, want the decision-point read skipped after a same-poll live item read", reads)
+	}
+}
+
 // TestCheckDependencies_StaleEmptyCache_ReVerifiesOnResume is requirement 6's
 // regression guard (#1419): a fabrik:blocked item whose cached item.BlockedBy
 // is empty must still get the live re-read on resume, not an automatic

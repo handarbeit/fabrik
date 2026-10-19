@@ -447,8 +447,10 @@ func (s *Store) applyLabelsRead(item *ItemState, v LabelsRead) ChangeFlags {
 // review was recorded after the read began keeps the Store's review.
 func (s *Store) applyPRReviewsRead(item *ItemState, v PRReviewsRead) ChangeFlags {
 	grace := s.graceLocked()
+	// Judged by the read's own start (a direct REST read, not a lagging listing);
+	// the baseline it records is the shifted lower bound (see LinkedPRStateObserved).
 	auth := authorityOf(v.FetchedAt, true, grace)
-	if s.ordering() && observedStale(item, observedReviewsKey, auth) {
+	if s.ordering() && observedStale(item, observedReviewsKey, v.FetchedAt) {
 		return 0
 	}
 	if item.LinkedPR == nil && v.PRNumber == 0 {
@@ -457,8 +459,8 @@ func (s *Store) applyPRReviewsRead(item *ItemState, v PRReviewsRead) ChangeFlags
 	ensureLinkedPR(item, v.PRNumber)
 	var flags ChangeFlags
 	reviews := v.Reviews
-	if s.ordering() && !auth.IsZero() {
-		reviews = keepNewerReviews(item, reviews, auth)
+	if s.ordering() && !v.FetchedAt.IsZero() {
+		reviews = keepNewerReviews(item, reviews, v.FetchedAt)
 	}
 	reviews = latestReviewPerAuthor(reviews)
 	lpr := item.LinkedPR

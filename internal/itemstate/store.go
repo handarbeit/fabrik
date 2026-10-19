@@ -1256,8 +1256,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return s.applyPRReviewsRead(item, v)
 
 	case LinkedPRStateObserved:
+		// A single-PR read is a direct, consistent GET, not a lagging listing: it is
+		// judged by its own start, so a webhook or PR update recorded in the previous
+		// grace window cannot drop a merge just confirmed. The baseline it records is
+		// still the listing-lag lower bound, like every other fetch (#2350).
 		auth := authorityOf(v.At, true, s.graceLocked())
-		if observedStale(item, observedLinkedPRKey, auth) {
+		if s.ordering() && observedStale(item, observedLinkedPRKey, v.At) {
 			return 0
 		}
 		ensureLinkedPR(item, v.PRNumber)

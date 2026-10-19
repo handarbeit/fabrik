@@ -131,6 +131,11 @@ func (e *Engine) liveItem(item *gh.ProjectItem) error {
 	repo := itemOwnerRepoString(*item, e.defaultRepo())
 	if !e.liveApplyOff.Load() && e.storeHolds(repo, item.Number) {
 		e.applyLive(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: *item})
+		// The blockedBy edges came in with this read and are now in the Store: a
+		// decision-point dependency check inside liveFreshFor trusts them. The Store's
+		// own "blockedBy" record is the fetch start minus the listing-lag allowance, so
+		// it can never satisfy a window of that size; this engine-clock stamp does.
+		e.live.note(liveKey("blockedBy", repo, item.Number), e.now())
 	}
 	item.DeepFetchLive = false
 	item.DeepFetchStartedAt = time.Time{}

@@ -78,7 +78,9 @@ func (m PRReviewsRead) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LinkedPRStateObserved sets only LinkedPR.State and Merged from a live PR read
 // (FetchPRMerged) by a gate (#2350). Unlike PRDetailsUpdated it never touches
-// Title or Draft. At is the request start (it gets the listing-lag allowance).
+// Title or Draft. At is the request start: the read is judged by it as is (a
+// direct GET does not lag), and the baseline it records gets the listing-lag
+// allowance like every other fetch.
 type LinkedPRStateObserved struct {
 	Repo     string
 	Number   int // issue number

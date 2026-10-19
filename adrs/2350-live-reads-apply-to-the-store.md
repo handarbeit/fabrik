@@ -53,9 +53,14 @@ newer fact.
    the window is invisible to a caller that trusts it, so the window stays short.
 6. **Dependency check.** `checkDependenciesMode`: Phase 1 is cache-only; `processItem` and the
    stage advance are decision points that read live, skipped while the edge list was observed within
-   `liveFreshFor()` (the check's own last live read, or any write that stamped the Store's
-   `blockedBy` record such as the #1995 webhook). An already-blocked item is always re-read
+   `liveFreshFor()` (any applied `liveItem` read of the item, stamped on the engine clock, or a write that
+   stamped the Store's `blockedBy` record such as the #1995 webhook). An already-blocked item is always re-read
    (ADR 1419). Cleanup-stage items are never read.
+
+Direct REST reads (`LinkedPRStateObserved`, `PRReviewsRead`) are judged by their own start, not the
+listing-lag-shifted one: they are consistent GETs, so a record from the previous grace window cannot
+make them stale or let a webhook's older per-author review outrank them. The baseline they record is
+still the shifted lower bound, like every other fetch.
 
 ## Alternatives considered
 
