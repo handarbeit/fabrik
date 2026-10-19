@@ -209,6 +209,31 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	outstanding, hasReviews := reviewGateOutstanding(reviewRequests, reviews)
 
+	// Confirm before clearing (#2350, R3/FR-007/FR-008). The cached review data of
+	// the poll-start copy cannot see a reviewer requested after the cache filled
+	// (a review request bumps no timestamp the freshness rule compares), so a gate
+	// that is about to clear on it first reads the requests and reviews live —
+	// the same read the landing gate makes — applies them to the Store and decides
+	// on that. A gate that holds needs no confirmation (a hold is always safe), and
+	// a read made within liveFreshFor is not repeated: the Store's applied view is
+	// used instead, so an item waiting for a human to advance does not pay a read
+	// per poll. A failed read leaves the cached verdict, as before.
+	if !fetchFailed && !e.reviewConfirmLiveOff.Load() && prNumber > 0 && !(itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) &&
+		e.reviewGateWouldClear(item, stage, outstanding, hasReviews) {
+		repoKey := owner + "/" + repo
+		if e.liveReviewsFresh(repoKey, item.Number) {
+			if sr, sq, ok := e.storeReviewState(repoKey, item.Number, prNumber); ok {
+				reviews, reviewRequests = sr, sq
+				outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
+			}
+		} else if lr, lq, err := e.liveReviews(owner, repo, item.Number, prNumber); err != nil {
+			e.logf(item.Number, "warn", "checkReviewGate: live confirmation read failed: %v — deciding on the cached review data\n", err)
+		} else {
+			reviews, reviewRequests = mergeLiveReviewState(reviews, reviewRequests, lr, lq)
+			outstanding, hasReviews = reviewGateOutstanding(reviewRequests, reviews)
+		}
+	}
+
 	// FR-2 fast path: nothing requested, nothing reviewed yet, and the stage
 	// explicitly declared expected_reviewers: [] (no unrequested reviewer is
 	// expected). Placed after handleBrokenReviewLinkage/REST-fallback PR
@@ -856,19 +881,17 @@ func (e *Engine) reviewGateHold(item gh.ProjectItem, stage *stages.Stage, owner,
 		prNumber = pr.Number
 	}
 
-	reviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
-	requests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
-	fetchFailed := reviewsErr != nil || requestsErr != nil
+	// The landing gate reads reviews and requests live through the shared helper
+	// (#2350, R3): the read is applied to the Store, and the advance gate
+	// (checkReviewGate) confirms against the same read before it clears, so the
+	// two cannot disagree on identical PR state.
+	reviews, requests, readErr := e.liveReviews(owner, repo, item.Number, prNumber)
+	fetchFailed := readErr != nil
 	if fetchFailed {
-		// Conservative: treat a partial failure as no-data rather than trusting
+		// Conservative: treat a failed read as no-data rather than trusting
 		// whichever call succeeded — a false len(outstanding)==0 read could clear
 		// the gate while real outstanding reviewers are unknown.
-		if reviewsErr != nil {
-			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviews failed: %v\n", reviewsErr)
-		}
-		if requestsErr != nil {
-			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewRequests failed: %v\n", requestsErr)
-		}
+		e.logf(item.Number, "warn", "reviewGateBlocksLanding: live review read failed: %v\n", readErr)
 		reviews, requests = nil, nil
 	}
 
@@ -2127,4 +2150,61 @@ func declaredReviewersOutstanding(declared []string, reviews []gh.PRReview) []st
 // over REST, as a base:<branch> item always is.
 func reviewDataRidesMissingLink(item gh.ProjectItem) bool {
 	return item.LinkedPRNumber == 0 && len(item.LinkedPRReviews) == 0 && len(item.LinkedPRReviewRequests) == 0
+}
+
+// reviewGateWouldClear reports whether the review data in hand would clear the
+// advance gate: the FR-2 fast path, or every requested reviewer responded with at
+// least one review. It is the condition checkReviewGate confirms live (#2350).
+func (e *Engine) reviewGateWouldClear(item gh.ProjectItem, stage *stages.Stage, outstanding []string, hasReviews bool) bool {
+	if len(outstanding) == 0 && hasReviews {
+		return true
+	}
+	return reviewGateFastAdvance(outstanding, hasReviews, e.effectiveExpectedReviewers(item, stage))
+}
+
+// storeReviewState returns the reviews and review requests the Store holds for
+// the item's linked PR, when it holds that PR.
+func (e *Engine) storeReviewState(repoKey string, issueNumber, prNumber int) ([]gh.PRReview, []gh.ReviewRequest, bool) {
+	snap, ok := e.store.Peek(repoKey, issueNumber)
+	if !ok {
+		return nil, nil, false
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil || lpr.Number != prNumber {
+		return nil, nil, false
+	}
+	return lpr.Reviews, lpr.ReviewRequests, true
+}
+
+// SetReviewConfirmLiveDisabledForTest restores the pre-#2350 advance gate, which
+// decides on the cached review data alone. Test seam only (tests/sim, engine).
+func (e *Engine) SetReviewConfirmLiveDisabledForTest(off bool) { e.reviewConfirmLiveOff.Store(off) }
+
+// mergeLiveReviewState folds a live review read into the cached view the advance
+// gate started from (#2350). The confirmation exists to catch what the cache
+// cannot see, so it only ever adds constraints: a review the live read has for an
+// author replaces the cached one (a dismissal or a newer verdict is seen), an
+// author only the cache knows keeps the cached review, and every review request
+// from either side stands. Gate policy is untouched: the same pure cores decide
+// on the merged view.
+func mergeLiveReviewState(cachedReviews []gh.PRReview, cachedRequests []gh.ReviewRequest, liveReviews []gh.PRReview, liveRequests []gh.ReviewRequest) ([]gh.PRReview, []gh.ReviewRequest) {
+	liveBy := make(map[string]bool, len(liveReviews))
+	for _, r := range liveReviews {
+		liveBy[r.Author] = true
+	}
+	reviews := append([]gh.PRReview(nil), liveReviews...)
+	for _, r := range cachedReviews {
+		if !liveBy[r.Author] {
+			reviews = append(reviews, r)
+		}
+	}
+	seen := make(map[string]bool, len(cachedRequests)+len(liveRequests))
+	var requests []gh.ReviewRequest
+	for _, q := range append(append([]gh.ReviewRequest(nil), cachedRequests...), liveRequests...) {
+		if !seen[q.Login] {
+			seen[q.Login] = true
+			requests = append(requests, q)
+		}
+	}
+	return reviews, requests
 }

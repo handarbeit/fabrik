@@ -337,6 +337,7 @@ type Engine struct {
 	cachelessWriteThroughOff  atomic.Bool            // test seam: SetCachelessWriteThroughDisabledForTest (#2350)
 	dispatchRereadOff         atomic.Bool            // test seam: SetDispatchRereadDisabledForTest (#2350)
 	liveApplyOff              atomic.Bool            // test seam: SetLiveReadApplyDisabledForTest (#2350)
+	reviewConfirmLiveOff      atomic.Bool            // test seam: SetReviewConfirmLiveDisabledForTest (#2350)
 	liveFreshOverride         atomic.Int64           // test seam: SetLiveFreshForTest, nanoseconds (#2350)
 	live                      liveReadState          // engine-clock stamps of the last live read of a fact (#2350)
 	pauseGuardOff             atomic.Bool            // test seam: SetPauseGuardDisabledForTest (#2341)
