@@ -207,6 +207,24 @@ func TestLiveDeepFetch_KeepsCommentRecordedAfterReadStarted(t *testing.T) {
 	}
 }
 
+// A Store comment created before the read began, but inside the engine-write grace
+// window, that the read lacks was deleted on GitHub: the live apply must drop it.
+func TestLiveDeepFetch_DropsCommentCreatedBeforeReadStartedEvenInsideGrace(t *testing.T) {
+	s := liveReadStore(t)
+	start := time.Now()
+	s.Apply(LocalCommentAdded{Repo: orderRepo, Number: 1, Comment: gh.Comment{ID: "deleted", CreatedAt: start.Add(-DefaultEngineWriteGrace / 2)}})
+	fresh := testProjectItem(orderRepo, 1)
+	fresh.DeepFetchLive = true
+	fresh.DeepFetchStartedAt = start
+	fresh.Comments = []gh.Comment{{ID: "c1", CreatedAt: start.Add(-time.Hour)}}
+	snap, _, _ := s.Apply(ItemDeepFetched{Repo: orderRepo, Number: 1, FreshState: fresh})
+	for _, c := range snap.State().Comments {
+		if c.ID == "deleted" {
+			t.Fatalf("comment created before the read began survived the live apply: %+v", snap.State().Comments)
+		}
+	}
+}
+
 func TestLiveDeepFetch_EngineCommentWithOnlyDatabaseIDIsNotDuplicated(t *testing.T) {
 	s := liveReadStore(t)
 	start := time.Now()

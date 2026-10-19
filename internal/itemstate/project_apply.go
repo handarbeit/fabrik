@@ -213,8 +213,10 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 
 	comments := pi.Comments
 	if pi.DeepFetchLive && !pi.DeepFetchStartedAt.IsZero() {
-		// A comment recorded after the read began is not in it; keep it (#2350).
-		comments = unionRecentComments(item.Comments, comments, pi.DeepFetchStartedAt.Add(-grace))
+		// A comment created at or after the read began is not in it; keep it (#2350).
+		// The cutoff is the read's own start, not shifted by the grace: a comment
+		// created before the read began that the read lacks was deleted, and must go.
+		comments = unionRecentComments(item.Comments, comments, pi.DeepFetchStartedAt)
 	}
 	if !reflect.DeepEqual(item.Comments, comments) {
 		item.Comments = copyComments(comments)
