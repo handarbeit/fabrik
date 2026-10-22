@@ -282,6 +282,12 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	if err := warnings.Resolve(listenKey); err != nil {
 		e.logf(0, "direct", "clearing listen warning: %v\n", err)
 	}
+	// A fresh process starts with no signature-failure streak, but the panel
+	// entry is persisted: clear one left by a previous run (the in-memory
+	// tracker only resolves it on an active→inactive transition).
+	if err := warnings.Resolve(driftKey); err != nil {
+		e.logf(0, "direct", "clearing stale signature-drift warning: %v\n", err)
+	}
 	e.logf(0, "direct", "event_source: direct — listening on %s%s (plain HTTP; TLS is the fronting proxy's job), secret from $%s\n",
 		tr.Addr(), appWebhookPath(e.cfg), secretEnvName)
 	// Startup assertion: the installation must grant every managed repo.

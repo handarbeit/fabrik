@@ -582,3 +582,33 @@ func TestDirectTransport_DriftPanelEntry(t *testing.T) {
 		t.Fatalf("drift entry not resolved: %v", k)
 	}
 }
+
+// The drift panel entry is persisted; a restarted daemon has no streak, so the
+// in-memory tracker would never resolve it. A successful start clears it.
+func TestDirectTransport_StartClearsStaleDriftEntry(t *testing.T) {
+	eng, cleanup := startDirectEngine(t, "127.0.0.1:0")
+	tr := directFromEngine(t, eng)
+	h := &directHarness{tr: tr, url: "http://" + tr.Addr() + directTestPath, logs: &syncLog{}}
+	for i := 0; i < events.SignatureDriftThreshold; i++ {
+		h.post(t, []byte(`{"a":1}`), "sha256=bad", "issues", "f")
+	}
+	if k := warningKeys(t); !k["direct_signature_drift:direct"] {
+		t.Fatalf("keys = %v", k)
+	}
+	cleanup() // the "restart": the panel entry outlives the process
+
+	eng2 := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng2.fabrikDir = t.TempDir()
+	eng2.cfg.EventSource = EventSourceDirect
+	eng2.cfg.DirectListen = "127.0.0.1:0"
+	eng2.cfg.AppWebhookPath = directTestPath
+	cache, _ := eng2.UseBoardCacheForTest()
+	cleanup2 := eng2.setUpIngestion(context.Background(), cache)
+	defer cleanup2()
+	if eng2.transports.Empty() {
+		t.Fatal("second start should have bound")
+	}
+	if k := warningKeys(t); k["direct_signature_drift:direct"] {
+		t.Fatalf("stale drift entry survived a successful start: %v", k)
+	}
+}
