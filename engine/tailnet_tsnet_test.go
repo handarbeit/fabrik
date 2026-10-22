@@ -4,6 +4,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -113,5 +114,25 @@ func TestTsnetTracker_DisconnectAndNoBackendYet(t *testing.T) {
 	tr.observe(&stopped, okStatus())
 	if len(*got) != 1 || (*got)[0].Connected || (*got)[0].BackendState != "Stopped" {
 		t.Fatalf("got %#v", *got)
+	}
+}
+
+// A stream that delivers its initial burst and then drops must not end a
+// failure streak, or the failure line would repeat on every retry.
+func TestStreamEndsFailureStreak(t *testing.T) {
+	cases := []struct {
+		name     string
+		received bool
+		up       time.Duration
+		want     bool
+	}{
+		{"initial burst then drop", true, 200 * time.Millisecond, false},
+		{"nothing received", false, 10 * time.Minute, false},
+		{"stayed up", true, tsnetStreamHealthy, true},
+	}
+	for _, c := range cases {
+		if got := streamEndsFailureStreak(c.received, c.up); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }

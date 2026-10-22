@@ -26,6 +26,12 @@ const tailscaleBuiltIn = true
 // stream.
 const tsnetWatchRetry = 5 * time.Second
 
+// tsnetStreamHealthy is how long a stream must stay up before a failure streak
+// is considered over. Every stream opens with an initial burst of notifications,
+// so merely receiving one proves nothing: a bus that delivers it and then drops
+// again would otherwise log on every retry.
+const tsnetStreamHealthy = time.Minute
+
 // tsnetNode is the real tailnetNode over a tsnet.Server.
 type tsnetNode struct {
 	srv  *tsnet.Server
@@ -136,11 +142,12 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 	defer cancel()
 	failing := false // inside a streak of broken streams: only its first error is logged
 	for wctx.Err() == nil {
+		opened := time.Now()
 		received, err := n.watchOnce(wctx, lc, tr)
 		if wctx.Err() != nil {
 			return nil
 		}
-		if received {
+		if streamEndsFailureStreak(received, time.Since(opened)) {
 			failing = false
 		}
 		// A broken stream is re-opened and the backend state catches up on the
@@ -167,8 +174,15 @@ const tsnetStatusPoll = 30 * time.Second
 // tsnetFunnelPort is the port ListenFunnel is asked for (tailnetFunnelAddr).
 const tsnetFunnelPort uint16 = 443
 
+// streamEndsFailureStreak reports whether a stream that has now ended proves
+// the bus is healthy again: it delivered a notification and stayed up for
+// tsnetStreamHealthy. The initial burst alone does not count.
+func streamEndsFailureStreak(received bool, up time.Duration) bool {
+	return received && up >= tsnetStreamHealthy
+}
+
 // watchOnce runs one IPN bus stream. received reports whether a notification
-// arrived on it, which ends a failure streak. A notification that carries the
+// arrived on it. A notification that carries the
 // backend state or the netmap triggers a status re-read.
 func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, tr *tsnetTracker) (received bool, err error) {
 	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyInitialNetMap|ipn.NotifyRateLimit)
