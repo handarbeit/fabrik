@@ -14,7 +14,6 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
-	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -126,9 +125,18 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 	if err != nil {
 		return err
 	}
+	tr := &tsnetTracker{fn: fn}
+	var pollWG sync.WaitGroup
+	pollWG.Add(1)
+	go func() {
+		defer pollWG.Done()
+		n.pollStatus(wctx, lc, tr)
+	}()
+	defer pollWG.Wait()
+	defer cancel()
 	failing := false // inside a streak of broken streams: only its first error is logged
 	for wctx.Err() == nil {
-		received, err := n.watchOnce(wctx, lc, fn)
+		received, err := n.watchOnce(wctx, lc, tr)
 		if wctx.Err() != nil {
 			return nil
 		}
@@ -136,11 +144,11 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 			failing = false
 		}
 		// A broken stream is re-opened and the backend state catches up on the
-		// next notify. While it stays broken the health row keeps its last
-		// reported state, so the streak is made visible, once, in the log.
+		// next notify. While it stays broken the status is still re-read on a
+		// timer; the streak is made visible, once, in the log.
 		if err != nil && !failing {
 			failing = true
-			n.logf("IPN bus watch failed (%v); retrying every %s — tailnet health may be stale until it recovers", err, tsnetWatchRetry)
+			n.logf("IPN bus watch failed (%v); retrying every %s — tailnet health may lag by up to %s until it recovers", err, tsnetWatchRetry, tsnetStatusPoll)
 		}
 		select {
 		case <-wctx.Done():
@@ -150,10 +158,20 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 	return nil
 }
 
+// tsnetStatusPoll is how often Watch re-reads the node status on its own. The
+// IPN bus is the fast path, but a Funnel can be revoked (node attribute or HTTPS
+// certificates) without a backend-state change, so the status is also re-read on
+// netmap notifications and on this timer.
+const tsnetStatusPoll = 30 * time.Second
+
+// tsnetFunnelPort is the port ListenFunnel is asked for (tailnetFunnelAddr).
+const tsnetFunnelPort uint16 = 443
+
 // watchOnce runs one IPN bus stream. received reports whether a notification
-// arrived on it, which ends a failure streak.
-func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, fn func(tailnetState)) (received bool, err error) {
-	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+// arrived on it, which ends a failure streak. A notification that carries the
+// backend state or the netmap triggers a status re-read.
+func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, tr *tsnetTracker) (received bool, err error) {
+	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyInitialNetMap|ipn.NotifyRateLimit)
 	if err != nil {
 		return false, err
 	}
@@ -164,20 +182,80 @@ func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, fn func(tai
 			return received, err
 		}
 		received = true
-		if note.State == nil {
+		if note.State == nil && note.NetMap == nil {
 			continue
 		}
-		st := tailnetState{
-			Connected:    *note.State == ipn.Running,
-			BackendState: note.State.String(),
-			Funnel:       tailnetFunnelUnknown,
+		status, serr := lc.StatusWithoutPeers(ctx)
+		if serr != nil {
+			status = nil
 		}
-		if status, serr := lc.StatusWithoutPeers(ctx); serr == nil {
-			st = tsnetStateFrom(status, st.Connected)
-			st.BackendState = note.State.String()
-		}
-		fn(st)
+		tr.observe(note.State, status)
 	}
+}
+
+// pollStatus re-reads the node status every tsnetStatusPoll until ctx ends.
+func (n *tsnetNode) pollStatus(ctx context.Context, lc *local.Client, tr *tsnetTracker) {
+	t := time.NewTicker(tsnetStatusPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if status, err := lc.StatusWithoutPeers(ctx); err == nil {
+				tr.observe(nil, status)
+			}
+		}
+	}
+}
+
+// tsnetTracker turns backend-state notifications, netmap notifications and the
+// periodic re-read into deduplicated calls of fn. A failed status read keeps the
+// last known Funnel status (an unreadable status is not evidence that the Funnel
+// came back), and fn runs under the lock so calls are ordered.
+type tsnetTracker struct {
+	mu          sync.Mutex
+	fn          func(tailnetState)
+	have        bool
+	last        tailnetState
+	backend     ipn.State
+	haveBackend bool
+}
+
+// observe merges one observation: state is the backend state a notification
+// carried (nil if none) and status the node status just read (nil if the read
+// failed or was not made).
+func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state != nil {
+		t.backend, t.haveBackend = *state, true
+	}
+	var backend string
+	switch {
+	case t.haveBackend:
+		backend = t.backend.String()
+	case status != nil && status.BackendState != "":
+		backend = status.BackendState
+	default:
+		return
+	}
+	connected := backend == ipn.Running.String()
+	var st tailnetState
+	if status != nil {
+		st = tsnetStateFrom(status, connected)
+	} else {
+		st = tailnetState{Connected: connected, Funnel: tailnetFunnelUnknown}
+		if t.have {
+			st.Funnel, st.DNSName = t.last.Funnel, t.last.DNSName
+		}
+	}
+	st.BackendState = backend
+	if t.have && st == t.last {
+		return
+	}
+	t.have, t.last = true, st
+	t.fn(st)
 }
 
 // Close cancels in-flight Up/Watch calls, waits for them and only then closes
@@ -199,6 +277,20 @@ func (n *tsnetNode) Close() error {
 	return n.srv.Close()
 }
 
+// tsnetFunnelStatus is the same check tsnet's ListenFunnel makes
+// (ipn.CheckFunnelAccess): HTTPS certificates enabled for the tailnet, the
+// "funnel" node attribute, and the port allowed. A node with no self status is
+// unknown, not unavailable.
+func tsnetFunnelStatus(self *ipnstate.PeerStatus) string {
+	if self == nil {
+		return tailnetFunnelUnknown
+	}
+	if ipn.CheckFunnelAccess(tsnetFunnelPort, self) != nil {
+		return tailnetFunnelUnavailable
+	}
+	return tailnetFunnelOK
+}
+
 // tsnetStateFrom maps a local-client status to the seam's state.
 func tsnetStateFrom(st *ipnstate.Status, connected bool) tailnetState {
 	out := tailnetState{Connected: connected, BackendState: "Running", Funnel: tailnetFunnelUnknown}
@@ -210,11 +302,7 @@ func tsnetStateFrom(st *ipnstate.Status, connected bool) tailnetState {
 	}
 	if self := st.Self; self != nil {
 		out.DNSName = strings.TrimSuffix(self.DNSName, ".")
-		if self.HasCap(tailcfg.NodeAttrFunnel) {
-			out.Funnel = tailnetFunnelOK
-		} else {
-			out.Funnel = tailnetFunnelUnavailable
-		}
+		out.Funnel = tsnetFunnelStatus(self)
 	}
 	return out
 }
