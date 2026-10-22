@@ -294,6 +294,8 @@ or `poll:` in `config.yaml`).
 
 Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. While quota is recovering (20%–50%, sticky zone), the 2× tier applies. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
 
+**Empty boards and the project ID.** The board cache never serves a board with an empty project ID: if it would, Fabrik reads GitHub for that poll instead. A cache started while the board was empty (or while the first probe failed) bootstraps on a later poll, once the board returns items. Until the project ID is known, board writes (column moves, placement, landing and the like) are deferred — nothing is sent, no retry is spent, nothing is paused — and Fabrik logs the deferral once.
+
 **Board fetch resilience**: `FetchProjectBoard` automatically retries up to 3 times (with 1s/2s backoff) when GitHub returns an empty response (zero items), which occurs during transient Projects v2 indexer degradation that intermittently returns empty boards for non-empty projects (both returned node count and `totalCount` are zero in degraded responses). The log line:
 
 ```
@@ -2177,7 +2179,9 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > outage dispatches nothing into the limit, keeps `fabrik:claude-limit` on the affected issues
 > and does not post the explanatory comment a second time. (If you upgrade from a version that
 > did not save the hold while issues still carry the label, Fabrik holds dispatch for up to an
-> hour from when the label was applied before sweeping it.)
+> hour from when the label was applied before sweeping it.) A review, CI-fix or rebase
+> re-invocation, or a comment review, that is refused because of the hold is not lost and
+> does not loop: it gives its cycle back and is tried again once the hold lifts.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
@@ -2250,6 +2254,52 @@ to resume it.
 > The log line is `fresh session (unchanged
 > re-dispatch, saved session <N>k > threshold <T>k)`. See #2395 (mentioned for
 > context: #2388).
+
+#### Recorded stage outcome and publication retry
+
+A stage that finished (it emitted `FABRIK_STAGE_COMPLETE`) but whose result could not be
+written to GitHub — the comment, the push or the completion label failed — is **not run again**.
+Fabrik records the finished result on disk (`.fabrik/state/stage-outcomes/`, one file per item)
+before its first GitHub write, and from then on publishes it by retry instead of re-running the
+stage:
+
+- While a record exists the stage is not dispatched again, and the completion signal
+  (`stage:<name>:complete`, `fabrik:awaiting-ci` or the terminal move) is written last, so a
+  half-published stage never looks complete.
+- Every poll retries the publication in order: the issue-body update (only if the body is still
+  the one the stage was run against, so an edit you made meanwhile is never overwritten), the
+  stage comment (never posted twice), the push, the pull-request steps, then the completion
+  signal.
+- A failed retry counts toward `--max-retries`, except a failure to reach GitHub at all (a
+  timeout, a connection error, a 5xx) or a GitHub rate limit, which never count — an outage
+  cannot use the budget up. At the limit the item is paused (`fabrik:paused` +
+  `fabrik:awaiting-input`) with a comment naming the error, the record is dropped, and the
+  stage runs again when you resume the item.
+- A record survives a restart. It is discarded, with one `[outcome]` log line naming the reason,
+  when the item is closed or has left the board, is paused, has moved to another column, or its
+  worktree is gone or no longer at the commit the stage finished on. A record that was still
+  being created when Fabrik stopped is discarded too, because the steps it may have interrupted
+  cannot be replayed safely.
+- A record never completes a [forced Validate re-run](#sha-change-auto-revalidation): applying
+  `fabrik:revalidate`, or a re-run started by a new push, discards the Validate record.
+
+If the log shows `[outcome]` lines and the item keeps being held without progress, look for the
+failing write (a missing permission, a deleted branch) rather than the stage itself. See #2394
+(mentioned for context: #2388).
+
+#### When GitHub cannot be written or reached
+
+Two rules keep Fabrik from starting model work that it could not record:
+
+- **Lock label.** If the `fabrik:editing` or lock label cannot be written, no worker is started
+  for the item. Nothing is counted against `--max-retries`, no `in_progress` label is written,
+  and the item is tried again on the next poll. The same holds for a comment review: it does
+  not run, and its comments stay unprocessed until the label can be written.
+- **GitHub unreachable.** After a sustained run of timeouts, connection errors or 5xx
+  responses, Fabrik holds all new model work — stage runs, comment passes, review/CI-fix/rebase
+  re-invocations and merge-train conflict resolution — until any GitHub call gets an answer
+  again. Workers already running are left alone. The hold appears as the `forge_unreachable`
+  entry in the Warnings panel and as `forge_hold` in `fabrik_health`.
 
 > **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
 > prior invocation.** A `--resume` invocation resumes the same session every
@@ -2798,7 +2848,7 @@ A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fail
 
 **Pruefer review notes.** If you run [Pruefer](https://github.com/handarbeit/fabrik/blob/main/cmd/pruefer/README.md) as your review bot, these behaviors matter at this gate (the Pruefer README is the full reference):
 
-- **A `partial` review still clears the gate.** Every Pruefer review ends with one fixed line, `PRUEFER_COVERAGE: complete`, or `PRUEFER_COVERAGE: partial — <reason>` followed by up to 50 unread paths. Fabrik's gate only sees that a non-dismissed review was submitted, so a partial review advances the item like any other. Search review bodies for `PRUEFER_COVERAGE: partial` and check what was left unread. Pruefer also saves every review's raw transcript under `.pruefer/transcripts/` by default (the `coverage: partial` log line names the file), with the full tool outputs the CLI hid beside it, so you can tell whether the check undercounted or the reviewer's account was wrong; no review session is left in the shared Claude profile. Retention is controlled by `keep_transcripts: all|partial|off` (default `all`; `partial` keeps only partial reviews, `off` keeps none), transcripts are deleted after `transcript_max_age` (default 168h, judged by the timestamp in the file name) with a `transcript_max_bytes` size backstop (default 1 GiB), files are mode `0600`, and the transcript contains the file contents the reviewer read, so treat `.pruefer/` as private. It is operator-only: a reviewed repo's own config cannot change it. See the Pruefer README.
+- **A `partial` review still clears the gate.** Every Pruefer review ends with one fixed line, `PRUEFER_COVERAGE: complete`, or `PRUEFER_COVERAGE: partial — <reason>` followed by up to 50 unread paths. Fabrik's gate only sees that a non-dismissed review was submitted, so a partial review advances the item like any other. Search review bodies for `PRUEFER_COVERAGE: partial` and check what was left unread. Pruefer also saves every review's raw transcript under `.pruefer/transcripts/` by default (the `coverage: partial` log line names the file), with the full tool outputs the CLI hid beside it, so you can tell whether the check undercounted or the reviewer's account was wrong; no review session is left in the shared Claude profile, and the empty `memory/` folder the Claude CLI creates in a review's profile directory is removed with it. Retention is controlled by `keep_transcripts: all|partial|off` (default `all`; `partial` keeps only partial reviews, `off` keeps none), transcripts are deleted after `transcript_max_age` (default 168h, judged by the timestamp in the file name) with a `transcript_max_bytes` size backstop (default 1 GiB), files are mode `0600`, and the transcript contains the file contents the reviewer read, so treat `.pruefer/` as private. It is operator-only: a reviewed repo's own config cannot change it. See the Pruefer README.
 - **Pruefer skips re-reviewing a head whose change it already reviewed (`patch_skip`, on by default).** A rebase, a clean catch-up or a restored head whose whole diff against the merge base is the same patch as the last head Pruefer completed a review of is not reviewed again, and a merge-train trial PR that adds nothing beyond its already-reviewed members is skipped (or reviewed only for the conflict-resolution edits). It is computed from diff text alone, trusts no marker, and fails toward reviewing. Skips are counted per reason in the log and the TUI footer; `patch_skip: false` (or `--patch-skip=false`, `PRUEFER_PATCH_SKIP=false`) is a live-reloadable kill switch.
 - **`catch_up_marker_authors` skips reviews of pure merge-train catch-ups.** Set it on the Pruefer daemon (`--catch-up-marker-authors`, `PRUEFER_CATCH_UP_MARKER_AUTHORS`, or `catch_up_marker_authors`) to the login that authors Fabrik's catch-up marker comment: the App's `<slug>[bot]` under GitHub App auth, your user login under PAT auth. Pruefer then skips a head only if it is a verified pure catch-up merge of an already-reviewed head; anything else is reviewed. Unset (the default) means the catch-up skip is inactive (Pruefer logs one startup notice naming the setting). It is operator-only and cannot be set from a reviewed repo.
 - **The review runs with a scrubbed environment and read-only, path-scoped tools.** Only an allowlist of variables reaches `claude`. If `claude` authenticates through an environment variable such as `CLAUDE_CODE_OAUTH_TOKEN`, name it in `PRUEFER_REVIEW_ENV_PASSTHROUGH` (comma-separated exact names; `GH_`, `GITHUB_`, `FABRIK_`, `PRUEFER_` and `HOOKDECK_` names are refused) or reviews can fail to authenticate.
@@ -3083,6 +3133,8 @@ When a PR receives a new push **after** `stage:Validate:complete` has been appli
 Validate then runs on the new HEAD SHA, with the full CI gate and convergence-monitor flow.
 
 **After a restart.** The completion SHA is held in memory, so Fabrik rebuilds it after a restart from the commit named in its own latest `🏭 **Fabrik — stage: Validate**` comment, before the landing decision is made. A push made while Fabrik was down, or after it came back, still re-runs Validate. If no SHA can be recovered for a completed Validate, Validate is re-run rather than the item being landed unverified.
+
+**A forced re-run is completed only by a Validate stage run.** Before Fabrik removes `stage:Validate:complete` for a re-run (a new push, `fabrik:revalidate`, or a merge-train auto-repair) it adds the engine marker `fabrik:validate-rerun`. While the marker is present, Validate runs *before* any pending comment is handled, a comment-review pass cannot mark Validate complete (comments are still answered and marked processed), a recorded stage outcome from the earlier run is not used, and the item is not landed. The marker is removed when a Validate stage run completes; do not remove it by hand.
 
 **Legacy items (empty completion SHA):** Issues that completed Validate before v0.0.69 was deployed do not have a recorded completion SHA. The SHA-change scan is a no-op for these — Fabrik cannot distinguish a pre-feature item from an item whose SHA was intentionally cleared. Use `fabrik:revalidate` as the manual fallback: applying the label clears `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, and `fabrik:auto-merge-enabled`, then re-runs Validate on the current HEAD SHA. See [fabrik:revalidate](#user-set-labels) in the labels reference.
 
@@ -3753,6 +3805,7 @@ added after it:
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
+| `fabrik:validate-rerun` | Engine marker of a forced Validate re-run, added just before `stage:Validate:complete` is removed (by a new push after Validate, `fabrik:revalidate` or a merge-train auto-repair) and removed when a Validate **stage** run completes. While it is present, a comment-review pass cannot complete Validate, the stage runs before any pending comment, and the item is not landed. Do not remove it by hand. See [SHA-change Auto-Revalidation](#sha-change-auto-revalidation). |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `fabrik:awaiting-placement` | Set on a spawned child issue when its initial project-board Status placement fails (the child, board item, and `blockedBy` link already exist — only the column placement is missing). Retried every poll from `board.Items` directly. Cleared on successful placement, or when the child is observed closed. Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on both child and parent (ADR-062). |
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
@@ -4836,7 +4889,10 @@ structured field. The usage-limit hold clears in any of three ways:
    with all other in-memory state. Prefer option 2 unless something else is also wedged.
 
 Already-running Claude invocations are never interrupted by this; the usage-limit hold only
-prevents new ones from starting. Once the account-wide usage-limit hold lifts (by any of the
+prevents new ones from starting. A review, CI-fix or rebase re-invocation, or a comment review,
+refused while the hold is on is refunded (it does not spend the cycle budget) and waits until the
+hold lifts instead of being retried every poll. The hold itself survives a restart: its end time
+is saved in `.fabrik/state/engine-decisions/usage-limit.json`. Once the account-wide usage-limit hold lifts (by any of the
 three paths above), a per-poll settle scan removes `fabrik:claude-limit` from every open
 issue that still carries it — not only from the issue that happens to be dispatched next.
 See the `fabrik:claude-limit` troubleshooting note above for the per-issue label/comment
@@ -4993,6 +5049,8 @@ Fabrik always maintains an in-memory cache of board state — the cache is the u
 | Webhooks enabled | Webhook deltas (`issues`, `pull_request`, `issue_comment`, etc.) update the cache between polls. Every poll still does a shallow Reconcile as the drift-detection safety net for missed events. The light-reconcile loop (~3 min) drives stream-health classification. |
 
 **Project Status note:** GitHub webhooks do not deliver project-board Status (column) changes for repo-level project subscriptions, and only conditionally for org-level subscriptions with the right permissions. The Layer 2 status gate (`updatedAt` check + lightweight status batch) runs each poll cycle regardless of webhook health and is the only authoritative delivery path for Status drift.
+
+**Ordering and live reads.** Every fact Fabrik learns from GitHub (a label, a column, a review, a linked PR, a milestone) carries the time it was observed, and an older observation never overwrites a newer one — whether it arrives as a webhook, a board listing, a probe or a live read. A label or column move Fabrik wrote itself is therefore not undone by a listing that was fetched before the write. Decisions that gate an advance or a landing (feedback, review, merge, dependency checks) are made from a fresh live read of GitHub that is applied to the cache first, and before starting work on a candidate the dispatcher re-reads its labels, column and comments, so an item paused or moved earlier in the same poll is skipped rather than started.
 
 **Stream-health failover (webhook mode):** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. The per-poll Reconcile remains active throughout and continues to keep state correct.
 
@@ -5157,6 +5215,10 @@ A stage that never outputs `FABRIK_STAGE_COMPLETE` retries after each cooldown. 
 
 After `--max-retries` failures, the issue is paused with `fabrik:paused`. Remove the
 label to resume.
+
+A stage that *did* finish but whose output could not be posted is not retried this way: its
+result is kept and published by retry. See [Recorded stage outcome and publication
+retry](#recorded-stage-outcome-and-publication-retry).
 
 ### Issue branch diverged from origin
 
