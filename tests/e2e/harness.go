@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 )
 
@@ -2162,21 +2163,44 @@ func readEnvFileReviewerToken(t *testing.T, env *Env) string {
 	return strings.TrimSpace(val)
 }
 
-// readEnvFileReviewWaitTimeout reads FABRIK_REVIEW_WAIT_TIMEOUT (minutes)
-// from the test bed's .env file. Returns 15 (the engine default) if absent.
-// Fails the test if the key is present but not a valid integer.
-func readEnvFileReviewWaitTimeout(t *testing.T, env *Env) int {
-	t.Helper()
-	envFile := filepath.Join(env.FabrikTestDir, ".env")
-	val, err := readEnvFileValue(envFile, "FABRIK_REVIEW_WAIT_TIMEOUT")
-	if err != nil {
-		return 15
+// bedReviewWait is the review wait timeout the bed was LAUNCHED with (#2417,
+// ADR-2417): both launch sites (tests/gate/bed.go, StartFabrikTestBed) inject it
+// from tests/e2e/bedtimeout, and the process environment beats the bed's .env,
+// so this is the engine's effective value. Tests read it here — never from the
+// bed's .env and never from a harness default.
+func bedReviewWait() time.Duration { return bedtimeout.ReviewWait() }
+
+// bedWindowMargin is the margin a wait-out of an engine timeout adds past the
+// timeout itself: bedtimeout.PollMargins bed (engine) polls — one for the engine
+// to reach its first evaluation after the timeout, one for the resulting label to
+// be written, one for the harness to see it — plus two harness polls for the
+// observation lag of the arming event and of the awaited one. Poll-derived,
+// replacing the former flat +10 minutes.
+func bedWindowMargin() time.Duration {
+	secs, err := strconv.Atoi(bedPollSeconds())
+	if err != nil || secs <= 0 {
+		secs, _ = strconv.Atoi(defaultBedPollSeconds)
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(val))
+	return time.Duration(bedtimeout.PollMargins*secs)*time.Second + 2*pollBase()
+}
+
+// labelAppliedAtEvent returns GitHub's time for the latest application of label
+// on the issue, from the durable issue events log — the exact arming instant for
+// a window anchored at that label, where the time a poll noticed it is up to one
+// harness poll late. ok is false when the label was never applied (or the read
+// failed), so callers can fall back explicitly.
+func labelAppliedAtEvent(env *Env, repo string, issueNumber int, label string) (time.Time, bool) {
+	events, err := tryIssueLabelEvents(env, repo, issueNumber)
 	if err != nil {
-		t.Fatalf("FABRIK_REVIEW_WAIT_TIMEOUT in %s is not an integer: %q", envFile, val)
+		return time.Time{}, false
 	}
-	return n
+	var at time.Time
+	for _, e := range events {
+		if e.Event == "labeled" && e.Label == label && e.At.After(at) {
+			at = e.At
+		}
+	}
+	return at, !at.IsZero()
 }
 
 // ghOutputWithToken runs gh with a caller-supplied token (overrides GH_TOKEN).

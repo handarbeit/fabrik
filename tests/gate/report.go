@@ -36,6 +36,9 @@ type RuntimeRow struct {
 	Entry         registry.Stage     `json:"entry"`
 	Traversal     registry.Traversal `json:"traversal"`
 	FullTraversal bool               `json:"full_traversal,omitempty"`
+	// Category is where the test's wall-clock mostly goes (registry/wallclock.json,
+	// #2417), blank when the test is not classified.
+	Category registry.WallclockCategory `json:"category,omitempty"`
 	// StagesSkipped is the number of pipeline stages before Entry (Specify=0 …
 	// Validate=5): the proxy for model quota not spent. See the package comment.
 	StagesSkipped int `json:"stages_skipped"`
@@ -139,6 +142,7 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		}
 	}
 
+	wall, _ := registry.LoadWallclock() // reporting data only: an unreadable table just leaves the column blank
 	rep := RuntimeReport{SHA: sha, ByEntry: map[registry.Stage]float64{}, Phases: phases}
 	tests := append([]registry.Entry(nil), reg.Tests...)
 	for name := range seconds {
@@ -150,6 +154,7 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		row := RuntimeRow{
 			Test: e.Name, Entry: e.EntryStage, Traversal: e.Traversal, FullTraversal: e.FullTraversal,
 			StagesSkipped: stagesBefore(e.EntryStage), Seconds: seconds[e.Name],
+			Category: wall.Category(e.Name),
 		}
 		for _, s := range row.Seconds {
 			row.Total += s
@@ -266,13 +271,13 @@ func readInvocationPhases(dir string) (*LegSummary, string) {
 func (r RuntimeReport) Format() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "live suite runtime for %s (measured: go-test per-phase stream Elapsed per test per cell)\n\n", shortSHA(r.SHA))
-	fmt.Fprintf(&b, "%-10s  %-9s  %-4s  %8s  %s\n", "entry", "traversal", "skip", "seconds", "test")
+	fmt.Fprintf(&b, "%-10s  %-9s  %-4s  %8s  %-15s  %s\n", "entry", "traversal", "skip", "seconds", "category", "test")
 	for _, row := range r.Rows {
 		mark := ""
 		if row.FullTraversal {
 			mark = "  [full traversal]"
 		}
-		fmt.Fprintf(&b, "%-10s  %-9s  %-4d  %8.0f  %s%s\n", row.Entry, row.Traversal, row.StagesSkipped, row.Total, row.Test, mark)
+		fmt.Fprintf(&b, "%-10s  %-9s  %-4d  %8.0f  %-15s  %s%s\n", row.Entry, row.Traversal, row.StagesSkipped, row.Total, row.Category, row.Test, mark)
 	}
 	fmt.Fprintf(&b, "\ntotal: %.0fs (%.1f min) across %d test(s); %d registry test(s) have no archived timing\n",
 		r.Total, r.Total/60, len(r.Rows)-len(r.Unmeasured), len(r.Unmeasured))

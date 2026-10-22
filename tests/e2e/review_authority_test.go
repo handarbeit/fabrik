@@ -468,7 +468,8 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 // Requires #1261 (engine support for the review-authority:authoritative
 // label) to be merged.
 //
-// Requires FABRIK_REVIEW_WAIT_TIMEOUT set comfortably above ~2 minutes: the
+// Requires the bed's review wait timeout (launch-injected, tests/e2e/bedtimeout,
+// #2417) comfortably above ~2 minutes (10 today): the
 // 90s "block persists" window below runs shortly after fabrik:awaiting-review
 // is first observed, and a too-short timeout risks the review-wait timeout
 // pause (checkAwaitingReviewTimeout, a legitimate outcome unrelated to yolo)
@@ -512,7 +513,7 @@ func TestReviewAuthorityYoloDoesNotBypassBlock(t *testing.T) {
 			if slices.Contains(labels, "fabrik:paused") {
 				t.Fatalf("fabrik:awaiting-review cleared via a review-wait-timeout pause during this test's 90s block-persist "+
 					"window on %s#%d — this is a legitimate outcome unrelated to yolo bypass, not evidence of one; "+
-					"FABRIK_REVIEW_WAIT_TIMEOUT is set too short for this test (needs to be comfortably above ~2 minutes, see README)",
+					"the bed's review wait timeout (tests/e2e/bedtimeout) is too short for this test (needs to be comfortably above ~2 minutes, see README)",
 					env.RepoAlpha, num)
 			}
 			t.Fatalf("yolo bypassed the authoritative gate — fabrik:awaiting-review cleared from %s#%d while CHANGES_REQUESTED still stood", env.RepoAlpha, num)
