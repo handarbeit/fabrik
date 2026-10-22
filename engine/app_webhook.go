@@ -30,6 +30,15 @@ type networkCondition struct {
 	funnel        string
 }
 
+// reachable reports whether deliveries can arrive: the tailnet is connected and
+// the Funnel has not been reported unavailable (the node can stay connected
+// after the "funnel" node attribute is revoked or HTTPS certificates are turned
+// off, and then no delivery can reach the listener). An unknown Funnel status
+// is not treated as unavailable.
+func (c networkCondition) reachable() bool {
+	return c.connected && c.funnel != tailnetFunnelUnavailable
+}
+
 // appWebhookTransport is the direct App webhook transport (#2142, ADR 2142):
 // the daemon receives a GitHub App's own webhook straight from an HTTP request
 // the operator's tunnel or proxy forwards to it, with no third-party relay.
@@ -181,22 +190,24 @@ func (t *appWebhookTransport) SetStopHook(fn func()) {
 
 // SetNetworkCondition reports the upstream connection (the tailnet, #2143):
 // connected, its state label and the Funnel status. While a reported condition
-// is not connected the transport is unhealthy. A false→true transition after an
-// earlier connected state calls the reconnect handler (outside any lock) so the
+// is not connected, or the Funnel is reported unavailable, the transport is
+// unhealthy. A not-reachable→reachable transition after an
+// earlier reachable state calls the reconnect handler (outside any lock) so the
 // intake's catch-up reconcile runs; the first connect never does.
 func (t *appWebhookTransport) SetNetworkCondition(connected bool, tailnet, funnel string) {
 	t.mu.Lock()
 	prev := t.network
-	t.network = networkCondition{
-		set: true, connected: connected, everConnected: prev.everConnected || connected,
-		tailnet: tailnet, funnel: funnel,
-	}
-	recovered := connected && prev.set && !prev.connected && prev.everConnected
+	t.network = networkCondition{set: true, connected: connected, tailnet: tailnet, funnel: funnel}
+	t.network.everConnected = prev.everConnected || t.network.reachable()
+	recovered := t.network.reachable() && prev.set && !prev.reachable() && prev.everConnected
 	fn := t.reconnectFn
 	t.mu.Unlock()
 	reason := ""
-	if !connected {
+	switch {
+	case !connected:
 		reason = "tailnet disconnected"
+	case funnel == tailnetFunnelUnavailable:
+		reason = "funnel unavailable"
 	}
 	t.recomputeState(reason)
 	if recovered {
@@ -416,7 +427,7 @@ func (t *appWebhookTransport) driftTransition() {
 func (t *appWebhookTransport) state() WebhookHealthState {
 	t.mu.Lock()
 	listening, cacheDrift := t.listening, t.cacheDrift
-	netDown := t.network.set && !t.network.connected
+	netDown := t.network.set && !t.network.reachable()
 	t.mu.Unlock()
 	if !listening || cacheDrift || netDown || t.sigDrift.Active() {
 		return WebhookStreamUnhealthy
@@ -538,6 +549,8 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 		state = "signature drift"
 	case nw.set && !nw.connected:
 		state = "tailnet disconnected"
+	case nw.set && !nw.reachable():
+		state = "funnel unavailable"
 	case listening:
 		state = "listening"
 	}

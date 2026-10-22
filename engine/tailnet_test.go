@@ -382,6 +382,42 @@ func TestTailscale_DropAndRecovery(t *testing.T) {
 	}
 }
 
+// A Funnel that becomes unavailable while the node stays connected cannot
+// receive deliveries: the transport is unhealthy, a panel entry exists, and the
+// Funnel coming back is a recovery that triggers the reconnect handler.
+func TestTailscale_FunnelUnavailableWhileConnected(t *testing.T) {
+	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	eng, cleanup, _ := startTailscaleEngine(t)
+	defer cleanup()
+	tr := tailscaleFromEngine(t, eng)
+	n := (*nodes)[0]
+	var reconnects atomic.Int32
+	tr.SetReconnectHandler(func() { reconnects.Add(1) })
+
+	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelUnavailable})
+	if tr.IsHealthyOrStartingUp() {
+		t.Fatal("an unavailable Funnel must make the transport unhealthy")
+	}
+	if row := tr.HealthRow(); row.State != "funnel unavailable" || row.Funnel.V != tailnetFunnelUnavailable {
+		t.Fatalf("row = %#v", row)
+	}
+	if k := warningKeys(t); !k["tailscale_funnel:fabrik-models"] || k["tailscale_connection:fabrik-models"] {
+		t.Fatalf("keys = %v", k)
+	}
+	tr.TransitionHealth(true, "reconcile ok")
+	if tr.IsHealthyOrStartingUp() {
+		t.Fatal("a reconcile hint masked an unavailable Funnel")
+	}
+	// An unknown Funnel status is not an outage.
+	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelUnknown})
+	if !tr.IsHealthyOrStartingUp() || reconnects.Load() != 1 {
+		t.Fatalf("healthy=%v reconnects=%d, want healthy and one recovery", tr.IsHealthyOrStartingUp(), reconnects.Load())
+	}
+	if k := warningKeys(t); k["tailscale_funnel:fabrik-models"] {
+		t.Fatalf("panel entry not cleared: %v", k)
+	}
+}
+
 // Transport-level: a connection that is down from its very first report and
 // then comes up is a first connect, not a recovery.
 func TestTailscale_FirstConnectAfterInitialDownIsNotARecovery(t *testing.T) {

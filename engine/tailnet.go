@@ -213,12 +213,28 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	e.logf(0, tag, "event_source: tailscale — node %q is up; App webhook URL: %s (secret from $%s)\n", hostname, u, secretEnvName)
 
 	connKey := warnings.Condition{Type: "tailscale_connection", Subject: hostname}.Key()
+	funnelKey := warnings.Condition{Type: "tailscale_funnel", Subject: hostname}.Key()
 	apply := func(st tailnetState) {
 		tr.SetNetworkCondition(st.Connected, st.BackendState, st.Funnel)
 		if st.Connected {
 			e.resolveWarning(tag, connKey)
+			if st.Funnel == tailnetFunnelUnavailable {
+				e.reportWarning(tag, warnings.Condition{
+					Type:    "tailscale_funnel",
+					Subject: hostname,
+					Title:   fmt.Sprintf("Tailscale node %q is connected but its Funnel is unavailable", hostname),
+					Detail: "The node is on the tailnet but Funnel is not available for it, so GitHub deliveries cannot reach the daemon. " +
+						"Polling and the periodic reconcile keep the board current. Check that the tailnet policy still grants the \"funnel\" " +
+						"node attribute to this node's tag and that HTTPS certificates are enabled.",
+					Fingerprint: "tailscale_funnel:" + hostname,
+					LogLine:     fmt.Sprintf("Tailscale node %q is connected but its Funnel is unavailable", hostname),
+				})
+			} else {
+				e.resolveWarning(tag, funnelKey)
+			}
 			return
 		}
+		e.resolveWarning(tag, funnelKey)
 		e.reportWarning(tag, warnings.Condition{
 			Type:    "tailscale_connection",
 			Subject: hostname,
@@ -243,7 +259,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	if baseFunnel == "" {
 		baseFunnel = tailnetFunnelOK
 	}
-	tr.SetNetworkCondition(true, baseState, baseFunnel)
+	apply(tailnetState{Connected: true, BackendState: baseState, Funnel: baseFunnel})
 	watchWG.Add(1)
 	go func() {
 		defer watchWG.Done()
