@@ -5,6 +5,9 @@ instance (`~/dev/fabrik-test/`) against the real test repositories
 (`handarbeit/fabrik-test-alpha`, `handarbeit/fabrik-test-beta`), files an
 issue, and asserts on the resulting pipeline behaviour.
 
+Where the suite's wall-clock goes, and what #2417 shortened: `WALLCLOCK_AUDIT.md`
+(machine-readable: `registry/wallclock.json`, shown by `gate report`).
+
 ## What this is for
 
 These tests catch regressions that escape `go test ./...` — bugs that only
@@ -309,8 +312,17 @@ and record each leg's `== GraphQL budget (leg: ...): N -> M remaining
    ```bash
    E2E_TIMEOUT=1h scripts/e2e/run.sh -run TestCIFixReinvoke
    ```
-8. **`FABRIK_CI_WAIT_TIMEOUT` — no override needed; the engine default (30
-   min, see `ciWaitTimeout()`) applies.** #1320 had introduced a
+8. **`FABRIK_CI_WAIT_TIMEOUT` — launch-injected at 30 min; nothing to set in the
+   bed `.env`.** Since #2417 (ADR-2417) both bed launch sites inject the review and
+   CI wait timeouts from `tests/e2e/bedtimeout` (`FABRIK_REVIEW_WAIT_TIMEOUT=10`,
+   `FABRIK_CI_WAIT_TIMEOUT=30`); the process environment beats the bed `.env`, so the
+   launch value wins and an operator `.env` value for either is ignored. **A bed
+   started by hand (not through `scripts/e2e/run.sh` or the harness) keeps the `.env`
+   value while the tests assume the shared one — start beds through the gate.** The
+   CI value is pinned at the old effective default (30 min, see `ciWaitTimeout()`)
+   on purpose: it is a liveness-stall dwell (ADR 1410) and no test waits it out.
+   Where the history below says "no override needed" or mentions the bed `.env`, read
+   it as that. #1320 had introduced a
    `FABRIK_CI_WAIT_TIMEOUT=120` requirement here, reasoning that
    `TestCIFixReinvokeCycleLimit` needed extra headroom for the cycle-limit
    path (`pauseForCIFixCycleLimit`) to win its race against the fixed
@@ -605,8 +617,8 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
       non-`@arbeithand` account with write access to `fabrik-test-alpha`. The
       test uses this token to submit an approving PR review from a second
       identity (GitHub forbids self-approval). This exercises the full
-      approval-path joint-clear (R5). Combined with a generous
-      `FABRIK_REVIEW_WAIT_TIMEOUT` (see next bullet), the test defers
+      approval-path joint-clear (R5). Combined with the launch-injected review
+      wait timeout (see next bullet), the test defers
       requesting this reviewer until `fabrik:awaiting-ci` is observed (R1) —
       not until `stage:Review:complete`, which is applied immediately when
       Review's Claude invocation finishes, simultaneously with
@@ -616,8 +628,11 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
       gate has genuinely cleared first via the incidental
       `gemini-code-assist` review — so only Validate's gate blocks on the
       real reviewer.
-    - **`FABRIK_REVIEW_WAIT_TIMEOUT` left at a generous value (e.g. the
-      15-minute default)** when running the approval path — a short timeout
+    - **`FABRIK_REVIEW_WAIT_TIMEOUT` is launch-injected (10 min since #2417); do not
+      set it in the `.env`.** The item is now seeded at Validate (#1992), so the
+      Review-gate reasoning below no longer applies and the former `< 10` skip is
+      gone. The timeout-fallback path (no `FABRIK_REVIEWER_TOKEN`) still skips when the
+      bed's value exceeds 5. The historical reasoning follows — a short timeout
       (e.g. `2`) risks Review's own gate timing out before
       `gemini-code-assist` submits its incidental review (documented
       30s–10m behind PR-ready), which would break the Review-then-Validate
@@ -957,11 +972,11 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     persists under yolo" window starts shortly after `fabrik:awaiting-review` first
     appears — a too-short timeout risks a legitimate review-wait-timeout pause landing
     inside that window, which the test detects and fails on explicitly (distinct message,
-    not misreported as a yolo bypass) rather than passing. **Leave
-    `FABRIK_REVIEW_WAIT_TIMEOUT` at its 15-minute default**: it satisfies this, and
-    `TestConjunctiveCIReviewGate` (prerequisite 13) *skips* below 10 when
-    `FABRIK_REVIEWER_TOKEN` is set, so a value like 5 silently drops that scenario
-    from the gate.
+    not misreported as a yolo bypass) rather than passing. **The review wait
+    timeout is no longer a `.env` setting**: the launch sites inject
+    `bedtimeout.ReviewMinutes` (10, #2417), which satisfies this. It is the one constant
+    to raise if a gate run shows `TestReviewAuthorityCycleLimitPauses`,
+    `...YoloDoesNotBypassBlock` or a full-pipeline test losing to it.
 24a. **`TestReviewAuthorityCycleLimitPauses` needs a small `FABRIK_MAX_REVIEW_CYCLES`**
     (set `FABRIK_MAX_REVIEW_CYCLES=3` in the bed `.env`) for a bounded wall-clock — each
     cycle requires a full reinvoke (a real Claude invocation) before the next distinct
@@ -1057,10 +1072,9 @@ is a documented, accepted e2e gap.
     object itself — the objects must exist before any of these scenarios can even
     file their seed issue.
 27. **`TestExpectedReviewersDeclaredWaitsAndReprompts`'s wall-clock is long**
-    (~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer) — Phase 1 and Phase 2
+    (~2×the bed's launch-injected review wait timeout + detection) — Phase 1 and Phase 2
     of the bot re-prompt ladder are folded into one continuation. The same
-    moderate `FABRIK_REVIEW_WAIT_TIMEOUT` value recommended in prerequisite #24
-    (e.g. `5`) applies here too; a very short value risks a legitimate Phase 1/2
+    launch-injected value (prerequisite #24) applies here too; a very short value risks a legitimate Phase 1/2
     transition racing this test's own bounded-window assertions in
     `TestExpectedReviewersFastAdvance`/`...ComposesWithAuthoritative`.
 28. **The synthetic declared-reviewer name (`e2e-synthetic-declared-reviewer`)
@@ -2373,10 +2387,10 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestReviewAuthorityYoloDoesNotBypassBlock` | ADR-1250 composition guarantee (via `review-authority:authoritative` label, requires #1261): fabrik:yolo does not bypass an authoritative gate — blocked while CHANGES_REQUESTED stands, clears once approved | Both | 5–10 min | ~$0.03 (no Claude) |
 | `TestReviewAuthorityAdvisoryRegressionGuard` | Regression guard: advisory (default) mode still clears on any submitted review regardless of verdict — proves the additive authoritative check didn't narrow the default path | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvance` | ADR-1283 `expected_reviewers: []` (via `expected-reviewers:none` label, requires follow-up engine issue): nothing requested/reviewed → gate fast-advances instead of waiting out the review timeout (the #1080 stall this feature fixes) | Both | 2–5 min | ~$0.02 (no Claude) |
-| `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283 `expected_reviewers: [<name>]` (via `expected-reviewers:declared` label, requires follow-up engine issue): declared-but-unrequested reviewer holds the gate open, Phase 1 re-prompt ladder fires with an @mention comment, Phase 2 pauses for human when no response arrives | Both | ~2×`FABRIK_REVIEW_WAIT_TIMEOUT` + buffer | ~$0.05 (no Claude) |
+| `TestExpectedReviewersDeclaredWaitsAndReprompts` | ADR-1283 `expected_reviewers: [<name>]` (via `expected-reviewers:declared` label, requires follow-up engine issue): declared-but-unrequested reviewer holds the gate open, Phase 1 re-prompt ladder fires with an @mention comment, Phase 2 pauses for human when no response arrives | Both | ~2×the bed review wait timeout (10 min) + ~3 min ≈ 23 min (was ≈ 33 at 15) | ~$0.05 (no Claude) |
 | `TestExpectedReviewersUndeclaredRegressionGuard` | Regression guard: undeclared (`nil`) `expected_reviewers` still never fast-advances — pins the `expected != nil` check and proves the shipped default (FR-5) is unchanged | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
-| `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + ~15 min | $0.10–0.50 (one Claude invocation) |
+| `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~14 min: ~3 min of activity, then until the engine escalation at L + 10 min + ~1 poll (negative window armed at `fabrik:awaiting-review`, #2417; was ≈ 28) | $0.10–0.50 (one Claude invocation) |
 | `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestYoloRemovedMidValidateBlocksMerge` | ADR-1769/#1769 live re-read of autonomy labels (yolo item taken to Validate): `fabrik:yolo` is removed over REST the moment `stage:Validate:in_progress` appears; the PR must not merge — no `fabrik:auto-merge-enabled`, PR and issue stay OPEN, board Status stays `Validate` with `stage:Validate:complete` present. The mid-stage window is proven from the events log by event id (`in_progress` < yolo removal < `awaiting-ci`); a missed window ends the test INCONCLUSIVE (#1973: uncovered, retried by the gate, never green). On the bed's `wait_for_ci` Validate a pre-fix engine can also pass when the board cache had already caught up — the scenario guards the operator-trust property and the cache-lag window. Mode-invariant | Both | 15–30 min | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestCommentReentryShowsReworking` | ADR-1802/#1802 comment re-entry rework marker: after a real Research run parks the item, a human comment triggers re-entry; the events log (after the pre-comment event id) must show `fabrik:reworking:Research` labeled, `stage:Research:complete` unlabeled, `stage:Research:complete` re-labeled, then the marker unlabeled — in that order — and the item ends with `:complete` restored, marker gone, still at Research. Events-log ordering is the proof (the window is sub-second); a live poll is informational only. Mode-invariant | Both | 10–20 min | ~$0.20–0.60 (two Claude invocations) |
