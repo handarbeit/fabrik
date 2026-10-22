@@ -51,6 +51,12 @@ type appWebhookTransport struct {
 
 	sigDrift events.SigDrift
 
+	// driftMu serialises driftTransition so the drift callback is never
+	// invoked out of order by concurrent requests; driftReported is the last
+	// state it reported.
+	driftMu       sync.Mutex
+	driftReported bool
+
 	rejectedSigs atomic.Int64
 	malformed    atomic.Int64
 	oversized    atomic.Int64
@@ -229,14 +235,14 @@ func (t *appWebhookTransport) handle(w http.ResponseWriter, r *http.Request) {
 		t.rejectedSigs.Add(1)
 		t.warnBadSignature()
 		if t.sigDrift.RecordFailure() {
-			t.driftTransition(true)
+			t.driftTransition()
 		}
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
 	// A verified request proves the secret is right, whatever else is wrong.
 	if t.sigDrift.RecordSuccess() {
-		t.driftTransition(false)
+		t.driftTransition()
 	}
 
 	if !json.Valid(body) {
@@ -288,18 +294,38 @@ func (t *appWebhookTransport) warnBadSignature() {
 	}
 }
 
-// driftTransition reports a signature-drift transition and re-derives health.
-func (t *appWebhookTransport) driftTransition(active bool) {
+// driftTransition reports the tracker's current drift state to the operator
+// (log line and onDrift callback) and re-derives health. RecordFailure and
+// RecordSuccess decide their transition atomically, but their callers reach
+// this function on separate request goroutines, so it is serialised and always
+// reports the tracker's present state (not the state the caller saw): a late
+// "drift began" can never overwrite a recovery that already happened, and a
+// transition that has since been reversed is not reported twice.
+func (t *appWebhookTransport) driftTransition() {
+	t.driftMu.Lock()
+	active := t.sigDrift.Active()
+	changed := active != t.driftReported
+	if changed {
+		t.driftReported = active
+		if active {
+			t.logFn(0, t.name, "signature verification drift: %d consecutive failures with no interleaved success — "+
+				"the App's webhook secret probably does not match the daemon's\n", events.SignatureDriftThreshold)
+		} else {
+			t.logFn(0, t.name, "signature verification recovered after a drift episode\n")
+		}
+		if t.onDrift != nil {
+			t.onDrift(active)
+		}
+	}
+	t.driftMu.Unlock()
+	if !changed {
+		return
+	}
+	reason := ""
 	if active {
-		t.logFn(0, t.name, "signature verification drift: %d consecutive failures with no interleaved success — "+
-			"the App's webhook secret probably does not match the daemon's\n", events.SignatureDriftThreshold)
-	} else {
-		t.logFn(0, t.name, "signature verification recovered after a drift episode\n")
+		reason = "signature verification drift"
 	}
-	if t.onDrift != nil {
-		t.onDrift(active)
-	}
-	t.recomputeState(map[bool]string{true: "signature verification drift", false: ""}[active])
+	t.recomputeState(reason)
 }
 
 // state derives the externally reported health state from the independently

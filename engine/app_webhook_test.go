@@ -320,6 +320,51 @@ func TestDirectTransport_ConcurrentRequests(t *testing.T) {
 	}
 }
 
+// Concurrent failures and successes: whatever the interleaving, the last
+// reported drift state equals the tracker's final state (no stale warning after
+// recovery) and callbacks alternate.
+func TestDirectTransport_DriftCallbacksStayOrderedUnderConcurrency(t *testing.T) {
+	h := startDirect(t)
+	var mu sync.Mutex
+	var seen []bool
+	h.tr.SetDriftHandler(func(active bool) {
+		mu.Lock()
+		seen = append(seen, active)
+		mu.Unlock()
+	})
+	body := []byte(`{"a":1}`)
+	good := signDirect(body)
+	for round := 0; round < 20; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < events.SignatureDriftThreshold*2; i++ {
+			sig := "sha256=bad"
+			if i%7 == 0 {
+				sig = good
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, directTestPath, bytes.NewReader(body))
+				req.Header.Set("X-Hub-Signature-256", sig)
+				h.tr.handle(rec, req)
+			}()
+		}
+		wg.Wait()
+		mu.Lock()
+		last := len(seen) > 0 && seen[len(seen)-1]
+		for i := 1; i < len(seen); i++ {
+			if seen[i] == seen[i-1] {
+				t.Fatalf("round %d: drift callbacks repeated a state: %v", round, seen)
+			}
+		}
+		mu.Unlock()
+		if last != h.tr.sigDrift.Active() {
+			t.Fatalf("round %d: last reported drift=%v, tracker active=%v", round, last, h.tr.sigDrift.Active())
+		}
+	}
+}
+
 func TestDirectTransport_ListenFailureIsAStartError(t *testing.T) {
 	boom := errors.New("address already in use")
 	tr := newAppWebhookTransport("direct", directTestPath, func() (net.Listener, error) { return nil, boom }, directTestSecret,
