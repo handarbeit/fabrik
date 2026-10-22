@@ -1237,3 +1237,47 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 
 	return appID, privateKey, justBootstrapped, nil
 }
+
+// appHookJWT mints a fresh App JWT from the Reconciler's captured App identity
+// for the webhook-delivery calls below. A Reconciler with no private key (the
+// zero value engine.NewWithDeps carries, or one whose Reconcile never ran)
+// returns an error before any network call or signing attempt.
+func (r *Reconciler) appHookJWT() (jwt, baseURL string, err error) {
+	if r == nil {
+		return "", "", fmt.Errorf("no GitHub App credentials available")
+	}
+	r.mu.Lock()
+	appID := r.appID
+	privateKey := r.privateKey
+	baseURL = r.baseURL
+	r.mu.Unlock()
+	if privateKey == nil || appID == 0 {
+		return "", "", fmt.Errorf("no GitHub App credentials available")
+	}
+	jwt, err = gh.BuildAppJWT(appID, privateKey)
+	if err != nil {
+		return "", "", fmt.Errorf("building app JWT: %w", err)
+	}
+	return jwt, baseURL, nil
+}
+
+// ListAppHookDeliveries lists one page of the App's webhook delivery log
+// (GET /app/hook/deliveries, #2144). A fresh JWT is minted per call, so none is
+// held across a long pass. See gh.FetchAppHookDeliveries for cursor semantics.
+func (r *Reconciler) ListAppHookDeliveries(cursor string, perPage int) ([]gh.AppHookDelivery, string, error) {
+	jwt, baseURL, err := r.appHookJWT()
+	if err != nil {
+		return nil, "", err
+	}
+	return gh.FetchAppHookDeliveries(baseURL, jwt, cursor, perPage)
+}
+
+// RedeliverAppHookDelivery asks GitHub to redeliver one webhook delivery
+// (POST /app/hook/deliveries/{id}/attempts, #2144).
+func (r *Reconciler) RedeliverAppHookDelivery(deliveryID int64) error {
+	jwt, baseURL, err := r.appHookJWT()
+	if err != nil {
+		return err
+	}
+	return gh.RedeliverAppHookDelivery(baseURL, jwt, deliveryID)
+}
