@@ -232,7 +232,7 @@ type tsnetTracker struct {
 	fn          func(tailnetState)
 	have        bool
 	last        tailnetState
-	backend     ipn.State
+	backend     string // last known backend state (from a status read, else a notification)
 	haveBackend bool
 }
 
@@ -242,18 +242,20 @@ type tsnetTracker struct {
 func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if state != nil {
-		t.backend, t.haveBackend = *state, true
-	}
-	var backend string
+	// A status read is the freshest source: the timer and netmap-only
+	// notifications carry no state, and a notification's state may be older than
+	// the status read right after it. The cached notification state is only the
+	// fallback when no status is available.
 	switch {
-	case t.haveBackend:
-		backend = t.backend.String()
 	case status != nil && status.BackendState != "":
-		backend = status.BackendState
-	default:
+		t.backend, t.haveBackend = status.BackendState, true
+	case state != nil:
+		t.backend, t.haveBackend = state.String(), true
+	}
+	if !t.haveBackend {
 		return
 	}
+	backend := t.backend
 	connected := backend == ipn.Running.String()
 	var st tailnetState
 	if status != nil {

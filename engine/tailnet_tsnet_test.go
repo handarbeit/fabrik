@@ -111,7 +111,9 @@ func TestTsnetTracker_DisconnectAndNoBackendYet(t *testing.T) {
 		t.Fatalf("emitted %#v", *got)
 	}
 	stopped := ipn.Stopped
-	tr.observe(&stopped, okStatus())
+	st := okStatus()
+	st.BackendState = "Stopped"
+	tr.observe(&stopped, st)
 	if len(*got) != 1 || (*got)[0].Connected || (*got)[0].BackendState != "Stopped" {
 		t.Fatalf("got %#v", *got)
 	}
@@ -134,5 +136,29 @@ func TestStreamEndsFailureStreak(t *testing.T) {
 		if got := streamEndsFailureStreak(c.received, c.up); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// The status poll is the fresher source: after the bus stream breaks, a node
+// that drops out of Running (key expired) is reported from the status read, not
+// masked by the last state a notification carried.
+func TestTsnetTracker_StatusReadBeatsStaleNotificationState(t *testing.T) {
+	tr, got := newTestTracker()
+	running := ipn.Running
+	tr.observe(&running, okStatus())
+	needsLogin := okStatus()
+	needsLogin.BackendState = "NeedsLogin"
+	tr.observe(nil, needsLogin) // timer read; the bus delivered nothing
+	if len(*got) != 2 {
+		t.Fatalf("emitted %d states, want 2: %#v", len(*got), *got)
+	}
+	if st := (*got)[1]; st.Connected || st.BackendState != "NeedsLogin" {
+		t.Fatalf("state = %#v, want disconnected / NeedsLogin", st)
+	}
+	// A netmap-only notification before its state notification, and a failed
+	// read afterwards, fall back to the last known state.
+	tr.observe(&running, nil)
+	if st := (*got)[len(*got)-1]; !st.Connected {
+		t.Fatalf("notification fallback = %#v", st)
 	}
 }
