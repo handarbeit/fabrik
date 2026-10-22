@@ -1464,7 +1464,7 @@ FABRIK_USER=my-personal-username
 | `--event-source` | Event ingestion transport: `poll` (default), `hookdeck` or `direct`. `hookdeck` and `direct` require GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `--hookdeck-api-key-env` | Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
 | `--hookdeck-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
-| `--direct-listen` | host:port the direct App webhook transport listens on (plain HTTP; bind loopback). Required with `--event-source direct`. Also `FABRIK_DIRECT_LISTEN`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver). | — |
+| `--direct-listen` | host:port the direct App webhook transport listens on (plain HTTP; bind loopback). Required with `--event-source direct`. Also `FABRIK_DIRECT_LISTEN`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | — |
 | `--app-webhook-path` | URL path the direct transport serves. Also `FABRIK_APP_WEBHOOK_PATH`. | `/webhook` |
 | `--app-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source direct`). Also `FABRIK_APP_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 
