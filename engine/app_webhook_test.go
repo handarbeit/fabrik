@@ -535,6 +535,15 @@ func TestDirectTransport_ListenFailureIsPollOnlyWithPanelEntry(t *testing.T) {
 	if k := warningKeys(t); !k["direct_listen:"+addr] {
 		t.Fatalf("keys = %v, want direct_listen:%s", k, addr)
 	}
+	// US4.2: the failed listener is still a health row, "not listening", while
+	// the aggregate mode stays "off" (nothing is attached).
+	rows := eng.transports.HealthRows()
+	if len(rows) != 1 || rows[0].Name != "direct" || rows[0].State != "not listening" {
+		t.Fatalf("rows after a bind failure = %#v, want one direct row, not listening", rows)
+	}
+	if m := eng.transports.Mode(); m != "off" {
+		t.Fatalf("mode = %q, want off (failed transports are not attached)", m)
+	}
 
 	// Free the port and start again: the entry resolves.
 	blocker.Close()

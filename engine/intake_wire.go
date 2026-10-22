@@ -266,6 +266,9 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
 	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {
+		// Not attached (poll-only), but still visible in fabrik_health as a
+		// "not listening" row, not only as the panel entry.
+		set.AddFailed(tr)
 		if rerr := warnings.Report(e.warnWriter("direct"), warnings.Condition{
 			Type:    "direct_listen",
 			Subject: listenAddr,
