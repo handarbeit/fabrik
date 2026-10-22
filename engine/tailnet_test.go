@@ -23,6 +23,7 @@ type fakeTailnet struct {
 	dnsName   string
 	upErr     error
 	listenErr error
+	upState   *tailnetState // overrides what Up reports (DNSName is still set)
 
 	closed   atomic.Int32
 	upCalled atomic.Int32
@@ -40,6 +41,11 @@ func (f *fakeTailnet) Up(context.Context) (tailnetState, error) {
 	f.upCalled.Add(1)
 	if f.upErr != nil {
 		return tailnetState{}, f.upErr
+	}
+	if f.upState != nil {
+		st := *f.upState
+		st.DNSName = f.dnsName
+		return st, nil
 	}
 	return tailnetState{Connected: true, BackendState: "Running", DNSName: f.dnsName, Funnel: tailnetFunnelOK}, nil
 }
@@ -313,6 +319,22 @@ func TestTailscale_StartFailuresArePollOnlyWithPanelEntry(t *testing.T) {
 
 // US4 / AC6: a tailnet drop is unhealthy with a panel entry; recovery clears it
 // and calls the reconnect handler exactly once; the first connect never does.
+// The startup health baseline is what Up reported, not a hard-coded "ok": an
+// unavailable Funnel shows from the start, before any IPN bus notification.
+func TestTailscale_StartupBaselineComesFromUp(t *testing.T) {
+	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet {
+		n := newFakeTailnet(cfg, "n.t.ts.net")
+		n.upState = &tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelUnavailable}
+		return n
+	})
+	eng, cleanup, _ := startTailscaleEngine(t)
+	defer cleanup()
+	row := tailscaleFromEngine(t, eng).HealthRow()
+	if row.Funnel.V != tailnetFunnelUnavailable || row.Tailnet.V != "Running" {
+		t.Fatalf("row = %#v, want tailnet Running / funnel %s", row, tailnetFunnelUnavailable)
+	}
+}
+
 func TestTailscale_DropAndRecovery(t *testing.T) {
 	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	eng, cleanup, _ := startTailscaleEngine(t)

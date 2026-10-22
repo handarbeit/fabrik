@@ -119,6 +119,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 		nodeMu sync.Mutex
 		node   tailnetNode
 		webURL string
+		upSt   tailnetState // what Up reported; seeds the health baseline
 	)
 	listenFn := func() (net.Listener, error) {
 		if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -157,7 +158,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 			return nil, fmt.Errorf("opening the Funnel listener (check that the tailnet policy grants the \"funnel\" node attribute to this node's tag, and that HTTPS certificates are enabled): %w", err)
 		}
 		nodeMu.Lock()
-		node, webURL = n, funnelWebhookURL(st.DNSName, path)
+		node, webURL, upSt = n, funnelWebhookURL(st.DNSName, path), st
 		nodeMu.Unlock()
 		return ln, nil
 	}
@@ -207,7 +208,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	e.resolveWarning(tag, warnings.Condition{Type: "tailscale_signature_drift", Subject: tr.Name()}.Key())
 
 	nodeMu.Lock()
-	n, u := node, webURL
+	n, u, up := node, webURL, upSt
 	nodeMu.Unlock()
 	e.logf(0, tag, "event_source: tailscale — node %q is up; App webhook URL: %s (secret from $%s)\n", hostname, u, secretEnvName)
 
@@ -231,7 +232,18 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 		})
 	}
 	// First connect: records the baseline, never calls the reconnect handler.
-	tr.SetNetworkCondition(true, "Running", tailnetFunnelOK)
+	// The baseline is what Up and the Funnel listen actually reported, so an
+	// unavailable Funnel shows from the start and does not wait for the first
+	// IPN bus notification. Up returned, so the node is connected; an empty
+	// backend state or Funnel status falls back to what that success implies.
+	baseState, baseFunnel := up.BackendState, up.Funnel
+	if baseState == "" {
+		baseState = "Running"
+	}
+	if baseFunnel == "" {
+		baseFunnel = tailnetFunnelOK
+	}
+	tr.SetNetworkCondition(true, baseState, baseFunnel)
 	watchWG.Add(1)
 	go func() {
 		defer watchWG.Done()
