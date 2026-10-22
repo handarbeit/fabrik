@@ -191,7 +191,7 @@ func (t *appWebhookTransport) Addr() string {
 func (t *appWebhookTransport) Stop() {
 	t.stopOnce.Do(func() {
 		t.mu.Lock()
-		srv := t.srv
+		srv, ln := t.srv, t.ln
 		t.listening = false
 		t.mu.Unlock()
 		if srv != nil {
@@ -200,6 +200,14 @@ func (t *appWebhookTransport) Stop() {
 			if err := srv.Shutdown(ctx); err != nil {
 				_ = srv.Close()
 			}
+		}
+		// Shutdown only closes listeners Serve has already registered. A Stop
+		// that races ahead of the Serve goroutine would otherwise leave the
+		// socket bound (and accepting into its backlog) until that goroutine
+		// runs; close it here so the port is released when Stop returns. The
+		// second Close on an already-closed listener is harmless.
+		if ln != nil {
+			_ = ln.Close()
 		}
 		t.recomputeState("stopped")
 	})
