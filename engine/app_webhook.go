@@ -78,9 +78,13 @@ type appWebhookTransport struct {
 const (
 	appWebhookReadHeaderTimeout = 10 * time.Second
 	appWebhookReadTimeout       = 2 * time.Minute
-	appWebhookWriteTimeout      = 30 * time.Second
-	appWebhookIdleTimeout       = 2 * time.Minute
-	appWebhookShutdownGrace     = 5 * time.Second
+	// The write deadline runs from the end of the request-header read, not from
+	// the end of the body, so it must cover the whole body upload (ReadTimeout)
+	// plus time to write the response; otherwise a slow 25 MiB upload would be
+	// accepted and then its 2xx/413 could not be written.
+	appWebhookWriteTimeout  = appWebhookReadTimeout + 30*time.Second
+	appWebhookIdleTimeout   = 2 * time.Minute
+	appWebhookShutdownGrace = 5 * time.Second
 	// appWebhookSigWarnInterval rate-limits the bad-signature log line: the
 	// listener is exposed through a public route.
 	appWebhookSigWarnInterval = 30 * time.Second
