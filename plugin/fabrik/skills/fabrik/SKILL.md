@@ -59,7 +59,7 @@ The running Fabrik daemon already knows where every item is and what it will do 
 | `fabrik_situation` | **Start here for "what needs me?"** One rolled-up view: PRs waiting for a merge decision, items held at a gate, items waiting for input (with how to resume them), pending decisions, stalled items, merge-train and poll health, and anomalies. Each entry carries the options to act and the tool that performs each |
 | `fabrik_status` | One issue: column and time in column, worker, linked PR and CI, blockers, labels, its attention state and what the engine will do next |
 | `fabrik_board` | The whole board. `view=attention` (default) lists only items that need looking at, ranked; `view=flow` shows throughput by column. Filter by `column`, `label`, `repo`, `milestone`, `has_open_blockers` |
-| `fabrik_health` | Daemon version and uptime, last poll, webhook and reconcile freshness, worker slots, per-partition merge-train state |
+| `fabrik_health` | Daemon version and uptime, last poll, webhook (per event transport) and reconcile freshness, worker slots, per-partition merge-train state |
 
 "What's the status of #1067?" is one `fabrik_status` call. "What needs me?" is one `fabrik_situation` call; use `fabrik_board` when the user wants the board filtered or the flow view. Answer from what they return; do not rebuild the picture from GitHub, `gh`, process lists or the worktree directory. The daemon serves them from its own cache, so they cost no GitHub calls.
 

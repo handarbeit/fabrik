@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"sync"
+
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 // ingestTransport is the surface every webhook delivery source implements
@@ -49,6 +51,11 @@ type ingestTransport interface {
 	// RE-establishes its connection after a disconnect (never on first connect),
 	// so the engine can run a catch-up reconcile for events missed meanwhile.
 	SetReconnectHandler(fn func())
+	// HealthRow reports the transport's own state, last delivery time and
+	// rejection counts for fabrik_health (#2142). Anything it cannot report is
+	// unknown. Required of every transport, so a new one cannot silently report
+	// nothing.
+	HealthRow() localapi.TransportHealth
 }
 
 // transportSet is the engine's collection of attached transports. Every method
@@ -138,6 +145,15 @@ func (s *transportSet) TransitionHealth(healthy bool, reason string) {
 	for _, t := range s.snapshot() {
 		t.TransitionHealth(healthy, reason)
 	}
+}
+
+// HealthRows returns one health row per attached transport, never nil.
+func (s *transportSet) HealthRows() []localapi.TransportHealth {
+	rows := []localapi.TransportHealth{}
+	for _, t := range s.snapshot() {
+		rows = append(rows, t.HealthRow())
+	}
+	return rows
 }
 
 // CheckCoverage runs every transport's coverage re-check.

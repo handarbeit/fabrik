@@ -412,3 +412,35 @@ func TestHookdeckManager_OverflowDroppedDeliveryIsAppliedOnRedelivery(t *testing
 		t.Fatalf("applied %d deliveries after the redelivery, want %d: a dropped Hookdeck delivery's redelivery was suppressed", got, before+1)
 	}
 }
+
+func TestHookdeckHealthRow(t *testing.T) {
+	hm, _ := newTestHookdeckManager(t)
+	row := hm.HealthRow()
+	if row.Name != "hookdeck" {
+		t.Fatalf("name = %q", row.Name)
+	}
+	if row.LastDeliveryAt.Valid {
+		t.Fatal("last delivery known before any delivery")
+	}
+	if row.OversizedRequests.Valid {
+		t.Fatal("oversized must be unknown for hookdeck")
+	}
+	hm.recordDrop(events.DropSignatureInvalid)
+	hm.recordDrop(events.DropSignatureMissing)
+	hm.recordDrop(events.DropMalformedPayload)
+	hm.Handle(context.Background(), events.GitHubEvent{EventType: "issues", DeliveryID: "d1"})
+	row = hm.HealthRow()
+	if !row.RejectedSignatures.Valid || row.RejectedSignatures.V != 2 {
+		t.Fatalf("rejected signatures = %#v, want 2", row.RejectedSignatures)
+	}
+	if !row.MalformedRequests.Valid || row.MalformedRequests.V != 1 {
+		t.Fatalf("malformed = %#v, want 1", row.MalformedRequests)
+	}
+	if !row.LastDeliveryAt.Valid {
+		t.Fatal("last delivery unknown after a delivery")
+	}
+	hm.handleSignatureDrift(true)
+	if got := hm.HealthRow().State; got != "signature drift" {
+		t.Fatalf("state under drift = %q", got)
+	}
+}

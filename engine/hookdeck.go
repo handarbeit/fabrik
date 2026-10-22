@@ -6,10 +6,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/events/hookdeck"
+	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/tui"
 	"github.com/handarbeit/fabrik/warnings"
 )
@@ -101,6 +103,10 @@ type hookdeckManager struct {
 	// checkHookdeckInstallationCoverage, surfaced via the same
 	// tui.WebhookStatusEvent.CoverageNote field webhookManager uses.
 	installationNote string
+
+	// lastDeliveryAt is when the last delivery reached Handle (protected by
+	// mu), for the per-transport health row (#2142).
+	lastDeliveryAt time.Time
 }
 
 // newHookdeckManager constructs a hookdeckManager and its underlying
@@ -268,6 +274,7 @@ func (hm *hookdeckManager) ManagedRepos() []string {
 func (hm *hookdeckManager) Handle(ctx context.Context, ev events.GitHubEvent) {
 	hm.mu.Lock()
 	hm.eventCounts[ev.EventType]++
+	hm.lastDeliveryAt = time.Now()
 	hm.mu.Unlock()
 	hm.emitCurrentState()
 	d := delivery{ID: ev.DeliveryID, EventType: ev.EventType, Payload: ev.Payload, Transport: "hookdeck"}
@@ -418,6 +425,27 @@ func (hm *hookdeckManager) recordDrop(reason events.DropReason) {
 	total := hm.dropCounts[reason]
 	hm.mu.Unlock()
 	hm.logFn(0, "hookdeck", "dropped delivery: %s (cumulative: %d)\n", reason, total)
+}
+
+// HealthRow implements ingestTransport. Rejected signatures and malformed
+// requests come from the ADR-1563 drop accounting; Hookdeck has no oversized
+// concept at this layer (the frame cap is the protocol's), so that is unknown.
+func (hm *hookdeckManager) HealthRow() localapi.TransportHealth {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	state := string(hm.state)
+	if hm.sigDriftActive {
+		state = "signature drift"
+	}
+	sigs := int64(hm.dropCounts[events.DropSignatureInvalid] + hm.dropCounts[events.DropSignatureMissing])
+	malformed := int64(hm.dropCounts[events.DropMalformedEnvelope] + hm.dropCounts[events.DropMalformedAttempt] + hm.dropCounts[events.DropMalformedPayload])
+	return localapi.TransportHealth{
+		Name:               "hookdeck",
+		State:              state,
+		LastDeliveryAt:     localapi.KnownTime(hm.lastDeliveryAt),
+		RejectedSignatures: localapi.Some(sigs),
+		MalformedRequests:  localapi.Some(malformed),
+	}
 }
 
 // DropCounts returns a locked snapshot of every recorded drop reason's

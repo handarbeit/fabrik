@@ -11,6 +11,7 @@ import (
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/events"
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 // fakeTransport is a transport the engine has never heard of: it implements only
@@ -88,6 +89,12 @@ func (f *fakeTransport) SetReconnectHandler(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reconnect = fn
+}
+
+// HealthRow reports everything but the name as unknown: a transport that
+// cannot vouch for a value says so (#2142).
+func (f *fakeTransport) HealthRow() localapi.TransportHealth {
+	return localapi.TransportHealth{Name: f.name, State: "unknown"}
 }
 
 var _ ingestTransport = (*fakeTransport)(nil)
@@ -347,5 +354,22 @@ func TestSetUpIngestion_StartsSeveralTransportsAndWiresEachOne(t *testing.T) {
 		if !stopped {
 			t.Errorf("transport %s was not stopped by the setup's cleanup", f.name)
 		}
+	}
+}
+
+func TestTransportSet_HealthRows(t *testing.T) {
+	var nilSet *transportSet
+	if rows := nilSet.HealthRows(); rows == nil || len(rows) != 0 {
+		t.Fatalf("nil set rows = %#v, want empty non-nil slice", rows)
+	}
+	set := &transportSet{}
+	set.Add(newFakeTransport("a"))
+	set.Add(newFakeTransport("b"))
+	rows := set.HealthRows()
+	if len(rows) != 2 || rows[0].Name != "a" || rows[1].Name != "b" {
+		t.Fatalf("rows = %#v", rows)
+	}
+	if rows[0].LastDeliveryAt.Valid || rows[0].RejectedSignatures.Valid {
+		t.Fatalf("unreported values must be unknown: %#v", rows[0])
 	}
 }

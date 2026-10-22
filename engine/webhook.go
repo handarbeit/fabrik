@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/events"
+	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/internal/sessionreap"
 	"github.com/handarbeit/fabrik/tui"
 	"github.com/handarbeit/fabrik/warnings"
@@ -197,6 +198,10 @@ type webhookManager struct {
 	// emitCurrentState/CoverageNote.
 	subscriptionNote string
 	hookNote         string
+
+	// lastDeliveryAt is when the last delivery was handed to the sink
+	// (protected by mu), for the per-transport health row (#2142).
+	lastDeliveryAt time.Time
 }
 
 func newWebhookManager(
@@ -1513,6 +1518,7 @@ const webhookMaxBodyBytes = 25 << 20
 // tests only) when no sink is installed.
 func (wm *webhookManager) deliver(d delivery) {
 	wm.mu.Lock()
+	wm.lastDeliveryAt = time.Now()
 	sink := wm.sink
 	wm.mu.Unlock()
 	if sink != nil {
@@ -1526,6 +1532,19 @@ func (wm *webhookManager) deliver(d delivery) {
 
 // Name implements ingestTransport.
 func (wm *webhookManager) Name() string { return "webhook" }
+
+// HealthRow implements ingestTransport. The gh-forward stream reports its
+// state and last delivery time; it keeps no rejection counts, so those are
+// unknown.
+func (wm *webhookManager) HealthRow() localapi.TransportHealth {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	return localapi.TransportHealth{
+		Name:           "webhook",
+		State:          string(wm.state),
+		LastDeliveryAt: localapi.KnownTime(wm.lastDeliveryAt),
+	}
+}
 
 // SetPort sets the listener port Start binds (0 = OS-assigned).
 func (wm *webhookManager) SetPort(port int) { wm.requestedPort = port }

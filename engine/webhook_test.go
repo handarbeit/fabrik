@@ -1342,3 +1342,15 @@ func TestStartSubprocessDropsOnlyTheRejectedOptionalEvent(t *testing.T) {
 	}
 	_ = cmd.Wait()
 }
+
+func TestWebhookManagerHealthRow(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	row := wm.HealthRow()
+	if row.Name != "webhook" || row.LastDeliveryAt.Valid || row.RejectedSignatures.Valid {
+		t.Fatalf("row = %#v", row)
+	}
+	wm.deliver(delivery{ID: "x", EventType: "issues"})
+	if !wm.HealthRow().LastDeliveryAt.Valid {
+		t.Fatal("last delivery unknown after deliver")
+	}
+}

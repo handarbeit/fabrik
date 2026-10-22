@@ -601,6 +601,10 @@ func TestLocalAPIHealth(t *testing.T) {
 	if !h.Claude.UsageLimited || !h.Claude.UsageLimitedUntil.Valid || !h.Claude.UsageLimitedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
 		t.Errorf("claude = %+v", h.Claude)
 	}
+	// The per-transport list is always a JSON array, never null (#2142).
+	if h.Webhook.Transports == nil {
+		t.Errorf("webhook transports is nil, want an empty list")
+	}
 	// The wire contract (#2129): the hold is reported as usage_limited /
 	// usage_limited_until under claude_usage_limit, with no suspended keys.
 	raw, err := json.Marshal(h)

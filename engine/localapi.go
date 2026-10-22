@@ -1164,6 +1164,7 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 			Mode:              b.webhookMode(),
 			LastEventAt:       localapi.KnownTime(h.WebhookEventAt),
 			SinceEventSeconds: ageSince(now, h.WebhookEventAt),
+			Transports:        e.transports.HealthRows(),
 		},
 		Reconcile: localapi.ReconcileHealth{
 			LastSuccessAt:       localapi.KnownTime(h.ReconcileOKAt),
