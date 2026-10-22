@@ -407,6 +407,18 @@ func TestRedactTailnetLog(t *testing.T) {
 	}
 }
 
+func TestRedactTailnetLog_Variants(t *testing.T) {
+	for _, in := range []string{
+		"visit: HTTPS://Login.Tailscale.com/a/secret1",
+		"visit: http://login.tailscale.com/a/secret1",
+		"noise https://example.com/?next=https://login.tailscale.com/a/secret1 more",
+	} {
+		if got := redactTailnetLog(in); strings.Contains(got, "secret1") {
+			t.Errorf("redactTailnetLog(%q) = %q leaks the link", in, got)
+		}
+	}
+}
+
 func TestTailnetStateExists(t *testing.T) {
 	dir := t.TempDir()
 	if tailnetStateExists(dir) {

@@ -92,7 +92,10 @@ func funnelWebhookURL(dnsName, path string) string {
 	return "https://" + dnsName + path
 }
 
-var tailnetLoginURL = regexp.MustCompile(`https://login\.tailscale\.com/\S*`)
+// tailnetLoginURL deliberately matches anywhere in a line (it is a redaction,
+// not a validation): over-matching only withholds more. Scheme and host are
+// case-insensitive and http is covered, so no spelling of the link slips through.
+var tailnetLoginURL = regexp.MustCompile(`(?i)https?://login\.tailscale\.com\S*`)
 
 // redactTailnetLog withholds interactive-login links from the node's log: we
 // never do an interactive login, and a one-time auth link is credential-like.
