@@ -806,3 +806,38 @@ func TestAnomalyThresholdFlagsAreDefined(t *testing.T) {
 		}
 	}
 }
+
+// TestExecute_DirectFlagsRegistered checks the event_source: direct flags
+// (#2142) are registered and that startup, not flag parsing, is what refuses a
+// PAT-auth direct configuration — naming the fix.
+func TestExecute_DirectFlagsRegistered(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir,
+		"--event-source", "direct", "--direct-listen", "127.0.0.1:0", "--app-webhook-path", "/hook", "--app-webhook-secret-env", "MY_SECRET"}
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, f := range []string{"direct-listen", "app-webhook-path", "app-webhook-secret-env"} {
+		if strings.Contains(err.Error(), "unknown flag: --"+f) {
+			t.Errorf("--%s not registered", f)
+		}
+	}
+}
+
+func TestExecute_DirectEnvAccepted(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	t.Setenv("FABRIK_DIRECT_LISTEN", "127.0.0.1:0")
+	t.Setenv("FABRIK_APP_WEBHOOK_PATH", "/hook")
+	t.Setenv("FABRIK_APP_WEBHOOK_SECRET_ENV", "MY_SECRET")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir}
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if strings.Contains(err.Error(), "DIRECT_LISTEN") || strings.Contains(err.Error(), "APP_WEBHOOK") {
+		t.Errorf("env resolution failed: %v", err)
+	}
+}

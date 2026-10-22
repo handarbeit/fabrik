@@ -48,8 +48,17 @@ type ProjectConfig struct {
 	// itself) — mirroring pruefer/config.go's hookdeck.api_key_env /
 	// hookdeck.webhook_secret_env convention exactly, so an operator already
 	// running Pruefer with Hookdeck recognizes the shape immediately.
-	HookdeckAPIKeyEnv          string   `yaml:"hookdeck_api_key_env"`
-	HookdeckWebhookSecretEnv   string   `yaml:"hookdeck_webhook_secret_env"`
+	HookdeckAPIKeyEnv        string `yaml:"hookdeck_api_key_env"`
+	HookdeckWebhookSecretEnv string `yaml:"hookdeck_webhook_secret_env"`
+	// DirectListen/AppWebhookPath/AppWebhookSecretEnv configure
+	// event_source: direct (#2142, ADR 2142), the App webhook received
+	// straight by the daemon behind the operator's own tunnel or proxy.
+	// AppWebhookSecretEnv names the variable holding the secret (indirection,
+	// like the hookdeck_* keys). The path and secret keys are shared with the
+	// later event_source: tailscale (#2143).
+	DirectListen               string   `yaml:"direct_listen"`
+	AppWebhookPath             string   `yaml:"app_webhook_path"`
+	AppWebhookSecretEnv        string   `yaml:"app_webhook_secret_env"`
 	StatusPoll                 *int     `yaml:"status_poll"`
 	JanitorIntervalHours       *int     `yaml:"janitor_interval_hours"`
 	LogRetentionDays           *int     `yaml:"log_retention_days"`

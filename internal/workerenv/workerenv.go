@@ -79,6 +79,7 @@ var Scrubbed = []Var{
 	cred(OptInVar, "the #2027 opt-in itself is never forwarded"),
 	{"FABRIK_HOOKDECK_API_KEY_ENV", GroupHookdeck, "names the variable holding the Hookdeck API key"},
 	{"FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the webhook secret"},
+	{"FABRIK_APP_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the App webhook secret (event_source: direct)"},
 	{DefaultHookdeckAPIKeyEnv, GroupHookdeck, "default Hookdeck API key variable (not FABRIK_-prefixed)"},
 
 	ident("FABRIK_OWNER"), ident("FABRIK_PROJECT_NUMBER"), ident("FABRIK_USER"),
@@ -89,7 +90,7 @@ var Scrubbed = []Var{
 	ident("FABRIK_WORKTREE_BOUNDARY_AUDIT"), ident("FABRIK_EVENT_SOURCE"),
 	ident("FABRIK_WEBHOOKS"), ident("FABRIK_WEBHOOK_PORT"), ident("FABRIK_WEBHOOK_EVENTS"),
 	ident("FABRIK_STATUS_POLL"), ident("FABRIK_TEST_POLL_CONTROL"),
-	ident("FABRIK_LOCK_DIR"),
+	ident("FABRIK_LOCK_DIR"), ident("FABRIK_DIRECT_LISTEN"), ident("FABRIK_APP_WEBHOOK_PATH"),
 
 	tune("FABRIK_POLL"), tune("FABRIK_RETRY_BACKOFF"), tune("FABRIK_MAX_CONCURRENT"),
 	tune("FABRIK_MAX_RETRIES"), tune("FABRIK_MAX_SLICE_RETRIES"),
