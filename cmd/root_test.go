@@ -841,3 +841,35 @@ func TestExecute_DirectEnvAccepted(t *testing.T) {
 		t.Errorf("env resolution failed: %v", err)
 	}
 }
+
+// TestExecute_TailscaleFlagsAndEnvRegistered checks the event_source: tailscale
+// settings (#2143) resolve from flags and FABRIK_TAILSCALE_* env, and that
+// startup (not flag parsing) is what refuses an unusable configuration.
+func TestExecute_TailscaleFlagsAndEnvRegistered(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir,
+		"--event-source", "tailscale", "--tailscale-hostname", "h", "--tailscale-auth-key-env", "MY_TS_KEY", "--tailscale-state-dir", t.TempDir()}
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected an error (no stages / refusal)")
+	}
+	for _, f := range []string{"tailscale-hostname", "tailscale-auth-key-env", "tailscale-state-dir"} {
+		if strings.Contains(err.Error(), "unknown flag: --"+f) {
+			t.Errorf("--%s not registered", f)
+		}
+	}
+
+	resetFlags()
+	t.Setenv("FABRIK_TAILSCALE_HOSTNAME", "h")
+	t.Setenv("FABRIK_TAILSCALE_AUTH_KEY_ENV", "MY_TS_KEY")
+	t.Setenv("FABRIK_TAILSCALE_STATE_DIR", t.TempDir())
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir}
+	err = Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if strings.Contains(err.Error(), "TAILSCALE") {
+		t.Errorf("env resolution failed: %v", err)
+	}
+}

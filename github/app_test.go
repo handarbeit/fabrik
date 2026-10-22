@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -824,6 +825,34 @@ func TestFetchAppHookDeliveries_PaginatesByLinkCursor(t *testing.T) {
 	}
 }
 
+// FetchAppHookConfig decodes url and content_type and never exposes the secret
+// GitHub returns in the same response (#2143).
+func TestFetchAppHookConfig_DropsSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/hook/config" || r.Header.Get("Authorization") != "Bearer jwt-1" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"url":"https://n.ts.net/webhook","content_type":"json","secret":"********","insecure_ssl":"0"}`))
+	}))
+	defer srv.Close()
+	got, err := FetchAppHookConfig(srv.URL, "jwt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://n.ts.net/webhook" || got.ContentType != "json" || got.InsecureSSL != "0" {
+		t.Fatalf("got %#v", got)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", got), "***") {
+		t.Fatal("secret leaked into the decoded value")
+	}
+	for _, f := range reflect.VisibleFields(reflect.TypeOf(got)) {
+		if strings.EqualFold(f.Name, "secret") {
+			t.Fatal("AppHookConfig must have no secret field")
+		}
+	}
+}
+
 func TestNextCursorFromLink(t *testing.T) {
 	cases := map[string]string{
 		"":                                   "",
@@ -902,5 +931,15 @@ func TestRedeliverAppHookDelivery(t *testing.T) {
 	}
 	if errors.Is(err, ErrAppUnauthorized) || errors.Is(err, ErrNotFound) {
 		t.Errorf("422 must be a plain error, got %v", err)
+	}
+}
+
+func TestFetchAppHookConfig_Unauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"nope"}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if _, err := FetchAppHookConfig(srv.URL, "x"); !errors.Is(err, ErrAppUnauthorized) {
+		t.Fatalf("err = %v", err)
 	}
 }
