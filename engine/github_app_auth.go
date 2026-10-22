@@ -281,11 +281,11 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 // into event-driven ingestion would get no error and no log message, only
 // silent poll-only delivery.
 func RefuseUnknownEventSource(eventSource string) error {
-	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck || eventSource == EventSourceDirect {
+	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck || eventSource == EventSourceDirect || eventSource == EventSourceTailscale {
 		return nil
 	}
-	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, %q, or "+
-		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourcePoll)
+	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, %q, %q, or "+
+		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourceTailscale, EventSourcePoll)
 }
 
 // appWebhookSecretEnvName is the name of the variable holding the App webhook
@@ -300,11 +300,11 @@ func appWebhookSecretEnvName(cfg Config) string {
 
 // workerSecretEnvNames lists the operator-chosen variable names that hold
 // transport secrets (Hookdeck's API key and webhook secret, the direct
-// transport's webhook secret). They are fed to workerenv.Resolve so a
+// transport's webhook secret, the Tailscale auth key). They are fed to workerenv.Resolve so a
 // non-default name is scrubbed from the worker environment like the defaults
 // (ADR 2027, ADR 2142).
 func workerSecretEnvNames(cfg Config) []string {
-	return []string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv, cfg.AppWebhookSecretEnv}
+	return []string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv, cfg.AppWebhookSecretEnv, cfg.TailscaleAuthKeyEnv}
 }
 
 // appWebhookPath is the URL path the direct transport serves.
@@ -327,24 +327,98 @@ func RefuseDirectMisconfigured(cfg Config, appAuthConfigured bool, secretValue s
 	if cfg.EventSource != EventSourceDirect {
 		return nil
 	}
-	if !appAuthConfigured {
-		return fmt.Errorf("event_source: direct (FABRIK_EVENT_SOURCE) requires GitHub App authentication — " +
-			"it receives a GitHub App's own webhook, which has no PAT-mode equivalent. Configure " +
-			"github_app_id/github_app_private_key_path/github_app_installation_id to use event_source: direct, " +
-			"or remove event_source (default: poll) to use PAT-mode --webhooks or plain polling instead")
+	if err := refuseAppWebhookNoAppAuth(EventSourceDirect, appAuthConfigured); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.DirectListen) == "" {
 		return fmt.Errorf("event_source: direct requires direct_listen (--direct-listen / FABRIK_DIRECT_LISTEN) — " +
 			"the host:port the daemon listens on, e.g. 127.0.0.1:8787; point your tunnel or proxy at it")
 	}
+	return refuseAppWebhookSecretAndPath(EventSourceDirect, cfg, secretValue)
+}
+
+// refuseAppWebhookNoAppAuth is the App-auth rule the two App-webhook event
+// sources (direct, tailscale) share: both receive an App's own webhook, which
+// has no PAT-mode equivalent.
+func refuseAppWebhookNoAppAuth(source string, appAuthConfigured bool) error {
+	if appAuthConfigured {
+		return nil
+	}
+	return fmt.Errorf("event_source: %s (FABRIK_EVENT_SOURCE) requires GitHub App authentication — "+
+		"it receives a GitHub App's own webhook, which has no PAT-mode equivalent. Configure "+
+		"github_app_id/github_app_private_key_path/github_app_installation_id to use event_source: %s, "+
+		"or remove event_source (default: poll) to use PAT-mode --webhooks or plain polling instead", source, source)
+}
+
+// refuseAppWebhookSecretAndPath is the empty-secret and absolute-path rules the
+// two App-webhook event sources share. secretValue is only tested for emptiness.
+func refuseAppWebhookSecretAndPath(source string, cfg Config, secretValue string) error {
 	if secretValue == "" {
-		return fmt.Errorf("event_source: direct requires the App's webhook secret in $%s — set that variable "+
+		return fmt.Errorf("event_source: %s requires the App's webhook secret in $%s — set that variable "+
 			"(or name another with app_webhook_secret_env / --app-webhook-secret-env) to the secret configured "+
-			"on the GitHub App", appWebhookSecretEnvName(cfg))
+			"on the GitHub App", source, appWebhookSecretEnvName(cfg))
 	}
 	if p := cfg.AppWebhookPath; p != "" && !strings.HasPrefix(p, "/") {
 		return fmt.Errorf("app_webhook_path %q (--app-webhook-path / FABRIK_APP_WEBHOOK_PATH) must start with \"/\", e.g. %q",
 			p, DefaultAppWebhookPath)
+	}
+	return nil
+}
+
+// tailscaleAuthKeyEnvName is the name of the variable holding the Tailscale
+// auth key: the configured name, else the default. A variable *name*, never the
+// key.
+func tailscaleAuthKeyEnvName(cfg Config) string {
+	if cfg.TailscaleAuthKeyEnv != "" {
+		return cfg.TailscaleAuthKeyEnv
+	}
+	return DefaultTailscaleAuthKeyEnv
+}
+
+// tailscaleStateDir resolves tailscale_state_dir against the fabrik directory
+// (the default and any relative value are relative to it).
+func tailscaleStateDir(cfg Config, fabrikDir string) string {
+	d := cfg.TailscaleStateDir
+	if d == "" {
+		d = DefaultTailscaleStateDir
+	}
+	if filepath.IsAbs(d) {
+		return d
+	}
+	return filepath.Join(fabrikDir, d)
+}
+
+// RefuseTailscaleMisconfigured refuses event_source: tailscale (#2143, ADR 2143)
+// configured in a way that could only produce a silently deaf daemon: a binary
+// built without the tailscale tag, the shared App-webhook mistakes (no App auth,
+// empty secret, relative path), no hostname, or no auth key while the state dir
+// holds no node state yet. Configuration mistakes fail startup naming the fix;
+// a runtime fault degrades to poll-only. authKeyValue and secretValue are only
+// tested for emptiness and never logged.
+func RefuseTailscaleMisconfigured(cfg Config, appAuthConfigured bool, secretValue, authKeyValue string, stateExists bool) error {
+	if cfg.EventSource != EventSourceTailscale {
+		return nil
+	}
+	if !tailscaleBuilt {
+		return fmt.Errorf("event_source: tailscale needs a binary built with the embedded Tailscale node, " +
+			"but this build does not include it. Build one with `go install -tags tailscale github.com/handarbeit/fabrik@latest` " +
+			"(or `go build -tags tailscale .` from a checkout), or use event_source: direct behind your own tunnel instead")
+	}
+	if err := refuseAppWebhookNoAppAuth(EventSourceTailscale, appAuthConfigured); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.TailscaleHostname) == "" {
+		return fmt.Errorf("event_source: tailscale requires tailscale_hostname (--tailscale-hostname / FABRIK_TAILSCALE_HOSTNAME) — " +
+			"the tailnet machine name for this daemon, e.g. fabrik-models")
+	}
+	if err := refuseAppWebhookSecretAndPath(EventSourceTailscale, cfg, secretValue); err != nil {
+		return err
+	}
+	if !stateExists && authKeyValue == "" {
+		return fmt.Errorf("event_source: tailscale requires a tagged, pre-approved auth key in $%s on the first start "+
+			"(no node state exists yet in the state directory) — set that variable (or name another with "+
+			"tailscale_auth_key_env / --tailscale-auth-key-env). It is not needed once the node has joined",
+			tailscaleAuthKeyEnvName(cfg))
 	}
 	return nil
 }

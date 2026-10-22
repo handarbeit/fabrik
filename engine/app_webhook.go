@@ -18,6 +18,18 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
+// networkCondition is the optional upstream-connectivity input to the derived
+// health state. The direct transport never sets it. The tailscale transport
+// (#2143) reports its tailnet connection through it, so a drop is unhealthy
+// independently of every other hint (reconcile, signature drift).
+type networkCondition struct {
+	set           bool // a condition has been reported
+	connected     bool
+	everConnected bool // a connected state has been seen: a later reconnect is a recovery
+	tailnet       string
+	funnel        string
+}
+
 // appWebhookTransport is the direct App webhook transport (#2142, ADR 2142):
 // the daemon receives a GitHub App's own webhook straight from an HTTP request
 // the operator's tunnel or proxy forwards to it, with no third-party relay.
@@ -65,8 +77,10 @@ type appWebhookTransport struct {
 
 	mu             sync.Mutex
 	sink           func(delivery)
-	reconnectFn    func()                 // stored for interface parity; never called by this transport (FR-017); see attachTransportErr for who consumes it
+	reconnectFn    func()                 // called only by SetNetworkCondition on a tailnet recovery (#2143)
 	replay         *localapi.ReplayHealth // last delivery replay pass (#2144); nil = replay not enabled for this transport
+	stopHook       func()                 // run at the end of Stop (the tailscale transport closes its node)
+	network        networkCondition
 	coverageFn     func()
 	srv            *http.Server
 	ln             net.Listener
@@ -140,10 +154,11 @@ func (t *appWebhookTransport) SetReplayStatus(h localapi.ReplayHealth) {
 
 // SetReconnectHandler implements ingestTransport. A direct receiver has no
 // connection to re-establish and the reconcile ticker is unchanged (FR-017), so
-// the handler is stored and never called. Delivery replay (#2144) reaches the
-// same conclusion: for this transport its only trigger is startup, and the
-// composite handler attachTransportErr installs is there for transports (the
-// tsnet one of #2143) that do signal a reconnect.
+// there the handler is stored and never called. The tailscale transport calls
+// it, through SetNetworkCondition, when a lost tailnet connection comes back.
+// Delivery replay (#2144) reaches the same conclusion for the direct transport:
+// its only trigger is startup, and the composite handler attachTransportErr
+// installs is there for transports (this tailnet one) that do signal a reconnect.
 func (t *appWebhookTransport) SetReconnectHandler(fn func()) {
 	t.mu.Lock()
 	t.reconnectFn = fn
@@ -155,6 +170,41 @@ func (t *appWebhookTransport) SetCoverageCheck(fn func()) {
 	t.mu.Lock()
 	t.coverageFn = fn
 	t.mu.Unlock()
+}
+
+// SetStopHook installs a function Stop runs last, after the listener is closed.
+func (t *appWebhookTransport) SetStopHook(fn func()) {
+	t.mu.Lock()
+	t.stopHook = fn
+	t.mu.Unlock()
+}
+
+// SetNetworkCondition reports the upstream connection (the tailnet, #2143):
+// connected, its state label and the Funnel status. While a reported condition
+// is not connected the transport is unhealthy. A false→true transition after an
+// earlier connected state calls the reconnect handler (outside any lock) so the
+// intake's catch-up reconcile runs; the first connect never does.
+func (t *appWebhookTransport) SetNetworkCondition(connected bool, tailnet, funnel string) {
+	t.mu.Lock()
+	prev := t.network
+	t.network = networkCondition{
+		set: true, connected: connected, everConnected: prev.everConnected || connected,
+		tailnet: tailnet, funnel: funnel,
+	}
+	recovered := connected && prev.set && !prev.connected && prev.everConnected
+	fn := t.reconnectFn
+	t.mu.Unlock()
+	reason := ""
+	if !connected {
+		reason = "tailnet disconnected"
+	}
+	t.recomputeState(reason)
+	if recovered {
+		t.logFn(0, t.name, "tailnet connection re-established — requesting a catch-up reconcile\n")
+		if fn != nil {
+			fn()
+		}
+	}
 }
 
 // SetDriftHandler installs the callback for signature-drift transitions.
@@ -204,7 +254,7 @@ func (t *appWebhookTransport) Addr() string {
 func (t *appWebhookTransport) Stop() {
 	t.stopOnce.Do(func() {
 		t.mu.Lock()
-		srv, ln := t.srv, t.ln
+		srv, ln, hook := t.srv, t.ln, t.stopHook
 		t.listening = false
 		t.mu.Unlock()
 		if srv != nil {
@@ -223,6 +273,9 @@ func (t *appWebhookTransport) Stop() {
 			_ = ln.Close()
 		}
 		t.recomputeState("stopped")
+		if hook != nil {
+			hook()
+		}
 	})
 }
 
@@ -363,8 +416,9 @@ func (t *appWebhookTransport) driftTransition() {
 func (t *appWebhookTransport) state() WebhookHealthState {
 	t.mu.Lock()
 	listening, cacheDrift := t.listening, t.cacheDrift
+	netDown := t.network.set && !t.network.connected
 	t.mu.Unlock()
-	if !listening || cacheDrift || t.sigDrift.Active() {
+	if !listening || cacheDrift || netDown || t.sigDrift.Active() {
 		return WebhookStreamUnhealthy
 	}
 	return WebhookStreamHealthy
@@ -471,7 +525,7 @@ func (t *appWebhookTransport) setInstallationCoverageNote(missing []string, trun
 // HealthRow implements ingestTransport.
 func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 	t.mu.Lock()
-	listening, last := t.listening, t.lastDeliveryAt
+	listening, last, nw := t.listening, t.lastDeliveryAt, t.network
 	var replay *localapi.ReplayHealth
 	if t.replay != nil {
 		cp := *t.replay
@@ -482,10 +536,12 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 	switch {
 	case t.sigDrift.Active():
 		state = "signature drift"
+	case nw.set && !nw.connected:
+		state = "tailnet disconnected"
 	case listening:
 		state = "listening"
 	}
-	return localapi.TransportHealth{
+	row := localapi.TransportHealth{
 		Name:               t.name,
 		State:              state,
 		LastDeliveryAt:     localapi.KnownTime(last),
@@ -494,6 +550,11 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 		OversizedRequests:  localapi.Some(t.oversized.Load()),
 		Replay:             replay,
 	}
+	if nw.set {
+		row.Tailnet = localapi.Some(nw.tailnet)
+		row.Funnel = localapi.Some(nw.funnel)
+	}
+	return row
 }
 
 var _ ingestTransport = (*appWebhookTransport)(nil)

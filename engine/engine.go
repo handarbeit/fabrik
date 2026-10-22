@@ -123,7 +123,17 @@ type Config struct {
 	// deliveries that failed while it was not receiving. cmd resolves the
 	// default (true); the zero value is off, so NewWithDeps engines never
 	// replay. Ignored for event sources other than direct/tailscale.
-	ReplayFailedDeliveries   bool
+	ReplayFailedDeliveries bool
+	// TailscaleHostname / TailscaleAuthKeyEnv / TailscaleStateDir configure
+	// event_source: tailscale (#2143, ADR 2143): the embedded tsnet node's
+	// hostname (required), the *name* of the variable holding its tagged
+	// pre-approved auth key ("" = DefaultTailscaleAuthKeyEnv; needed only until
+	// node state exists) and the node's state directory ("" =
+	// DefaultTailscaleStateDir). AppWebhookPath and AppWebhookSecretEnv are
+	// shared with the direct transport.
+	TailscaleHostname        string
+	TailscaleAuthKeyEnv      string
+	TailscaleStateDir        string
 	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
 	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
@@ -181,6 +191,9 @@ const (
 	EventSourcePoll     = "poll"
 	EventSourceHookdeck = "hookdeck"
 	EventSourceDirect   = "direct"
+	// EventSourceTailscale is the embedded Tailscale Funnel receiver (#2143).
+	// It needs a binary built with -tags tailscale.
+	EventSourceTailscale = "tailscale"
 
 	DefaultEventSource              = EventSourcePoll
 	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
@@ -192,6 +205,11 @@ const (
 	// transports' keys stay uncoupled.
 	DefaultAppWebhookPath      = "/webhook"
 	DefaultAppWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+
+	// DefaultTailscaleAuthKeyEnv / DefaultTailscaleStateDir are event_source:
+	// tailscale's defaults (#2143). The state dir is relative to the fabrik dir.
+	DefaultTailscaleAuthKeyEnv = "FABRIK_TS_AUTHKEY"
+	DefaultTailscaleStateDir   = ".fabrik/state/tailscale"
 )
 
 // cloneCall coordinates concurrent bare-clone attempts for the same repo.
@@ -702,6 +720,10 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	if err := RefuseDirectMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg))); err != nil {
+		return nil, err
+	}
+	if err := RefuseTailscaleMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg)),
+		os.Getenv(tailscaleAuthKeyEnvName(cfg)), tailnetStateExists(tailscaleStateDir(cfg, fabrikDir))); err != nil {
 		return nil, err
 	}
 

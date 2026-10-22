@@ -101,6 +101,9 @@ type Config struct {
 	DirectListen               string // host:port the direct App webhook transport listens on (event_source: direct); required then
 	AppWebhookPath             string // URL path the direct transport serves; "" = /webhook
 	AppWebhookSecretEnv        string // env var name holding the App webhook secret for event_source: direct; "" = FABRIK_GITHUB_WEBHOOK_SECRET
+	TailscaleHostname          string // tailnet hostname of the embedded node (event_source: tailscale); required then
+	TailscaleAuthKeyEnv        string // env var name holding the tagged pre-approved Tailscale auth key; "" = FABRIK_TS_AUTHKEY
+	TailscaleStateDir          string // tsnet node state directory; "" = .fabrik/state/tailscale
 	StatusPollSeconds          int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval          int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 	JanitorIntervalHours       int    // hours; 1 = default; 0 disables the janitor
@@ -255,12 +258,15 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
-	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default), 'hookdeck' or 'direct'. hookdeck and direct require GitHub App auth (also FABRIK_EVENT_SOURCE; #1142, #2142)")
+	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default), 'hookdeck', 'direct' or 'tailscale'. hookdeck, direct and tailscale require GitHub App auth; tailscale also needs a binary built with -tags tailscale (also FABRIK_EVENT_SOURCE; #1142, #2142, #2143)")
 	flag.StringVar(&cfg.HookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Name of the environment variable holding the Hookdeck API key (only used when --event-source=hookdeck; default HOOKDECK_API_KEY; also FABRIK_HOOKDECK_API_KEY_ENV)")
 	flag.StringVar(&cfg.HookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=hookdeck; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV)")
 	flag.StringVar(&cfg.DirectListen, "direct-listen", "", "host:port the direct App webhook transport listens on (plain HTTP; bind loopback and let your tunnel or proxy terminate TLS). Required with --event-source=direct (also FABRIK_DIRECT_LISTEN; #2142)")
 	flag.StringVar(&cfg.AppWebhookPath, "app-webhook-path", "", "URL path the direct App webhook transport serves (default /webhook; also FABRIK_APP_WEBHOOK_PATH; #2142)")
-	flag.StringVar(&cfg.AppWebhookSecretEnv, "app-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=direct; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_APP_WEBHOOK_SECRET_ENV; #2142)")
+	flag.StringVar(&cfg.TailscaleHostname, "tailscale-hostname", "", "Tailnet hostname of the embedded Funnel node. Required with --event-source=tailscale (also FABRIK_TAILSCALE_HOSTNAME; #2143)")
+	flag.StringVar(&cfg.TailscaleAuthKeyEnv, "tailscale-auth-key-env", "", "Name of the environment variable holding the tagged, pre-approved Tailscale auth key (only needed until the node has state; default FABRIK_TS_AUTHKEY; also FABRIK_TAILSCALE_AUTH_KEY_ENV; #2143)")
+	flag.StringVar(&cfg.TailscaleStateDir, "tailscale-state-dir", "", "Directory for the embedded Tailscale node's state (default .fabrik/state/tailscale; also FABRIK_TAILSCALE_STATE_DIR; #2143)")
+	flag.StringVar(&cfg.AppWebhookSecretEnv, "app-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=direct or tailscale; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_APP_WEBHOOK_SECRET_ENV; #2142)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile drift checks (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Always active — this is the sole correctness backstop in poll-only mode; when --webhooks is enabled it also drives webhook stream-health transitions.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
@@ -933,6 +939,27 @@ func Execute() error {
 			cfg.AppWebhookSecretEnv = pc.AppWebhookSecretEnv
 		}
 	}
+	if !explicitFlags["tailscale-hostname"] {
+		if v := os.Getenv("FABRIK_TAILSCALE_HOSTNAME"); v != "" {
+			cfg.TailscaleHostname = v
+		} else if pc.TailscaleHostname != "" {
+			cfg.TailscaleHostname = pc.TailscaleHostname
+		}
+	}
+	if !explicitFlags["tailscale-auth-key-env"] {
+		if v := os.Getenv("FABRIK_TAILSCALE_AUTH_KEY_ENV"); v != "" {
+			cfg.TailscaleAuthKeyEnv = v
+		} else if pc.TailscaleAuthKeyEnv != "" {
+			cfg.TailscaleAuthKeyEnv = pc.TailscaleAuthKeyEnv
+		}
+	}
+	if !explicitFlags["tailscale-state-dir"] {
+		if v := os.Getenv("FABRIK_TAILSCALE_STATE_DIR"); v != "" {
+			cfg.TailscaleStateDir = v
+		} else if pc.TailscaleStateDir != "" {
+			cfg.TailscaleStateDir = pc.TailscaleStateDir
+		}
+	}
 	if !explicitFlags["status-poll"] {
 		if v := os.Getenv("FABRIK_STATUS_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1130,6 +1157,9 @@ func Execute() error {
 		DirectListen:               cfg.DirectListen,
 		AppWebhookPath:             cfg.AppWebhookPath,
 		AppWebhookSecretEnv:        cfg.AppWebhookSecretEnv,
+		TailscaleHostname:          cfg.TailscaleHostname,
+		TailscaleAuthKeyEnv:        cfg.TailscaleAuthKeyEnv,
+		TailscaleStateDir:          cfg.TailscaleStateDir,
 		ProjectStatusPollSeconds:   statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:          reconcileIntervalDuration(cfg.ReconcileInterval),
 		JanitorIntervalHours:       cfg.JanitorIntervalHours,

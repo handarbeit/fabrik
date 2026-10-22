@@ -55,10 +55,17 @@ type ProjectConfig struct {
 	// straight by the daemon behind the operator's own tunnel or proxy.
 	// AppWebhookSecretEnv names the variable holding the secret (indirection,
 	// like the hookdeck_* keys). The path and secret keys are shared with the
-	// later event_source: tailscale (#2143).
-	DirectListen               string   `yaml:"direct_listen"`
-	AppWebhookPath             string   `yaml:"app_webhook_path"`
-	AppWebhookSecretEnv        string   `yaml:"app_webhook_secret_env"`
+	// event_source: tailscale (#2143).
+	DirectListen        string `yaml:"direct_listen"`
+	AppWebhookPath      string `yaml:"app_webhook_path"`
+	AppWebhookSecretEnv string `yaml:"app_webhook_secret_env"`
+	// TailscaleHostname/TailscaleAuthKeyEnv/TailscaleStateDir configure
+	// event_source: tailscale (#2143, ADR 2143), the embedded tsnet Funnel
+	// receiver. TailscaleAuthKeyEnv names the variable holding the tagged
+	// pre-approved auth key (indirection; the key itself is never in config).
+	TailscaleHostname          string   `yaml:"tailscale_hostname"`
+	TailscaleAuthKeyEnv        string   `yaml:"tailscale_auth_key_env"`
+	TailscaleStateDir          string   `yaml:"tailscale_state_dir"`
 	StatusPoll                 *int     `yaml:"status_poll"`
 	JanitorIntervalHours       *int     `yaml:"janitor_interval_hours"`
 	LogRetentionDays           *int     `yaml:"log_retention_days"`

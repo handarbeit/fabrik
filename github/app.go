@@ -515,3 +515,24 @@ func RedeliverAppHookDelivery(baseURL, jwt string, deliveryID int64) error {
 	}
 	return nil
 }
+
+// AppHookConfig is the part of a GitHub App's webhook configuration
+// (GET /app/hook/config) the daemon compares with its own endpoint. GitHub also
+// returns the webhook secret in that response; it is deliberately not a field
+// here, so it is never decoded and can never be logged or returned.
+type AppHookConfig struct {
+	URL string `json:"url"`
+	// ContentType is "json" or "form".
+	ContentType string `json:"content_type"`
+	InsecureSSL string `json:"insecure_ssl"`
+}
+
+// FetchAppHookConfig reads the App's webhook configuration with the App's JWT
+// (#2143). baseURL "" is production, as for the other App-JWT fetchers.
+func FetchAppHookConfig(baseURL, jwt string) (AppHookConfig, error) {
+	var cfg AppHookConfig
+	if err := appRequest("GET", baseURL, "/app/hook/config", jwt, &cfg); err != nil {
+		return AppHookConfig{}, err
+	}
+	return cfg, nil
+}

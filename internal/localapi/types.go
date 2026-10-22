@@ -525,7 +525,8 @@ type TransportHealth struct {
 	// Name identifies the transport ("webhook", "hookdeck", "direct", ...).
 	Name string `json:"name"`
 	// State is the transport's own state: "listening", "not listening" or
-	// "signature drift" for the direct transport; "starting_up", "healthy" or
+	// "signature drift" for the direct transport (the tailscale transport adds
+	// "tailnet disconnected"); "starting_up", "healthy" or
 	// "unhealthy" (or "signature drift") for the others.
 	State string `json:"state"`
 	// LastDeliveryAt is the time of the last delivery the transport handed to
@@ -538,6 +539,11 @@ type TransportHealth struct {
 	// Nil (omitted) when replay does not apply to the transport; present with
 	// unknown values before the first pass has completed.
 	Replay *ReplayHealth `json:"replay,omitempty"`
+	// Tailnet is the embedded node's connection state (the tailscale transport
+	// only: "Running", "NeedsLogin", ...); Funnel is its Funnel status ("ok",
+	// "unavailable"). Both are unknown for every other transport (#2143).
+	Tailnet Known[string] `json:"tailnet"`
+	Funnel  Known[string] `json:"funnel"`
 }
 
 // ReplayHealth is the summary of the last delivery replay pass.
