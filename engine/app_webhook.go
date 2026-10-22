@@ -219,6 +219,15 @@ func (t *appWebhookTransport) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A declared length above the cap is answered 413 without reading the body
+	// at all (same status, still before verification, still not a signature
+	// failure). A chunked or understated body falls through to the capped read.
+	if r.ContentLength > webhookMaxBodyBytes {
+		t.oversized.Add(1)
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes+1))
 	if err != nil {
 		t.malformed.Add(1)

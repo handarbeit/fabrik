@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -208,6 +209,32 @@ func TestDirectTransport_BodyCap(t *testing.T) {
 	}
 	if row.State != "listening" {
 		t.Fatalf("oversized requests must not advance signature drift; state = %q", row.State)
+	}
+}
+
+// A declared Content-Length above the cap is refused 413 without the body
+// being read (only headers are sent here), and without counting as a
+// signature failure.
+func TestDirectTransport_DeclaredOversizeRefusedWithoutReading(t *testing.T) {
+	h := startDirect(t)
+	conn, err := net.Dial("tcp", h.tr.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: x\r\nX-GitHub-Event: issues\r\nX-GitHub-Delivery: declared\r\nContent-Length: %d\r\n\r\n", directTestPath, webhookMaxBodyBytes+1)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d, want 413", resp.StatusCode)
+	}
+	row := h.tr.HealthRow()
+	if row.OversizedRequests.V != 1 || row.RejectedSignatures.V != 0 {
+		t.Fatalf("row = %#v", row)
 	}
 }
 
