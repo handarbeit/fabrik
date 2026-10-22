@@ -383,9 +383,34 @@ func TestReportCmdAgainstAPhasedFakeArchive(t *testing.T) {
 	if code := g.ReportCmd(t.Context(), []string{"--sha", sha}); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	for _, want := range []string{"1200  TestSmokeSingleRepoFullPipeline", "phase wall-clock", "wall 20m0s"} {
+	for _, want := range []string{"1200  real-work        TestSmokeSingleRepoFullPipeline", "phase wall-clock", "wall 20m0s"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+// The Category column (#2417) joins registry/wallclock.json by test name and is
+// blank for an unclassified test.
+func TestRuntimeReportCarriesWallclockCategory(t *testing.T) {
+	reg := &registry.Registry{Version: registry.Version, Tests: []registry.Entry{
+		{Name: "TestExpectedReviewersDeclaredWaitsAndReprompts"}, {Name: "TestNotClassifiedAnywhere"},
+	}}
+	rep, err := BuildRuntimeReport("s", filepath.Join(t.TempDir(), "absent"), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]registry.WallclockCategory{}
+	for _, r := range rep.Rows {
+		got[r.Test] = r.Category
+	}
+	if got["TestExpectedReviewersDeclaredWaitsAndReprompts"] != registry.CategoryEngineTimeout {
+		t.Errorf("classified test: category = %q", got["TestExpectedReviewersDeclaredWaitsAndReprompts"])
+	}
+	if got["TestNotClassifiedAnywhere"] != "" {
+		t.Errorf("unclassified test must have a blank category, got %q", got["TestNotClassifiedAnywhere"])
+	}
+	if !strings.Contains(rep.Format(), "engine-timeout") {
+		t.Errorf("Format must print the category column:\n%s", rep.Format())
 	}
 }

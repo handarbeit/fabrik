@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "categories": {
+    "real-work": "Claude workers and CI / merge-train Actions runs: evidence is produced by the time spent",
+    "engine-timeout": "an engine timeout deliberately waited out at the bed's value",
+    "negative-window": "a polled 'this must not happen' window",
+    "harness-slack": "caps, margins and fixed sleeps that buy no evidence"
+  },
+  "tests": [
+    {"name": "TestExpectedReviewersDeclaredWaitsAndReprompts", "dominant": "engine-timeout", "note": "Phase 1 at T, Phase 2 at 2T (T = bedtimeout.ReviewMinutes); caps were T+10 flat"},
+    {"name": "TestConvergenceRace", "dominant": "real-work", "note": "two overlapping 25-min slow-gate waits (test-repo ci.yml, out of scope); live-only server-side race"},
+    {"name": "TestConjunctiveCIReviewGate", "dominant": "real-work", "note": "25-min slow-gate CI wait; R1 window runs inside it; timeout path waits T"},
+    {"name": "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation", "dominant": "negative-window", "note": "~2 min activity then a T+10 window armed late; now armed at awaiting-review and ended at the engine escalation"},
+    {"name": "TestCrossRepoSpawn", "dominant": "real-work", "note": "parent and spawned child both run full pipelines; Review waits on Pruefer"},
+    {"name": "TestMergeTrainConflictBisectPrefixRerere", "dominant": "real-work", "note": "~11 trial CI cycles plus one Claude conflict resolution"},
+    {"name": "TestMergeTrainRunawayGuardPausesBatch", "dominant": "real-work", "note": "six red trials to reach the runaway cap"},
+    {"name": "TestMergeTrainBisectionEjectsPoisoner", "dominant": "real-work", "note": "halving bisection, one trial CI cycle per step"},
+    {"name": "TestCIFixReinvoke", "dominant": "real-work", "note": "forced-red CI, reinvoke worker, green CI"},
+    {"name": "TestCIFixReinvokeCycleLimit", "dominant": "real-work", "note": "MaxCiFixCycles CI cycles; per-cycle 5 min cap is a failure bound"},
+    {"name": "TestCruiseFullPipeline", "dominant": "real-work", "note": "full pipeline; Review waits on Pruefer"},
+    {"name": "TestBaseBranchPipeline", "dominant": "real-work", "note": "full pipeline; Review waits on Pruefer"},
+    {"name": "TestSmokeSingleRepoFullPipeline", "dominant": "real-work", "note": "full pipeline; Review waits on Pruefer"},
+    {"name": "TestQueuedMemberCommentEjection", "dominant": "real-work", "note": "slow-gate trial held open by the occupant member"},
+    {"name": "TestLateCheckRunSuiteGate", "dominant": "real-work", "note": "late check run sleeps ~4 min by design"},
+    {"name": "TestMergeTrainRestartSafety", "dominant": "real-work", "note": "landing plus exactly-once settle wait (3 bed polls)"},
+    {"name": "TestMergeTrainQueuedDeeperThanBatchCap", "dominant": "real-work", "note": "two trial cycles for seven members plus exactly-once settle wait"},
+    {"name": "TestAppSelfRecognitionBlockedCommentUpdatedInPlace", "dominant": "engine-timeout", "note": "waits out the dep-blocked cooldown (engine behaviour, not changed here)"},
+    {"name": "TestExpectedReviewersFastAdvance", "dominant": "negative-window", "note": "3-min window = three bed polls at 60 s, armed at seed; no change"},
+    {"name": "TestReviewAuthorityYoloDoesNotBypassBlock", "dominant": "negative-window", "note": "90 s block-persist window = 1.5 bed polls; no change"}
+  ]
+}
