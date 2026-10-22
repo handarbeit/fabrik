@@ -346,10 +346,14 @@ func shortErr(err error) string {
 // is off or cannot work (no App auth, no intake): in those cases nothing is
 // reported on the health row either.
 func (e *Engine) newDeliveryReplayer(tr replayStatusSink) *deliveryReplayer {
-	if !e.cfg.ReplayFailedDeliveries || e.ghAppAuth == nil || e.intake == nil {
+	var api hookDeliveryAPI = e.replayAPIOverride
+	if api == nil && e.ghAppAuth != nil {
+		api = e.ghAppAuth
+	}
+	if !e.cfg.ReplayFailedDeliveries || api == nil || e.intake == nil {
 		return nil
 	}
-	return newDeliveryReplayer(e.ghAppAuth, e.intake, tr,
+	return newDeliveryReplayer(api, e.intake, tr,
 		func(format string, args ...any) { e.logf(0, "direct", format, args...) }, e.now)
 }
 
