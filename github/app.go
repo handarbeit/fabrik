@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -162,50 +164,58 @@ type AppInstallation struct {
 // an empty baseURL (the production case) falls back to defaultBaseURL, the
 // same convention github.Client uses.
 func appRequest(method, baseURL, path, jwt string, result interface{}) error {
+	_, err := appDo(method, baseURL, path, jwt, result)
+	return err
+}
+
+// appDo is appRequest returning the response headers too, for callers that
+// need them (cursor pagination via the Link header). On an error response the
+// returned headers are nil.
+func appDo(method, baseURL, path, jwt string, result interface{}) (http.Header, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 	req, err := http.NewRequest(method, baseURL+path, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := appHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
+		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading response: %w", err)
+		return nil, fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		// A rate-limited 403/429 is checked first: GitHub reuses 403 for
 		// rate limiting, and a request-volume problem must never read as the
 		// App's identity being rejected (#1951).
 		if rl := classifyRateLimit("GitHub App API", resp.StatusCode, resp.Header, body); rl != nil {
-			return rl
+			return nil, rl
 		}
 		switch resp.StatusCode {
 		case 401, 403:
 			// No authErrorHint: it advises switching a fine-grained PAT to a
 			// classic one, and the App client uses no PAT at all (R4).
-			return fmt.Errorf("GitHub App API returned %d: %s: %w", resp.StatusCode, string(body), ErrAppUnauthorized)
+			return nil, fmt.Errorf("GitHub App API returned %d: %s: %w", resp.StatusCode, string(body), ErrAppUnauthorized)
 		case 404:
-			return fmt.Errorf("GitHub App API returned 404: %s: %w", string(body), ErrNotFound)
+			return nil, fmt.Errorf("GitHub App API returned 404: %s: %w", string(body), ErrNotFound)
 		}
-		return fmt.Errorf("GitHub App API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("GitHub App API returned %d: %s", resp.StatusCode, string(body))
 	}
 	if result == nil {
-		return nil
+		return resp.Header, nil
 	}
 	if err := json.Unmarshal(body, result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
+		return nil, fmt.Errorf("decoding response: %w", err)
 	}
-	return nil
+	return resp.Header, nil
 }
 
 // appFetchPageSize is the page size every paginated App-auth REST fetcher
@@ -418,4 +428,90 @@ func FetchAppSlug(baseURL, jwt string) (string, error) {
 		return "", fmt.Errorf("github: /app response missing slug")
 	}
 	return result.Slug, nil
+}
+
+// AppHookDelivery is one entry of the App webhook delivery log, as returned by
+// GET /app/hook/deliveries (#2144). GUID is the X-GitHub-Delivery value the
+// engine's delivery ledger is keyed on; ID is GitHub's own delivery id, the one
+// the redelivery endpoint takes. A redelivery is a separate entry sharing the
+// original's GUID.
+type AppHookDelivery struct {
+	ID          int64     `json:"id"`
+	GUID        string    `json:"guid"`
+	DeliveredAt time.Time `json:"delivered_at"`
+	Redelivery  bool      `json:"redelivery"`
+	Status      string    `json:"status"`
+	StatusCode  int       `json:"status_code"`
+	Event       string    `json:"event"`
+	Action      string    `json:"action"`
+}
+
+// Succeeded reports whether GitHub recorded a 2xx response for the delivery.
+// Anything else — a non-2xx code, or 0 for no response — counts as failed.
+func (d AppHookDelivery) Succeeded() bool {
+	return d.StatusCode >= 200 && d.StatusCode < 300
+}
+
+// FetchAppHookDeliveries lists one page of the App's webhook delivery log via
+// GET /app/hook/deliveries, newest first, JWT-authenticated. cursor is empty
+// for the first page; the returned nextCursor is empty when there is no further
+// page. The cursor comes from the Link header's rel="next" URL; a missing or
+// malformed header ends paging rather than erroring. Failed deliveries are
+// filtered by the caller (the API's status=failure filter misses status_code 0).
+func FetchAppHookDeliveries(baseURL, jwt, cursor string, perPage int) ([]AppHookDelivery, string, error) {
+	if perPage <= 0 || perPage > appFetchPageSize {
+		perPage = appFetchPageSize
+	}
+	path := fmt.Sprintf("/app/hook/deliveries?per_page=%d", perPage)
+	if cursor != "" {
+		path += "&cursor=" + url.QueryEscape(cursor)
+	}
+	var items []AppHookDelivery
+	hdr, err := appDo("GET", baseURL, path, jwt, &items)
+	if err != nil {
+		return nil, "", fmt.Errorf("listing app webhook deliveries: %w", err)
+	}
+	return items, nextCursorFromLink(hdr.Get("Link")), nil
+}
+
+// nextCursorFromLink extracts the cursor query parameter of the rel="next"
+// entry of a Link header, or "" when there is none or it cannot be parsed.
+func nextCursorFromLink(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		segs := strings.Split(part, ";")
+		if len(segs) < 2 {
+			continue
+		}
+		isNext := false
+		for _, a := range segs[1:] {
+			if strings.ReplaceAll(strings.TrimSpace(a), " ", "") == `rel="next"` {
+				isNext = true
+			}
+		}
+		if !isNext {
+			continue
+		}
+		raw := strings.TrimSpace(segs[0])
+		raw = strings.TrimPrefix(raw, "<")
+		raw = strings.TrimSuffix(raw, ">")
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return u.Query().Get("cursor")
+	}
+	return ""
+}
+
+// RedeliverAppHookDelivery asks GitHub to redeliver one delivery via
+// POST /app/hook/deliveries/{delivery_id}/attempts (202 Accepted). The
+// redelivery arrives asynchronously at the receiver; success here means only
+// that GitHub accepted the request. A 422 (validation failed, or the endpoint
+// has been spammed) comes back as a plain error.
+func RedeliverAppHookDelivery(baseURL, jwt string, deliveryID int64) error {
+	path := fmt.Sprintf("/app/hook/deliveries/%d/attempts", deliveryID)
+	if err := appRequest("POST", baseURL, path, jwt, nil); err != nil {
+		return fmt.Errorf("redelivering app webhook delivery %d: %w", deliveryID, err)
+	}
+	return nil
 }
