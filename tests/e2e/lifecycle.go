@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
 // Fabrik test-bed lifecycle management. Until now the harness assumed an
@@ -299,6 +300,10 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// The overlap-aware batch filter is off on the bed (#2047): "**" ignores every path,
 	// so the live conflict-resolution tests can still batch members writing one file.
 	cmd.Env = append(cmd.Env, "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**")
+	// The review and CI wait timeouts (#2417, ADR-2417), from the one definition the
+	// tests read. Appended last so it also beats any value in the operator's shell,
+	// and the process environment beats the bed's .env.
+	cmd.Env = append(stripEnv(stripEnv(cmd.Env, bedtimeout.ReviewEnvVar), bedtimeout.CIEnvVar), bedtimeout.Env()...)
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

@@ -5,9 +5,12 @@ package e2e
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
 // This file covers ADR-1283's expected_reviewers (declared unrequested
@@ -77,6 +80,16 @@ import (
 // as of #1396) from ever reviewing it — it only lists open, non-draft PRs
 // each poll (cmd/pruefer/README.md) — removing the incidental review
 // entirely rather than racing it.
+// reinvokeAllowance bounds how long the review-reinvoke Claude run (a worker
+// that delays the engine's first post-timeout gate evaluation) may hold the item.
+// It matches the bound the test already waits for the reinvoke to be dispatched.
+const reinvokeAllowance = 10 * time.Minute
+
+// pollSleepFn is bedtimeout.Watch's sleep: it ignores the requested step (the
+// BED's poll interval, which sizes the ceiling) and probes at the harness's own
+// shorter cadence, so an escalation is seen within one harness poll.
+func pollSleepFn(time.Duration) { pollSleep(pollBase()) }
+
 const (
 	expectedReviewersNoneLabel     = "expected-reviewers:none"
 	expectedReviewersDeclaredLabel = "expected-reviewers:declared"
@@ -145,14 +158,16 @@ func TestExpectedReviewersFastAdvance(t *testing.T) {
 // the duration of this test, so the bed's real reviewer (Pruefer, as of
 // #1396) never reviews it and there is no incidental review to race.
 //
-// Wall-clock (worst case): ~2xFABRIK_REVIEW_WAIT_TIMEOUT + buffer — see
-// README for a recommended bed value.
+// Wall-clock: ~2xT + detection, T being the bed's launch-injected review wait
+// timeout (bedtimeout.ReviewMinutes). The two waits below are failure caps
+// (WaitForIssueLabel returns as soon as the label shows), sized T + a poll-derived
+// margin (bedWindowMargin) rather than the former flat T + 10 min (#2417).
 func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
+	reviewWaitTimeout := bedReviewWait()
 
 	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-declared-reprompt", expectedReviewersDeclaredLabel)
 
@@ -167,7 +182,9 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	// engine re-prompts the declared identity via a direct @mention comment
 	// (no PR review-request mutation, since it was never formally requested)
 	// and applies fabrik:bot-reprompted.
-	phase1Wait := time.Duration(reviewWaitTimeout+10) * time.Minute
+	// Armed by the fabrik:awaiting-review application; the engine fires at the
+	// first gate evaluation after T, so the cap is T + a poll-derived margin.
+	phase1Wait := reviewWaitTimeout + bedWindowMargin()
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:bot-reprompted", phase1Wait)
 	t.Logf("fabrik:bot-reprompted appeared on %s#%d — Phase 1 re-prompt fired", env.RepoAlpha, num)
 
@@ -178,7 +195,8 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	// Phase 2: the synthetic name never actually reviews, so after a second
 	// full timeout window the engine gives up and pauses for a human,
 	// removing both fabrik:bot-reprompted and fabrik:awaiting-review.
-	phase2Wait := time.Duration(reviewWaitTimeout+10) * time.Minute
+	// Armed by the fabrik:bot-reprompted application: Phase 2 is one further T.
+	phase2Wait := reviewWaitTimeout + bedWindowMargin()
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", phase2Wait)
 	t.Logf("fabrik:paused appeared on %s#%d — Phase 2 timed out with no response from the declared reviewer", env.RepoAlpha, num)
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input", 5*time.Minute)
@@ -290,12 +308,14 @@ func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
 // (#1375), "the human path wins" concretely means the review-reinvoke fires
 // to address the feedback (Finding 1) — this test asserts that AND that the
 // declared bot's ladder never engages, waiting out a full
-// FABRIK_REVIEW_WAIT_TIMEOUT window (the window Phase 1 would fire in, if
-// buggy, timed from the original fabrik:awaiting-review application — not
-// from the review submission) to make the absence conclusive rather than a
-// race.
+// FABRIK_REVIEW_WAIT_TIMEOUT window, timed from the original
+// fabrik:awaiting-review application — not from the review submission —
+// and ended at the engine's own escalation, to make the absence conclusive
+// rather than a race (see the window comment in the body).
 //
-// Wall-clock (worst case): ~FABRIK_REVIEW_WAIT_TIMEOUT + ~15 min.
+// Wall-clock: ~2 min of activity, then until the engine's escalation at
+// L + T + about one poll (T = the bed's launch-injected review wait timeout);
+// worst case the ceiling L + T + reinvokeAllowance + PollMargins x poll (#2417).
 func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -305,7 +325,7 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	if reviewerToken == "" {
 		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env — required for deterministic verdict scenarios")
 	}
-	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
+	reviewWaitTimeout := bedReviewWait()
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "declared-bot-no-defer",
 		"review-authority:authoritative", expectedReviewersDeclaredLabel)
@@ -338,20 +358,60 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	WaitForLogLine(t, env, fmt.Sprintf("[#%d review-reinvoke] re-invoking stage", num), logOffset, 10*time.Minute)
 	t.Logf("review-reinvoke dispatched for %s#%d on the human's CHANGES_REQUESTED verdict", env.RepoAlpha, num)
 
-	// Wait out a full FABRIK_REVIEW_WAIT_TIMEOUT window from the original
-	// fabrik:awaiting-review application — the window Phase 1's bot
-	// re-prompt would fire in, if reviewGateAllBots incorrectly read
-	// allBots=true for the still-outstanding declared bot once the human's
-	// verdict dropped outstanding to empty. Poll throughout rather than a
-	// single sleep, failing immediately (not just at the end) if the wrong
-	// escalation fires.
-	deadline := time.Now().Add(time.Duration(reviewWaitTimeout+10) * time.Minute)
-	for time.Now().Before(deadline) {
-		if labels, err := tryIssueLabels(env, env.RepoAlpha, num); err == nil && slices.Contains(labels, "fabrik:bot-reprompted") {
-			t.Fatalf("fabrik:bot-reprompted applied to %s#%d — the declared bot's re-prompt ladder fired instead of "+
-				"deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)", env.RepoAlpha, num)
+	// Negative window (#2417, ADR-2417). It is ARMED by the fabrik:awaiting-review
+	// application L — the clock checkAwaitingReviewTimeout runs from — read from
+	// the issue events log (exact), not from the later review-reinvoke
+	// observation, and it must not outlive the property it proves:
+	//
+	//   - bug:     at the first gate evaluation after L+T, reviewGateAllBots reads
+	//              allBots=true for the still-unresponsive declared bot and Phase 1
+	//              fires (@mention comment + fabrik:bot-reprompted).
+	//   - correct: at the SAME engine instant the human's authoritative block
+	//              (authorityReason != "") keeps allBots false, so the engine takes
+	//              the mixed/human path and logs "review wait timeout elapsed;
+	//              pausing issue" (the item pauses).
+	//
+	// So the window ends at that positive observable — proof that a post-timeout
+	// gate evaluation ran without taking the bot path — rather than at a blind
+	// deadline, which could pass with zero post-timeout evaluations while the
+	// multi-minute review-reinvoke still holds the worker. The ceiling is a
+	// failure bound for an engine that does nothing: L + T + the reinvoke
+	// allowance + PollMargins bed polls (bedtimeout.Window), not a flat +10 min.
+	armed, ok := labelAppliedAtEvent(env, env.RepoAlpha, num, "fabrik:awaiting-review")
+	if !ok {
+		t.Fatalf("could not read the fabrik:awaiting-review application time for %s#%d from the issue events log", env.RepoAlpha, num)
+	}
+	pollSecs, _ := strconv.Atoi(bedPollSeconds())
+	win := bedtimeout.Window{
+		Armed:           armed,
+		Timeout:         reviewWaitTimeout,
+		Poll:            time.Duration(pollSecs) * time.Second,
+		WorkerAllowance: reinvokeAllowance,
+	}
+	outcome, obs := bedtimeout.Watch(win, time.Now, pollSleepFn, func() bedtimeout.Observation {
+		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
+		if err != nil {
+			return bedtimeout.Observation{}
 		}
-		pollSleep(pollBase())
+		if slices.Contains(labels, "fabrik:bot-reprompted") {
+			return bedtimeout.Observation{Bug: true, Detail: "fabrik:bot-reprompted applied"}
+		}
+		if line, _ := tryLogLineContaining(env, fmt.Sprintf("[#%d warn] review wait timeout elapsed; pausing issue", num), logOffset); line != "" {
+			return bedtimeout.Observation{Settled: true, Detail: strings.TrimSpace(line)}
+		}
+		if slices.Contains(labels, "fabrik:paused") {
+			return bedtimeout.Observation{Settled: true, Detail: "fabrik:paused applied"}
+		}
+		return bedtimeout.Observation{}
+	})
+	switch outcome {
+	case bedtimeout.OutcomeBug:
+		t.Fatalf("%s on %s#%d — the declared bot's re-prompt ladder fired instead of "+
+			"deferring to the human's authoritative CHANGES_REQUESTED escalation (Finding 2 regression)", obs.Detail, env.RepoAlpha, num)
+	case bedtimeout.OutcomeSettled:
+		t.Logf("post-timeout gate evaluation confirmed for %s#%d (%s) without the bot path", env.RepoAlpha, num, obs.Detail)
+	default:
+		t.Logf("window ceiling %s reached for %s#%d without the bug and without a positively observed escalation", win.Ceiling().Format(time.RFC3339), env.RepoAlpha, num)
 	}
 	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:bot-reprompted")
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
 // The bed (~/dev/fabrik-test) is a full fabrik source checkout with its own
@@ -263,7 +264,13 @@ func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
 	// the overlap-aware batch filter off on the bed: the live conflict-resolution and
 	// bisection tests deliberately batch members that write the same path. The filter is
 	// covered by its sim twin. lifecycle.go appends the same entry.
+	//
+	// bedtimeout.Env() (#2417, ADR-2417) pins the review and CI wait timeouts from
+	// the one definition the tests also read. The process environment beats the
+	// bed's .env (.env loading never overrides a set variable), so the launch value
+	// wins over whatever the operator put there. lifecycle.go appends the same entries.
 	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed), "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0", "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**")
+	env = withEnv(env, bedtimeout.Env()...)
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

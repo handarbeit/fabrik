@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
 // realGate is a Gate over the real OS (real git) with an isolated environment.
@@ -217,7 +218,8 @@ func TestWriteIsolatedBedGitconfig(t *testing.T) {
 func TestBedStartCmdContracts(t *testing.T) {
 	g, _, _, _ := testGate(t,
 		"FABRIK_GITHUB_APP_ID=1", "FABRIK_GITHUB_APP_PRIVATE_KEY_PATH=/k", "FABRIK_GITHUB_APP_INSTALLATION_ID=2",
-		"FABRIK_TOKEN=keep", "GIT_CONFIG_GLOBAL=/operator/gitconfig")
+		"FABRIK_TOKEN=keep", "GIT_CONFIG_GLOBAL=/operator/gitconfig",
+		"FABRIK_REVIEW_WAIT_TIMEOUT=99", "FABRIK_CI_WAIT_TIMEOUT=99")
 	g.Cfg.BedPollSeconds = "75"
 	c := g.BedStartCmd("/bed/.fabrik/git-config-isolated")
 
@@ -264,6 +266,15 @@ func TestBedStartCmdContracts(t *testing.T) {
 	// batch conflicting members keep working; lifecycle.go appends the same entry.
 	if got := envOf("FABRIK_MERGE_TRAIN_OVERLAP_IGNORE"); len(got) != 1 || got[0] != "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**" {
 		t.Errorf("the bed must start with the overlap filter disabled: %v", got)
+	}
+	// The review and CI wait timeouts are launch-injected from the one shared
+	// definition (#2417, ADR-2417), exactly once each, and win over an operator
+	// shell export (the process env in turn beats the bed's .env).
+	for _, want := range bedtimeout.Env() {
+		k, _, _ := strings.Cut(want, "=")
+		if got := envOf(k); len(got) != 1 || got[0] != want {
+			t.Errorf("%s must be launch-injected as %q and win over the operator's value: %v", k, want, got)
+		}
 	}
 }
 
