@@ -158,17 +158,47 @@ func TestReplayPass_LookbackBound(t *testing.T) {
 	}
 	// Newest ledger entry 3h ago: bound = 3h5m back.
 	h = newReplayHarness(t, pages...)
-	h.ledger.newest = replayTestNow.Add(-3 * time.Hour)
+	h.r.startNewest = replayTestNow.Add(-3 * time.Hour)
 	h.r.pass(context.Background())
 	if fmt.Sprint(h.api.redelivered) != "[4 3]" {
 		t.Errorf("3h ledger: redelivered %v, want [4 3]", h.api.redelivered)
 	}
 	// Newest ledger entry long ago: clamped to the 24h ledger window.
 	h = newReplayHarness(t, pages...)
-	h.ledger.newest = replayTestNow.Add(-100 * time.Hour)
+	h.r.startNewest = replayTestNow.Add(-100 * time.Hour)
 	h.r.pass(context.Background())
 	if fmt.Sprint(h.api.redelivered) != "[4 3 2]" {
 		t.Errorf("old ledger: redelivered %v, want [4 3 2]", h.api.redelivered)
+	}
+}
+
+// A live delivery accepted between the listener coming up and the startup pass
+// reading the ledger must not collapse the lookback past the outage: the first
+// pass uses the ledger's newest time as it was when the replayer was built.
+func TestReplayPass_StartupLookbackIgnoresLiveDeliveryAcceptedBeforePass(t *testing.T) {
+	pages := [][]gh.AppHookDelivery{{
+		dlv(3, "during-outage", 502, 2*time.Hour),
+		dlv(2, "older-outage", 502, 3*time.Hour),
+	}}
+	api := &fakeHookAPI{pages: pages}
+	ledger := &fakeReplayLedger{seen: map[string]bool{}, newest: replayTestNow.Add(-4 * time.Hour)}
+	old := replayPace
+	replayPace = 0
+	t.Cleanup(func() { replayPace = old })
+	r := newDeliveryReplayer(api, ledger, &recordingStatus{}, nil, func() time.Time { return replayTestNow })
+	// The listener is up and GitHub delivers a live event before the pass runs.
+	ledger.newest = replayTestNow
+	r.pass(context.Background())
+	if fmt.Sprint(api.redelivered) != "[3 2]" {
+		t.Fatalf("startup pass redelivered %v, want [3 2] (bound must come from the pre-listener snapshot)", api.redelivered)
+	}
+
+	// A later pass (a reconnect) reads the live ledger value.
+	api2 := &fakeHookAPI{pages: [][]gh.AppHookDelivery{{dlv(3, "during-outage-2", 502, 2*time.Hour)}}}
+	r.api = api2
+	r.pass(context.Background())
+	if len(api2.redelivered) != 0 {
+		t.Fatalf("later pass redelivered %v, want none (live newest bounds the lookback)", api2.redelivered)
 	}
 }
 

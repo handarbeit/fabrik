@@ -71,7 +71,16 @@ type deliveryReplayer struct {
 
 	trigger chan struct{}
 
+	// startNewest is the ledger's newest receipt time, snapshotted when the
+	// replayer is built — before the listener accepts anything. The startup
+	// pass uses it instead of the live value: GitHub resumes live deliveries as
+	// soon as the daemon is back, and one accepted before the pass reads the
+	// ledger would move "newest" to about now and collapse the lookback past the
+	// whole outage. A zero snapshot means the ledger was empty at start.
+	startNewest time.Time
+
 	mu        sync.Mutex
+	startDone bool                 // the startup snapshot has been consumed by a pass
 	requested map[string]time.Time // guid -> when redelivery was requested
 }
 
@@ -87,6 +96,9 @@ func newDeliveryReplayer(api hookDeliveryAPI, ledger replayLedger, status replay
 		now:       now,
 		trigger:   make(chan struct{}, 1),
 		requested: make(map[string]time.Time),
+	}
+	if ledger != nil {
+		r.startNewest = ledger.ledgerNewest()
 	}
 	if status != nil {
 		status.SetReplayStatus(localapi.ReplayHealth{})
@@ -125,8 +137,19 @@ func (r *deliveryReplayer) log(format string, args ...any) {
 }
 
 // lowerBound is the oldest delivered_at a pass considers.
+// The first pass reads the startup snapshot; later passes (reconnects) read the
+// live ledger.
 func (r *deliveryReplayer) lowerBound(now time.Time) time.Time {
-	newest := r.ledger.ledgerNewest()
+	r.mu.Lock()
+	first := !r.startDone
+	r.startDone = true
+	r.mu.Unlock()
+	var newest time.Time
+	if first {
+		newest = r.startNewest
+	} else {
+		newest = r.ledger.ledgerNewest()
+	}
 	if newest.IsZero() {
 		return now.Add(-replayEmptyLedgerLookback)
 	}

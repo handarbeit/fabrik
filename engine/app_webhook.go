@@ -65,7 +65,7 @@ type appWebhookTransport struct {
 
 	mu             sync.Mutex
 	sink           func(delivery)
-	reconnectFn    func() // stored for interface parity; never called by this transport (FR-017); see attachTransportErr for who consumes it
+	reconnectFn    func()                 // stored for interface parity; never called by this transport (FR-017); see attachTransportErr for who consumes it
 	replay         *localapi.ReplayHealth // last delivery replay pass (#2144); nil = replay not enabled for this transport
 	coverageFn     func()
 	srv            *http.Server
