@@ -25,7 +25,12 @@
 
 `tailscale.com` is pinned at **v1.96.5**, the newest release whose own `go` directive (1.26.0) is at or below the module's `go 1.26.1`. Newer lines require 1.26.2 (v1.98.x) and 1.27.x (v1.104.x), which would force a toolchain bump on every contributor and CI job and is hard to undo after release. `go mod tidy` leaves the `go` directive unchanged. The cost is an older Tailscale; a bump is a follow-up once the repository's Go version moves. A nested module was rejected: `engine` must import the adapter, so the root module would require `tailscale.com` anyway.
 
-A build tag does not shield `go.mod`: the dependency and its closure are in `go.mod`/`go.sum` for every build (`go.sum` grew from 67 to ~290 lines; `go.mod` from 26 to 83 requirement lines; `gorilla/websocket` and `golang.org/x/text` were bumped by the graph). A **default build compiles none of it** — `go build ./...`, `go vet` and `go test` without the tag never touch `tailscale.com` — so default binaries and behaviour are unchanged. This is a deliberate exception to the "only `yaml.v3`" convention in `.claude/rules/golang.md`, accepted because the usage is isolated to one tagged file.
+A build tag does not shield `go.mod`: the dependency and its closure are in `go.mod`/`go.sum` for every build (`go.sum` grew from 67 to ~290 lines; `go.mod` from 26 to 83 requirement lines; `gorilla/websocket` and `golang.org/x/text` were bumped by the graph). A **default build compiles none of `tailscale.com`** — `go build ./...`, `go vet` and `go test` without the tag never touch it. Two bumped modules are different, because the module graph (not the tag) selects their versions:
+
+- `golang.org/x/text` (v0.3.8 → v0.32.0) is not in the default build's package graph (`go list -deps ./...` lists only the standard library's vendored copy), so it changes nothing there.
+- `github.com/gorilla/websocket` (v1.5.3 → `v1.5.4-0.20250319132907-e064f32e3674`, an untagged upstream commit) **is** compiled by default builds: the Hookdeck source (`internal/events/hookdeck`) uses it. `tailscale.com v1.96.5` itself requires that pseudo-version, and gorilla has published no release newer than v1.5.3, so no released version satisfies the requirement; the only way to avoid the change is not to depend on `tailscale.com`. The Hookdeck and events tests pass unchanged on the new version. Default-build users therefore ship one untagged upstream websocket commit in the Hookdeck path; this is the accepted cost, and a gorilla release (or a Tailscale line that requires one) removes it.
+
+The dependency is a deliberate exception to the "only `yaml.v3`" convention in `.claude/rules/golang.md`, accepted because the usage is isolated to one tagged file.
 
 ## Binary size and the release decision
 

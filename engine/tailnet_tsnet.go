@@ -29,7 +29,8 @@ const tsnetWatchRetry = 5 * time.Second
 
 // tsnetNode is the real tailnetNode over a tsnet.Server.
 type tsnetNode struct {
-	srv *tsnet.Server
+	srv  *tsnet.Server
+	logf func(format string, args ...any) // the redacted engine log; never nil
 
 	mu      sync.Mutex
 	started bool
@@ -47,6 +48,7 @@ func newTailnetNode(cfg tailnetNodeConfig) (tailnetNode, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &tsnetNode{
+		logf: logf,
 		srv: &tsnet.Server{
 			Hostname: cfg.Hostname,
 			Dir:      cfg.StateDir,
@@ -124,12 +126,22 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 	if err != nil {
 		return err
 	}
+	failing := false // inside a streak of broken streams: only its first error is logged
 	for wctx.Err() == nil {
-		err := n.watchOnce(wctx, lc, fn)
+		received, err := n.watchOnce(wctx, lc, fn)
 		if wctx.Err() != nil {
 			return nil
 		}
-		_ = err // a broken stream is re-opened; the backend state catches up on the next notify
+		if received {
+			failing = false
+		}
+		// A broken stream is re-opened and the backend state catches up on the
+		// next notify. While it stays broken the health row keeps its last
+		// reported state, so the streak is made visible, once, in the log.
+		if err != nil && !failing {
+			failing = true
+			n.logf("IPN bus watch failed (%v); retrying every %s — tailnet health may be stale until it recovers", err, tsnetWatchRetry)
+		}
 		select {
 		case <-wctx.Done():
 		case <-time.After(tsnetWatchRetry):
@@ -138,17 +150,20 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 	return nil
 }
 
-func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, fn func(tailnetState)) error {
+// watchOnce runs one IPN bus stream. received reports whether a notification
+// arrived on it, which ends a failure streak.
+func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, fn func(tailnetState)) (received bool, err error) {
 	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer w.Close()
 	for {
 		note, err := w.Next()
 		if err != nil {
-			return err
+			return received, err
 		}
+		received = true
 		if note.State == nil {
 			continue
 		}
