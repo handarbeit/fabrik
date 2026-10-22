@@ -173,6 +173,35 @@ func (l *deliveryLedger) Accept(id string, now time.Time) bool {
 	return true
 }
 
+// Seen reports whether id is currently recorded, without recording anything.
+// It is the read-only sibling of Accept for delivery replay (#2144, ADR 2144):
+// replay must ask "did the engine already receive this?" without recording the
+// ID, because an Accept would make the redelivery itself look like a duplicate.
+// It does not prune and schedules no flush. An empty id is never seen.
+func (l *deliveryLedger) Seen(id string) bool {
+	if l == nil || id == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.seen[id]
+	return ok
+}
+
+// Newest returns the receipt time of the most recently accepted delivery, or
+// the zero time when the ledger is empty. Read-only, like Seen.
+func (l *deliveryLedger) Newest() time.Time {
+	if l == nil {
+		return time.Time{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.entries) == 0 {
+		return time.Time{}
+	}
+	return l.entries[len(l.entries)-1].At
+}
+
 // Forget removes id, so a delivery that was accepted but then dropped before
 // application (queue overflow) is not suppressed if its source redelivers it.
 func (l *deliveryLedger) Forget(id string) {

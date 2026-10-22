@@ -240,3 +240,46 @@ func TestDeliveryLedger_ConcurrentFlushesNeverLeaveAStaleSnapshot(t *testing.T) 
 		t.Fatalf("disk holds %d entries and lost %q: an older snapshot overwrote a newer one", reloaded.Len(), "two")
 	}
 }
+
+// #2144: Seen is a pure lookup — it must record nothing, or a replayed
+// delivery would be dropped as a duplicate of the lookup that preceded it.
+func TestDeliveryLedger_SeenIsReadOnly(t *testing.T) {
+	var nilLedger *deliveryLedger
+	if nilLedger.Seen("a") || !nilLedger.Newest().IsZero() {
+		t.Fatal("nil ledger must see nothing")
+	}
+	l := newDeliveryLedger("", time.Now(), nil)
+	now := time.Now()
+	if l.Seen("a") {
+		t.Fatal("empty ledger must not have seen a")
+	}
+	if l.Len() != 0 || l.dirty || l.timer != nil {
+		t.Fatalf("Seen on an unknown ID changed state: len=%d dirty=%v", l.Len(), l.dirty)
+	}
+	if !l.Accept("a", now) {
+		t.Fatal("Accept after Seen must still accept (Seen recorded the ID)")
+	}
+	if !l.Seen("a") || l.Seen("b") || l.Seen("") {
+		t.Fatal("Seen must report exactly the accepted IDs")
+	}
+	if l.Accept("a", now) {
+		t.Fatal("Accept must still dedupe after a Seen")
+	}
+}
+
+func TestDeliveryLedger_Newest(t *testing.T) {
+	l := newDeliveryLedger("", time.Now(), nil)
+	if !l.Newest().IsZero() {
+		t.Fatal("empty ledger must report a zero newest time")
+	}
+	t0 := time.Now().Add(-time.Hour)
+	l.Accept("a", t0)
+	l.Accept("b", t0.Add(10*time.Minute))
+	if got := l.Newest(); !got.Equal(t0.Add(10 * time.Minute)) {
+		t.Fatalf("Newest = %v", got)
+	}
+	var in *intake
+	if in.ledgerSeen("a") || !in.ledgerNewest().IsZero() {
+		t.Fatal("nil intake accessors must be safe")
+	}
+}
