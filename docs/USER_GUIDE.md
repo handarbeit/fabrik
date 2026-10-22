@@ -724,12 +724,64 @@ The same gap is surfaced as a coverage note next to the webhook health indicator
 
 **Poll is still the correctness backstop.** As with `--webhooks`, Hookdeck delivery is a trigger only — `--reconcile-interval` polling remains the sole source of truth and continues running unconditionally regardless of Hookdeck's connectivity.
 
+#### Direct App Webhook Receiver (`event_source: direct`)
+
+Hookdeck puts a third-party account between GitHub and the daemon: every payload passes through it, and every daemon needs one more API key and secret. If you can already expose a local port publicly — Tailscale Funnel through the system `tailscaled`, Cloudflare Tunnel, a reverse proxy — you can point the GitHub App's webhook URL straight at the daemon instead. `event_source: direct` makes Fabrik listen for the App's webhook itself, verify the signature, and feed the same delivery intake Hookdeck uses (the same persisted `X-GitHub-Delivery` dedupe, the same fast ack, echo attribution and reconnect catch-up — see [Delivery Intake](#delivery-intake-dedupe-ordering-and-acknowledgement)). It requires GitHub App auth.
+
+**Configuration:**
+
+```bash
+# Flags
+fabrik --event-source direct --direct-listen 127.0.0.1:8787 \
+  --app-webhook-path /fabrik-myproject \
+  --app-webhook-secret-env FABRIK_GITHUB_WEBHOOK_SECRET \
+  --github-app-id 123456 --github-app-private-key-path /path/to/key.pem --github-app-installation-id 789012 \
+  --owner myorg --project 5
+
+# Environment variables
+export FABRIK_EVENT_SOURCE=direct
+export FABRIK_DIRECT_LISTEN=127.0.0.1:8787
+export FABRIK_APP_WEBHOOK_PATH=/fabrik-myproject
+export FABRIK_APP_WEBHOOK_SECRET_ENV=FABRIK_GITHUB_WEBHOOK_SECRET
+
+# .fabrik/config.yaml
+event_source: direct
+direct_listen: 127.0.0.1:8787
+app_webhook_path: /fabrik-myproject            # default /webhook
+app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET   # the variable NAME; default shown
+```
+
+`direct_listen` is required. `app_webhook_secret_env` names the environment variable that holds the secret (indirection, like the `hookdeck_*` keys); the secret itself must be in that variable. All the new names are scrubbed from worker environments.
+
+**Operator recipe.** The daemon speaks **plain HTTP and never terminates TLS** — bind loopback and let the fronting tunnel or proxy provide HTTPS. With the system Tailscale daemon:
+
+```bash
+tailscale funnel --bg --set-path /fabrik-myproject http://127.0.0.1:8787
+```
+
+(any reverse proxy or tunnel that forwards `POST https://<public host>/fabrik-myproject` to `127.0.0.1:8787/fabrik-myproject` works the same way; keep the path identical on both sides, or the daemon answers 404). Then, on the GitHub App's settings page:
+
+1. **Webhook URL:** `https://<your public host>/fabrik-myproject`.
+2. **Webhook secret:** the same value as the environment variable named by `app_webhook_secret_env`.
+3. **Content type:** `application/json`. The default `application/x-www-form-urlencoded` makes GitHub wrap the payload in a form field; the signature still verifies, but the body is not JSON, so Fabrik answers 400 and logs that the content type must be changed.
+4. Subscribe the App to the events you want (the same set as for Hookdeck) and use **Redeliver** or the App's "Recent Deliveries" page to confirm GitHub sees a 2xx.
+
+Binding a non-loopback address is allowed but is your choice: the endpoint is protected only by the HMAC signature, and each body (up to 25 MiB) is buffered before it is verified. Prefer loopback plus a fronting proxy.
+
+**How requests are answered.** `POST` on the configured path only (any other path is 404, any other method 405). A body over 25 MiB is 413 before any signature check, and is not counted as a signature failure. A wrong or missing `X-Hub-Signature-256` is 401 and nothing is submitted. A correctly signed body that is not JSON is 400. A verified `ping` is acknowledged and logged but not submitted. Everything else is handed to the intake and acknowledged with 200 before any of the apply work runs.
+
+**Failure visibility.** A streak of signature failures (the same threshold as Hookdeck) marks the transport unhealthy, logs once and adds a `direct_signature_drift` entry to the Warnings panel; the next correctly signed request clears both. If the listener cannot start (port in use, malformed address) the daemon keeps running poll-only and a `direct_listen` panel entry names the address; the entry clears on a later successful start (a restart). A managed repo the App installation does not grant gets the same coverage warning as Hookdeck (`direct_coverage`). `fabrik_health` lists the transport (state `listening`, `not listening` or `signature drift`, last delivery time, and counts of rejected signatures, malformed and oversized requests) under `webhook.transports`.
+
+**Startup refusals** (each names the fix): `direct` without GitHub App auth; a missing `direct_listen`; a missing or empty secret in the variable `app_webhook_secret_env` names (default `FABRIK_GITHUB_WEBHOOK_SECRET`); an `app_webhook_path` that does not start with `/`.
+
+**Deliveries are lost while the daemon is down.** There is no relay buffer: GitHub does not retry, and anything sent while the daemon (or the tunnel) is down is missed. The periodic reconcile is the safety net, exactly as for Hookdeck, and a listener that is bound but never receives anything (a wrong URL) still looks healthy — poll remains the correctness backstop. Replaying missed deliveries is a separate follow-up (#2144).
+
 #### Known limitations
 
 - **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
 - **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or use `event_source: hookdeck` (see [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above) for real-time delivery under App auth, or drop the GitHub App config to use `--webhooks` with a personal access token.
 - **`event_source: hookdeck` requires App auth.** `event_source: hookdeck` with no GitHub App configured is refused explicitly at startup, naming both settings (Hookdeck has no PAT-mode equivalent — it consumes the App's own webhook). Since `--webhooks` is refused under App auth (previous bullet), `event_source: hookdeck` and `--webhooks` cannot both be active; the engine itself no longer carries a separate Hookdeck-versus-`--webhooks` refusal, because it supports more than one delivery transport. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above.
-- **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
+- **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, `direct`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
 - **One installation, one account** (per instance). The engine holds a single GitHub client scoped to one App installation (one organization); two local instances may share it, each holding its own lock label (see "No user, no PAT" above). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
 - **HTTPS git needs `contents: write`.** Under App auth, HTTPS git (engine and workers) authenticates as the installation, which requires `contents: write`; with `git_ssh: true` or an `insteadOf` rewrite, git uses your SSH key instead. See "Git under App auth" above.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
@@ -1125,13 +1177,19 @@ user: your-github-username
 # "Browser-opening during reconcile" above.
 # no_browser: true
 
-# Event ingestion transport: "poll" (default) or "hookdeck". hookdeck requires
+# Event ingestion transport: "poll" (default), "hookdeck" or "direct". hookdeck and direct require
 # GitHub App auth (which in turn cannot be combined with `webhooks: true`). The two *_env keys
 # name environment variables holding the secrets — never the secrets themselves.
 # See "Event-Driven Ingestion via Hookdeck (App Auth)" above.
 # event_source: hookdeck
 # hookdeck_api_key_env: HOOKDECK_API_KEY
 # hookdeck_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
+# event_source: direct receives the App's webhook straight from your own tunnel or
+# proxy (plain HTTP; the proxy terminates TLS). See "Direct App Webhook Receiver".
+# event_source: direct
+# direct_listen: 127.0.0.1:8787
+# app_webhook_path: /webhook
+# app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
 
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
@@ -1403,9 +1461,12 @@ FABRIK_USER=my-personal-username
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
 | `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. Also `FABRIK_NO_BROWSER`. See [Browser-opening during reconcile](#browser-opening-during-reconcile). Distinct from `fabrik init --github-app --no-browser`'s setup-time flag, whose default is unchanged. | `true` (suppressed) |
-| `--event-source` | Event ingestion transport: `poll` (default) or `hookdeck`. `hookdeck` requires GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `--event-source` | Event ingestion transport: `poll` (default), `hookdeck` or `direct`. `hookdeck` and `direct` require GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `--hookdeck-api-key-env` | Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
 | `--hookdeck-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `--direct-listen` | host:port the direct App webhook transport listens on (plain HTTP; bind loopback). Required with `--event-source direct`. Also `FABRIK_DIRECT_LISTEN`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver). | — |
+| `--app-webhook-path` | URL path the direct transport serves. Also `FABRIK_APP_WEBHOOK_PATH`. | `/webhook` |
+| `--app-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source direct`). Also `FABRIK_APP_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 
 #### Unrecognized `config.yaml` Key Warnings
 
@@ -1491,9 +1552,12 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
 | `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
 | `FABRIK_NO_BROWSER` | `no_browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. See [Browser-opening during reconcile](#browser-opening-during-reconcile). | `true` (suppressed) |
-| `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default) or `hookdeck`. `hookdeck` requires GitHub App auth. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default), `hookdeck` or `direct`. `hookdeck` and `direct` require GitHub App auth. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `FABRIK_HOOKDECK_API_KEY_ENV` | `hookdeck_api_key_env` | Name of the environment variable holding the Hookdeck API key (only used when `event_source: hookdeck`). | `HOOKDECK_API_KEY` |
 | `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: hookdeck`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `FABRIK_DIRECT_LISTEN` | `direct_listen` | host:port the direct App webhook transport listens on. Required when `event_source: direct`. | — |
+| `FABRIK_APP_WEBHOOK_PATH` | `app_webhook_path` | URL path the direct transport serves. | `/webhook` |
+| `FABRIK_APP_WEBHOOK_SECRET_ENV` | `app_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: direct`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -4220,7 +4284,7 @@ A `COMMENTED` review is the same state for a clean pass and for a review with fi
 
 #### `fabrik_health()`
 
-Daemon version and uptime; time since the last poll attempt and the last success; webhook mode and last-event time; time since the last successful reconcile; the account-wide Claude usage-limit hold deadline, if any; the GraphQL backoff state; worker slots held against `max_concurrent` (`in_use` counts item workers that hold a slot and never exceeds `max_concurrent`; `queued` counts workers dispatched and waiting for a slot, which are not in use yet. A merge-train conflict resolution running on a general-pool slot is counted in `in_use` like any worker; one on the reserved merge-train slot is not, it is `train_in_use`), and (`train_in_use`/`train_max`) the reserved merge-train slot, which is separate from and not counted in the general figure (both zero with `merge_train` off); and, per (repo, base) merge-train partition, its members, whether a train worker is in flight, and its liveness (below).
+Daemon version and uptime; time since the last poll attempt and the last success; webhook mode and last-event time, plus a `webhook.transports` list with one row per event transport (`name`, `state`, `last_delivery_at`, and `rejected_signatures`/`malformed_requests`/`oversized_requests` counts — `"unknown"` where a transport cannot report one; the direct transport's state is `listening`, `not listening` or `signature drift`); time since the last successful reconcile; the account-wide Claude usage-limit hold deadline, if any; the GraphQL backoff state; worker slots held against `max_concurrent` (`in_use` counts item workers that hold a slot and never exceeds `max_concurrent`; `queued` counts workers dispatched and waiting for a slot, which are not in use yet. A merge-train conflict resolution running on a general-pool slot is counted in `in_use` like any worker; one on the reserved merge-train slot is not, it is `train_in_use`), and (`train_in_use`/`train_max`) the reserved merge-train slot, which is separate from and not counted in the general figure (both zero with `merge_train` off); and, per (repo, base) merge-train partition, its members, whether a train worker is in flight, and its liveness (below).
 
 **Is the engine stuck, or an item?** The `poll` block answers this from one response:
 
