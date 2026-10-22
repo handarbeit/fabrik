@@ -132,7 +132,12 @@ func (e *Engine) attachTransport(ctx context.Context, set *transportSet, t inges
 // transport whose failure is reported to the operator (the direct listener).
 func (e *Engine) attachTransportErr(ctx context.Context, set *transportSet, t ingestTransport, sink func(delivery), bootstrap func()) error {
 	t.SetSink(sink)
-	t.SetReconnectHandler(e.requestReconcile)
+	// A reconnect requests a catch-up reconcile and, when delivery replay is
+	// enabled (#2144), a replay pass. Trigger is nil-safe and coalescing.
+	t.SetReconnectHandler(func() {
+		e.requestReconcile()
+		e.replayer.Trigger()
+	})
 	bootstrap()
 	if err := t.Start(ctx); err != nil {
 		e.logf(0, t.Name(), "could not start: %v\n", err)
@@ -264,6 +269,8 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 		}
 	})
 
+	e.replayer = e.newDeliveryReplayer(tr)
+
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
 	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {
 		// Not attached (poll-only), but still visible in fabrik_health as a
@@ -295,4 +302,7 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 		tr.Addr(), appWebhookPath(e.cfg), secretEnvName)
 	// Startup assertion: the installation must grant every managed repo.
 	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"})
+	// Replay failed deliveries from while the daemon was not receiving (#2144).
+	// Background, after the listener is up: it never delays startup.
+	e.startDeliveryReplay(ctx, e.replayer)
 }

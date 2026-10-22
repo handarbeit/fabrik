@@ -65,7 +65,8 @@ type appWebhookTransport struct {
 
 	mu             sync.Mutex
 	sink           func(delivery)
-	reconnectFn    func() // stored for interface parity; never called (FR-017)
+	reconnectFn    func() // stored for interface parity; never called by this transport (FR-017); see attachTransportErr for who consumes it
+	replay         *localapi.ReplayHealth // last delivery replay pass (#2144); nil = replay not enabled for this transport
 	coverageFn     func()
 	srv            *http.Server
 	ln             net.Listener
@@ -128,9 +129,21 @@ func (t *appWebhookTransport) SetSink(sink func(delivery)) {
 	t.mu.Unlock()
 }
 
+// SetReplayStatus implements replayStatusSink (#2144): it stores the summary of
+// the last delivery replay pass for HealthRow. The first call (a zero value)
+// marks replay as enabled for this transport.
+func (t *appWebhookTransport) SetReplayStatus(h localapi.ReplayHealth) {
+	t.mu.Lock()
+	t.replay = &h
+	t.mu.Unlock()
+}
+
 // SetReconnectHandler implements ingestTransport. A direct receiver has no
 // connection to re-establish and the reconcile ticker is unchanged (FR-017), so
-// the handler is stored and never called.
+// the handler is stored and never called. Delivery replay (#2144) reaches the
+// same conclusion: for this transport its only trigger is startup, and the
+// composite handler attachTransportErr installs is there for transports (the
+// tsnet one of #2143) that do signal a reconnect.
 func (t *appWebhookTransport) SetReconnectHandler(fn func()) {
 	t.mu.Lock()
 	t.reconnectFn = fn
@@ -459,6 +472,11 @@ func (t *appWebhookTransport) setInstallationCoverageNote(missing []string, trun
 func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 	t.mu.Lock()
 	listening, last := t.listening, t.lastDeliveryAt
+	var replay *localapi.ReplayHealth
+	if t.replay != nil {
+		cp := *t.replay
+		replay = &cp
+	}
 	t.mu.Unlock()
 	state := "not listening"
 	switch {
@@ -474,8 +492,10 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 		RejectedSignatures: localapi.Some(t.rejectedSigs.Load()),
 		MalformedRequests:  localapi.Some(t.malformed.Load()),
 		OversizedRequests:  localapi.Some(t.oversized.Load()),
+		Replay:             replay,
 	}
 }
 
 var _ ingestTransport = (*appWebhookTransport)(nil)
 var _ appCoverageTransport = (*appWebhookTransport)(nil)
+var _ replayStatusSink = (*appWebhookTransport)(nil)
