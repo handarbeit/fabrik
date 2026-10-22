@@ -50,3 +50,22 @@ func TestNoTestReadsTheTimeoutFromBedEnvFile(t *testing.T) {
 		}
 	}
 }
+
+// The declared-bot window credits only the engine's own timeout-escalation log
+// line. If the engine's text drifts, the window would fail at its ceiling; pin the
+// two together so the drift is caught in plain CI instead.
+func TestReviewTimeoutLogLineMatchesEngine(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "engine", "reviews.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "[#%d warn] <msg>" is logf(item.Number, "warn", "<msg>...").
+	msg := strings.TrimPrefix(ReviewTimeoutLogFmt, "[#%d warn] ")
+	if msg == ReviewTimeoutLogFmt {
+		t.Fatalf("ReviewTimeoutLogFmt %q has an unexpected shape", ReviewTimeoutLogFmt)
+	}
+	want := `e.logf(item.Number, "warn", "` + msg
+	if !strings.Contains(string(src), want) {
+		t.Errorf("engine/reviews.go no longer logs %q; update bedtimeout.ReviewTimeoutLogFmt and the declared-bot window", want)
+	}
+}

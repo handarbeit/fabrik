@@ -78,11 +78,10 @@ import (
 // See docs/state-machine.md for the gate's PR-scoped (not stage-scoped)
 // review-state semantics that make this sequencing work.
 //
-// Known limitation: the timeout-fallback path below (no FABRIK_REVIEWER_TOKEN)
-// has no second identity to request, so it remains exposed to confound 3 —
-// gemini's incidental review can clear the gate before the timeout fires.
-// Out of scope for this redesign; see #925's severity note (test-infra only,
-// scoped to the approval path).
+// The former timeout-fallback path (no FABRIK_REVIEWER_TOKEN, review gate times
+// out and pauses) is gone (#2417): the review wait timeout is launch-injected and
+// fixed above the ~5 min the fallback needed, so the path could never run and the
+// test simply requires the reviewer token.
 //
 // Pass criteria (R1–R5):
 //   - R1: fabrik:awaiting-ci is applied after FABRIK_STAGE_COMPLETE; stage:Validate:complete
@@ -90,10 +89,8 @@ import (
 //   - R2: fabrik:awaiting-ci clears when CI passes, then fabrik:awaiting-review appears.
 //   - R3: A PR comment posted during CI-await receives 👀 reaction (not dropped).
 //   - R4: Issue remains OPEN while fabrik:awaiting-review is present (advance suppressed).
-//   - R5 (approval path): SubmitPRReview(APPROVE) clears the review gate; issue closes;
+//   - R5: SubmitPRReview(APPROVE) clears the review gate; issue closes;
 //     stage:Validate:complete applied; fabrik:paused never applied.
-//   - R5 (timeout fallback): if no FABRIK_REVIEWER_TOKEN, review gate times out;
-//     fabrik:paused + fabrik:awaiting-input appear; issue stays OPEN.
 //
 // Prerequisites:
 //   - "slow-gate" enrolled as a required status check on fabrik-test-alpha/main.
@@ -102,14 +99,12 @@ import (
 //     resolves to in the test bed's .env — verify no shell export shadows it
 //     (see tests/e2e/README.md prerequisites). TestAuthEnginePRAuthorIdentity
 //     fails fast, in seconds, if this drifts.
-//   - FABRIK_REVIEWER_TOKEN in test bed .env for the approval path, set to a PAT
-//     for an identity distinct from FABRIK_TOKEN's. If absent AND the bed's review
-//     wait timeout > 5, the test skips with an instructional message. If absent AND
-//     it is ≤ 5, the timeout fallback path runs.
+//   - FABRIK_REVIEWER_TOKEN in test bed .env, set to a PAT for an identity distinct
+//     from FABRIK_TOKEN's. If absent the test skips with an instructional message.
 //   - The review wait timeout is not a bed .env setting: both launch sites inject it
 //     from tests/e2e/bedtimeout (#2417, ADR-2417), and it beats the .env. The item
 //     is seeded at Validate, so Review's own gate does not arise and no lower bound
-//     applies beyond the approval path's ~2 min R4 window.
+//     applies beyond the ~2 min R4 window.
 //
 // Seeded at Validate (#1992, ADR-1992): the Specify → Review traversal was set-up, not
 // subject. The Review → Validate hand-off it used to exercise stays covered by
@@ -127,13 +122,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	assertSlowGateRequired(t, env, env.RepoAlpha)
 
 	reviewerToken := readEnvFileReviewerToken(t, env)
-	// The bed's review wait timeout is the launch-injected shared value (#2417,
-	// ADR-2417), never the bed .env or a harness default.
-	reviewWaitTimeout := int(bedReviewWait() / time.Minute)
-	if reviewerToken == "" && reviewWaitTimeout > 5 {
-		t.Skipf("FABRIK_REVIEWER_TOKEN not set in test bed .env and the bed's review wait timeout is %d min (> 5), so the "+
-			"timeout-fallback path would be too slow; set FABRIK_REVIEWER_TOKEN to a non-author PAT for the approval path",
-			reviewWaitTimeout)
+	if reviewerToken == "" {
+		t.Skip("FABRIK_REVIEWER_TOKEN not set in test bed .env; set it to a non-author PAT for the approval path " +
+			"(the former review-timeout fallback path was removed in #2417: the launch-injected review wait timeout is fixed above the ~5 min it needed)")
 	}
 	// There used to be a second skip here for a short timeout with a reviewer token
 	// (it guarded Review's own gate timing out before an incidental review). The item
@@ -313,41 +304,18 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	}
 	t.Logf("R4 withheld window passed: review gate held for 2 minutes on %s#%d", env.RepoAlpha, num)
 
-	if reviewerToken != "" {
-		// R5 — approval path: submit an approving review from the second identity.
-		// GitHub forbids the PR author (@arbeithand) from approving their own PR, so
-		// FABRIK_REVIEWER_TOKEN must be a different GitHub account.
-		SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNumber, "APPROVE")
-		t.Logf("submitted APPROVE review on %s PR #%d using reviewer token", env.RepoAlpha, prNumber)
+	// R5 — approval path: submit an approving review from the second identity.
+	// GitHub forbids the PR author (@arbeithand) from approving their own PR, so
+	// FABRIK_REVIEWER_TOKEN must be a different GitHub account.
+	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNumber, "APPROVE")
+	t.Logf("submitted APPROVE review on %s PR #%d using reviewer token", env.RepoAlpha, prNumber)
 
-		// Issue must close (yolo auto-merges after both gates clear).
-		WaitForIssueClosed(t, env, env.RepoAlpha, num, 30*time.Minute)
-		AssertLabelWasApplied(t, env, env.RepoAlpha, num, "stage:Validate:complete")
-		AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:paused")
-		t.Logf("R5 verified: %s#%d closed after approval; stage:Validate:complete applied, fabrik:paused never applied",
-			env.RepoAlpha, num)
-	} else {
-		// R5 fallback — timeout path: with no second reviewer, the review gate
-		// times out after FABRIK_REVIEW_WAIT_TIMEOUT minutes and pauses the issue.
-		t.Logf("no FABRIK_REVIEWER_TOKEN — using review-timeout fallback path (FABRIK_REVIEW_WAIT_TIMEOUT=%d min)",
-			reviewWaitTimeout)
-		// Armed by the fabrik:awaiting-review application observed above; the engine
-		// pauses at the first gate evaluation after T, so T + a poll-derived margin
-		// (replacing the former flat +5 min).
-		timeoutWait := bedReviewWait() + bedWindowMargin()
-		WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", timeoutWait)
-		t.Logf("fabrik:paused appeared on %s#%d (review gate timed out)", env.RepoAlpha, num)
-		WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input", 5*time.Minute)
-		t.Logf("fabrik:awaiting-input appeared on %s#%d", env.RepoAlpha, num)
-		if state := IssueState(t, env, env.RepoAlpha, num); state != "OPEN" {
-			t.Fatalf("expected issue OPEN after review timeout, got %s on %s#%d",
-				state, env.RepoAlpha, num)
-		}
-		t.Logf("R5 timeout path verified: %s#%d paused with fabrik:awaiting-input; review gate held (no premature advance)",
-			env.RepoAlpha, num)
-		t.Logf("NOTE: R5 approval path (joint-clear on review submission) was not exercised — " +
-			"set FABRIK_REVIEWER_TOKEN in the test bed .env to test full joint-clear")
-	}
+	// Issue must close (yolo auto-merges after both gates clear).
+	WaitForIssueClosed(t, env, env.RepoAlpha, num, 30*time.Minute)
+	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "stage:Validate:complete")
+	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:paused")
+	t.Logf("R5 verified: %s#%d closed after approval; stage:Validate:complete applied, fabrik:paused never applied",
+		env.RepoAlpha, num)
 }
 
 // conjunctiveCIReviewGateBody is the issue body for TestConjunctiveCIReviewGate. It

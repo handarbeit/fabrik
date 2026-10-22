@@ -23,7 +23,7 @@ timeout** (waited out on purpose), **negative window** (a polled "must not happe
 |---|---|---|---|---|
 | ExpectedReviewersDeclaredWaitsAndReprompts | 1952 (8) | engine timeout | Phase 1 at T, Phase 2 at a further T (T = review wait); ~2 min seed and detection | **T 15 → 10**; failure caps T+10 flat → T + poll margin |
 | ConvergenceRace | 1883 (10) | real work | two overlapping 25-min `slow-gate` waits (defined in the test repos' `ci.yml`, outside this repo) | no |
-| ConjunctiveCIReviewGate | 1872 (10) | real work | 25-min `slow-gate`; R1 window (2 min) runs inside it; R4 window (2 min) adds; timeout path waits T | timeout path T 15 → 10; stale skip removed |
+| ConjunctiveCIReviewGate | 1872 (10) | real work | 25-min `slow-gate`; R1 window (2 min) runs inside it; R4 window (2 min) adds | unreachable timeout-fallback path and stale skip removed |
 | ReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation | 1693 (10) | negative window | ~2 min activity, then a `T+10` min window armed *after* the reinvoke was seen | **re-anchored and ended at the escalation** (below) |
 | CrossRepoSpawn | 1478 (16) | real work | parent + child full pipelines; Review waits on Pruefer | no |
 | MergeTrainConflictBisectPrefixRerere | 1364 (3) | real work | ~11 trial CI cycles + one Claude conflict resolution | no |
@@ -76,21 +76,27 @@ overridden by `.env` loading), so no preflight-mismatch failure mode is added.
   The 3 polls are: the engine reaching its first evaluation after T, the label/log being
   written, the harness observing it. It is reached only if the engine does nothing.
   `fabrik:bot-reprompted` fails the window immediately at any time.
-* **If the observable never appears** the test logs it and passes on the unchanged
-  post-window label/comment assertions, as before: the ceiling is a lower-confidence outcome,
-  never a new failure mode.
+* **If the observable never appears** the test **fails** at the ceiling: absence of
+  `fabrik:bot-reprompted` with no proven post-timeout evaluation is not evidence. Only the
+  engine's own `review wait timeout elapsed; pausing issue` log line is credited (a bare
+  `fabrik:paused` could come from the review-cycle limit), and
+  `bedtimeout.TestReviewTimeoutLogLineMatchesEngine` pins that text to `engine/reviews.go` so
+  drift is caught in plain CI rather than at a gate.
 
 ### 3. Poll-derived caps elsewhere
 
-`ExpectedReviewersDeclaredWaitsAndReprompts` phase caps and the Conjunctive timeout-path cap
-change from `T+10` / `T+5` flat to `T + bedWindowMargin()` (= 3 bed polls + 2 harness polls,
+`ExpectedReviewersDeclaredWaitsAndReprompts` phase caps
+change from `T+10` flat to `T + bedWindowMargin()` (= 3 bed polls + 2 harness polls,
 5 min at defaults). They are caps (`WaitForIssueLabel` returns on the label), so this
 tightens failure latency rather than passing time.
 
-### 4. Conjunctive stale skip removed
+### 4. Conjunctive: stale skip and unreachable fallback removed
 
 The `reviewerToken != "" && T < 10` skip guarded Review's own gate; the item has been seeded
-at Validate since #1992, so it never arises. A skip counts against SC-006, so it is gone.
+at Validate since #1992, so it never arises, and a skip counts against SC-006, so it is gone.
+The no-token timeout-fallback branch needed T ≤ 5; with T fixed at 10 by the launch it could
+never run (the test skipped instead), so the dead branch is removed and the test requires
+`FABRIK_REVIEWER_TOKEN`. No coverage changes: that path already skipped at the former default 15.
 
 ## Poll seam (ADR-1978): evaluated, not adopted
 
@@ -106,7 +112,7 @@ minutes of window for serial scheduling. No registry classification changes.
 |---|---|---|---|
 | ExpectedReviewersDeclaredWaitsAndReprompts | 1952 s | ~1350 s | 2×10 min + ~2.5 min = 22.5 min (was 2×15 + 2.5) |
 | ReviewAuthorityDeclaredBot… | 1693 s | ~850 s | seed/reinvoke ~3 min after L, escalation at L+10+~1 min ≈ 14 min (was ~28) |
-| ConjunctiveCIReviewGate | 1872 s | 1872 s approval path; −300 s timeout path | CI-bound |
+| ConjunctiveCIReviewGate | 1872 s | 1872 s | CI-bound; unchanged |
 | **Per leg** | ~8 h | **−~24 min (≈5 %)** | −602 s −843 s per leg that runs both |
 
 A full-matrix release runs these in each leg it selects (sparse matrix: baseline plus

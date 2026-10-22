@@ -33,8 +33,9 @@ application). The bed `.env` files are operator-owned, outside the repository.
 4. **Negative windows** are armed at the event that arms the bug (read from the events log)
    and, where the correct engine takes a visible escalation at the same instant the bug would
    fire, end at that positive observable with a failure ceiling of
-   `armed + timeout + worker allowance + 3 × bed poll` (`bedtimeout.Window` / `Watch`). Margins
-   are poll-derived, not flat.
+   `armed + timeout + worker allowance + 3 × bed poll` (`bedtimeout.Window` / `Watch`); reaching
+   the ceiling without the observable is a test **failure**, not a pass. Margins are
+   poll-derived, not flat.
 5. **The poll seam (ADR-1978) is not adopted** for the review tests: their gate is a
    wall-clock comparison that held polls cannot advance, and `exclusive` costs the shared
    phase's parallelism.

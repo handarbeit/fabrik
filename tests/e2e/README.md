@@ -629,24 +629,11 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
       `gemini-code-assist` review — so only Validate's gate blocks on the
       real reviewer.
     - **`FABRIK_REVIEW_WAIT_TIMEOUT` is launch-injected (10 min since #2417); do not
-      set it in the `.env`.** The item is now seeded at Validate (#1992), so the
-      Review-gate reasoning below no longer applies and the former `< 10` skip is
-      gone. The timeout-fallback path (no `FABRIK_REVIEWER_TOKEN`) still skips when the
-      bed's value exceeds 5. The historical reasoning follows — a short timeout
-      (e.g. `2`) risks Review's own gate timing out before
-      `gemini-code-assist` submits its incidental review (documented
-      30s–10m behind PR-ready), which would break the Review-then-Validate
-      sequencing the approval path depends on. The test skips with an
-      instructional message if `FABRIK_REVIEWER_TOKEN` is set and this value
-      is `< 10`. Use `FABRIK_REVIEW_WAIT_TIMEOUT=2` only for the
-      timeout-fallback path below (no `FABRIK_REVIEWER_TOKEN`), so the
-      review-timeout fallback path (R5 reduced scope) completes in a
-      reasonable wall-clock budget. If this value exceeds 5 and no reviewer
-      token is present, the test skips with an instructional message. After
-      editing `.env`, restart Fabrik. Note: the timeout-fallback path has no
-      second identity to request, so it remains exposed to the
-      `gemini-code-assist` bot clearing the gate before the timeout fires
-      (residual flakiness, not fixed by this redesign — see #925).
+      set it in the `.env`** — the launch value wins. The item is seeded at Validate
+      (#1992), so Review's own gate does not arise and the former `< 10` skip is gone. The
+      former timeout-fallback path (no `FABRIK_REVIEWER_TOKEN`; it needed a timeout of 5 min
+      or less) was removed because the fixed 10-min value made it unreachable: the test now
+      skips without `FABRIK_REVIEWER_TOKEN`.
 14. The default `E2E_TIMEOUT=4h` already covers this test run in isolation
     (worst case ~60–90 min for the approval path). Use a *smaller* override
     to fail faster while iterating on just this scenario, e.g.:
@@ -931,8 +918,7 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
 
 21. **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — same non-author PAT documented
     in prerequisite #13 above. All five `TestReviewAuthority*` scenarios skip with an
-    instructional message if it is unset; there is no timeout-fallback path here (unlike
-    `TestConjunctiveCIReviewGate`) because these scenarios exist specifically to assert
+    instructional message if it is unset; there is no timeout-fallback path here, because these scenarios exist specifically to assert
     on a deterministic verdict, not on gate-timeout behavior alone.
 22. **`review-authority:authoritative` label seeded** in `handarbeit/fabrik-test-alpha`
     (the only repo these scenarios use). `FileIssue` passes it straight through to

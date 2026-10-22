@@ -60,6 +60,13 @@ func ReviewWait() time.Duration { return ReviewMinutes * time.Minute }
 // CIWait is the CI wait timeout the bed was launched with.
 func CIWait() time.Duration { return CIMinutes * time.Minute }
 
+// ReviewTimeoutLogFmt is the engine log line (format, one %d for the issue
+// number) written when the review wait timeout elapses on the mixed/human path
+// (engine/reviews.go checkAwaitingReviewTimeout) — the positive observable that a
+// post-timeout gate evaluation ran without taking the bot re-prompt path. Pinned
+// to the engine source by TestReviewTimeoutLogLineMatchesEngine.
+const ReviewTimeoutLogFmt = "[#%d warn] review wait timeout elapsed; pausing issue"
+
 // PollMargins is how many bed polls a negative window waits past the point the
 // bug could first show. One poll for the engine to reach its first evaluation
 // after the timeout, one for the resulting label or log line to be written, and

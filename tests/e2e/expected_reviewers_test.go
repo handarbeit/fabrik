@@ -396,11 +396,12 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 		if slices.Contains(labels, "fabrik:bot-reprompted") {
 			return bedtimeout.Observation{Bug: true, Detail: "fabrik:bot-reprompted applied"}
 		}
-		if line, _ := tryLogLineContaining(env, fmt.Sprintf("[#%d warn] review wait timeout elapsed; pausing issue", num), logOffset); line != "" {
+		// Only the engine's own timeout-escalation log line is credited. A bare
+		// fabrik:paused is not: the review-cycle limit (or anything else) can pause the
+		// item without a post-timeout gate evaluation having run. The line's text is
+		// pinned to engine/reviews.go by bedtimeout's TestReviewTimeoutLogLineMatchesEngine.
+		if line, _ := tryLogLineContaining(env, fmt.Sprintf(bedtimeout.ReviewTimeoutLogFmt, num), logOffset); line != "" {
 			return bedtimeout.Observation{Settled: true, Detail: strings.TrimSpace(line)}
-		}
-		if slices.Contains(labels, "fabrik:paused") {
-			return bedtimeout.Observation{Settled: true, Detail: "fabrik:paused applied"}
 		}
 		return bedtimeout.Observation{}
 	})
@@ -411,7 +412,11 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	case bedtimeout.OutcomeSettled:
 		t.Logf("post-timeout gate evaluation confirmed for %s#%d (%s) without the bot path", env.RepoAlpha, num, obs.Detail)
 	default:
-		t.Logf("window ceiling %s reached for %s#%d without the bug and without a positively observed escalation", win.Ceiling().Format(time.RFC3339), env.RepoAlpha, num)
+		// Absence alone proves nothing: with no post-timeout gate evaluation observed
+		// the bug may simply not have had its chance. Fail rather than pass vacuously.
+		t.Fatalf("window ceiling %s reached for %s#%d: neither the bot re-prompt nor the engine's timeout escalation "+
+			"(%q) was observed, so no post-timeout gate evaluation is proven — the absence of fabrik:bot-reprompted is not evidence",
+			win.Ceiling().Format(time.RFC3339), env.RepoAlpha, num, fmt.Sprintf(bedtimeout.ReviewTimeoutLogFmt, num))
 	}
 	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:bot-reprompted")
 
