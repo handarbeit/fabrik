@@ -527,10 +527,33 @@ var fetchInstallationRepositoriesFn = gh.FetchInstallationRepositories
 // always the App-auth-backed *gh.Client here — RefuseHookdeckWithoutGitHubApp
 // guarantees event_source: hookdeck never runs without App auth configured.
 func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
+	e.checkAppInstallationCoverage(hm, appCoverageSpec{Tag: "hookdeck", PanelType: "hookdeck_coverage", Ref: "#1142"})
+}
+
+// appCoverageTransport is what the App-installation coverage check needs from
+// an App-webhook transport (Hookdeck, the direct transport).
+type appCoverageTransport interface {
+	ManagedRepos() []string
+	setInstallationCoverageNote(missing []string, truncated bool)
+}
+
+// appCoverageSpec names a transport in the coverage check's logs and
+// warnings-panel entries. PanelType is persisted in .fabrik/warnings.json, so
+// each transport keeps its own (two transports' Reconcile sweeps must not
+// clobber each other's subject sets).
+type appCoverageSpec struct {
+	Tag       string
+	PanelType string
+	Ref       string
+}
+
+// checkAppInstallationCoverage is the transport-neutral body of the R5
+// installation-repo-coverage assertion (#1142, generalised for #2142).
+func (e *Engine) checkAppInstallationCoverage(hm appCoverageTransport, spec appCoverageSpec) {
 	repos := hm.ManagedRepos()
 	if len(repos) == 0 {
 		hm.setInstallationCoverageNote(nil, false)
-		_ = warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", nil)
+		_ = warnings.Reconcile(e.warnWriter(spec.Tag), spec.PanelType, nil)
 		return
 	}
 	if e.hostClient == nil {
@@ -538,7 +561,7 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	}
 	granted, truncated, err := fetchInstallationRepositoriesFn("", e.hostClient.Token())
 	if err != nil {
-		e.logf(0, "hookdeck", "WARNING: installation-repo-coverage check failed: %v — leaving prior coverage note in place\n", err)
+		e.logf(0, spec.Tag, "WARNING: installation-repo-coverage check failed: %v — leaving prior coverage note in place\n", err)
 		return
 	}
 	grantedSet := make(map[string]bool, len(granted))
@@ -563,19 +586,19 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 			truncationNote = " (installation-repo listing was truncated by the pagination ceiling — this may be a false positive; see the FetchInstallationRepositories warning above)"
 		}
 		list := strings.Join(missing, ", ")
-		if err := warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", []warnings.Condition{{
+		if err := warnings.Reconcile(e.warnWriter(spec.Tag), spec.PanelType, []warnings.Condition{{
 			Subject: "repos",
 			Title:   fmt.Sprintf("GitHub App installation does not cover %d managed repo(s)", len(missing)),
 			Detail: fmt.Sprintf("These repos are receiving no webhooks (poll-only): %s%s\n\n"+
-				"Fix: grant the installation access to them (App settings → Install App → Configure); see #1142.", list, truncationNote),
+				"Fix: grant the installation access to them (App settings → Install App → Configure); see %s.", list, truncationNote, spec.Ref),
 			LogLine: fmt.Sprintf("GitHub App installation does not cover %d of %d managed repo(s): %s — "+
 				"these repos are receiving no webhooks (poll-only); grant the installation access to them (App settings "+
-				"→ Install App → Configure); see #1142%s", len(missing), len(repos), list, truncationNote),
+				"→ Install App → Configure); see %s%s", len(missing), len(repos), list, spec.Ref, truncationNote),
 		}}); err != nil {
-			e.logf(0, "hookdeck", "recording hookdeck_coverage warning: %v\n", err)
+			e.logf(0, spec.Tag, "recording %s warning: %v\n", spec.PanelType, err)
 		}
-	} else if err := warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", nil); err != nil {
-		e.logf(0, "hookdeck", "clearing hookdeck_coverage warning: %v\n", err)
+	} else if err := warnings.Reconcile(e.warnWriter(spec.Tag), spec.PanelType, nil); err != nil {
+		e.logf(0, spec.Tag, "clearing %s warning: %v\n", spec.PanelType, err)
 	}
 	hm.setInstallationCoverageNote(missing, truncated)
 }
