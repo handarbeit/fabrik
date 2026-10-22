@@ -50,8 +50,8 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.88: Pruefer reviews through plugins and keeps resuming a review until every diff entry is read, and the engine now guarantees that a paused item is never advanced or landed and that only the commit Validate verified is merged, even across a restart. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#sha-change-auto-revalidation">SHA-change Auto-Revalidation</a>.
+      New in v0.0.89: the engine stops looping on work it cannot finish. A stage that finished but could not post its output is published by retry instead of being run again, no work starts while GitHub cannot be written or reached, and one stage of one item is dispatched at most 25 times before the item is paused. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#recorded-stage-outcome-and-publication-retry">Recorded stage outcome and publication retry</a>.
     </p>
 
     <div class="hero-diagram">
