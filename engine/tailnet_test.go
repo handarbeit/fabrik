@@ -466,3 +466,37 @@ func TestOnlyTheTaggedFileImportsTailscale(t *testing.T) {
 		t.Error("tailnet_tsnet.go must carry //go:build tailscale")
 	}
 }
+
+// Self-upgrade would replace a tagged binary with the untagged release asset (or
+// rebuild without the tag); it is skipped, once and loudly, for a tagged
+// tailscale daemon, and is untouched for every other configuration.
+func TestSelfUpgradeSkippedForTaggedTailscaleDaemon(t *testing.T) {
+	orig := tailscaleBuilt
+	defer func() { tailscaleBuilt = orig }()
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	logs := &syncLog{}
+	eng.SetLogSinkForTest(func(_ int, tag, msg string) { logs.add("[%s] %s", tag, msg) })
+
+	tailscaleBuilt = true
+	eng.cfg.EventSource = EventSourceTailscale
+	eng.cfg.Version = "v0.0.1"
+	for i := 0; i < 3; i++ {
+		eng.checkAndUpgrade() // would dereference a nil release client if it proceeded
+	}
+	if n := strings.Count(logs.String(), "self-upgrade is disabled"); n != 1 {
+		t.Fatalf("notice logged %d times:\n%s", n, logs.String())
+	}
+	if !eng.selfUpgradeWouldDropTailscale() {
+		t.Fatal("guard should hold")
+	}
+
+	eng.cfg.EventSource = EventSourceDirect
+	if eng.selfUpgradeWouldDropTailscale() {
+		t.Fatal("direct must upgrade as before")
+	}
+	eng.cfg.EventSource = EventSourceTailscale
+	tailscaleBuilt = false
+	if eng.selfUpgradeWouldDropTailscale() {
+		t.Fatal("an untagged binary has nothing to lose")
+	}
+}
