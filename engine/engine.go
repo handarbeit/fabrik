@@ -108,6 +108,15 @@ type Config struct {
 	// DefaultHookdeckAPIKeyEnv / DefaultHookdeckWebhookSecretEnv.
 	HookdeckAPIKeyEnv        string
 	HookdeckWebhookSecretEnv string
+	// DirectListen is the host:port the direct App webhook transport binds
+	// (EventSource == EventSourceDirect; required then). The daemon speaks
+	// plain HTTP: bind loopback and let the fronting tunnel or proxy terminate
+	// TLS. AppWebhookPath is the URL path served ("" = DefaultAppWebhookPath).
+	// AppWebhookSecretEnv names the variable holding the App's webhook secret
+	// ("" = DefaultAppWebhookSecretEnv). See ADR 2142.
+	DirectListen             string
+	AppWebhookPath           string
+	AppWebhookSecretEnv      string
 	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
 	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
@@ -164,10 +173,18 @@ type Config struct {
 const (
 	EventSourcePoll     = "poll"
 	EventSourceHookdeck = "hookdeck"
+	EventSourceDirect   = "direct"
 
 	DefaultEventSource              = EventSourcePoll
 	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
 	DefaultHookdeckWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+
+	// DefaultAppWebhookPath / DefaultAppWebhookSecretEnv are event_source:
+	// direct's defaults (#2142). The secret variable name equals Hookdeck's
+	// (one App, one webhook secret) but is a separate constant so the two
+	// transports' keys stay uncoupled.
+	DefaultAppWebhookPath      = "/webhook"
+	DefaultAppWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
 )
 
 // cloneCall coordinates concurrent bare-clone attempts for the same repo.
@@ -623,7 +640,7 @@ func New(cfg Config) (*Engine, error) {
 	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
 	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
 	claudeWorkerEnv = workerenv.Resolve(
-		[]string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv},
+		workerSecretEnvNames(cfg),
 		os.Getenv(workerenv.OptInVar))
 
 	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
@@ -673,6 +690,9 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
+		return nil, err
+	}
+	if err := RefuseDirectMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg))); err != nil {
 		return nil, err
 	}
 

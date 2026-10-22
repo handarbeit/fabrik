@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"sync"
+
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 // ingestTransport is the surface every webhook delivery source implements
@@ -49,6 +51,11 @@ type ingestTransport interface {
 	// RE-establishes its connection after a disconnect (never on first connect),
 	// so the engine can run a catch-up reconcile for events missed meanwhile.
 	SetReconnectHandler(fn func())
+	// HealthRow reports the transport's own state, last delivery time and
+	// rejection counts for fabrik_health (#2142). Anything it cannot report is
+	// unknown. Required of every transport, so a new one cannot silently report
+	// nothing.
+	HealthRow() localapi.TransportHealth
 }
 
 // transportSet is the engine's collection of attached transports. Every method
@@ -58,6 +65,12 @@ type ingestTransport interface {
 type transportSet struct {
 	mu sync.RWMutex
 	ts []ingestTransport
+	// failed holds transports whose Start returned an error. They are not
+	// attached (the daemon is poll-only for them) and take no part in Empty,
+	// Mode, Healthy or StopAll; HealthRows alone reads them, so a failed
+	// listener still shows as a row (state "not listening") instead of
+	// vanishing from fabrik_health.
+	failed []ingestTransport
 }
 
 func (s *transportSet) snapshot() []ingestTransport {
@@ -74,6 +87,22 @@ func (s *transportSet) Add(t ingestTransport) {
 	s.mu.Lock()
 	s.ts = append(s.ts, t)
 	s.mu.Unlock()
+}
+
+// AddFailed records a transport that could not start, for HealthRows only.
+func (s *transportSet) AddFailed(t ingestTransport) {
+	s.mu.Lock()
+	s.failed = append(s.failed, t)
+	s.mu.Unlock()
+}
+
+func (s *transportSet) failedSnapshot() []ingestTransport {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]ingestTransport(nil), s.failed...)
 }
 
 // Empty reports that no transport is attached.
@@ -138,6 +167,19 @@ func (s *transportSet) TransitionHealth(healthy bool, reason string) {
 	for _, t := range s.snapshot() {
 		t.TransitionHealth(healthy, reason)
 	}
+}
+
+// HealthRows returns one health row per attached transport, followed by one per
+// transport that failed to start, never nil.
+func (s *transportSet) HealthRows() []localapi.TransportHealth {
+	rows := []localapi.TransportHealth{}
+	for _, t := range s.snapshot() {
+		rows = append(rows, t.HealthRow())
+	}
+	for _, t := range s.failedSnapshot() {
+		rows = append(rows, t.HealthRow())
+	}
+	return rows
 }
 
 // CheckCoverage runs every transport's coverage re-check.

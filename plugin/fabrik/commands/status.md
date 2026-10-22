@@ -23,7 +23,7 @@ Lead with what needs the user, then the rest. Keep it short enough to read at a 
 1. **Needs you** — merge decisions, items waiting for input and pending decisions from `fabrik_situation`. For each: `#N title`, the reason, and what they can do (use the entry's options; don't invent steps).
 2. **Held and stalled** — items held at a gate (which gate, how long) and stalled items.
 3. **Anomalies** — any active anomaly the situation reports.
-4. **Daemon health** — one line: version, uptime, time since the last successful poll. Call out anything stale or overdue (poll overdue, webhooks quiet, a merge-train partition idle with queued items).
+4. **Daemon health** — one line: version, uptime, time since the last successful poll. Call out anything stale or overdue (poll overdue, webhooks quiet or a transport in `signature drift`/`not listening`, a merge-train partition idle with queued items).
 
 If `nothing_needs_you` is true, say so in one line before the rest. A section's `omitted` count means entries were cut; say how many. Report "unknown" values as unknown.
 

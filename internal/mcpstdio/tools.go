@@ -141,7 +141,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name": ToolHealth,
-			"description": "Pipeline health from the daemon's own state (no GitHub call): version and uptime, time since the last poll attempt and success, webhook and reconcile freshness, " +
+			"description": "Pipeline health from the daemon's own state (no GitHub call): version and uptime, time since the last poll attempt and success, webhook and reconcile freshness (webhook.transports lists each event transport's own state, last delivery time and rejected-signature, malformed and oversized request counts; unknown values are \"unknown\"), " +
 				"poll liveness (poll.in_progress and current_started_at, last_completed_at, the step an in-progress poll is in, next_due_at with backing_off, and the overdue verdict: true when a poll has run longer than 2 x interval_seconds or none started within 2 x interval of next_due_at, so a stalled engine is distinguishable from a stalled item), " +
 				"the account-wide Claude usage-limit hold, GraphQL backoff (as_of says when a poll last refreshed it; it does not age on its own), worker slots in use (plus the reserved merge-train slot, train_in_use/train_max, when merge_train is on), " +
 				"and per (repo, base) merge-train partition members with oldest_queued_since, the run phase, and an idle_reason when members are queued and no run is active. " +

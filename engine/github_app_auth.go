@@ -281,11 +281,72 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 // into event-driven ingestion would get no error and no log message, only
 // silent poll-only delivery.
 func RefuseUnknownEventSource(eventSource string) error {
-	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck {
+	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck || eventSource == EventSourceDirect {
 		return nil
 	}
-	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, or "+
-		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourcePoll)
+	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, %q, or "+
+		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourcePoll)
+}
+
+// appWebhookSecretEnvName is the name of the variable holding the App webhook
+// secret for event_source: direct: the configured name, else the default. It is
+// a variable *name*, never the secret.
+func appWebhookSecretEnvName(cfg Config) string {
+	if cfg.AppWebhookSecretEnv != "" {
+		return cfg.AppWebhookSecretEnv
+	}
+	return DefaultAppWebhookSecretEnv
+}
+
+// workerSecretEnvNames lists the operator-chosen variable names that hold
+// transport secrets (Hookdeck's API key and webhook secret, the direct
+// transport's webhook secret). They are fed to workerenv.Resolve so a
+// non-default name is scrubbed from the worker environment like the defaults
+// (ADR 2027, ADR 2142).
+func workerSecretEnvNames(cfg Config) []string {
+	return []string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv, cfg.AppWebhookSecretEnv}
+}
+
+// appWebhookPath is the URL path the direct transport serves.
+func appWebhookPath(cfg Config) string {
+	if cfg.AppWebhookPath != "" {
+		return cfg.AppWebhookPath
+	}
+	return DefaultAppWebhookPath
+}
+
+// RefuseDirectMisconfigured refuses event_source: direct (#2142, ADR 2142)
+// configured in a way that could only ever produce a silently deaf daemon: no
+// GitHub App auth (the direct transport receives an App's own webhook), no
+// listen address, an empty webhook secret, or a path that is not absolute. These
+// are configuration mistakes, so they fail startup naming the fix; a listen
+// failure at runtime is different and degrades to poll-only (FR-015).
+// secretValue is the value read from the configured variable; it is only tested
+// for emptiness and never logged.
+func RefuseDirectMisconfigured(cfg Config, appAuthConfigured bool, secretValue string) error {
+	if cfg.EventSource != EventSourceDirect {
+		return nil
+	}
+	if !appAuthConfigured {
+		return fmt.Errorf("event_source: direct (FABRIK_EVENT_SOURCE) requires GitHub App authentication — " +
+			"it receives a GitHub App's own webhook, which has no PAT-mode equivalent. Configure " +
+			"github_app_id/github_app_private_key_path/github_app_installation_id to use event_source: direct, " +
+			"or remove event_source (default: poll) to use PAT-mode --webhooks or plain polling instead")
+	}
+	if strings.TrimSpace(cfg.DirectListen) == "" {
+		return fmt.Errorf("event_source: direct requires direct_listen (--direct-listen / FABRIK_DIRECT_LISTEN) — " +
+			"the host:port the daemon listens on, e.g. 127.0.0.1:8787; point your tunnel or proxy at it")
+	}
+	if secretValue == "" {
+		return fmt.Errorf("event_source: direct requires the App's webhook secret in $%s — set that variable "+
+			"(or name another with app_webhook_secret_env / --app-webhook-secret-env) to the secret configured "+
+			"on the GitHub App", appWebhookSecretEnvName(cfg))
+	}
+	if p := cfg.AppWebhookPath; p != "" && !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("app_webhook_path %q (--app-webhook-path / FABRIK_APP_WEBHOOK_PATH) must start with \"/\", e.g. %q",
+			p, DefaultAppWebhookPath)
+	}
+	return nil
 }
 
 // RefuseHookdeckWithoutGitHubApp refuses event_source: hookdeck (#1142)

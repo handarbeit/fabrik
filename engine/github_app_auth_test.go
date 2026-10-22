@@ -19,6 +19,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
+	"github.com/handarbeit/fabrik/internal/workerenv"
 )
 
 // writeEngineTestAppKey generates a small (test-only) RSA key and writes it
@@ -697,5 +698,70 @@ func TestPermissionShortfallRemedy(t *testing.T) {
 	}
 	if !strings.Contains(other, "settings/installations/77") {
 		t.Errorf("non-actions remedy missing URLs:\n%s", other)
+	}
+}
+
+func TestRefuseUnknownEventSource_AcceptsDirect(t *testing.T) {
+	if err := RefuseUnknownEventSource(EventSourceDirect); err != nil {
+		t.Fatalf("direct refused: %v", err)
+	}
+	err := RefuseUnknownEventSource("bogus")
+	if err == nil || !strings.Contains(err.Error(), `"direct"`) {
+		t.Fatalf("unknown-source message should list direct, got %v", err)
+	}
+}
+
+func TestRefuseDirectMisconfigured(t *testing.T) {
+	good := Config{EventSource: EventSourceDirect, DirectListen: "127.0.0.1:8787"}
+	tests := []struct {
+		name    string
+		cfg     Config
+		app     bool
+		secret  string
+		wantErr string // substring naming the fix; "" = accepted
+	}{
+		{"not direct: ignored", Config{EventSource: EventSourcePoll}, false, "", ""},
+		{"hookdeck: ignored", Config{EventSource: EventSourceHookdeck}, false, "", ""},
+		{"happy path", good, true, "s3cret", ""},
+		{"happy path with path", Config{EventSource: EventSourceDirect, DirectListen: ":1", AppWebhookPath: "/fabrik-x"}, true, "zz-secret-value", ""},
+		{"PAT auth", good, false, "s3cret", "requires GitHub App authentication"},
+		{"missing listen", Config{EventSource: EventSourceDirect}, true, "s3cret", "direct_listen"},
+		{"blank listen", Config{EventSource: EventSourceDirect, DirectListen: "  "}, true, "s3cret", "direct_listen"},
+		{"missing secret default name", good, true, "", "$FABRIK_GITHUB_WEBHOOK_SECRET"},
+		{"missing secret custom name", Config{EventSource: EventSourceDirect, DirectListen: ":1", AppWebhookSecretEnv: "MY_APP_SECRET"}, true, "", "$MY_APP_SECRET"},
+		{"relative path", Config{EventSource: EventSourceDirect, DirectListen: ":1", AppWebhookPath: "hook"}, true, "zz-secret-value", "app_webhook_path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RefuseDirectMisconfigured(tt.cfg, tt.app, tt.secret)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected refusal: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), tt.secret) && tt.secret != "" {
+				t.Fatalf("refusal leaked the secret value: %v", err)
+			}
+		})
+	}
+}
+
+// A non-default app_webhook_secret_env must be scrubbed from the worker
+// environment like the default name (ADR 2027, ADR 2142); TestEveryFabrikLiteralIsClassified
+// cannot see a dynamic name.
+func TestWorkerSecretEnvNames_ScrubsCustomAppWebhookSecret(t *testing.T) {
+	resetWorkerEnv(t)
+	cfg := Config{AppWebhookSecretEnv: "MY_APP_HOOK_SECRET"}
+	claudeWorkerEnv = workerenv.Resolve(workerSecretEnvNames(cfg), "")
+	got := constructedEnv(append(daemonEnv(), "MY_APP_HOOK_SECRET=s3cret", "OTHER=o"), InvokeOptions{})
+	if hasKey(got, "MY_APP_HOOK_SECRET") {
+		t.Fatal("custom app webhook secret variable reached the worker")
+	}
+	if !containsExact(got, "OTHER=o") {
+		t.Fatal("unrelated variable must survive")
 	}
 }

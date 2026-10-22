@@ -156,7 +156,7 @@ type Config struct {
 	// consecutive signature-verification failures reach
 	// SignatureDriftThreshold with no interleaved success, and with false
 	// the next time a signature verifies successfully after such a streak
-	// (recovery). See consecutiveSigFailures/sigDriftActive below and
+	// (recovery). See events.SigDrift and
 	// ADR-1563 — a sustained 100% signature-failure rate is either a
 	// misconfigured webhook secret or a Hookdeck wire-format change, never
 	// a transient blip, and callers should escalate accordingly rather than
@@ -185,15 +185,11 @@ type Source struct {
 	// single-threaded guarantee as lastSigWarnAt.
 	lastFrameWarnAt time.Time
 
-	// consecutiveSigFailures counts signature-verification failures with no
-	// interleaved success — reset to 0 on every successful verification.
-	// Same single-threaded guarantee as lastSigWarnAt: only processAttempt,
-	// off Source's own read loop, ever touches it.
-	consecutiveSigFailures int
-	// sigDriftActive tracks whether OnSignatureDrift(true) has fired for
-	// the current streak, so recovery (OnSignatureDrift(false)) fires
-	// exactly once per streak rather than on every success.
-	sigDriftActive bool
+	// sigDrift counts signature-verification failures with no interleaved
+	// success and tracks whether OnSignatureDrift(true) has fired for the
+	// current streak, so recovery fires exactly once per streak. The tracker
+	// is shared with the direct App webhook transport (ADR 2142).
+	sigDrift events.SigDrift
 }
 
 // SignatureDriftThreshold is the number of consecutive signature-check
@@ -207,7 +203,7 @@ type Source struct {
 // because any caller currently needs it — Daemon's own escalation
 // messaging (see daemon.go's SignatureDriftHandler) is deliberately
 // transport-agnostic and does not import this package to quote the number.
-const SignatureDriftThreshold = 20
+const SignatureDriftThreshold = events.SignatureDriftThreshold
 
 // NewSource returns a Source ready to Run, applying defaults for any unset
 // Config field.
@@ -286,11 +282,9 @@ func (s *Source) emitSignatureDrift(active bool) {
 
 // recordSigFailure tracks a signature-verification failure toward
 // SignatureDriftThreshold, firing OnSignatureDrift(true) exactly once when
-// the streak first reaches it. See consecutiveSigFailures/sigDriftActive.
+// the streak first reaches it. See events.SigDrift.
 func (s *Source) recordSigFailure() {
-	s.consecutiveSigFailures++
-	if s.consecutiveSigFailures >= SignatureDriftThreshold && !s.sigDriftActive {
-		s.sigDriftActive = true
+	if s.sigDrift.RecordFailure() {
 		s.emitSignatureDrift(true)
 	}
 }
@@ -298,9 +292,7 @@ func (s *Source) recordSigFailure() {
 // recordSigSuccess resets the consecutive-failure streak and, if a drift
 // escalation was active, fires the one-time recovery signal.
 func (s *Source) recordSigSuccess() {
-	s.consecutiveSigFailures = 0
-	if s.sigDriftActive {
-		s.sigDriftActive = false
+	if s.sigDrift.RecordSuccess() {
 		s.emitSignatureDrift(false)
 	}
 }

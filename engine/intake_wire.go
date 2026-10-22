@@ -2,11 +2,14 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // setUpIngestion starts every configured event-ingestion transport behind one
@@ -25,7 +28,8 @@ import (
 func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.CacheImpl) func() {
 	wantWebhooks := e.cfg.Webhooks
 	wantHookdeck := e.cfg.EventSource == EventSourceHookdeck
-	if !wantWebhooks && !wantHookdeck && len(e.extraTransports) == 0 {
+	wantDirect := e.cfg.EventSource == EventSourceDirect
+	if !wantWebhooks && !wantHookdeck && !wantDirect && len(e.extraTransports) == 0 {
 		return func() {}
 	}
 
@@ -92,6 +96,9 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	if wantHookdeck {
 		e.startHookdeckTransport(ctx, set, sink, initialRepos, bootstrap)
 	}
+	if wantDirect {
+		e.startDirectTransport(ctx, set, sink, initialRepos, bootstrap)
+	}
 	// Transports the engine has no built-in knowledge of (a test fake today; the
 	// Funnel receiver of #2143 tomorrow) attach through the very same wiring.
 	for _, t := range e.extraTransports {
@@ -118,15 +125,21 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 // that health, coverage and repo-set updates fan out to. A transport that fails
 // to start is not attached and the others keep running.
 func (e *Engine) attachTransport(ctx context.Context, set *transportSet, t ingestTransport, sink func(delivery), bootstrap func()) bool {
+	return e.attachTransportErr(ctx, set, t, sink, bootstrap) == nil
+}
+
+// attachTransportErr is attachTransport returning the start error, for a
+// transport whose failure is reported to the operator (the direct listener).
+func (e *Engine) attachTransportErr(ctx context.Context, set *transportSet, t ingestTransport, sink func(delivery), bootstrap func()) error {
 	t.SetSink(sink)
 	t.SetReconnectHandler(e.requestReconcile)
 	bootstrap()
 	if err := t.Start(ctx); err != nil {
 		e.logf(0, t.Name(), "could not start: %v\n", err)
-		return false
+		return err
 	}
 	set.Add(t)
-	return true
+	return nil
 }
 
 // startWebhookTransport starts the gh webhook forward transport (PAT mode).
@@ -212,4 +225,74 @@ func (e *Engine) startHookdeckTransport(ctx context.Context, set *transportSet, 
 	// covers every managed repo, warning (never failing startup) on any gap — the
 	// App-mode analogue of checkWebhookHookCoverage.
 	e.checkHookdeckInstallationCoverage(hm)
+}
+
+// startDirectTransport starts the direct App webhook transport (event_source:
+// direct, App auth; #2142). Configuration mistakes were already refused in New();
+// a listen failure here (port in use, bad address) leaves the daemon poll-only
+// and is reported on the warnings panel, resolved by a later successful start.
+func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, sink func(delivery), initialRepos map[string]bool, bootstrap func()) {
+	// secretEnvName is the variable *name*; the secret value goes only to the
+	// transport and is never logged.
+	secretEnvName := appWebhookSecretEnvName(e.cfg)
+	listenAddr := e.cfg.DirectListen
+	tr := newAppWebhookTransport("direct", appWebhookPath(e.cfg),
+		func() (net.Listener, error) { return net.Listen("tcp", listenAddr) },
+		os.Getenv(secretEnvName), e.logf, e.emit)
+	tr.UpdateRepos(initialRepos)
+	tr.SetCoverageCheck(func() {
+		e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"})
+	})
+	driftKey := warnings.Condition{Type: "direct_signature_drift", Subject: tr.Name()}.Key()
+	tr.SetDriftHandler(func(active bool) {
+		if !active {
+			if err := warnings.Resolve(driftKey); err != nil {
+				e.logf(0, "direct", "clearing signature-drift warning: %v\n", err)
+			}
+			return
+		}
+		if err := warnings.Report(e.warnWriter("direct"), warnings.Condition{
+			Type:    "direct_signature_drift",
+			Subject: tr.Name(),
+			Title:   "App webhook signatures are failing verification",
+			Detail: "Every recent delivery to the direct App webhook listener failed signature verification, so no events are being applied (the daemon is effectively poll-only).\n\n" +
+				"Fix: make the App's webhook secret equal the value of $" + secretEnvName + ", and set the App's webhook content type to application/json.",
+			Fingerprint: "direct_signature_drift",
+			LogLine:     "direct App webhook: signature verification is failing — check that the App's webhook secret equals $" + secretEnvName,
+		}); err != nil {
+			e.logf(0, "direct", "recording signature-drift warning: %v\n", err)
+		}
+	})
+
+	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
+	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {
+		// Not attached (poll-only), but still visible in fabrik_health as a
+		// "not listening" row, not only as the panel entry.
+		set.AddFailed(tr)
+		if rerr := warnings.Report(e.warnWriter("direct"), warnings.Condition{
+			Type:    "direct_listen",
+			Subject: listenAddr,
+			Title:   fmt.Sprintf("Direct App webhook listener could not start on %s", listenAddr),
+			Detail: fmt.Sprintf("event_source: direct could not listen on %s: %v\n\nThe daemon is running poll-only. "+
+				"Fix: free the port or correct direct_listen (--direct-listen / FABRIK_DIRECT_LISTEN), then restart.", listenAddr, err),
+			Fingerprint: "direct_listen:" + listenAddr,
+			LogLine:     fmt.Sprintf("direct App webhook listener could not start on %s: %v — running poll-only", listenAddr, err),
+		}); rerr != nil {
+			e.logf(0, "direct", "recording listen warning: %v\n", rerr)
+		}
+		return
+	}
+	if err := warnings.Resolve(listenKey); err != nil {
+		e.logf(0, "direct", "clearing listen warning: %v\n", err)
+	}
+	// A fresh process starts with no signature-failure streak, but the panel
+	// entry is persisted: clear one left by a previous run (the in-memory
+	// tracker only resolves it on an active→inactive transition).
+	if err := warnings.Resolve(driftKey); err != nil {
+		e.logf(0, "direct", "clearing stale signature-drift warning: %v\n", err)
+	}
+	e.logf(0, "direct", "event_source: direct — listening on %s%s (plain HTTP; TLS is the fronting proxy's job), secret from $%s\n",
+		tr.Addr(), appWebhookPath(e.cfg), secretEnvName)
+	// Startup assertion: the installation must grant every managed repo.
+	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"})
 }

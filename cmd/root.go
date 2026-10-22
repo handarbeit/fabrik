@@ -98,6 +98,9 @@ type Config struct {
 	EventSource                string // "" or "poll" (default), or "hookdeck" — see engine.Config.EventSource
 	HookdeckAPIKeyEnv          string // env var name holding the Hookdeck API key; "" = use default
 	HookdeckWebhookSecretEnv   string // env var name holding the GitHub App webhook secret; "" = use default
+	DirectListen               string // host:port the direct App webhook transport listens on (event_source: direct); required then
+	AppWebhookPath             string // URL path the direct transport serves; "" = /webhook
+	AppWebhookSecretEnv        string // env var name holding the App webhook secret for event_source: direct; "" = FABRIK_GITHUB_WEBHOOK_SECRET
 	StatusPollSeconds          int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval          int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 	JanitorIntervalHours       int    // hours; 1 = default; 0 disables the janitor
@@ -247,9 +250,12 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
-	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default) or 'hookdeck'. hookdeck requires GitHub App auth (also FABRIK_EVENT_SOURCE; #1142)")
+	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default), 'hookdeck' or 'direct'. hookdeck and direct require GitHub App auth (also FABRIK_EVENT_SOURCE; #1142, #2142)")
 	flag.StringVar(&cfg.HookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Name of the environment variable holding the Hookdeck API key (only used when --event-source=hookdeck; default HOOKDECK_API_KEY; also FABRIK_HOOKDECK_API_KEY_ENV)")
 	flag.StringVar(&cfg.HookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=hookdeck; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV)")
+	flag.StringVar(&cfg.DirectListen, "direct-listen", "", "host:port the direct App webhook transport listens on (plain HTTP; bind loopback and let your tunnel or proxy terminate TLS). Required with --event-source=direct (also FABRIK_DIRECT_LISTEN; #2142)")
+	flag.StringVar(&cfg.AppWebhookPath, "app-webhook-path", "", "URL path the direct App webhook transport serves (default /webhook; also FABRIK_APP_WEBHOOK_PATH; #2142)")
+	flag.StringVar(&cfg.AppWebhookSecretEnv, "app-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=direct; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_APP_WEBHOOK_SECRET_ENV; #2142)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile drift checks (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Always active — this is the sole correctness backstop in poll-only mode; when --webhooks is enabled it also drives webhook stream-health transitions.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
@@ -892,6 +898,27 @@ func Execute() error {
 			cfg.HookdeckWebhookSecretEnv = pc.HookdeckWebhookSecretEnv
 		}
 	}
+	if !explicitFlags["direct-listen"] {
+		if v := os.Getenv("FABRIK_DIRECT_LISTEN"); v != "" {
+			cfg.DirectListen = v
+		} else if pc.DirectListen != "" {
+			cfg.DirectListen = pc.DirectListen
+		}
+	}
+	if !explicitFlags["app-webhook-path"] {
+		if v := os.Getenv("FABRIK_APP_WEBHOOK_PATH"); v != "" {
+			cfg.AppWebhookPath = v
+		} else if pc.AppWebhookPath != "" {
+			cfg.AppWebhookPath = pc.AppWebhookPath
+		}
+	}
+	if !explicitFlags["app-webhook-secret-env"] {
+		if v := os.Getenv("FABRIK_APP_WEBHOOK_SECRET_ENV"); v != "" {
+			cfg.AppWebhookSecretEnv = v
+		} else if pc.AppWebhookSecretEnv != "" {
+			cfg.AppWebhookSecretEnv = pc.AppWebhookSecretEnv
+		}
+	}
 	if !explicitFlags["status-poll"] {
 		if v := os.Getenv("FABRIK_STATUS_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1086,6 +1113,9 @@ func Execute() error {
 		EventSource:                cfg.EventSource,
 		HookdeckAPIKeyEnv:          cfg.HookdeckAPIKeyEnv,
 		HookdeckWebhookSecretEnv:   cfg.HookdeckWebhookSecretEnv,
+		DirectListen:               cfg.DirectListen,
+		AppWebhookPath:             cfg.AppWebhookPath,
+		AppWebhookSecretEnv:        cfg.AppWebhookSecretEnv,
 		ProjectStatusPollSeconds:   statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:          reconcileIntervalDuration(cfg.ReconcileInterval),
 		JanitorIntervalHours:       cfg.JanitorIntervalHours,

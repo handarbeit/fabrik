@@ -513,6 +513,27 @@ type WebhookHealth struct {
 	Mode              string           `json:"mode"`
 	LastEventAt       Known[time.Time] `json:"last_event_at"`
 	SinceEventSeconds Known[int64]     `json:"since_event_seconds"`
+	// Transports is one row per attached event transport (#2142, ADR 2142);
+	// always a list (empty when poll-only), never null. The aggregate fields
+	// above are unchanged.
+	Transports []TransportHealth `json:"transports"`
+}
+
+// TransportHealth is one event transport's own health row. Whatever a
+// transport cannot report is unknown (marshals as "unknown").
+type TransportHealth struct {
+	// Name identifies the transport ("webhook", "hookdeck", "direct", ...).
+	Name string `json:"name"`
+	// State is the transport's own state: "listening", "not listening" or
+	// "signature drift" for the direct transport; "starting_up", "healthy" or
+	// "unhealthy" (or "signature drift") for the others.
+	State string `json:"state"`
+	// LastDeliveryAt is the time of the last delivery the transport handed to
+	// the intake.
+	LastDeliveryAt     Known[time.Time] `json:"last_delivery_at"`
+	RejectedSignatures Known[int64]     `json:"rejected_signatures"`
+	MalformedRequests  Known[int64]     `json:"malformed_requests"`
+	OversizedRequests  Known[int64]     `json:"oversized_requests"`
 }
 
 // ReconcileHealth describes the periodic board reconcile.
