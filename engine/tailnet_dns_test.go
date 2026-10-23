@@ -286,8 +286,8 @@ func TestFunnelDNSProbe_BackoffGrowsToTheCeiling(t *testing.T) {
 	}
 }
 
-// R5: a failure is logged at most once per backoff level. Each level repeats
-// nothing, so two failures at different levels log twice and the same level once.
+// R5: a failure is logged at most once per backoff level. A level is one delay
+// value, so the 60 s ceiling is a single level however many probes run at it.
 func TestFunnelDNSProbe_LogsAtMostOncePerLevel(t *testing.T) {
 	h := newProbeHarness(t, resolveStep{err: errors.New("boom")})
 	h.probe.SetName(probeName)
@@ -297,9 +297,9 @@ func TestFunnelDNSProbe_LogsAtMostOncePerLevel(t *testing.T) {
 	}
 	h.nextWait()
 	text := h.logText()
-	// 6 probes ran at levels 0..5 and each is a distinct level.
-	if got := strings.Count(text, "could not check whether"); got != 6 {
-		t.Fatalf("failure lines = %d, want one per level (6):\n%s", got, text)
+	// 6 probes ran at delays 10s, 20s, 40s, 60s, 60s, 60s: four levels.
+	if got := strings.Count(text, "could not check whether"); got != 4 {
+		t.Fatalf("failure lines = %d, want one per level (4):\n%s", got, text)
 	}
 	if strings.Contains(text, "does not resolve publicly yet") {
 		t.Fatalf("a failure was logged as pending:\n%s", text)

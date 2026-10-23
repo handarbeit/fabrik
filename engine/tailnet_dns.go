@@ -209,8 +209,10 @@ func (p *funnelDNSProbe) current(gen int) bool {
 
 func (p *funnelDNSProbe) run(ctx context.Context, name string, gen int) {
 	delay := funnelDNSBackoffInitial
-	level := 0
-	loggedPending, loggedErr := -1, -1
+	// A backoff level is one delay value (10 s, 20 s, 40 s, 60 s): the ceiling is
+	// one level however many probes run at it, so a permanently failing probe
+	// logs four lines, not one per minute for ever.
+	var loggedPending, loggedErr time.Duration
 	for {
 		rctx, cancel := context.WithTimeout(ctx, funnelDNSProbeTimeout)
 		ok, err := p.cfg.Resolver.Resolve(rctx, name)
@@ -224,8 +226,8 @@ func (p *funnelDNSProbe) run(ctx context.Context, name string, gen int) {
 				return
 			}
 			// R5: a failed probe is logged at most once per backoff level.
-			if level != loggedErr {
-				loggedErr = level
+			if delay != loggedErr {
+				loggedErr = delay
 				p.cfg.Logf("could not check whether %s resolves publicly (retrying in %s): %v\n", name, delay, err)
 			}
 		case ok:
@@ -235,8 +237,8 @@ func (p *funnelDNSProbe) run(ctx context.Context, name string, gen int) {
 			if !p.record(gen, dnsProbePending, name, nil) {
 				return
 			}
-			if level != loggedPending {
-				loggedPending = level
+			if delay != loggedPending {
+				loggedPending = delay
 				p.cfg.Logf("%s does not resolve publicly yet (the authoritative servers have no usable address); webhook deliveries cannot reach this node — checking again in %s\n", name, delay)
 			}
 		}
@@ -246,7 +248,6 @@ func (p *funnelDNSProbe) run(ctx context.Context, name string, gen int) {
 		if delay *= 2; delay > funnelDNSBackoffMax {
 			delay = funnelDNSBackoffMax
 		}
-		level++
 	}
 }
 
