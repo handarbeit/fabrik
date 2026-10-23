@@ -1,5 +1,3 @@
-//go:build tailscale
-
 package engine
 
 import (
@@ -16,11 +14,6 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
-
-// tailscaleBuiltIn is true: this binary carries the embedded Tailscale node
-// (-tags tailscale; #2143, ADR 2143). This is the only file that imports
-// tailscale.com (pinned by TestOnlyTheTaggedFileImportsTailscale).
-const tailscaleBuiltIn = true
 
 // tsnetWatchRetry is how long Watch waits before re-opening a broken IPN bus
 // stream.

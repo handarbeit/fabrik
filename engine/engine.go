@@ -192,7 +192,6 @@ const (
 	EventSourceHookdeck = "hookdeck"
 	EventSourceDirect   = "direct"
 	// EventSourceTailscale is the embedded Tailscale Funnel receiver (#2143).
-	// It needs a binary built with -tags tailscale.
 	EventSourceTailscale = "tailscale"
 
 	DefaultEventSource              = EventSourcePoll
@@ -249,7 +248,6 @@ type Engine struct {
 	projectIDEpisodeMu                 sync.Mutex
 	projectIDWriteGuardDisabledForTest atomic.Bool                 // neutralises writeProjectID/fillBoardProjectID (#2396)
 	worktreeManagers                   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	tailscaleUpgradeNoted              atomic.Bool                 // the self-upgrade-skipped notice for a tagged tailscale daemon was logged (#2143)
 	fabrikDir                          string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                                 sync.Mutex
 	store                              *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036

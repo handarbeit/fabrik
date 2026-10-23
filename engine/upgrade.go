@@ -28,32 +28,12 @@ const (
 // The actual logic lives in internal/selfupgrade, which neither daemon owns —
 // see that package's doc comment and adrs/1196-extract-self-upgrade-package.md.
 func (e *Engine) checkAndUpgrade() {
-	if e.selfUpgradeWouldDropTailscale() {
-		return
-	}
 	if !strings.HasPrefix(e.cfg.Version, "dev") {
 		e.checkReleaseUpgrade()
 		return
 	}
 
 	selfupgrade.CheckAndRebuildDev(e.devBuildConfig())
-}
-
-// selfUpgradeWouldDropTailscale reports whether self-upgrade must be skipped
-// because it would replace a tagged binary with an untagged one (#2143, ADR
-// 2143): release assets are built without -tags tailscale, and the dev-build
-// rebuild runs a plain `go build`. After the exec the daemon would refuse
-// event_source: tailscale at startup and exit. The skip is announced once, never
-// silent; upgrade by building the new version with -tags tailscale instead.
-func (e *Engine) selfUpgradeWouldDropTailscale() bool {
-	if !tailscaleBuilt || e.cfg.EventSource != EventSourceTailscale {
-		return false
-	}
-	if e.tailscaleUpgradeNoted.CompareAndSwap(false, true) {
-		e.logf(0, "upgrade", "self-upgrade is disabled for a binary built with -tags tailscale running event_source: tailscale "+
-			"(the replacement would not include the embedded Tailscale node); upgrade by rebuilding with -tags tailscale and restarting\n")
-	}
-	return true
 }
 
 // flushBeforeExec persists the state that is written lazily and would otherwise

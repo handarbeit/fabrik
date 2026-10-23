@@ -82,8 +82,7 @@ func installFakeTailnet(t *testing.T, build func(cfg tailnetNodeConfig) *fakeTai
 	t.Helper()
 	var nodes []*fakeTailnet
 	var mu sync.Mutex
-	orig, origBuilt := tailnetNodeFactory, tailscaleBuilt
-	tailscaleBuilt = true
+	orig := tailnetNodeFactory
 	tailnetNodeFactory = func(cfg tailnetNodeConfig) (tailnetNode, error) {
 		n := build(cfg)
 		mu.Lock()
@@ -91,7 +90,7 @@ func installFakeTailnet(t *testing.T, build func(cfg tailnetNodeConfig) *fakeTai
 		mu.Unlock()
 		return n, nil
 	}
-	t.Cleanup(func() { tailnetNodeFactory, tailscaleBuilt = orig, origBuilt })
+	t.Cleanup(func() { tailnetNodeFactory = orig })
 	return &nodes
 }
 
@@ -508,9 +507,9 @@ func TestTailscaleStateDirResolution(t *testing.T) {
 	}
 }
 
-// R4/AC: only the tagged file may import tailscale.com, so the default build's
-// compiled graph is untouched.
-func TestOnlyTheTaggedFileImportsTailscale(t *testing.T) {
+// Only the adapter file may import tailscale.com, so every other file (and its
+// tests) stays on the tailnetNode seam and needs no tailnet.
+func TestOnlyTheAdapterFileImportsTailscale(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
@@ -525,48 +524,69 @@ func TestOnlyTheTaggedFileImportsTailscale(t *testing.T) {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(b), `"tailscale.com`) {
-			t.Errorf("%s imports tailscale.com; only tailnet_tsnet.go (build tag tailscale) may", name)
+			t.Errorf("%s imports tailscale.com; only tailnet_tsnet.go may", name)
 		}
-	}
-	b, err := os.ReadFile("tailnet_tsnet.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(string(b), "//go:build tailscale") {
-		t.Error("tailnet_tsnet.go must carry //go:build tailscale")
 	}
 }
 
-// Self-upgrade would replace a tagged binary with the untagged release asset (or
-// rebuild without the tag); it is skipped, once and loudly, for a tagged
-// tailscale daemon, and is untouched for every other configuration.
-func TestSelfUpgradeSkippedForTaggedTailscaleDaemon(t *testing.T) {
-	orig := tailscaleBuilt
-	defer func() { tailscaleBuilt = orig }()
+// tsnet's log lines carry no line ending and the engine log adds none, so the
+// adapter must, or several node lines run together on one line.
+func TestWithLineEnd(t *testing.T) {
+	for in, want := range map[string]string{
+		"a":     "a\n",
+		"a\n":   "a\n",
+		"":      "\n",
+		"a\nb":  "a\nb\n",
+		"x\n\n": "x\n\n",
+	} {
+		if got := withLineEnd(in); got != want {
+			t.Errorf("withLineEnd(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The node's routed log lines reach the engine log one per line: each gets its
+// line ending even though tsnet supplies none (seen live as
+// "...tailscaled.state[tailscale] node: tsnet starting...").
+func TestTailscale_NodeLogLinesEndWithNewline(t *testing.T) {
+	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet {
+		return newFakeTailnet(cfg, "fabrik-models.tail1234.ts.net.")
+	})
+	isolateWarnings(t)
+	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
+	t.Setenv(DefaultTailscaleAuthKeyEnv, tailscaleTestKey)
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-	logs := &syncLog{}
-	eng.SetLogSinkForTest(func(_ int, tag, msg string) { logs.add("[%s] %s", tag, msg) })
-
-	tailscaleBuilt = true
+	eng.fabrikDir = t.TempDir()
 	eng.cfg.EventSource = EventSourceTailscale
-	eng.cfg.Version = "v0.0.1"
-	for i := 0; i < 3; i++ {
-		eng.checkAndUpgrade() // would dereference a nil release client if it proceeded
-	}
-	if n := strings.Count(logs.String(), "self-upgrade is disabled"); n != 1 {
-		t.Fatalf("notice logged %d times:\n%s", n, logs.String())
-	}
-	if !eng.selfUpgradeWouldDropTailscale() {
-		t.Fatal("guard should hold")
-	}
+	eng.cfg.TailscaleHostname = "fabrik-models"
+	eng.cfg.AppWebhookPath = directTestPath
+	var mu sync.Mutex
+	var raw []string
+	eng.SetLogSinkForTest(func(_ int, _, msg string) { mu.Lock(); raw = append(raw, msg); mu.Unlock() })
+	orig := fetchAppHookConfigFn
+	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
+	t.Cleanup(func() { fetchAppHookConfigFn = orig })
+	cache, _ := eng.UseBoardCacheForTest()
+	cleanup := eng.setUpIngestion(context.Background(), cache)
+	defer cleanup()
 
-	eng.cfg.EventSource = EventSourceDirect
-	if eng.selfUpgradeWouldDropTailscale() {
-		t.Fatal("direct must upgrade as before")
+	n := (*nodes)[0]
+	n.cfg.Logf("tsnet starting with hostname %q", "fabrik-models")
+	n.cfg.Logf("AuthLoop: state is Running; done\n")
+	mu.Lock()
+	defer mu.Unlock()
+	var got []string
+	for _, m := range raw {
+		if strings.HasPrefix(m, "node: ") {
+			got = append(got, m)
+		}
 	}
-	eng.cfg.EventSource = EventSourceTailscale
-	tailscaleBuilt = false
-	if eng.selfUpgradeWouldDropTailscale() {
-		t.Fatal("an untagged binary has nothing to lose")
+	if len(got) != 2 {
+		t.Fatalf("node lines = %q", got)
+	}
+	for _, m := range got {
+		if !strings.HasSuffix(m, "\n") || strings.HasSuffix(m, "\n\n") {
+			t.Errorf("node line %q must end with exactly one newline", m)
+		}
 	}
 }

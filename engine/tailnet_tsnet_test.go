@@ -1,5 +1,3 @@
-//go:build tailscale
-
 package engine
 
 import (

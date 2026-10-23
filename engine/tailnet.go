@@ -15,16 +15,12 @@ import (
 	"github.com/handarbeit/fabrik/warnings"
 )
 
-// This file is the build-tag-independent half of the embedded Tailscale Funnel
+// This file is the library-independent half of the embedded Tailscale Funnel
 // receiver (event_source: tailscale; #2143, ADR 2143). The Tailscale library
-// (tsnet) is touched only by tailnet_tsnet.go behind -tags tailscale; everything
+// (tsnet) is touched only by tailnet_tsnet.go; everything
 // here talks to it through the tailnetNode seam, so the listener acquisition,
 // health, drop/recovery, URL resolution and shutdown are all tested without a
 // tailnet. All request handling is the shared appWebhookTransport's.
-
-// tailscaleBuilt reports whether this binary carries the embedded node. It is a
-// variable only so tests can exercise both refusals in one build.
-var tailscaleBuilt = tailscaleBuiltIn
 
 const (
 	// tailnetUpTimeout bounds how long startup waits for the node to join the
@@ -103,6 +99,16 @@ func redactTailnetLog(s string) string {
 	return tailnetLoginURL.ReplaceAllString(s, "[login URL withheld]")
 }
 
+// withLineEnd ends s with a newline when it lacks one. tsnet's log lines carry
+// none, and the engine log adds none, so without this several node lines run
+// together on one line.
+func withLineEnd(s string) string {
+	if strings.HasSuffix(s, "\n") {
+		return s
+	}
+	return s + "\n"
+}
+
 // startTailscaleTransport starts the embedded Funnel receiver (event_source:
 // tailscale, App auth; #2143). Configuration mistakes were already refused in
 // New(); an Up or Funnel failure here leaves the daemon poll-only and is
@@ -136,7 +142,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 			AuthKey:  authKey,
 			StateDir: stateDir,
 			Logf: func(format string, args ...any) {
-				e.logf(0, tag, "node: %s", redactTailnetLog(fmt.Sprintf(format, args...)))
+				e.logf(0, tag, "node: %s", withLineEnd(redactTailnetLog(fmt.Sprintf(format, args...))))
 			},
 		})
 		if err != nil {

@@ -19,10 +19,6 @@ func TestRefuseUnknownEventSource_AcceptsTailscale(t *testing.T) {
 
 // R5 / AC4: every refusal names the missing setting.
 func TestRefuseTailscaleMisconfigured(t *testing.T) {
-	orig := tailscaleBuilt
-	tailscaleBuilt = true
-	defer func() { tailscaleBuilt = orig }()
-
 	good := Config{EventSource: EventSourceTailscale, TailscaleHostname: "fabrik-models"}
 	const key = "tskey-auth-zzz-secret"
 	tests := []struct {
@@ -68,26 +64,8 @@ func TestRefuseTailscaleMisconfigured(t *testing.T) {
 	}
 }
 
-// AC3 (any build, via the seam): a binary without the embedded node refuses
-// with the build hint, before any other check.
-func TestRefuseTailscaleMisconfigured_NotBuiltIn(t *testing.T) {
-	orig := tailscaleBuilt
-	tailscaleBuilt = false
-	defer func() { tailscaleBuilt = orig }()
-	err := RefuseTailscaleMisconfigured(Config{EventSource: EventSourceTailscale}, false, "", "", false)
-	if err == nil || !strings.Contains(err.Error(), "-tags tailscale") {
-		t.Fatalf("err = %v, want the build hint", err)
-	}
-	if err := RefuseTailscaleMisconfigured(Config{EventSource: EventSourceDirect}, false, "", "", false); err != nil {
-		t.Fatalf("other event sources must be unaffected: %v", err)
-	}
-}
-
 // New() wires the refusal in: a tailscale config with PAT auth fails startup.
 func TestNew_RefusesTailscaleWithoutAppAuth(t *testing.T) {
-	orig := tailscaleBuilt
-	tailscaleBuilt = true
-	defer func() { tailscaleBuilt = orig }()
 	_, err := New(Config{EventSource: EventSourceTailscale, TailscaleHostname: "h", Token: "tok", Owner: "o", Repo: "r", ProjectNum: 1})
 	if err == nil || !strings.Contains(err.Error(), "event_source: tailscale") {
 		t.Fatalf("err = %v", err)

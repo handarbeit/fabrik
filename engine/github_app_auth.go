@@ -389,8 +389,8 @@ func tailscaleStateDir(cfg Config, fabrikDir string) string {
 }
 
 // RefuseTailscaleMisconfigured refuses event_source: tailscale (#2143, ADR 2143)
-// configured in a way that could only produce a silently deaf daemon: a binary
-// built without the tailscale tag, the shared App-webhook mistakes (no App auth,
+// configured in a way that could only produce a silently deaf daemon: the shared
+// App-webhook mistakes (no App auth,
 // empty secret, relative path), no hostname, or no auth key while the state dir
 // holds no node state yet. Configuration mistakes fail startup naming the fix;
 // a runtime fault degrades to poll-only. authKeyValue and secretValue are only
@@ -398,11 +398,6 @@ func tailscaleStateDir(cfg Config, fabrikDir string) string {
 func RefuseTailscaleMisconfigured(cfg Config, appAuthConfigured bool, secretValue, authKeyValue string, stateExists bool) error {
 	if cfg.EventSource != EventSourceTailscale {
 		return nil
-	}
-	if !tailscaleBuilt {
-		return fmt.Errorf("event_source: tailscale needs a binary built with the embedded Tailscale node, " +
-			"but this build does not include it. Build one with `go install -tags tailscale github.com/handarbeit/fabrik@latest` " +
-			"(or `go build -tags tailscale .` from a checkout), or use event_source: direct behind your own tunnel instead")
 	}
 	if err := refuseAppWebhookNoAppAuth(EventSourceTailscale, appAuthConfigured); err != nil {
 		return err
