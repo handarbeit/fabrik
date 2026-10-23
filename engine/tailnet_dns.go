@@ -333,17 +333,32 @@ func (p *funnelDNSProbe) resolve(gen int, name string) {
 	}
 }
 
-// funnelDNSCondition is the R3 panel entry. lastErr is the last probe failure,
-// if the probe could not even find out.
+// funnelDNSCondition is the R3 panel entry. lastErr is the last probe failure:
+// non-nil when the probe could not even find out, in which case the entry says
+// so instead of claiming the name does not resolve (the transport row reports
+// funnel "unknown" and stays healthy for the same state).
 func funnelDNSCondition(name string, lastErr error) warnings.Condition {
+	if lastErr != nil {
+		detail := fmt.Sprintf("The daemon could not check whether the Funnel hostname %s resolves publicly, and has not been able to for %s. "+
+			"The name may or may not be reachable by GitHub; the transport keeps serving, and polling and the periodic reconcile keep the board current. "+
+			"Likely causes: outbound DNS (UDP and TCP port 53) to the authoritative name servers is blocked or intercepted on this host or network. "+
+			"If webhook deliveries do not arrive, also check that Funnel is granted to the node's tag in the tailnet policy (the \"funnel\" node attribute) "+
+			"and that HTTPS certificates are enabled for the tailnet. The entry clears once a check completes and the name resolves.\n\n"+
+			"The last check could not complete: %v", name, funnelDNSGrace, lastErr)
+		return warnings.Condition{
+			Type:        funnelDNSPanelType,
+			Subject:     name,
+			Title:       fmt.Sprintf("Cannot check whether Funnel hostname %s resolves publicly", name),
+			Detail:      detail,
+			Fingerprint: funnelDNSPanelType + ":" + name,
+			LogLine:     fmt.Sprintf("Cannot check whether Funnel hostname %s resolves publicly after %s: %v", name, funnelDNSGrace, lastErr),
+		}
+	}
 	detail := fmt.Sprintf("The Funnel hostname %s has not resolved publicly after %s, so GitHub cannot deliver webhooks to this daemon. "+
 		"Polling and the periodic reconcile keep the board current, at poll latency. Likely causes: DNS propagation of a new node name is still in progress "+
 		"(it can take about 15 minutes); Funnel is not granted to the node's tag in the tailnet policy (the \"funnel\" node attribute); "+
 		"HTTPS certificates are not enabled for the tailnet. The entry clears, and missed deliveries are replayed, once the name resolves.",
 		name, funnelDNSGrace)
-	if lastErr != nil {
-		detail += fmt.Sprintf("\n\nThe last check could not complete: %v", lastErr)
-	}
 	return warnings.Condition{
 		Type:        funnelDNSPanelType,
 		Subject:     name,

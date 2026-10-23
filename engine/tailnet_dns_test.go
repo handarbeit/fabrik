@@ -614,3 +614,28 @@ func TestFunnelDNSProbe_ReplacedLoopCannotReAddClearedPanelEntry(t *testing.T) {
 		t.Fatalf("panel events = %v, want the old report first, then its clear", events)
 	}
 }
+
+// A probe that cannot find out must not tell the operator the name does not
+// resolve: the panel entry says the check could not be made, and keeps the
+// likely causes that apply to a probe failure.
+func TestFunnelDNSCondition_WordingFollowsWhetherTheProbeCouldTell(t *testing.T) {
+	pending := funnelDNSCondition(probeName, nil)
+	if !strings.Contains(pending.Title, "does not resolve publicly yet") ||
+		!strings.Contains(pending.LogLine, "deliveries cannot reach this node") {
+		t.Fatalf("pending entry = %q / %q", pending.Title, pending.LogLine)
+	}
+	unknown := funnelDNSCondition(probeName, errors.New("read udp: i/o timeout"))
+	if !strings.Contains(unknown.Title, "Cannot check whether") ||
+		strings.Contains(unknown.Title, "does not resolve") ||
+		strings.Contains(unknown.LogLine, "cannot reach this node") {
+		t.Fatalf("unknown entry claims a definite failure: %q / %q", unknown.Title, unknown.LogLine)
+	}
+	for _, want := range []string{probeName, "port 53", "i/o timeout"} {
+		if !strings.Contains(unknown.Detail, want) {
+			t.Errorf("unknown detail lacks %q:\n%s", want, unknown.Detail)
+		}
+	}
+	if pending.Key() != unknown.Key() {
+		t.Errorf("the two entries must share a key (so one clears the other): %q vs %q", pending.Key(), unknown.Key())
+	}
+}
