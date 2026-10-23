@@ -217,9 +217,9 @@ func (n *tsnetNode) pollStatus(ctx context.Context, lc *local.Client, tr *tsnetT
 }
 
 // tsnetTracker turns backend-state notifications, netmap notifications and the
-// periodic re-read into deduplicated calls of fn. A failed status read keeps the
-// last known Funnel status (an unreadable status is not evidence that the Funnel
-// came back), and fn runs under the lock so calls are ordered.
+// periodic re-read into deduplicated calls of fn. A failed status read, or a
+// successful one with no Self entry, keeps the last known Funnel status and name
+// (neither is evidence that the Funnel came back), and fn runs under the lock so calls are ordered.
 type tsnetTracker struct {
 	mu          sync.Mutex
 	fn          func(tailnetState)
@@ -253,6 +253,18 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	var st tailnetState
 	if status != nil {
 		st = tsnetStateFrom(status, connected)
+		// A successful read with no Self (a transient gap while the netmap
+		// refreshes) says nothing about the Funnel or the name, so it must not
+		// overwrite what is known: reporting "unknown" would clear an active
+		// Funnel outage and fire a spurious catch-up reconcile.
+		if t.have {
+			if st.Funnel == tailnetFunnelUnknown {
+				st.Funnel = t.last.Funnel
+			}
+			if st.DNSName == "" {
+				st.DNSName = t.last.DNSName
+			}
+		}
 	} else {
 		st = tailnetState{Connected: connected, Funnel: tailnetFunnelUnknown}
 		if t.have {

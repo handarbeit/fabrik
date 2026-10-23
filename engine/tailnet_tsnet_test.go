@@ -102,6 +102,31 @@ func TestTsnetTracker_FailedReadKeepsLastFunnel(t *testing.T) {
 	}
 }
 
+// A successful read with no Self entry (a transient gap while the netmap
+// refreshes) is not evidence that the Funnel came back either: the last known
+// Funnel status and name are kept, so an active outage is not cleared and no
+// spurious recovery follows.
+func TestTsnetTracker_SelflessReadKeepsLastFunnel(t *testing.T) {
+	tr, got := newTestTracker()
+	running := ipn.Running
+	revoked := revokedStatus()
+	revoked.Self.DNSName = "n.t.ts.net."
+	tr.observe(&running, revoked)
+	tr.observe(nil, &ipnstate.Status{BackendState: "Running"}) // read succeeded, Self nil
+	if len(*got) != 1 {
+		t.Fatalf("emitted %d states, want 1 (unchanged): %#v", len(*got), *got)
+	}
+	if st := (*got)[0]; st.Funnel != tailnetFunnelUnavailable || st.DNSName != "n.t.ts.net" {
+		t.Fatalf("state = %#v", st)
+	}
+	// With nothing known yet, a Self-less read still reports unknown.
+	tr2, got2 := newTestTracker()
+	tr2.observe(nil, &ipnstate.Status{BackendState: "Running"})
+	if len(*got2) != 1 || (*got2)[0].Funnel != tailnetFunnelUnknown {
+		t.Fatalf("first Self-less read = %#v", *got2)
+	}
+}
+
 func TestTsnetTracker_DisconnectAndNoBackendYet(t *testing.T) {
 	tr, got := newTestTracker()
 	tr.observe(nil, nil) // nothing known: nothing emitted
