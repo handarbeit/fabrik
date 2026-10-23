@@ -480,7 +480,7 @@ app_webhook_path: /webhook                     # shared with direct
 app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET   # shared with direct
 ```
 
-The auth key is needed **only until the node has joined**: once `tailscale_state_dir` holds the node's state, restarts (including the SIGHUP restart) reuse that node and the key is neither required nor read. That state directory is the node's only persisted credential — keep it out of version control, never share it between daemons, and do not delete it (a lost state directory with a valid key creates a *second* node and a new certificate request, and repeated requests can hit Let's Encrypt rate limits for over a day). Two daemons on one machine need distinct hostnames **and** distinct state directories. Fabrik never logs the key or writes it anywhere; the key variable and the variable `tailscale_auth_key_env` names are scrubbed from worker environments.
+The auth key is needed **only until the node has joined**: once `tailscale_state_dir` holds the node's state, restarts (including the SIGHUP restart) reuse that node and the key is not required. If the key variable is set it is still handed to the node, which ignores it while the node is logged in; if the node's registration expired or was revoked (health shows `NeedsLogin`), restart with a fresh pre-approved key in the variable and the existing node re-authenticates, with no need to touch the state directory. That state directory is the node's only persisted credential — keep it out of version control, never share it between daemons, and do not delete it (a lost state directory with a valid key creates a *second* node and a new certificate request, and repeated requests can hit Let's Encrypt rate limits for over a day). Two daemons on one machine need distinct hostnames **and** distinct state directories. Fabrik never logs the key or writes it anywhere; the key variable and the variable `tailscale_auth_key_env` names are scrubbed from worker environments.
 
 **The webhook URL.** When the node is up the daemon logs it once, built from the name the node *reports* (Tailscale appends a suffix such as `-1` if the hostname was already taken, so it can differ from `tailscale_hostname`):
 
@@ -1527,7 +1527,7 @@ FABRIK_USER=my-personal-username
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
 | `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. Also `FABRIK_NO_BROWSER`. See [Browser-opening during reconcile](#browser-opening-during-reconcile). Distinct from `fabrik init --github-app --no-browser`'s setup-time flag, whose default is unchanged. | `true` (suppressed) |
-| `--event-source` | Event ingestion transport: `poll` (default), `hookdeck`, `direct` or `tailscale`. `hookdeck`, `direct` and `tailscale` require GitHub App auth `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `--event-source` | Event ingestion transport: `poll` (default), `hookdeck`, `direct` or `tailscale`. `hookdeck`, `direct` and `tailscale` require GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `--hookdeck-api-key-env` | Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
 | `--hookdeck-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 | `--replay-failed-deliveries` | Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving (startup pass; `event_source: direct` only, ignored otherwise). Also `FABRIK_REPLAY_FAILED_DELIVERIES` and `replay_failed_deliveries`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | `true` |
@@ -1535,7 +1535,7 @@ FABRIK_USER=my-personal-username
 | `--app-webhook-path` | URL path the direct transport serves. Also `FABRIK_APP_WEBHOOK_PATH`. | `/webhook` |
 | `--app-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source direct` or `tailscale`). Also `FABRIK_APP_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 | `--tailscale-hostname` | Tailnet hostname of the embedded Funnel node. Required with `--event-source tailscale`. Also `FABRIK_TAILSCALE_HOSTNAME`. See [Embedded Tailscale Funnel Receiver](#embedded-tailscale-funnel-receiver-event_source-tailscale). | — |
-| `--tailscale-auth-key-env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (only needed until the node has state). Also `FABRIK_TAILSCALE_AUTH_KEY_ENV`. | `FABRIK_TS_AUTHKEY` |
+| `--tailscale-auth-key-env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (required only until the node has state; a fresh key also re-authenticates a node whose registration expired). Also `FABRIK_TAILSCALE_AUTH_KEY_ENV`. | `FABRIK_TS_AUTHKEY` |
 | `--tailscale-state-dir` | Directory for the embedded Tailscale node's state. Also `FABRIK_TAILSCALE_STATE_DIR`. | `.fabrik/state/tailscale` |
 
 #### Unrecognized `config.yaml` Key Warnings
@@ -1630,7 +1630,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_APP_WEBHOOK_PATH` | `app_webhook_path` | URL path the direct transport serves. | `/webhook` |
 | `FABRIK_APP_WEBHOOK_SECRET_ENV` | `app_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: direct` or `tailscale`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 | `FABRIK_TAILSCALE_HOSTNAME` | `tailscale_hostname` | Tailnet hostname of the embedded Funnel node. Required when `event_source: tailscale`. See [Embedded Tailscale Funnel Receiver](#embedded-tailscale-funnel-receiver-event_source-tailscale). | — |
-| `FABRIK_TAILSCALE_AUTH_KEY_ENV` | `tailscale_auth_key_env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (needed only until the node has state). The key variable is scrubbed from workers. | `FABRIK_TS_AUTHKEY` |
+| `FABRIK_TAILSCALE_AUTH_KEY_ENV` | `tailscale_auth_key_env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (required only until the node has state; a fresh key also re-authenticates a node whose registration expired). The key variable is scrubbed from workers. | `FABRIK_TS_AUTHKEY` |
 | `FABRIK_TAILSCALE_STATE_DIR` | `tailscale_state_dir` | Directory for the embedded node's state (the only persisted credential; created 0700; never shared between daemons). | `.fabrik/state/tailscale` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`

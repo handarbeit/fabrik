@@ -62,7 +62,7 @@ type tailnetNode interface {
 // tailnetNodeConfig is what the factory needs to build a node.
 type tailnetNodeConfig struct {
 	Hostname string
-	// AuthKey is empty when node state already exists. Never logged.
+	// AuthKey may be empty (a node with state needs none). Never logged.
 	AuthKey  string
 	StateDir string
 	// Logf receives the node's user-facing log lines (already redacted).
@@ -131,12 +131,12 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 		if err := os.MkdirAll(stateDir, 0o700); err != nil {
 			return nil, fmt.Errorf("creating tailscale state dir: %w", err)
 		}
-		// The key is read here, only when the node has no state, and goes solely
-		// to the node. It is never logged.
-		authKey := ""
-		if !tailnetStateExists(stateDir) {
-			authKey = os.Getenv(authKeyEnvName)
-		}
+		// The key is read here whenever one is configured and goes solely to the
+		// node. It is never logged. tsnet ignores it for a node that is logged in
+		// from stored state, so passing it is harmless; passing it is also what
+		// lets a node whose registration expired or was revoked (NeedsLogin, state
+		// file still present) re-authenticate with a fresh key on restart.
+		authKey := os.Getenv(authKeyEnvName)
 		n, err := tailnetNodeFactory(tailnetNodeConfig{
 			Hostname: hostname,
 			AuthKey:  authKey,

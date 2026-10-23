@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-2143`
 **Created**: 2026-10-22
-**Status**: Specified
+**Status**: Specified (revised 2026-10-23: R4 changed; the original request below is kept as filed)
 **Input**: User description: "events: embedded Tailscale Funnel receiver (event_source: tailscale) — one tailnet node per daemon via tsnet, behind -tags tailscale
 
 ## Problem
@@ -32,29 +32,29 @@ This issue supplies a different listener to that same transport. It does not add
   app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET   # shared with direct (#2142)
   ```
   Every new `FABRIK_*` name is classified in `internal/workerenv`; the auth key is `Scrubbed`, and so is the variable `tailscale_auth_key_env` names (resolved once, as Hookdeck's are). The auth key is never logged or written to disk by Fabrik (tsnet's own node state in `state_dir` is the only persisted credential).
-- **R4 — build tag.** `tsnet` (wireguard-go, gVisor netstack) is heavy. The listener code compiles only under `-tags tailscale`; a binary built without it refuses `event_source: tailscale` at startup with a message saying how to get a build that has it. The ADR records binary size with and without the tag and decides whether published release binaries carry it.
+- **R4 — no build tag (decision changed 2026-10-23).** `tsnet` (wireguard-go, gVisor netstack) adds about 19.5 MB to the binary, which is not worth a split build (a split build also stops a tailscale daemon from self-upgrading from release assets). The embedded node compiles into every build, release binaries included; there is no `-tags tailscale`, no default-build stub and no "built without the tag" refusal. The `tsnet` interface seam stays so tests need no tailnet. The ADR records the measured sizes and the decision.
 - **R5 — refusals:** #2142's (no App auth, missing secret) plus missing `tailscale_hostname`, and a missing auth key when `state_dir` holds no node state.
 - **R6 — health.** #2142's per-transport row, with this transport's state extended by tailnet connection state and Funnel status (from `tsnet`'s local client). A lost tailnet connection makes the transport unhealthy and is a warnings-panel entry, not silent. Re-establishing it calls the reconnect handler (never on first connect), so the intake's catch-up reconcile runs. Reconcile (ADR-043) stays the safety net.
 - **R7 — App webhook URL check.** `CheckCoverage` additionally compares the App's configured webhook URL (`GET /app/hook/config`, App JWT) with this node's Funnel URL and its content type with `json`, warning through the panel on a mismatch. Unreadable config → skipped with one log line, never fatal.
-- **R8 — clean shutdown and restart.** `Stop` closes the listener and `tsnet.Server`. SIGHUP restart and self-upgrade re-exec must not leave a stale node or listener and must reuse `state_dir` (no new auth key, no duplicate node). tsnet's own logging is routed through `logf` and quietened by default.
+- **R8 — clean shutdown and restart.** `Stop` closes the listener and `tsnet.Server`. SIGHUP restart and self-upgrade re-exec must not leave a stale node or listener and must reuse `state_dir` (no new auth key, no duplicate node). Self-upgrade works as for every other daemon. tsnet's own logging is routed through `logf` and quietened by default, and each routed line ends with a newline.
 
 ## Scope
 
-In: the tsnet listener, build tag, config, refusals, health, the webhook-URL check, tests (`tsnet` behind an interface seam so tests need no tailnet; a default-build test for the refusal), USER_GUIDE operator setup (access-policy `nodeAttrs` granting `funnel` to the tag, HTTPS certificates enabled, tagged pre-approved auth key, App webhook URL/secret/content type), `docs/llms-full.txt` regen, ADR `adrs/2143-embedded-tailscale-funnel.md`.
+In: the tsnet listener, config, refusals, health, the webhook-URL check, tests (`tsnet` behind an interface seam so tests need no tailnet), USER_GUIDE operator setup (access-policy `nodeAttrs` granting `funnel` to the tag, HTTPS certificates enabled, tagged pre-approved auth key, App webhook URL/secret/content type, and a note that a new node's public name can take minutes to resolve), `docs/llms-full.txt` regen, ADR `adrs/2143-embedded-tailscale-funnel.md`.
 
 Out: delivery replay (#2144); any change to #2142's transport beyond what the listener needs; tailnet-only (non-Funnel) exposure.
 
 ## Acceptance
 
-- AC1: Built with `-tags tailscale` and configured, the daemon appears as its own tailnet node and logs its Funnel webhook URL; a signed delivery to it is applied (verified live once on a test bed, recorded in the PR).
+- AC1: Configured, the daemon appears as its own tailnet node and logs its Funnel webhook URL; a signed delivery to it is applied (verified live once on a test bed, recorded in the PR; passed).
 - AC2: `direct` and `tailscale` construct the same transport type (pinned by a test).
-- AC3: Built without the tag, `event_source: tailscale` refuses at startup with the build hint.
+- AC3: Withdrawn. There is no build tag, so no build refuses `event_source: tailscale` for lack of the node.
 - AC4: R5 refusals tested.
 - AC5: Restart with existing `state_dir` and no auth key succeeds and reuses the node.
 - AC6: `fabrik_health` shows tailnet and Funnel state; a simulated tailnet drop marks it unhealthy and its recovery triggers the reconnect handler.
 - AC7: The R7 mismatch warning fires for a wrong URL or content type (stubbed App API).
-- AC8: Binary size with and without the tag and the release-build decision are recorded in the ADR.
-- AC9: Docs, regen, ADR; `go test -race ./...` green in the default build and with `-tags tailscale`."
+- AC8: Binary size with and without the node and the decision that every build carries it are recorded in the ADR.
+- AC9: Docs, regen, ADR; `go test -race ./...` green."
 
 ## Background
 
@@ -83,7 +83,7 @@ An operator running one daemon per GitHub App sets `event_source: tailscale` wit
 
 **Acceptance Scenarios**:
 
-1. **Given** a build with the `tailscale` tag, valid App auth, a webhook secret, `tailscale_hostname`, and a valid auth key, **When** the daemon starts, **Then** a node with that hostname appears in the tailnet and one log line states the Funnel webhook URL.
+1. **Given** valid App auth, a webhook secret, `tailscale_hostname`, and a valid auth key, **When** the daemon starts, **Then** a node with that hostname appears in the tailnet and one log line states the Funnel webhook URL.
 2. **Given** the daemon is running, **When** GitHub sends a correctly signed delivery to that URL, **Then** it is acknowledged and applied exactly as it would be under `event_source: direct`.
 3. **Given** a delivery with a bad signature, **When** it reaches the endpoint, **Then** it is handled by the shared transport's existing signature handling, with no tailscale-specific behaviour.
 
@@ -107,18 +107,17 @@ A daemon that has joined once restarts through SIGHUP, a self-upgrade re-exec, o
 
 ### User Story 3 - Misconfiguration is refused with an actionable message (Priority: P1)
 
-An operator who configures `event_source: tailscale` incorrectly gets a clear refusal at startup instead of a daemon that silently receives nothing. This covers a binary built without the tag, a missing hostname, a missing auth key when no node state exists yet, no GitHub App auth, and a missing webhook secret.
+An operator who configures `event_source: tailscale` incorrectly gets a clear refusal at startup instead of a daemon that silently receives nothing. This covers a missing hostname, a missing auth key when no node state exists yet, no GitHub App auth, and a missing webhook secret.
 
-**Why this priority**: The embedded listener is an opt-in build. An operator on a stock binary needs to be told how to get one.
+**Why this priority**: An operator who configures the new event source needs to be told exactly which setting is missing.
 
-**Independent Test**: In the default build, start with `event_source: tailscale` and verify the refusal names the build requirement. In a build with the tag, drive each of the other refusals and verify each names the missing setting.
+**Independent Test**: Drive each refusal and verify each names the missing setting.
 
 **Acceptance Scenarios**:
 
-1. **Given** a binary built without the `tailscale` tag, **When** `event_source: tailscale` is configured, **Then** startup is refused with a message that says how to obtain a build that includes it.
-2. **Given** `event_source: tailscale` with no `tailscale_hostname`, **When** the daemon starts, **Then** it is refused naming `tailscale_hostname`.
-3. **Given** an empty state directory and no auth key, **When** the daemon starts, **Then** it is refused naming the auth key variable.
-4. **Given** no GitHub App auth, or no webhook secret, **When** the daemon starts, **Then** it is refused with the same refusal `event_source: direct` gives.
+1. **Given** `event_source: tailscale` with no `tailscale_hostname`, **When** the daemon starts, **Then** it is refused naming `tailscale_hostname`.
+2. **Given** an empty state directory and no auth key, **When** the daemon starts, **Then** it is refused naming the auth key variable.
+3. **Given** no GitHub App auth, or no webhook secret, **When** the daemon starts, **Then** it is refused with the same refusal `event_source: direct` gives.
 
 ---
 
@@ -156,7 +155,7 @@ The operator may have pasted the wrong URL, or left the content type as form-enc
 
 ### User Story 6 - Operators can follow the setup end to end (Priority: P2)
 
-An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from the user guide alone. The guide covers the tailnet access-policy and certificate prerequisites, creating a tagged pre-approved auth key, the daemon config, and the GitHub App webhook settings. An ADR records the binary-size trade-off and the decision on release binaries.
+An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from the user guide alone. The guide covers the tailnet access-policy and certificate prerequisites, creating a tagged pre-approved auth key, the daemon config, and the GitHub App webhook settings. An ADR records the binary-size trade-off and the decision that every build carries the node.
 
 **Why this priority**: Most of the setup happens outside Fabrik. Without documentation, the feature cannot be adopted.
 
@@ -181,19 +180,20 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 - `app_webhook_path` is customised: both the served path and the logged URL use it.
 - The auth key environment variable is configured but empty: treated as missing.
 - Self-upgrade exec fails and returns: the listener is still usable, or is re-established, without leaving two listeners.
-- The binary is built with the tag but `event_source` is `direct` or `poll`: no tailnet node is started.
+- `event_source` is `direct` or `poll`: no tailnet node is started, although the node's code is in the binary.
+- A new node's public Funnel name can take several minutes to resolve publicly: early deliveries can fail until it does, and the operator redelivers from the App's Advanced tab.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: `event_source: tailscale` is accepted as a value alongside the existing ones. In a binary built with the `tailscale` tag it starts an embedded tailnet node with the configured hostname and its own state directory. It obtains a public Funnel listener on port 443 with TLS terminated on the node, and hands that listener to the same App webhook transport that `event_source: direct` (#2142) uses.
+- **FR-001**: `event_source: tailscale` is accepted as a value alongside the existing ones. It starts an embedded tailnet node with the configured hostname and its own state directory. It obtains a public Funnel listener on port 443 with TLS terminated on the node, and hands that listener to the same App webhook transport that `event_source: direct` (#2142) uses.
 - **FR-002**: All request handling for this event source (signature verification, dedupe, acknowledgement, ordering, body cap, health row) is the code of the shared transport and intake. A test or static check pins that `direct` and `tailscale` construct the same transport type.
 - **FR-003**: Once the node is up, the daemon resolves its tailnet DNS name and logs, once at startup, the full App webhook URL of the form `https://<hostname>.<tailnet>.ts.net<app_webhook_path>`. The name used is the one the node reports, not the configured string.
 - **FR-004**: Configuration uses flat keys resolved flag > environment > YAML: `tailscale_hostname` (required), `tailscale_auth_key_env` (the name of the environment variable holding the key; default `FABRIK_TS_AUTHKEY`), `tailscale_state_dir` (default `.fabrik/state/tailscale`, created with mode 0700). `app_webhook_path` and `app_webhook_secret_env` are the shared #2142 keys with the same defaults and meaning.
 - **FR-005**: Every new `FABRIK_*` name is classified in `internal/workerenv`. The auth key variable and the variable named by `tailscale_auth_key_env` are scrubbed from worker environments, the latter resolved once at construction as Hookdeck's are. The classification test must pass with no unclassified literal.
 - **FR-006**: Fabrik never logs the auth key and never writes it to disk. The embedded node's own state in `tailscale_state_dir` is the only persisted credential.
-- **FR-007**: The listener code compiles only under the `tailscale` build tag. A binary built without the tag refuses `event_source: tailscale` at startup, with a message naming how to build or obtain a binary that supports it. The default build's dependency graph and behaviour are otherwise unchanged.
+- **FR-007**: The embedded node compiles into every build; there is no build tag. Behaviour for every other `event_source` value is unchanged.
 - **FR-008**: Startup refuses `event_source: tailscale` when: GitHub App auth is not configured, or the webhook secret is missing (the same refusals as `direct`); `tailscale_hostname` is empty; or the auth key is missing or empty while `tailscale_state_dir` holds no node state. Each refusal names the missing setting.
 - **FR-009**: With existing node state in `tailscale_state_dir`, the daemon starts without an auth key and reuses the existing node. It does not create a second node.
 - **FR-010**: The transport's health row extends the shared per-transport row with the tailnet connection state and the Funnel status, read from the embedded node's local client, and `fabrik_health` exposes both.
@@ -202,11 +202,11 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 - **FR-013**: The coverage check additionally reads the App's webhook configuration using App credentials and compares its URL with this node's Funnel URL, and its content type with `json`. A mismatch of either produces a warnings-panel warning naming the expected and actual values.
 - **FR-014**: When the App's webhook configuration cannot be read, the URL check is skipped with a single log line. It is never fatal and produces no panel warning.
 - **FR-015**: `Stop` closes the listener and the embedded node. SIGHUP restart and self-upgrade re-exec close them before exec, leave no stale node or listener, and reuse the state directory in the new process with no new auth key and no duplicate node.
-- **FR-016**: The embedded node's own logging is routed through the engine's logging path and is quiet by default.
-- **FR-017**: The embedded-node dependency is accessed behind an interface seam so unit and sim tests exercise listener acquisition, health, drop and recovery, URL resolution and shutdown without a real tailnet. A test in the default build covers the missing-tag refusal.
-- **FR-018**: `docs/USER_GUIDE.md` gains an operator section for this event source covering: the access-policy `nodeAttrs` entry granting `funnel` to the node's tag, HTTPS certificates enabled for the tailnet, creating a tagged pre-approved auth key, the Fabrik configuration, and the App's webhook URL, secret and `json` content type. Flag, environment and YAML references list the new settings. `docs/llms-full.txt` is regenerated in the same change.
-- **FR-019**: `adrs/2143-embedded-tailscale-funnel.md` records the decision, the binary size with and without the tag, and the decision on whether published release binaries include the tag.
-- **FR-020**: Tests pass under `go test -race ./...` in the default build and with `-tags tailscale`.
+- **FR-016**: The embedded node's own logging is routed through the engine's logging path and is quiet by default. Each routed line ends with a newline.
+- **FR-017**: The embedded-node dependency is accessed behind an interface seam so unit and sim tests exercise listener acquisition, health, drop and recovery, URL resolution and shutdown without a real tailnet.
+- **FR-018**: `docs/USER_GUIDE.md` gains an operator section for this event source covering: the access-policy `nodeAttrs` entry granting `funnel` to the node's tag, HTTPS certificates enabled for the tailnet, creating a tagged pre-approved auth key, the Fabrik configuration, and the App's webhook URL, secret and `json` content type. A setup step notes that a new node's public Funnel name can take several minutes to resolve, so the operator redelivers from the App's Advanced tab once it does. Flag, environment and YAML references list the new settings. `docs/llms-full.txt` is regenerated in the same change.
+- **FR-019**: `adrs/2143-embedded-tailscale-funnel.md` records the decision, the measured binary size with and without the node, and the decision that every build, release binaries included, carries the node.
+- **FR-020**: Tests pass under `go test -race ./...`.
 
 ### Key Entities *(if applicable)*
 
@@ -219,14 +219,14 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 
 ### Measurable Outcomes
 
-- **SC-001**: On a live test bed, a daemon built with the tag joins the tailnet as its own machine, logs its webhook URL, and applies a real signed GitHub delivery sent to it. This is recorded in the PR.
+- **SC-001**: On a live test bed, a daemon joins the tailnet as its own machine, logs its webhook URL, and applies a real signed GitHub delivery sent to it. This is recorded in the PR.
 - **SC-002**: A restart with a populated state directory and no auth key succeeds, and the tailnet shows exactly one node for that daemon afterwards.
-- **SC-003**: Every misconfiguration listed in FR-007 and FR-008 is refused at startup, and each refusal message names the specific setting or build requirement. Zero such cases start a daemon that receives nothing silently.
+- **SC-003**: Every misconfiguration listed in FR-008 is refused at startup, and each refusal message names the specific setting. Zero such cases start a daemon that receives nothing silently.
 - **SC-004**: A simulated tailnet drop produces an unhealthy transport and a panel entry. Recovery clears the entry and triggers exactly one reconnect handler call. The first connect triggers none.
 - **SC-005**: A wrong App webhook URL or a non-`json` content type produces a panel warning in 100% of stubbed cases. An unreadable config produces none and does not fail startup.
 - **SC-006**: `direct` and `tailscale` are shown by a test to construct the same transport type, so no second copy of request handling exists.
-- **SC-007**: The default build's behaviour for every other `event_source` value is unchanged. `go test -race ./...` passes in both the default build and the `tailscale` build.
-- **SC-008**: The ADR states the binary size with and without the tag and a release-build decision, and the doc bundle regeneration produces no diff.
+- **SC-007**: Behaviour for every other `event_source` value is unchanged. `go test -race ./...` passes.
+- **SC-008**: The ADR states the binary size with and without the node and the decision that every build carries it, and the doc bundle regeneration produces no diff.
 
 ## Assumptions
 
@@ -234,11 +234,11 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 - Funnel exposure on port 443 is the only exposure mode. Tailnet-only access is out of scope.
 - The operator has already enabled HTTPS certificates for the tailnet and granted the `funnel` node attribute to the node's tag. Fabrik does not configure the tailnet policy itself and only documents it.
 - The auth key is a tagged, pre-approved key. Fabrik does not mint keys or call the Tailscale control API.
-- Adding the embedded-node library to the module's dependencies is acceptable, even though the project minimises dependencies, because the code that uses it compiles only under the tag. Whether the default build's dependency graph and module sizes stay unchanged is a point the ADR addresses.
+- Adding the embedded-node library to the module's dependencies is acceptable, even though the project minimises dependencies, because its use is isolated to one adapter file behind the interface seam. The ADR records the module-graph effect.
 - Distinct daemons on one machine use distinct hostnames and distinct state directories.
 - The reconnect handler and the reconcile it triggers are the intake's existing ones (#2351). No change to them is needed.
 - The default state directory is relative to the daemon's `.fabrik/` directory, consistent with other persisted state.
-- Whether published release binaries carry the tag is decided in the ADR from the measured size difference, not fixed by this spec.
+- Every build, release binaries included, carries the node (decision of 2026-10-23, about +19.5 MB), so a tailscale daemon self-upgrades like any other.
 
 ## Out of Scope *(optional)*
 

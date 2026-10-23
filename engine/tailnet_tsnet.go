@@ -50,7 +50,7 @@ func newTailnetNode(cfg tailnetNodeConfig) (tailnetNode, error) {
 		srv: &tsnet.Server{
 			Hostname: cfg.Hostname,
 			Dir:      cfg.StateDir,
-			AuthKey:  cfg.AuthKey, // ignored by tsnet when node state exists
+			AuthKey:  cfg.AuthKey, // tsnet ignores it for a node logged in from stored state
 			// The backend's own logs stay discarded (Logf nil); the user-facing
 			// lines (including any login URL, which cfg.Logf redacts) go to logf.
 			UserLogf: logf,

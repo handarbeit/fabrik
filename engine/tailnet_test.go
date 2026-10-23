@@ -205,7 +205,7 @@ func TestTailscale_SharesTheDirectTransportType(t *testing.T) {
 	}
 }
 
-// US2 / AC5: node state in the state dir means no auth key is read or passed.
+// US2 / AC5: node state in the state dir makes the auth key optional (none is passed when none is set).
 func TestTailscale_ExistingStateReusesNodeWithoutAuthKey(t *testing.T) {
 	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	isolateWarnings(t)
@@ -232,8 +232,10 @@ func TestTailscale_ExistingStateReusesNodeWithoutAuthKey(t *testing.T) {
 	}
 }
 
-// A key in the environment is not handed to a node that already has state.
-func TestTailscale_KeyNotPassedWhenStateExists(t *testing.T) {
+// A key in the environment is handed to the node even when state exists: tsnet
+// ignores it for a logged-in node, and it is what re-authenticates a node whose
+// registration expired or was revoked (NeedsLogin with the state file present).
+func TestTailscale_KeyPassedWhenStateExists(t *testing.T) {
 	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	isolateWarnings(t)
 	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
@@ -247,8 +249,8 @@ func TestTailscale_KeyNotPassedWhenStateExists(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, tailnetNodeStateFile), []byte("x"), 0o600)
 	cleanup := eng.setUpIngestion(context.Background(), nil)
 	defer cleanup()
-	if (*nodes)[0].cfg.AuthKey != "" {
-		t.Fatal("auth key was handed to a node with existing state")
+	if len(*nodes) != 1 || (*nodes)[0].cfg.AuthKey != tailscaleTestKey {
+		t.Fatal("a configured auth key must reach the node even when state exists, so a revoked node can re-authenticate")
 	}
 }
 
