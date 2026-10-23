@@ -24,12 +24,13 @@ package gate
 
 import (
 	"fmt"
-	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 )
 
 // Exit codes. scripts/cut-release.sh's interpret_e2e_exit_code keys on these;

@@ -124,6 +124,11 @@ func StripKeys() []string {
 		"FABRIK_APP_WEBHOOK_PATH",
 		"FABRIK_APP_WEBHOOK_SECRET_ENV",
 		"FABRIK_DIRECT_LISTEN",
+		// The default names of the per-bed secrets: a value exported in the
+		// operator's shell would otherwise beat each bed's own .env and be shared
+		// between beds. (A bed that names a custom variable keeps it in its .env.)
+		"FABRIK_TS_AUTHKEY",
+		"FABRIK_GITHUB_WEBHOOK_SECRET",
 	}
 }
 

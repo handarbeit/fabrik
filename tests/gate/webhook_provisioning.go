@@ -2,10 +2,11 @@ package gate
 
 import (
 	"fmt"
-	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 )
 
 // CheckBedWebhookProvisioning is the static, no-spend half of the webhook bed
