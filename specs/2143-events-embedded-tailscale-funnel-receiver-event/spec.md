@@ -36,7 +36,7 @@ This issue supplies a different listener to that same transport. It does not add
 - **R5 — refusals:** #2142's (no App auth, missing secret) plus missing `tailscale_hostname`, and a missing auth key when `state_dir` holds no node state.
 - **R6 — health.** #2142's per-transport row, with this transport's state extended by tailnet connection state and Funnel status (from `tsnet`'s local client). A lost tailnet connection makes the transport unhealthy and is a warnings-panel entry, not silent. Re-establishing it calls the reconnect handler (never on first connect), so the intake's catch-up reconcile runs. Reconcile (ADR-043) stays the safety net.
 - **R7 — App webhook URL check.** `CheckCoverage` additionally compares the App's configured webhook URL (`GET /app/hook/config`, App JWT) with this node's Funnel URL and its content type with `json`, warning through the panel on a mismatch. Unreadable config → skipped with one log line, never fatal.
-- **R8 — clean shutdown and restart.** `Stop` closes the listener and `tsnet.Server`. SIGHUP restart and self-upgrade re-exec must not leave a stale node or listener and must reuse `state_dir` (no new auth key, no duplicate node). Self-upgrade works as for every other daemon. tsnet's own logging is routed through `logf` and quietened by default, and each routed line ends with a newline.
+- **R8 — clean shutdown and restart.** `Stop` closes the listener and `tsnet.Server`. A SIGHUP restart and a self-upgrade re-exec must not leave a stale node or listener and must reuse `state_dir` (no new auth key, no duplicate node). Self-upgrade works as for every other daemon. The SIGHUP restart stops the node before the exec; the self-upgrade exec does not stop it (a successful exec replaces the process and the new one reuses `state_dir`; a failed exec leaves exactly one running listener; see ADR 2143 decision 7). tsnet's own logging is routed through `logf` and quietened by default, and each routed line ends with a newline.
 
 ## Scope
 
@@ -100,7 +100,7 @@ A daemon that has joined once restarts through SIGHUP, a self-upgrade re-exec, o
 **Acceptance Scenarios**:
 
 1. **Given** a state directory holding node state from an earlier run, **When** the daemon starts with no auth key, **Then** it starts successfully and reuses that node.
-2. **Given** a running daemon, **When** it performs a SIGHUP restart or a self-upgrade re-exec, **Then** the listener and tailnet server are closed before the exec, and the new process reuses the state directory.
+2. **Given** a running daemon, **When** it performs a SIGHUP restart, **Then** the listener and tailnet server are closed before the exec, and the new process reuses the state directory. **When** it performs a self-upgrade re-exec, **Then** the node is not stopped first: the exec replaces the process, the new process reuses the state directory, and a failed exec leaves exactly one running listener (ADR 2143 decision 7).
 3. **Given** `Stop` is called, **When** it returns, **Then** the listener and the tailnet server are closed.
 
 ---
@@ -170,7 +170,7 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 
 ### Edge Cases
 
-- The auth key is supplied but the state directory already holds node state: the existing state is reused and the key is not required or consumed.
+- The auth key is supplied but the state directory already holds node state: the existing state is reused and the key is not required. If the variable is set it is still handed to the node, which ignores it while the node is logged in; a node whose registration expired or was revoked (`NeedsLogin`) re-authenticates with it on restart, with no need to delete the state directory.
 - The state directory exists but is corrupt or belongs to a different node identity: the failure surfaces as a startup refusal or transport-unhealthy state with the underlying reason, not a silent empty listener.
 - The state directory does not exist: it is created with mode 0700.
 - The configured hostname is already taken in the tailnet: the node's actual name may differ from the configured one, so the logged URL must be built from the name the node reports, not the configured string.
@@ -201,7 +201,7 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 - **FR-012**: Re-establishing a lost tailnet connection invokes the intake's reconnect handler so a catch-up reconcile runs. It is never invoked on the first connect after startup.
 - **FR-013**: The coverage check additionally reads the App's webhook configuration using App credentials and compares its URL with this node's Funnel URL, and its content type with `json`. A mismatch of either produces a warnings-panel warning naming the expected and actual values.
 - **FR-014**: When the App's webhook configuration cannot be read, the URL check is skipped with a single log line. It is never fatal and produces no panel warning.
-- **FR-015**: `Stop` closes the listener and the embedded node. SIGHUP restart and self-upgrade re-exec close them before exec, leave no stale node or listener, and reuse the state directory in the new process with no new auth key and no duplicate node.
+- **FR-015**: `Stop` closes the listener and the embedded node. The SIGHUP restart stops the transports (so closes them) before the exec. The self-upgrade exec does not stop them: a successful exec replaces the process, and a failed exec leaves exactly one running listener (ADR 2143 decision 7). Either way no stale node or listener is left behind, and the new process reuses the state directory with no new auth key and no duplicate node.
 - **FR-016**: The embedded node's own logging is routed through the engine's logging path and is quiet by default. Each routed line ends with a newline.
 - **FR-017**: The embedded-node dependency is accessed behind an interface seam so unit and sim tests exercise listener acquisition, health, drop and recovery, URL resolution and shutdown without a real tailnet.
 - **FR-018**: `docs/USER_GUIDE.md` gains an operator section for this event source covering: the access-policy `nodeAttrs` entry granting `funnel` to the node's tag, HTTPS certificates enabled for the tailnet, creating a tagged pre-approved auth key, the Fabrik configuration, and the App's webhook URL, secret and `json` content type. A setup step notes that a new node's public Funnel name can take several minutes to resolve, so the operator redelivers from the App's Advanced tab once it does. Flag, environment and YAML references list the new settings. `docs/llms-full.txt` is regenerated in the same change.
