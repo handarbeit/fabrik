@@ -125,7 +125,7 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	requireTrainBed(t, env)
 
 	if bedWebhooksEnabled(env) {
-		t.Skip("bed has a webhook transport on this leg — poll 1 hydrates Queued members before batching, so there is no cold window to exercise (run it on a poll leg; the event-source matrix axis that gives it a structural skip here is #2427)")
+		t.Skip("bed has a webhook transport on this leg — poll 1 hydrates Queued members before batching, so there is no cold window to exercise (run it on a poll leg; the skip is structural on a webhook cell, */*/webhook)")
 	}
 
 	repo := env.RepoAlpha
@@ -376,6 +376,24 @@ func fileExistsOnRef(env *Env, repo, path, ref string) (bool, error) {
 func isNotFoundOutput(out string) bool {
 	return strings.Contains(out, "HTTP 404") || strings.Contains(out, "Not Found")
 }
+
+// webhookEffectMissing reports that a test did not observe an effect only a
+// webhook delivery can produce (#2426, FR-005). On a webhook leg the gate's
+// delivery preflight has already proved delivery, so the missing effect is a
+// defect in the ingestion path and fails the test; on any other leg the scenario
+// proves nothing and the test is Inconclusive, as before. It reaches
+// bedWebhooksEnabled, so a caller is an events: sensitive test in the registry.
+func webhookEffectMissing(t testing.TB, env *Env, format string, args ...any) {
+	t.Helper()
+	if webhookEffectMissingFails(bedWebhooksEnabled(env)) {
+		t.Fatalf("webhook effect missing on a webhook leg (delivery was proved by the preflight): "+format, args...)
+	}
+	Inconclusive(t, format, args...)
+}
+
+// webhookEffectMissingFails is the leg-keyed decision: fail on a webhook leg,
+// Inconclusive otherwise.
+func webhookEffectMissingFails(webhookLeg bool) bool { return webhookLeg }
 
 // bedWebhooksEnabled reports whether the bed engine would receive webhooks on this
 // leg: the leg's effective event source attaches a webhook transport (#2408,

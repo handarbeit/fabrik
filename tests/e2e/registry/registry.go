@@ -142,6 +142,12 @@ type Entry struct {
 	Train Sensitivity `json:"train"`
 	// TrainReason is one non-empty line, required iff Train == sensitive.
 	TrainReason string `json:"train_reason,omitempty"`
+	// Events is whether the test is sensitive to how the engine ingests GitHub
+	// events (poll-only | webhook as the primary wake source): ordering, dedupe,
+	// echo, wake-ups, reconcile, replay (#2426, ADR-2426). Required, no default.
+	Events Sensitivity `json:"events"`
+	// EventsReason is one non-empty line, required iff Events == sensitive.
+	EventsReason string `json:"events_reason,omitempty"`
 	// Exclusive marks a test that takes over the whole bed: it stops, restarts or
 	// reconfigures it, or holds or poisons bed-wide state (#1977, ADR-1977). The
 	// gate runs exclusive tests serially, last in the leg, so no shared test ever
@@ -204,15 +210,35 @@ func (r *Registry) IsolationOf() map[string]Isolation {
 	return out
 }
 
-// MatchLeg reports whether the leg label ("auth/train", e.g. "app/off") matches
-// pattern, a "<auth>/<train>" pair in which either part may be "*".
+// MatchLeg reports whether the leg label matches pattern. A label is
+// "<auth>/<train>" for a poll cell ("app/off") and "<auth>/<train>/webhook" for a
+// webhook cell (#2426); a missing third part means events "poll". A pattern is
+// "<auth>/<train>" (matches any events value) or "<auth>/<train>/<events>", and
+// any part may be "*".
 func MatchLeg(pattern, label string) bool {
-	pa, pt, ok := strings.Cut(pattern, "/")
-	la, lt, ok2 := strings.Cut(label, "/")
+	pa, pt, pe, ok := splitLeg(pattern, false)
+	la, lt, le, ok2 := splitLeg(label, true)
 	if !ok || !ok2 {
 		return false
 	}
-	return (pa == "*" || pa == la) && (pt == "*" || pt == lt)
+	return (pa == "*" || pa == la) && (pt == "*" || pt == lt) && (pe == "" || pe == "*" || pe == le)
+}
+
+// splitLeg splits a two- or three-part leg string. When defaultPoll is set, a
+// missing events part is read as "poll"; otherwise it stays empty (a two-part
+// pattern that constrains no events value).
+func splitLeg(s string, defaultPoll bool) (auth, train, events string, ok bool) {
+	parts := strings.Split(s, "/")
+	switch len(parts) {
+	case 2:
+		if defaultPoll {
+			return parts[0], parts[1], "poll", true
+		}
+		return parts[0], parts[1], "", true
+	case 3:
+		return parts[0], parts[1], parts[2], true
+	}
+	return "", "", "", false
 }
 
 // SkipOK reports whether a skip of this test on the leg is structurally expected.

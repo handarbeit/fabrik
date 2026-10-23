@@ -98,7 +98,7 @@ func validateEntry(e Entry, simSet map[string]bool) []string {
 	out = append(out, validateTraversal(e)...)
 	for _, p := range e.SkipOKLegs {
 		if !validLegPattern(p) {
-			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>\" with auth pat|app|*, train off|on|*)", p)
+			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>[/<events>]\" with auth pat|app|*, train off|on|*, events poll|webhook|*)", p)
 		}
 	}
 	return out
@@ -132,6 +132,7 @@ func validateSensitivity(e Entry) []string {
 	}
 	axis("auth", e.Auth, e.AuthReason)
 	axis("train", e.Train, e.TrainReason)
+	axis("events", e.Events, e.EventsReason)
 	if strings.Contains(e.Name, selfRecognitionMarker) && e.Auth != Sensitive {
 		add("a %s test must be auth: %s", selfRecognitionMarker, Sensitive)
 	}
@@ -234,6 +235,26 @@ func CheckPollSeamCallers(reg *Registry, callers []string) []string {
 	return problems
 }
 
+// CheckBedWebhookCallers reports every live test in callers (the set that reaches
+// bedWebhooksEnabled or the webhook-effect helper, from ScanBedWebhookCallers —
+// a HoldPolls caller that isolates a webhook effect is among them) whose registry
+// entry is not events: sensitive (#2426). Entries that do not exist are Check's
+// concern.
+func CheckBedWebhookCallers(reg *Registry, callers []string) []string {
+	byName := map[string]Entry{}
+	for _, e := range reg.Tests {
+		byName[e.Name] = e
+	}
+	var problems []string
+	for _, n := range callers {
+		if e, ok := byName[n]; ok && e.Events != Sensitive {
+			problems = append(problems, fmt.Sprintf("%s: reaches a webhook-mode call (%s) and so must be events: %s",
+				n, strings.Join(BedWebhookCalls, " / "), Sensitive))
+		}
+	}
+	return problems
+}
+
 // CheckParallelConsistency reports every live test whose t.Parallel() use
 // disagrees with its class: a shared test must call t.Parallel() (otherwise it
 // would silently run serially at the head of the shared phase, with no gain) and
@@ -321,8 +342,11 @@ func validStage(s Stage) bool {
 }
 
 func validLegPattern(p string) bool {
-	auth, train, ok := strings.Cut(p, "/")
+	auth, train, events, ok := splitLeg(p, false)
 	if !ok {
+		return false
+	}
+	if strings.Count(p, "/") == 2 && events != "*" && events != "poll" && events != "webhook" {
 		return false
 	}
 	return (auth == "*" || auth == "pat" || auth == "app") && (train == "*" || train == "off" || train == "on")

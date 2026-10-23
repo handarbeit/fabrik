@@ -166,6 +166,15 @@ var BedLifecycleCalls = []string{
 // test that reaches one must be exclusive.
 var PollSeamCalls = []string{"HoldPolls", "TriggerPoll", "ReleasePolls"}
 
+// BedWebhookCalls are the harness functions that branch on, or depend on, the bed
+// running with webhook delivery (#2426, ADR-2426). A test that reaches one — or
+// holds polls to isolate a webhook effect and so reaches one too — has a subject
+// that changes with how the engine ingests events, and so must be events:
+// sensitive. webhookEffectMissing is the FR-005 helper; it reaches
+// bedWebhooksEnabled itself, so listing it keeps a rename of either from hiding a
+// caller.
+var BedWebhookCalls = []string{"bedWebhooksEnabled", "webhookEffectMissing"}
+
 // ScanIdentityAssertCallers returns the top-level Test* functions in dir
 // (tests/e2e) that reach one of IdentityAssertions: by calling it directly, or by
 // calling — transitively, by name, through same-directory non-test functions — a
@@ -189,6 +198,13 @@ func ScanBedLifecycleCallers(dir string) ([]string, error) {
 // same-directory helper. Result is sorted.
 func ScanPollSeamCallers(dir string) ([]string, error) {
 	return scanReachingTests(dir, PollSeamCalls)
+}
+
+// ScanBedWebhookCallers returns the top-level Test* functions in dir that reach
+// one of BedWebhookCalls, directly, from a nested closure or through a
+// same-directory helper. Result is sorted.
+func ScanBedWebhookCallers(dir string) ([]string, error) {
+	return scanReachingTests(dir, BedWebhookCalls)
 }
 
 // ScanParallelTests returns the top-level Test* functions in dir whose own body
