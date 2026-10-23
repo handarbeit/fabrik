@@ -283,14 +283,19 @@ func (g *Gate) ProbeWebhookDelivery(ctx context.Context, cell Cell) error {
 				}
 			}
 			if urlChecked {
-				ok, detail := g.probeOneDelivery(ctx, scratch, row, attempt, interval)
+				ok, step, detail := g.probeOneDelivery(ctx, scratch, row, attempt, interval)
+				if step == bedevents.StepProbeSetup {
+					// The probe's own write failed (token scope, repo access): not a
+					// Funnel-settling condition, so it is not retried.
+					return fail(step, detail)
+				}
 				if ok {
 					res.Status = DeliveryOK
 					res.WaitedSeconds = g.Now().Sub(start).Seconds()
 					g.outf("   delivery reached %s after %d attempt(s) (%.0fs)\n", bed, res.Attempts, res.WaitedSeconds)
 					return nil
 				}
-				lastStep, lastDetail = bedevents.StepNoDelivery, detail
+				lastStep, lastDetail = step, detail
 				continue // probeOneDelivery already waited out an interval
 			}
 		}
@@ -306,29 +311,30 @@ func (g *Gate) ProbeWebhookDelivery(ctx context.Context, cell Cell) error {
 // waits one interval for it. The observation must be a delivery NEWER than the
 // baseline read just before the write; when the App's delivery log is readable it
 // must also show the probe's own event, so a replayed older delivery cannot satisfy
-// it. detail explains a miss.
-func (g *Gate) probeOneDelivery(ctx context.Context, s *deliveryScratch, before TransportRow, attempt int, interval time.Duration) (bool, string) {
+// it. step and detail explain a miss: StepNoDelivery, or StepProbeSetup when the
+// probe's own write failed.
+func (g *Gate) probeOneDelivery(ctx context.Context, s *deliveryScratch, before TransportRow, attempt int, interval time.Duration) (bool, string, string) {
 	writeAt := g.Now()
 	if err := s.toggleLabel(ctx, attempt); err != nil {
-		return false, fmt.Sprintf("the probe's own write failed: %v (a probe-setup problem, not a delivery one)", err)
+		return false, bedevents.StepProbeSetup, fmt.Sprintf("the probe's own write failed: %v (a probe-setup problem — check the bed token's issues:write access on the alpha repo — not a delivery one)", err)
 	}
 	g.Sleep(interval)
 	after, err := g.Delivery.TransportRow(ctx, g.Cfg.TestBed)
 	if err != nil || !after.Present {
-		return false, "the bed daemon stopped answering while waiting for the delivery"
+		return false, bedevents.StepNoDelivery, "the bed daemon stopped answering while waiting for the delivery"
 	}
 	if !after.LastDelivery.After(before.LastDelivery) {
-		return false, g.explainMissingDelivery(ctx, writeAt)
+		return false, bedevents.StepNoDelivery, g.explainMissingDelivery(ctx, writeAt)
 	}
 	if ds, derr := g.Delivery.AppDeliveries(ctx, g.Cfg.TestBed); derr == nil && len(ds) > 0 {
 		for _, d := range ds {
 			if d.Event == "issues" && d.Action == "labeled" && !d.DeliveredAt.Before(writeAt.Add(-deliveryClockSkew)) && d.StatusCode >= 200 && d.StatusCode < 300 {
-				return true, ""
+				return true, "", ""
 			}
 		}
-		return false, "the daemon's last-delivery time moved, but the App's delivery log shows no successful issues delivery for the probe's write (an older delivery was replayed)"
+		return false, bedevents.StepNoDelivery, "the daemon's last-delivery time moved, but the App's delivery log shows no successful issues delivery for the probe's write (an older delivery was replayed)"
 	}
-	return true, ""
+	return true, "", ""
 }
 
 // explainMissingDelivery turns the App's delivery log into the most likely cause of

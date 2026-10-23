@@ -426,3 +426,28 @@ func TestProbeWebhookDeliveryUsesOneFixedLabel(t *testing.T) {
 		t.Errorf("want exactly the fixed label %q across all attempts, got %v", deliveryProbeLabel, seen)
 	}
 }
+
+// A failed probe write (the bed PAT lacks issues:write on alpha, so creating the
+// scratch issue fails) is a setup problem: it fails at probe-setup, is not retried
+// like a Funnel that is still settling, and is not reported as a missing delivery.
+func TestProbeWebhookDeliveryWriteFailureIsProbeSetupAndNotRetried(t *testing.T) {
+	fd := &fakeDelivery{row: upRow(), hookURL: probeFunnelURL, deliver: true}
+	g, fe, _ := deliveryGate(t, fd)
+	creates := 0
+	fe.handler = func(_ context.Context, c Cmd) Result {
+		if strings.Contains(argsLine(c), "POST repos/") && strings.Contains(argsLine(c), "/issues") && !strings.Contains(argsLine(c), "/labels") {
+			creates++
+		}
+		return Result{ExitCode: 1} // every gh call fails, as with a token that cannot write
+	}
+	msg := failureOf(t, g.ProbeWebhookDelivery(context.Background(), Cell{Auth: "app", Train: "on"}))
+	if !strings.Contains(msg, bedevents.StepProbeSetup) || strings.Contains(msg, `step "`+bedevents.StepNoDelivery) {
+		t.Errorf("a failed write must fail at %s, not %s: %s", bedevents.StepProbeSetup, bedevents.StepNoDelivery, msg)
+	}
+	if creates != 1 {
+		t.Errorf("a write failure must not be retried: %d create attempts", creates)
+	}
+	if got := g.probes.Delivery[len(g.probes.Delivery)-1]; got.FailedStep != bedevents.StepProbeSetup || got.Attempts != 1 {
+		t.Errorf("archived result = %+v", got)
+	}
+}
