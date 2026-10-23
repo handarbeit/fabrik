@@ -308,3 +308,68 @@ func TestRunLegProbesWebhookLegsOnly(t *testing.T) {
 		})
 	}
 }
+
+// The delivery preflight runs after beginArchive wrote probes.json, so the leg
+// archive's Finish must rewrite it: on a failed probe (RunLeg returns at once) and
+// on a pass alike, the result and failed step must reach the file (SC-004).
+func TestDeliveryProbeResultIsArchivedInTheLegDirectory(t *testing.T) {
+	cell := Cell{Auth: "app", Train: "on", Parallel: "2"}
+	run := func(t *testing.T, fd *fakeDelivery) (string, error) {
+		lf := &legFake{suiteOut: passStream}
+		g, _, _ := newLegGate(t, lf)
+		mustWrite(t, g.Cfg.TestBed+"/.env", "FABRIK_TOKEN=bed-token\nFABRIK_TAILSCALE_HOSTNAME=bed-a\n")
+		mustWrite(t, g.Cfg.TestBed+"/bed-run.log", "Fabrik starting 0.1.0 (abc)\n[tailscale] App webhook URL: "+probeFunnelURL+" (secret from $X)\n")
+		var clockMu sync.Mutex
+		now := time.Unix(2000, 0)
+		g.Now = func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
+		g.Sleep = func(d time.Duration) { clockMu.Lock(); now = now.Add(d); clockMu.Unlock() }
+		fe := g.Exec.(*fakeExec)
+		inner := fe.handler
+		fe.handler = func(ctx context.Context, c Cmd) Result {
+			line := argsLine(c)
+			switch {
+			case c.Name == "gh" && strings.Contains(line, "POST repos/") && strings.HasSuffix(strings.Split(line, " -f ")[0], "/issues"):
+				writeStdout(c, "42\n")
+				return Result{}
+			case c.Name == "gh" && strings.Contains(line, "/issues/42/labels"):
+				fd.wrote(g.Now())
+				return Result{}
+			case c.Name == "gh" && strings.Contains(line, "/issues/42"):
+				return Result{}
+			}
+			return inner(ctx, c)
+		}
+		l := testLedger(t)
+		g.cov = &covState{ledger: l, invocation: "inv-1", noRecord: true}
+		g.Delivery = fd
+		g.Cfg.EventSource = bedevents.Tailscale
+		g.Cfg.DeliveryProbeWait = 60 * time.Second
+		g.Cfg.DeliveryProbeInterval = 15 * time.Second
+		err := g.RunLeg(context.Background(), cell)
+		b, rerr := os.ReadFile(filepath.Join(l.ArchiveCellDir(cellDirName(cell), "inv-1"), "probes.json"))
+		if rerr != nil {
+			t.Fatalf("no probes.json in the leg archive: %v", rerr)
+		}
+		return strings.ReplaceAll(string(b), ": ", ":"), err
+	}
+	t.Run("failed probe", func(t *testing.T) {
+		got, err := run(t, &fakeDelivery{rowErr: errors.New("daemon down"), hookURL: probeFunnelURL})
+		if failureOf(t, err) == "" {
+			t.Fatal("want a preflight failure")
+		}
+		for _, want := range []string{`"delivery"`, `"failed_step":"` + bedevents.StepTransportNotUp + `"`, `"status":"failed"`} {
+			if !strings.Contains(got, want) {
+				t.Errorf("probes.json lacks %s:\n%s", want, got)
+			}
+		}
+	})
+	t.Run("passing probe", func(t *testing.T) {
+		got, err := run(t, &fakeDelivery{row: upRow(), hookURL: probeFunnelURL, deliver: true})
+		if err != nil {
+			t.Fatalf("leg failed: %v", err)
+		}
+		if !strings.Contains(got, `"delivery"`) || !strings.Contains(got, `"status":"ok"`) {
+			t.Errorf("probes.json lacks the passing delivery result:\n%s", got)
+		}
+	})
+}

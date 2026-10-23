@@ -385,6 +385,11 @@ func (a *legArchive) Finish() {
 	if err := os.WriteFile(filepath.Join(a.dir, "load.json"), mustJSON(l), 0o644); err != nil {
 		a.g.errf("warning: archiving load average: %v\n", err)
 	}
+	// Rewrite probes.json now that the leg is over (#2408): beginArchive wrote it
+	// before the leg's per-leg webhook delivery preflight ran, so a pass or a
+	// failed step (an exit-4 return skips everything after it) would otherwise
+	// never reach the archive.
+	a.g.writeProbes(a.dir)
 }
 
 func copyFile(src, dst string) error {
