@@ -373,3 +373,56 @@ func TestDeliveryProbeResultIsArchivedInTheLegDirectory(t *testing.T) {
 		}
 	})
 }
+
+// A bed .env with no FABRIK_TOKEN is a provisioning problem; it must not be
+// reported as a missing delivery (which sends the operator to debug the Funnel).
+func TestProbeWebhookDeliveryMissingTokenIsProbeSetup(t *testing.T) {
+	fd := &fakeDelivery{row: upRow(), hookURL: probeFunnelURL, deliver: true}
+	g, _, _ := deliveryGate(t, fd)
+	if err := os.WriteFile(filepath.Join(g.Cfg.TestBed, ".env"), []byte("FABRIK_TAILSCALE_HOSTNAME=bed-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := failureOf(t, g.ProbeWebhookDelivery(context.Background(), Cell{Auth: "app", Train: "on"}))
+	if !strings.Contains(msg, bedevents.StepProbeSetup) || strings.Contains(msg, bedevents.StepNoDelivery) {
+		t.Errorf("a missing bed token must fail at %s, not %s: %s", bedevents.StepProbeSetup, bedevents.StepNoDelivery, msg)
+	}
+}
+
+// An unrelated successful `issues` delivery (not a `labeled` one) near the probe's
+// write must not satisfy the own-event check when last-delivery merely moved.
+func TestProbeWebhookDeliveryRequiresALabeledEvent(t *testing.T) {
+	fd := &fakeDelivery{row: upRow(), hookURL: probeFunnelURL}
+	g, _, _ := deliveryGate(t, fd)
+	orig := g.Exec.(*fakeExec).handler
+	g.Exec.(*fakeExec).handler = func(ctx context.Context, c Cmd) Result {
+		r := orig(ctx, c)
+		if strings.Contains(argsLine(c), "/issues/42/labels") {
+			fd.mu.Lock()
+			fd.row.LastDelivery = fd.row.LastDelivery.Add(time.Second)
+			fd.mu.Unlock()
+		}
+		return r
+	}
+	fd.log = []HookDelivery{{Event: "issues", Action: "opened", StatusCode: 200, DeliveredAt: time.Unix(2001, 0)}}
+	msg := failureOf(t, g.ProbeWebhookDelivery(context.Background(), Cell{Auth: "app", Train: "on"}))
+	if !strings.Contains(msg, "replayed") {
+		t.Errorf("a non-labeled issues delivery must not count as the probe's own: %s", msg)
+	}
+}
+
+// The probe uses one fixed label across attempts so labels never accumulate on
+// the alpha repository.
+func TestProbeWebhookDeliveryUsesOneFixedLabel(t *testing.T) {
+	fd := &fakeDelivery{row: upRow(), hookURL: probeFunnelURL}
+	g, fe, _ := deliveryGate(t, fd)
+	_ = g.ProbeWebhookDelivery(context.Background(), Cell{Auth: "app", Train: "on"})
+	seen := map[string]bool{}
+	for _, l := range fe.lines() {
+		if i := strings.Index(l, "labels[]="); i >= 0 {
+			seen[strings.Fields(l[i:])[0]] = true
+		}
+	}
+	if len(seen) != 1 || !seen["labels[]="+deliveryProbeLabel] {
+		t.Errorf("want exactly the fixed label %q across all attempts, got %v", deliveryProbeLabel, seen)
+	}
+}

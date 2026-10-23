@@ -290,7 +290,9 @@ definition is `tests/e2e/bedevents`, an untagged package shared by both launch s
   as its startup log named it (`hook-url-mismatch`), and a label write on a scratch issue must
   advance the transport's `last_delivery_at` past a baseline taken just before the write
   (`no-delivery`, with the App's delivery log used to say whether GitHub sent it and got an HTTP
-  error). It retries within `E2E_DELIVERY_PROBE_WAIT` (default 300 s) to let a fresh Funnel
+  error; a probe that cannot make its own write — no bed token, scratch issue not creatable — is the
+  separate `probe-setup` step, and only a `labeled` `issues` delivery for the probe's own write counts).
+  It uses one fixed scratch label, `e2e-delivery-probe`, so labels never accumulate on the alpha repo. It retries within `E2E_DELIVERY_PROBE_WAIT` (default 300 s) to let a fresh Funnel
   settle, **blocks on an unreadable reading** (a deliberate difference from the ADR-1974 probes) and
   closes its scratch issue on every path. One `DeliveryProbeResult` per leg and bed lands in
   `probes.json` under `delivery`; no token, auth key or secret is ever printed or archived.

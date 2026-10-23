@@ -34,7 +34,7 @@ transports are App-auth transports, and the Tailscale one is the bed transport.
 5. **A per-leg delivery preflight** runs after the leg's bed restart and identity check, before the first
    phase, for effective-webhook cells only. It is a live probe (a scratch-issue label write), so it follows
    ADR 1454 by running after the pre-gate, but it cannot be a `LivePreflights` entry because it needs the
-   running bed with its transport. Steps: `transport-not-up`, `hook-url-mismatch` (App config vs the URL the
+   running bed with its transport. Steps: `probe-setup` (the probe cannot make its own write), `transport-not-up`, `hook-url-mismatch` (App config vs the URL the
    daemon logged, exact), `no-delivery` (the daemon's last-delivery time must move past a baseline taken
    before the write, confirmed by the App's delivery log when readable so a replayed older delivery cannot
    pass). It retries within `E2E_DELIVERY_PROBE_WAIT` so a fresh Funnel name can settle.

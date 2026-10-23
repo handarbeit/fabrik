@@ -271,6 +271,7 @@ The engine logs the URL it expects on startup
   |---|---|---|
   | `transport-not-up` | the daemon reports no tailscale transport, or it is not `listening`/Funnel not `ok`, or the daemon could not be asked | check `bed-run.log`, the auth key/state, that Funnel is enabled for the tag |
   | `hook-url-mismatch` | the App's webhook URL is not this bed's Funnel URL (or the App config could not be read) | fix the URL in the App's settings (step 5) |
+  | `probe-setup` | the probe could not make its own write (no `FABRIK_TOKEN` in the bed's `.env`, or the scratch issue could not be created) | fix the bed's `.env` / token scope; this is provisioning, not delivery |
   | `no-delivery` | transport up and URL right, but no delivery arrived; the message says whether GitHub sent it and got an HTTP error (Funnel unreachable) or created none (App not subscribed to Issues) | see the message; redeliver by hand (below) |
 
   The result is archived in each leg's `probes.json` under `delivery`.

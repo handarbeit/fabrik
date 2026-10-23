@@ -43,6 +43,16 @@ const (
 	DeliveryFailed = "failed"
 )
 
+// deliveryClockSkew is the slack allowed between the gate's clock and GitHub's
+// delivery timestamps when matching the probe's own `issues` `labeled` delivery.
+const deliveryClockSkew = 10 * time.Second
+
+// deliveryProbeLabel is the one label the probe adds to (and removes from) its
+// scratch issue. It is fixed, so repeated runs never accumulate labels on the
+// alpha repository; add-after-remove still gives each attempt a distinct
+// `labeled` delivery.
+const deliveryProbeLabel = "e2e-delivery-probe"
+
 // deliveryProbeTitlePrefix marks the probe's scratch issues so a leftover from a
 // run killed mid-probe can be recognised and swept by the next one.
 const deliveryProbeTitlePrefix = "e2e-delivery-probe-"
@@ -239,7 +249,7 @@ func (g *Gate) ProbeWebhookDelivery(ctx context.Context, cell Cell) error {
 	hostname := EnvFileValue(filepath.Join(bedDir, ".env"), "FABRIK_TAILSCALE_HOSTNAME")
 	scratch := &deliveryScratch{g: g, repo: g.resetConfig().Alpha, token: EnvFileValue(filepath.Join(bedDir, ".env"), "FABRIK_TOKEN")}
 	if scratch.token == "" {
-		return fail(bedevents.StepNoDelivery, "no bed token (FABRIK_TOKEN in the bed's .env) to make the probe's write with")
+		return fail(bedevents.StepProbeSetup, "no bed token (FABRIK_TOKEN in the bed's .env) to make the probe's write with — a provisioning problem, not a delivery one")
 	}
 	defer scratch.cleanup(ctx)
 	scratch.sweepLeftovers(ctx)
@@ -300,7 +310,7 @@ func (g *Gate) ProbeWebhookDelivery(ctx context.Context, cell Cell) error {
 func (g *Gate) probeOneDelivery(ctx context.Context, s *deliveryScratch, before TransportRow, attempt int, interval time.Duration) (bool, string) {
 	writeAt := g.Now()
 	if err := s.toggleLabel(ctx, attempt); err != nil {
-		return false, fmt.Sprintf("the probe's own write failed: %v", err)
+		return false, fmt.Sprintf("the probe's own write failed: %v (a probe-setup problem, not a delivery one)", err)
 	}
 	g.Sleep(interval)
 	after, err := g.Delivery.TransportRow(ctx, g.Cfg.TestBed)
@@ -312,7 +322,7 @@ func (g *Gate) probeOneDelivery(ctx context.Context, s *deliveryScratch, before 
 	}
 	if ds, derr := g.Delivery.AppDeliveries(ctx, g.Cfg.TestBed); derr == nil && len(ds) > 0 {
 		for _, d := range ds {
-			if d.Event == "issues" && !d.DeliveredAt.Before(writeAt.Add(-time.Minute)) && d.StatusCode >= 200 && d.StatusCode < 300 {
+			if d.Event == "issues" && d.Action == "labeled" && !d.DeliveredAt.Before(writeAt.Add(-deliveryClockSkew)) && d.StatusCode >= 200 && d.StatusCode < 300 {
 				return true, ""
 			}
 		}
@@ -391,14 +401,17 @@ func (s *deliveryScratch) ensureIssue(ctx context.Context) error {
 	return nil
 }
 
-// toggleLabel adds a label distinct to the attempt (an `issues` `labeled`
-// delivery). Closing the issue at the end discards them all.
+// toggleLabel adds the fixed probe label (an `issues` `labeled` delivery). On a
+// retry it first removes it, so the re-add is a new `labeled` event rather than a
+// no-op.
 func (s *deliveryScratch) toggleLabel(ctx context.Context, attempt int) error {
 	if err := s.ensureIssue(ctx); err != nil {
 		return err
 	}
-	label := fmt.Sprintf("e2e-delivery-probe-%d", attempt+1)
-	if _, ok := s.gh(ctx, "api", "-X", "POST", fmt.Sprintf("repos/%s/issues/%d/labels", s.repo, s.number), "-f", "labels[]="+label); !ok {
+	if attempt > 0 {
+		s.gh(ctx, "api", "-X", "DELETE", fmt.Sprintf("repos/%s/issues/%d/labels/%s", s.repo, s.number, deliveryProbeLabel)) // best effort: absent is fine
+	}
+	if _, ok := s.gh(ctx, "api", "-X", "POST", fmt.Sprintf("repos/%s/issues/%d/labels", s.repo, s.number), "-f", "labels[]="+deliveryProbeLabel); !ok {
 		return fmt.Errorf("labelling the scratch issue #%d on %s failed", s.number, s.repo)
 	}
 	return nil

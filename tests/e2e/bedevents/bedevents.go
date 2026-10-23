@@ -62,6 +62,7 @@ const (
 	StepTransportNotUp  = "transport-not-up"  // Funnel/transport not up
 	StepHookURLMismatch = "hook-url-mismatch" // the App's webhook URL is not this bed's Funnel URL
 	StepNoDelivery      = "no-delivery"       // transport up and URL right, but no delivery arrived
+	StepProbeSetup      = "probe-setup"       // the probe could not make its write (bed .env has no FABRIK_TOKEN, scratch issue not creatable)
 )
 
 // Parse validates a requested event source. Empty is Poll; anything other than
