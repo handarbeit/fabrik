@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -36,7 +37,8 @@ const (
 	// tailnetFunnelAddr is the only Funnel port the daemon uses.
 	tailnetFunnelAddr = ":443"
 	// tailnetNodeStateFile is tsnet's default state file (a FileStore at
-	// Dir/tailscaled.state); its presence is what makes the auth key optional.
+	// Dir/tailscaled.state); a logged-in profile in it is what makes the auth key
+	// optional (tailnetStateExists).
 	tailnetNodeStateFile = "tailscaled.state"
 
 	tailnetFunnelOK          = "ok"
@@ -78,10 +80,33 @@ type tailnetNodeConfig struct {
 // tailnetNodeFactory builds the node; tests replace it.
 var tailnetNodeFactory = newTailnetNode
 
-// tailnetStateExists reports whether stateDir already holds node state.
+// tailnetStateExists reports whether stateDir holds the state of a node that has
+// logged in, which is what makes the auth key optional. A non-empty state file
+// is not enough: tsnet writes the machine key at Start, before login, so a first
+// start that failed on a bad or expired key leaves a non-empty file for a node
+// that never joined. A completed login stores a profile (prefs JSON) whose
+// "Config" (the persisted node identity) carries a NodeID, and tsnet does not
+// persist a profile without one, so that is the signal. The file is a JSON object
+// of base64 values; anything unreadable or without such a profile counts as no
+// state, so the refusal asks for the key rather than hanging in Up.
 func tailnetStateExists(stateDir string) bool {
-	fi, err := os.Stat(filepath.Join(stateDir, tailnetNodeStateFile))
-	return err == nil && fi.Mode().IsRegular() && fi.Size() > 0
+	bs, err := os.ReadFile(filepath.Join(stateDir, tailnetNodeStateFile))
+	if err != nil || len(bs) == 0 {
+		return false
+	}
+	var entries map[string][]byte
+	if json.Unmarshal(bs, &entries) != nil {
+		return false
+	}
+	for _, v := range entries {
+		var prefs struct {
+			Config *struct{ NodeID string } `json:"Config"`
+		}
+		if json.Unmarshal(v, &prefs) == nil && prefs.Config != nil && prefs.Config.NodeID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // funnelWebhookURL builds the App webhook URL from the name the node reports

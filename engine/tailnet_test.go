@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -219,9 +220,7 @@ func TestTailscale_ExistingStateReusesNodeWithoutAuthKey(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, tailnetNodeStateFile), []byte(`{"node":"state"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeTailnetState(t, dir, true)
 	if err := RefuseTailscaleMisconfigured(eng.cfg, true, directTestSecret, "", tailnetStateExists(dir)); err != nil {
 		t.Fatalf("existing state must make the key optional: %v", err)
 	}
@@ -246,7 +245,7 @@ func TestTailscale_KeyPassedWhenStateExists(t *testing.T) {
 	eng.cfg.TailscaleHostname = "h"
 	dir := tailscaleStateDir(eng.cfg, eng.fabrikDir)
 	_ = os.MkdirAll(dir, 0o700)
-	_ = os.WriteFile(filepath.Join(dir, tailnetNodeStateFile), []byte("x"), 0o600)
+	writeTailnetState(t, dir, true)
 	cleanup := eng.setUpIngestion(context.Background(), nil)
 	defer cleanup()
 	if len(*nodes) != 1 || (*nodes)[0].cfg.AuthKey != tailscaleTestKey {
@@ -478,6 +477,28 @@ func TestRedactTailnetLog_Variants(t *testing.T) {
 	}
 }
 
+// writeTailnetState writes a tsnet FileStore state file: a JSON object of base64
+// values. With loggedIn it holds a profile whose prefs carry a NodeID (what a
+// completed login stores); without it only the machine key tsnet writes at Start.
+func writeTailnetState(t *testing.T, dir string, loggedIn bool) {
+	t.Helper()
+	entries := map[string][]byte{"_machinekey": []byte("privkey:00")}
+	if loggedIn {
+		entries["_current-profile"] = []byte("profile-1")
+		entries["profile-1"] = []byte(`{"WantRunning":true,"Config":{"NodeID":"nABC","UserProfile":{"LoginName":"tagged-devices"}}}`)
+	}
+	bs, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, tailnetNodeStateFile), bs, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTailnetStateExists(t *testing.T) {
 	dir := t.TempDir()
 	if tailnetStateExists(dir) {
@@ -489,11 +510,36 @@ func TestTailnetStateExists(t *testing.T) {
 		t.Fatal("an empty state file is not node state")
 	}
 	_ = os.WriteFile(p, []byte("x"), 0o600)
+	if tailnetStateExists(dir) {
+		t.Fatal("an unparseable state file is not node state")
+	}
+	_ = os.WriteFile(p, []byte("{}"), 0o600)
+	if tailnetStateExists(dir) {
+		t.Fatal("tsnet's initial empty store is not node state")
+	}
+	// A first start that failed on a bad key leaves the machine key behind.
+	writeTailnetState(t, dir, false)
+	if tailnetStateExists(dir) {
+		t.Fatal("a machine key without a logged-in profile is not node state: the key is still required")
+	}
+	writeTailnetState(t, dir, true)
 	if !tailnetStateExists(dir) {
-		t.Fatal("non-empty state file is node state")
+		t.Fatal("a stored profile with a NodeID is node state")
 	}
 	if tailnetStateExists(filepath.Join(dir, "missing")) {
 		t.Fatal("missing dir")
+	}
+}
+
+// A failed first start leaves a non-empty state file; the next start without a
+// key must still be refused with the actionable message, not hang in Up.
+func TestTailscale_FailedFirstStartStillRequiresKey(t *testing.T) {
+	dir := t.TempDir()
+	writeTailnetState(t, dir, false)
+	cfg := Config{EventSource: EventSourceTailscale, TailscaleHostname: "h"}
+	err := RefuseTailscaleMisconfigured(cfg, true, directTestSecret, "", tailnetStateExists(dir))
+	if err == nil || !strings.Contains(err.Error(), DefaultTailscaleAuthKeyEnv) {
+		t.Fatalf("want a refusal naming the auth key variable, got %v", err)
 	}
 }
 

@@ -392,7 +392,7 @@ func tailscaleStateDir(cfg Config, fabrikDir string) string {
 // configured in a way that could only produce a silently deaf daemon: the shared
 // App-webhook mistakes (no App auth,
 // empty secret, relative path), no hostname, or no auth key while the state dir
-// holds no node state yet. Configuration mistakes fail startup naming the fix;
+// holds no logged-in node state yet. Configuration mistakes fail startup naming the fix;
 // a runtime fault degrades to poll-only. authKeyValue and secretValue are only
 // tested for emptiness and never logged.
 func RefuseTailscaleMisconfigured(cfg Config, appAuthConfigured bool, secretValue, authKeyValue string, stateExists bool) error {
@@ -411,7 +411,7 @@ func RefuseTailscaleMisconfigured(cfg Config, appAuthConfigured bool, secretValu
 	}
 	if !stateExists && authKeyValue == "" {
 		return fmt.Errorf("event_source: tailscale requires a tagged, pre-approved auth key in $%s on the first start "+
-			"(no node state exists yet in the state directory) — set that variable (or name another with "+
+			"(the state directory holds no logged-in node yet) — set that variable (or name another with "+
 			"tailscale_auth_key_env / --tailscale-auth-key-env). It is not needed once the node has joined",
 			tailscaleAuthKeyEnvName(cfg))
 	}
