@@ -42,7 +42,7 @@ This issue supplies a different listener to that same transport. It does not add
 
 In: the tsnet listener, config, refusals, health, the webhook-URL check, tests (`tsnet` behind an interface seam so tests need no tailnet), USER_GUIDE operator setup (access-policy `nodeAttrs` granting `funnel` to the tag, HTTPS certificates enabled, tagged pre-approved auth key, App webhook URL/secret/content type, and a note that a new node's public name can take minutes to resolve), `docs/llms-full.txt` regen, ADR `adrs/2143-embedded-tailscale-funnel.md`.
 
-Out: delivery replay (#2144); any change to #2142's transport beyond what the listener needs; tailnet-only (non-Funnel) exposure.
+Out: delivery replay itself (#2144; superseded in part by ADR 2143 decision 9, which wires #2144's replayer for `event_source: tailscale`, the same as for `direct`); any change to #2142's transport beyond what the listener needs; tailnet-only (non-Funnel) exposure.
 
 ## Acceptance
 
@@ -242,7 +242,7 @@ An operator unfamiliar with Funnel can set up a tailscale-sourced daemon from th
 
 ## Out of Scope *(optional)*
 
-- Delivery replay and redelivery handling (#2144).
+- Delivery replay and redelivery handling (#2144) as a feature of its own. The tailscale transport only wires #2144's existing replayer (ADR 2143 decision 9); it adds no replay logic.
 - Any change to #2142's transport beyond what accepting this listener requires.
 - Tailnet-only (non-Funnel) exposure.
 - Creating or rotating the tailnet access policy, auth keys or the GitHub App's webhook settings from Fabrik.
