@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 )
 
 // TestMergeTrainColdCacheBaseMember is the e2e regression for the #1688 incident
@@ -375,12 +377,19 @@ func isNotFoundOutput(out string) bool {
 	return strings.Contains(out, "HTTP 404") || strings.Contains(out, "Not Found")
 }
 
-// bedWebhooksEnabled reports whether the bed engine would run with webhooks on,
-// resolving the way cmd/root.go does: FABRIK_WEBHOOKS (the harness's own
+// bedWebhooksEnabled reports whether the bed engine would receive webhooks on this
+// leg: the leg's effective event source attaches a webhook transport (#2408,
+// bedevents — E2E_EVENT_SOURCE=tailscale on an App leg; the launch injects it, so
+// it is what the bed actually runs with), or the legacy gh-forward configuration
+// is on (kept for hand-run beds). The legacy part resolves the way cmd/root.go
+// does: FABRIK_WEBHOOKS (the harness's own
 // environment is inherited by the launched bed, and .env loading never overrides an
 // already-set variable) wins over the bed's .env, which wins over config.yaml's
 // top-level webhooks key.
 func bedWebhooksEnabled(env *Env) bool {
+	if bedevents.Webhook(bedEventSource()) {
+		return true
+	}
 	envVal := os.Getenv("FABRIK_WEBHOOKS")
 	if envVal == "" {
 		if v, err := readEnvFileValue(filepath.Join(env.FabrikTestDir, ".env"), "FABRIK_WEBHOOKS"); err == nil {
