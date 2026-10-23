@@ -24,6 +24,7 @@ package gate
 
 import (
 	"fmt"
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -91,6 +92,18 @@ type Config struct {
 	ParallelOn string // E2E_PARALLEL_ON, default 2: the shared phase of a default-gate "on" leg (4 is the value to try)
 
 	BedPollSeconds string // E2E_BED_POLL_SECONDS, default 60
+
+	// EventSource is E2E_EVENT_SOURCE (#2408): bedevents.Poll (default) or
+	// bedevents.Tailscale. A leg's effective source also depends on its auth
+	// (EffectiveEventSource); the zero value is poll, so a Config built by hand
+	// (the tests') is poll-only.
+	EventSource string
+	// DeliveryProbeWait bounds the webhook delivery preflight's wait for a
+	// GitHub-originated delivery to reach the bed (E2E_DELIVERY_PROBE_WAIT secs,
+	// default 5m). A zero value disables the wait loop's retries (one attempt).
+	DeliveryProbeWait time.Duration
+	// DeliveryProbeInterval is the pause between the preflight's attempts (15s).
+	DeliveryProbeInterval time.Duration
 
 	// Matrix is E2E_MATRIX: MatrixSparse (default via LoadConfig) or MatrixFull.
 	// The zero value means full, so a Config built by hand (the tests') keeps the
@@ -187,6 +200,8 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 
 		LoadProbeFactor: 2,
 		LagPollInterval: 3 * time.Second,
+
+		DeliveryProbeInterval: 15 * time.Second,
 	}
 	var err error
 	if c.BedDirs, err = parseBeds(getenv("E2E_BEDS"), testBed, home); err != nil {
@@ -197,6 +212,12 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	c.TestBed = c.BedDirs[0]
 	c.EngineLog = filepath.Join(c.TestBed, ".fabrik", "fabrik.log")
 	if c.Matrix, err = parseMatrix(getenv("E2E_MATRIX")); err != nil {
+		return c, err
+	}
+	if c.EventSource, err = bedevents.Parse(getenv(bedevents.RequestVar)); err != nil {
+		return c, err
+	}
+	if c.DeliveryProbeWait, err = secsEnv(getenv, "E2E_DELIVERY_PROBE_WAIT", 300); err != nil {
 		return c, err
 	}
 	if c.LagProbeThreshold, err = secsEnv(getenv, "E2E_LAG_PROBE_THRESHOLD", 30); err != nil {
@@ -246,6 +267,12 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	// secsEnv returned the integer as seconds; this knob is in minutes.
 	c.StallWarn = mins * 60
 	return c, nil
+}
+
+// EffectiveEventSource is the event source a leg of the given auth runs with: the
+// requested source, except that a PAT leg is always poll-only (#2408).
+func (c Config) EffectiveEventSource(auth string) string {
+	return bedevents.Effective(c.EventSource, auth)
 }
 
 // parseMatrix resolves E2E_MATRIX. Unset or "sparse" is sparse, "full" is full;

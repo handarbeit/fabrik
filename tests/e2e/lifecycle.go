@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
@@ -197,7 +198,14 @@ func StopFabrikTestBed(t *testing.T, env *Env) {
 // Override with E2E_BED_POLL_SECONDS, mirroring E2E_POLL_INTERVAL's convention
 // — e.g. to restore the 30s cadence for a single scenario in isolation, where
 // budget is not a constraint and detection latency matters more.
-const defaultBedPollSeconds = "60"
+const defaultBedPollSeconds = bedevents.PollOnlySeconds
+
+// bedEventSource is the event source the current leg's bed runs with (#2408,
+// ADR-2408): E2E_EVENT_SOURCE as the gate put it in the leg's environment, forced
+// to poll on a PAT leg. A webhook leg's cadence (bedevents.WebhookPollSeconds) is
+// longer than a poll leg's, so a quick engine effect is evidence of the webhook
+// path and not of a short poll.
+func bedEventSource() string { return bedevents.FromEnv(os.Getenv) }
 
 func bedPollSeconds() string {
 	if s := os.Getenv("E2E_BED_POLL_SECONDS"); s != "" {
@@ -205,7 +213,7 @@ func bedPollSeconds() string {
 			return s
 		}
 	}
-	return defaultBedPollSeconds
+	return bedevents.PollSeconds(bedEventSource())
 }
 
 // markInheritedFDsCloseOnExec marks every descriptor above stdio close-on-exec,
@@ -304,6 +312,15 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// tests read. Appended last so it also beats any value in the operator's shell,
 	// and the process environment beats the bed's .env.
 	cmd.Env = append(stripEnv(stripEnv(cmd.Env, bedtimeout.ReviewEnvVar), bedtimeout.CIEnvVar), bedtimeout.Env()...)
+	// The leg's event source (#2408, ADR-2408), from the one definition the gate
+	// runner's BedStartCmd and the tests share. The ambient event-source and
+	// receiver variables are stripped first so a poll leg cannot inherit a webhook
+	// setting from the operator's shell and each webhook bed takes its hostname from
+	// its own .env; the injected value then beats the bed's .env.
+	for _, k := range bedevents.StripKeys() {
+		cmd.Env = stripEnv(cmd.Env, k)
+	}
+	cmd.Env = append(cmd.Env, bedevents.Env(bedEventSource())...)
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

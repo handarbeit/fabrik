@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
@@ -219,7 +220,9 @@ func TestBedStartCmdContracts(t *testing.T) {
 	g, _, _, _ := testGate(t,
 		"FABRIK_GITHUB_APP_ID=1", "FABRIK_GITHUB_APP_PRIVATE_KEY_PATH=/k", "FABRIK_GITHUB_APP_INSTALLATION_ID=2",
 		"FABRIK_TOKEN=keep", "GIT_CONFIG_GLOBAL=/operator/gitconfig",
-		"FABRIK_REVIEW_WAIT_TIMEOUT=99", "FABRIK_CI_WAIT_TIMEOUT=99")
+		"FABRIK_REVIEW_WAIT_TIMEOUT=99", "FABRIK_CI_WAIT_TIMEOUT=99",
+		"FABRIK_EVENT_SOURCE=tailscale", "FABRIK_TAILSCALE_HOSTNAME=shell-host", "FABRIK_TAILSCALE_AUTH_KEY_ENV=SHELL_KEY",
+		"FABRIK_TAILSCALE_STATE_DIR=/shell/ts", "FABRIK_DIRECT_LISTEN=:9")
 	g.Cfg.BedPollSeconds = "75"
 	c := g.BedStartCmd("/bed/.fabrik/git-config-isolated")
 
@@ -274,6 +277,19 @@ func TestBedStartCmdContracts(t *testing.T) {
 		k, _, _ := strings.Cut(want, "=")
 		if got := envOf(k); len(got) != 1 || got[0] != want {
 			t.Errorf("%s must be launch-injected as %q and win over the operator's value: %v", k, want, got)
+		}
+	}
+	// The event source (#2408): the initial start is explicitly poll-only whatever
+	// the operator's shell exports, and no receiver setting leaks in.
+	if got := envOf("FABRIK_EVENT_SOURCE"); len(got) != 1 || got[0] != "FABRIK_EVENT_SOURCE=poll" {
+		t.Errorf("the bed start must inject an explicit poll event source over a hostile shell value: %v", got)
+	}
+	for _, k := range bedevents.StripKeys() {
+		if k == bedevents.LaunchVar {
+			continue
+		}
+		if got := envOf(k); len(got) != 0 {
+			t.Errorf("%s must not reach a poll start: %v", k, got)
 		}
 	}
 }
