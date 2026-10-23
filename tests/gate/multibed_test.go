@@ -1025,10 +1025,32 @@ func TestMultiBedNoCapableBedNeverRunsAWebhookCellPollOnly(t *testing.T) {
 	mustWrite(t, h.g.Cfg.BedDirs[0]+"/.env", "FABRIK_TOKEN=a\n")
 	mustWrite(t, h.g.Cfg.BedDirs[1]+"/.env", "FABRIK_TOKEN=b\n")
 	_, done := h.run(context.Background(), []Cell{{Auth: "app", Train: "on", Events: EventsWebhook}})
+	// A webhook cell no bed can serve is reported, never silently left unrun.
+	failureCode(t, h.result(done), ExitPreconditionFailed)
+	if len(h.ran) != 0 {
+		t.Errorf("the scheduler must not run a webhook cell on a bed that cannot receive deliveries: %v", h.ran)
+	}
+}
+
+// When bed A holds the baseline it does not serve the shared queue, so if it is the
+// ONLY webhook-capable bed it must take the webhook cell after its baseline; the
+// cell is neither dropped silently nor run poll-only on bed B.
+func TestMultiBedOnlyBedAWebhookCapableRunsTheWebhookCellAfterItsBaseline(t *testing.T) {
+	h := newSchedHarness(t, "alice", "bob", MatrixSparse)
+	mustWrite(t, h.g.Cfg.BedDirs[0]+"/.env", "FABRIK_TOKEN=a\nFABRIK_TAILSCALE_HOSTNAME=bed-a\nFABRIK_TS_AUTHKEY=k\nFABRIK_GITHUB_WEBHOOK_SECRET=s\n")
+	mustWrite(t, h.g.Cfg.BedDirs[1]+"/.env", "FABRIK_TOKEN=b\n")
+	cells := []Cell{{Auth: "app", Train: "on"}, {Auth: "app", Train: "on", Events: EventsWebhook}}
+	_, done := h.run(context.Background(), cells)
+	h.expectStarts("A app/on")
+	h.finish("A app/on", nil)
+	h.expectStarts("A app/on/webhook")
+	h.finish("A app/on/webhook", nil)
 	if err := h.result(done); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.ran) != 0 {
-		t.Errorf("the scheduler must not run a webhook cell on a bed that cannot receive deliveries: %v", h.ran)
+	for _, c := range h.ran {
+		if strings.HasPrefix(c, "B ") {
+			t.Fatalf("a webhook cell ran on the poll-only bed: %v", h.ran)
+		}
 	}
 }

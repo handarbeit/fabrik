@@ -205,7 +205,7 @@ func DefaultPreflights() []Preflight {
 		// Multi-bed only (#1976): beds that can never run together are refused here.
 		{Name: "bed-topology", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedTopology(p.AuthModes) }},
 		// E2E_EVENT_SOURCE=tailscale only (#2408): every bed has what its Funnel needs.
-		{Name: "bed-webhook-provisioning", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedWebhookProvisioning(p.AuthModes) }},
+		{Name: "bed-webhook-provisioning", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedWebhookProvisioningForPlan(p) }},
 		{Name: "competing-token-consumers", Run: func(ctx context.Context, g *Gate, p *Plan) error {
 			return g.CheckCompetingTokenConsumers(ctx, p.AuthModes)
 		}},

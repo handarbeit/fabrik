@@ -119,3 +119,22 @@ func failureCode(t *testing.T, err error, code int) string {
 	}
 	return ee.Msg
 }
+
+// The preflight is keyed on the cells the plan actually contains (#2426): a sparse
+// run whose selection holds no events: sensitive test plans no webhook cell, so an
+// unprovisioned bed is not refused for one that would never run.
+func TestCheckBedWebhookProvisioningForPlanFollowsThePlannedCells(t *testing.T) {
+	g, _, _, _ := testGate(t)
+	g.Cfg.RepoRoot = "../.." // the real registry: tests/gate -> repo root
+	g.Cfg.Matrix = MatrixSparse
+	app := []string{"app"}
+
+	// The default sparse plan has an app/on/webhook cell: the unprovisioned bed is refused.
+	failureCode(t, g.CheckBedWebhookProvisioningForPlan(&Plan{AuthModes: app}), ExitPreconditionFailed)
+
+	// A caller -run naming only an events: neutral test narrows the webhook cell away.
+	narrow := &Plan{AuthModes: app, Args: []string{"-run", "^TestAuthLockLabelShape$"}}
+	if err := g.CheckBedWebhookProvisioningForPlan(narrow); err != nil {
+		t.Fatalf("no webhook cell is planned, so no bed is refused for one: %v", err)
+	}
+}

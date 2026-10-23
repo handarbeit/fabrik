@@ -78,6 +78,34 @@ func (g *Gate) CheckBedWebhookProvisioning(modes []string) error {
 	return &ExitError{Code: ExitPreconditionFailed, Msg: sb.String()}
 }
 
+// CheckBedWebhookProvisioningForPlan is the preflight form of the check: it runs
+// CheckBedWebhookProvisioning only when the plan really contains a webhook cell
+// (#2426). Under the sparse matrix that cell exists only if some live test is
+// events: sensitive (and survives a caller -run), so a run whose plan has none is
+// not refused for a bed that was never going to serve one. An unreadable registry
+// is treated as "planned": the check stays conservative and the run's own registry
+// load reports the real error later.
+func (g *Gate) CheckBedWebhookProvisioningForPlan(p *Plan) error {
+	if !g.webhookCellsPlanned(p.AuthModes) {
+		return nil
+	}
+	if g.Cfg.sparseMatrix() {
+		if sel, err := g.loadSelection(); err == nil {
+			planned := false
+			for _, c := range PlanCells(g.buildPlanInput(p.AuthModes, p.Args, sel)) {
+				if c.Webhook() {
+					planned = true
+					break
+				}
+			}
+			if !planned {
+				return nil
+			}
+		}
+	}
+	return g.CheckBedWebhookProvisioning(p.AuthModes)
+}
+
 // webhookCellsPlanned reports whether the plan for these auth modes includes a
 // webhook cell: App auth is planned and E2E_EVENTS does not restrict to poll.
 func (g *Gate) webhookCellsPlanned(modes []string) bool {
