@@ -121,6 +121,11 @@ type funnelDNSProbeConfig struct {
 type funnelDNSProbe struct {
 	cfg funnelDNSProbeConfig
 
+	// sinkMu orders the liveness check and the sink write of record and resolve:
+	// a loop that SetName has replaced must not write its late result over the
+	// new loop's. It is taken before mu and never held across a callback other
+	// than the sink's state write.
+	sinkMu     sync.Mutex
 	mu         sync.Mutex
 	name       string
 	gen        int // bumped by every (re)start; a stale loop writes nothing
@@ -254,9 +259,11 @@ func (p *funnelDNSProbe) run(ctx context.Context, name string, gen int) {
 // record applies an unresolved result (pending or failed) for the loop gen and
 // reports the grace-period panel entry. It returns false when the loop is stale.
 func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error) bool {
+	p.sinkMu.Lock()
 	p.mu.Lock()
 	if !p.current(gen) {
 		p.mu.Unlock()
+		p.sinkMu.Unlock()
 		return false
 	}
 	p.sawNot = true
@@ -276,6 +283,7 @@ func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error
 	}
 	p.mu.Unlock()
 	p.cfg.Sink.SetDNSProbeState(s)
+	p.sinkMu.Unlock()
 	if replayNow && p.cfg.StartReplay != nil {
 		p.cfg.Logf("the probe cannot tell whether %s resolves — running the held-back startup delivery replay pass\n", name)
 		p.cfg.StartReplay()
@@ -291,9 +299,11 @@ func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error
 // if the name was seen unresolved first (or the startup replay was held back
 // for it), so a name that resolved at the first probe never triggers it.
 func (p *funnelDNSProbe) resolve(gen int, name string) {
+	p.sinkMu.Lock()
 	p.mu.Lock()
 	if !p.current(gen) {
 		p.mu.Unlock()
+		p.sinkMu.Unlock()
 		return
 	}
 	p.resolved = true
@@ -306,6 +316,7 @@ func (p *funnelDNSProbe) resolve(gen int, name string) {
 	}
 	p.mu.Unlock()
 	p.cfg.Sink.SetDNSProbeState(dnsProbeResolved)
+	p.sinkMu.Unlock()
 	if key != "" {
 		p.cfg.Resolve(key)
 	}

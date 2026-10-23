@@ -486,3 +486,70 @@ func TestFunnelDNSProbe_UnknownRunsTheHeldBackReplay(t *testing.T) {
 		t.Fatalf("held-back pass ran %d times, want 1", runs)
 	}
 }
+
+// namedResolver resolves only the names in ok; every other name is unresolved.
+type namedResolver map[string]bool
+
+func (r namedResolver) Resolve(_ context.Context, name string) (bool, error) { return r[name], nil }
+
+// gatedSink blocks its first pending write until release is closed, recording
+// writes in completion order.
+type gatedSink struct {
+	fakeSink
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedSink) SetDNSProbeState(st dnsProbeState) {
+	if st == dnsProbePending {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	s.fakeSink.SetDNSProbeState(st)
+}
+
+// A loop SetName has replaced must not write its late result over the new
+// loop's: here the old loop is inside its pending sink write while the new name
+// resolves, and the transport must end up resolved, not pending for good.
+func TestFunnelDNSProbe_ReplacedLoopCannotOverwriteResolution(t *testing.T) {
+	sink := &gatedSink{entered: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	p := newFunnelDNSProbe(funnelDNSProbeConfig{
+		Tag:      "tailscale",
+		Resolver: namedResolver{"new.t.ts.net": true},
+		Sink:     sink,
+		Wait:     func(ctx context.Context, _ time.Duration) bool { <-ctx.Done(); return false },
+		Now:      time.Now,
+		Logf:     func(string, ...any) {},
+		Report:   func(warnings.Condition) {},
+		Resolve:  func(string) {},
+		Ctx:      ctx,
+		WG:       &wg,
+	})
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	p.SetName("old.t.ts.net")
+	<-sink.entered // the old loop is inside its pending write
+	p.SetName("new.t.ts.net")
+	time.Sleep(50 * time.Millisecond) // let the new loop reach its resolution
+	close(sink.release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		states, _ := sink.snapshot()
+		if n := len(states); n >= 2 {
+			if states[n-1] != dnsProbeResolved {
+				t.Fatalf("sink writes = %v, want the last to be resolved", states)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sink writes = %v, want pending then resolved", states)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
