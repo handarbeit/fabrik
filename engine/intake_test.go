@@ -231,15 +231,18 @@ func TestIntake_OverflowDropsForgetsAndRecovers(t *testing.T) {
 	in := newTestIntake(func(et string, p []byte) { <-release; rec.apply(et, p) })
 
 	p := payloadFor("o/r", 1)
-	var queued, dropped int
+	// The per-key worker may take d0 off the queue at any point in this loop,
+	// freeing a slot, so which IDs are dropped is not fixed: record them.
+	var accepted, dropped []string
 	for i := 0; i < 6; i++ {
-		if in.Submit(delivery{ID: fmt.Sprintf("d%d", i), EventType: "issues", Payload: p}) {
-			queued++
+		id := fmt.Sprintf("d%d", i)
+		if in.Submit(delivery{ID: id, EventType: "issues", Payload: p}) {
+			accepted = append(accepted, id)
 		} else {
-			dropped++
+			dropped = append(dropped, id)
 		}
 	}
-	if dropped == 0 {
+	if len(dropped) == 0 {
 		t.Fatal("a deep queue never dropped anything")
 	}
 	if !in.Submit(delivery{ID: "other", EventType: "issues", Payload: payloadFor("o/r", 2)}) {
@@ -249,12 +252,16 @@ func TestIntake_OverflowDropsForgetsAndRecovers(t *testing.T) {
 	in.Drain()
 
 	// The dropped deliveries were forgotten: their redelivery is accepted.
-	if !in.Submit(delivery{ID: "d5", EventType: "issues", Payload: p}) {
-		t.Fatal("a dropped delivery stayed in the ledger and its redelivery was suppressed")
+	if !in.Submit(delivery{ID: dropped[0], EventType: "issues", Payload: p}) {
+		t.Fatalf("dropped delivery %s stayed in the ledger and its redelivery was suppressed", dropped[0])
+	}
+	// An accepted delivery stays recorded: its redelivery is suppressed.
+	if in.Submit(delivery{ID: accepted[0], EventType: "issues", Payload: p}) {
+		t.Fatalf("accepted delivery %s was forgotten and its redelivery was applied again", accepted[0])
 	}
 	in.Drain()
-	if got := len(rec.list()); got != queued+1+1 {
-		t.Fatalf("applied %d, want %d queued + other + redelivered", got, queued+2)
+	if got := len(rec.list()); got != len(accepted)+1+1 {
+		t.Fatalf("applied %d, want %d accepted + other + redelivered", got, len(accepted)+2)
 	}
 }
 
