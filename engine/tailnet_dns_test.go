@@ -467,3 +467,22 @@ func TestPublicAddr(t *testing.T) {
 		t.Error("a public address among tailnet ones was not found")
 	}
 }
+
+// A pass the grace held back runs once the probe turns out unable to find out,
+// rather than waiting for a resolution that may never be reported.
+func TestFunnelDNSProbe_UnknownRunsTheHeldBackReplay(t *testing.T) {
+	h := newProbeHarness(t, resolveStep{err: errors.New("no network")})
+	var mu sync.Mutex
+	runs := 0
+	h.probe.cfg.StartReplay = func() { mu.Lock(); runs++; mu.Unlock() }
+	if !h.probe.SkipStartupReplayIfPending() {
+		t.Fatal("pending probe did not hold the pass back")
+	}
+	h.probe.SetName(probeName)
+	h.nextWait()
+	mu.Lock()
+	defer mu.Unlock()
+	if runs != 1 {
+		t.Fatalf("held-back pass ran %d times, want 1", runs)
+	}
+}

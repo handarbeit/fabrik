@@ -101,6 +101,9 @@ type funnelDNSProbeConfig struct {
 	Tag      string
 	Resolver funnelDNSResolver
 	Sink     funnelDNSSink
+	// StartReplay requests the delivery replay pass the startup grace held back
+	// when the probe turns out unable to find out (nil = none).
+	StartReplay func()
 	// Wait sleeps d, returning false if ctx ended first.
 	Wait func(ctx context.Context, d time.Duration) bool
 	Now  func() time.Time
@@ -257,6 +260,13 @@ func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error
 	}
 	p.sawNot = true
 	p.state = s
+	// A held-back startup pass must not wait for a resolution a broken probe may
+	// never report: once the probe is unknown it is no longer pending, so the
+	// pass the grace skipped runs now (the resolution, if it comes, adds its own).
+	replayNow := s == dnsProbeUnknown && p.needReplay
+	if replayNow {
+		p.needReplay = false
+	}
 	pastGrace := p.cfg.Now().Sub(p.graceStart) >= funnelDNSGrace
 	var key string
 	if pastGrace {
@@ -265,6 +275,10 @@ func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error
 	}
 	p.mu.Unlock()
 	p.cfg.Sink.SetDNSProbeState(s)
+	if replayNow && p.cfg.StartReplay != nil {
+		p.cfg.Logf("the probe cannot tell whether %s resolves — running the held-back startup delivery replay pass\n", name)
+		p.cfg.StartReplay()
+	}
 	if pastGrace {
 		p.cfg.Report(funnelDNSCondition(name, err))
 	}

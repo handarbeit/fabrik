@@ -115,6 +115,7 @@ func startTailscaleEngine(t *testing.T) (*Engine, func(), *syncLog) {
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := eng.setUpIngestion(context.Background(), cache)
+	awaitFirstDNSProbe(eng)
 	return eng, cleanup, logs
 }
 

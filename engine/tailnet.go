@@ -270,16 +270,17 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	// The probe is owned by watchCtx/watchWG, so the stop hook cancels and joins
 	// it. It never runs inline: startup stays synchronous and unblocked.
 	probe := newFunnelDNSProbe(funnelDNSProbeConfig{
-		Tag:      tag,
-		Resolver: funnelDNSResolverFactory(),
-		Sink:     tr,
-		Wait:     e.funnelDNSWait(),
-		Now:      e.now,
-		Logf:     func(format string, args ...any) { e.logf(0, tag, "funnel dns: "+format, args...) },
-		Report:   func(c warnings.Condition) { e.reportWarning(tag, c) },
-		Resolve:  func(key string) { e.resolveWarning(tag, key) },
-		Ctx:      watchCtx,
-		WG:       &watchWG,
+		Tag:         tag,
+		Resolver:    funnelDNSResolverFactory(),
+		Sink:        tr,
+		StartReplay: func() { e.replayer.Trigger() },
+		Wait:        e.funnelDNSWait(),
+		Now:         e.now,
+		Logf:        func(format string, args ...any) { e.logf(0, tag, "funnel dns: "+format, args...) },
+		Report:      func(c warnings.Condition) { e.reportWarning(tag, c) },
+		Resolve:     func(key string) { e.resolveWarning(tag, key) },
+		Ctx:         watchCtx,
+		WG:          &watchWG,
 	})
 	connKey := warnings.Condition{Type: "tailscale_connection", Subject: hostname}.Key()
 	funnelKey := warnings.Condition{Type: "tailscale_funnel", Subject: hostname}.Key()
