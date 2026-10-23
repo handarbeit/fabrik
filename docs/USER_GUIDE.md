@@ -1248,7 +1248,7 @@ user: your-github-username
 # app_webhook_path: /webhook
 # app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
 # Ask GitHub to redeliver App webhook deliveries missed while the daemon was down
-# (event_source: direct only; default true). See "Direct App Webhook Receiver".
+# (event_source: direct or tailscale; default true). See "Direct App Webhook Receiver".
 # replay_failed_deliveries: true
 # event_source: tailscale embeds a Tailscale node (own tailnet machine + Funnel).
 # See "Embedded Tailscale Funnel Receiver".
