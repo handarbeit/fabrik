@@ -192,11 +192,7 @@ func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, tr *tsnetTr
 		if note.State == nil && note.NetMap == nil {
 			continue
 		}
-		status, serr := lc.StatusWithoutPeers(ctx)
-		if serr != nil {
-			status = nil
-		}
-		tr.observe(note.State, status)
+		tr.refresh(ctx, lc.StatusWithoutPeers, note.State)
 	}
 }
 
@@ -209,9 +205,7 @@ func (n *tsnetNode) pollStatus(ctx context.Context, lc *local.Client, tr *tsnetT
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if status, err := lc.StatusWithoutPeers(ctx); err == nil {
-				tr.observe(nil, status)
-			}
+			tr.refresh(ctx, lc.StatusWithoutPeers, nil)
 		}
 	}
 }
@@ -221,12 +215,33 @@ func (n *tsnetNode) pollStatus(ctx context.Context, lc *local.Client, tr *tsnetT
 // successful one with no Self entry, keeps the last known Funnel status and name
 // (neither is evidence that the Funnel came back), and fn runs under the lock so calls are ordered.
 type tsnetTracker struct {
+	// readMu serialises a status read with the observe that applies it (see
+	// refresh). It is separate from mu, which observe takes and holds while fn runs.
+	readMu      sync.Mutex
 	mu          sync.Mutex
 	fn          func(tailnetState)
 	have        bool
 	last        tailnetState
 	backend     string // last known backend state (from a status read, else a notification)
 	haveBackend bool
+}
+
+// refresh reads the node status through read and applies it with observe, both
+// under readMu. The bus watcher and the timer both call it; without the lock a
+// slow reader could apply an older read after a newer one and report a stale
+// state until the next notification or poll. A failed read is applied as nil
+// when a notification carried state, and skipped when it carried none.
+func (t *tsnetTracker) refresh(ctx context.Context, read func(context.Context) (*ipnstate.Status, error), state *ipn.State) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	status, err := read(ctx)
+	if err != nil {
+		if state == nil {
+			return
+		}
+		status = nil
+	}
+	t.observe(state, status)
 }
 
 // observe merges one observation: state is the backend state a notification

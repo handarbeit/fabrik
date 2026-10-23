@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,5 +187,63 @@ func TestTsnetTracker_StatusReadBeatsStaleNotificationState(t *testing.T) {
 	tr.observe(&running, nil)
 	if st := (*got)[len(*got)-1]; !st.Connected {
 		t.Fatalf("notification fallback = %#v", st)
+	}
+}
+
+// The bus watcher and the timer both refresh the tracker. A read and the observe
+// applying it are one step, so a slow older read can never be applied after a
+// newer one: reads never overlap, and each is applied before the next starts.
+func TestTsnetTracker_RefreshSerialisesReadAndApply(t *testing.T) {
+	tr, got := newTestTracker()
+	var inFlight, maxInFlight atomic.Int32
+	var seq atomic.Int32
+	read := func(context.Context) (*ipnstate.Status, error) {
+		n := inFlight.Add(1)
+		for {
+			m := maxInFlight.Load()
+			if n <= m || maxInFlight.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		defer inFlight.Add(-1)
+		time.Sleep(2 * time.Millisecond)
+		st := okStatus()
+		// Alternate Running / Stopped so a misordered apply would be visible.
+		if seq.Add(1)%2 == 0 {
+			st.BackendState = "Stopped"
+		}
+		return st, nil
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tr.refresh(context.Background(), read, nil)
+		}()
+	}
+	wg.Wait()
+	if m := maxInFlight.Load(); m != 1 {
+		t.Fatalf("status reads overlapped (max in flight %d, want 1)", m)
+	}
+	// The last state applied is the last read taken: reads 1..8, so read 8 (Stopped).
+	if st := (*got)[len(*got)-1]; st.Connected {
+		t.Fatalf("last applied state = %#v, want the last read (Stopped)", st)
+	}
+}
+
+// A failed read is skipped when no notification carried state, and applied as
+// "no status" when one did.
+func TestTsnetTracker_RefreshFailedRead(t *testing.T) {
+	tr, got := newTestTracker()
+	fail := func(context.Context) (*ipnstate.Status, error) { return nil, errors.New("boom") }
+	tr.refresh(context.Background(), fail, nil)
+	if len(*got) != 0 {
+		t.Fatalf("a failed timer read emitted %#v", *got)
+	}
+	running := ipn.Running
+	tr.refresh(context.Background(), fail, &running)
+	if len(*got) != 1 || !(*got)[0].Connected {
+		t.Fatalf("notification with failed read = %#v", *got)
 	}
 }
