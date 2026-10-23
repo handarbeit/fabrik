@@ -6,7 +6,7 @@
 **Builds on**: ADR 2142 (direct App webhook transport), ADR 2351 (transport-neutral intake and delivery ledger), ADR 043 (reconcile ticker), ADR 2348 (observed-at ordering)
 **Amends**: ADR 2142 decision 2/consequences (deliveries sent while the daemon is down are no longer simply lost)
 **Chain**: #2081 → #2142 → #2143 (reuses the transport) → this.
-**Amended by**: #2143 (decision 8: a failed redelivery is requested once more; a follow-up pass; the tailscale startup grace — see "Amendment" below)
+**Amended by**: #2143 (decision 8: a failed redelivery is requested once more; a follow-up pass; the tailscale startup grace — see "Amendment" below; decision 9 and the consequences: the replayer is also built by the tailscale start path, ADR 2143 decision 9)
 
 ## Context
 
@@ -22,7 +22,7 @@ A direct receiver has no broker buffering deliveries. If the daemon is down or u
 6. **Bounded.** Fixed constants, not configuration (variables only so tests can shrink them): 10 pages × 100 listed, 50 redeliveries per pass, ~250 ms between requests. A 422 (GitHub's spam guard), 401/403/404 or a rate limit ends the pass at once; three consecutive other failures also end it. Capped passes log what was left and report outcome `capped`.
 7. **Non-fatal.** Any API error is logged once for the pass and degrades to reconcile-only, with outcome `degraded: …` on the health row. No `warnings` panel entry: the spec asks for a log line, the row is visible in `fabrik_health`, and the endpoints need no extra App permission, so this is rare. A Reconciler without credentials (`NewWithDeps` engines) returns an error before any network call.
 8. **In-memory request memory** (amended by #2143, see "Amendment" below: a failed redelivery is requested once more). A `guid` requested in this process is not requested again within the ledger window (covers quick repeated triggers). A request that itself failed is forgotten so a later pass can retry. A redelivery that is requested and then fails again at the daemon stays unseen but is not re-requested until a restart; a short TTL could hammer a daemon that is rejecting deliveries (for example on signature drift). Not persisted: after a restart the ledger and the lookback are the only memory.
-9. **Config**: flat `replay_failed_deliveries` (`*bool` in YAML, default true), `--replay-failed-deliveries`, `FABRIK_REPLAY_FAILED_DELIVERIES` (flag > env > YAML), classified `tune` in `internal/workerenv`. It is ignored for sources other than `direct`/`tailscale` (the replayer is only built by the direct start path), silently. `engine.Config.ReplayFailedDeliveries` defaults to off so `NewWithDeps` engines never replay.
+9. **Config**: flat `replay_failed_deliveries` (`*bool` in YAML, default true), `--replay-failed-deliveries`, `FABRIK_REPLAY_FAILED_DELIVERIES` (flag > env > YAML), classified `tune` in `internal/workerenv`. It is ignored, silently, for sources other than `direct` and `tailscale`: the replayer is built by the direct start path and, since #2143 (ADR 2143 decision 9), by the tailscale start path. `engine.Config.ReplayFailedDeliveries` defaults to off so `NewWithDeps` engines never replay.
 10. **Health**: `localapi.TransportHealth.Replay` (`last_pass_at`, `found_failed`, `requested`, `capped`, `failed`, `outcome`) is additive, present with unknown values before the first pass and omitted for transports without replay. The replayer reports through an optional `replayStatusSink` implemented by `appWebhookTransport`, so `HealthRow()` stays the single source of the row.
 11. **JWT access** is two narrow methods on `githubauth.Reconciler` (`ListAppHookDeliveries`, `RedeliverAppHookDelivery`) in the `VerifyGrants` style; a fresh JWT is minted per call. `github/app.go` gains a headers-returning `appDo` (cursor pagination reads the `Link` header; a missing or malformed header ends paging).
 
@@ -32,7 +32,7 @@ A direct receiver has no broker buffering deliveries. If the daemon is down or u
 - Redelivery of a stale event is ordered by the observed-at rule (ADR 2348), whose receipt-time fallback is the redelivery's arrival.
 - Ledger eviction at 10,000 entries can make an applied delivery look unseen, costing one redundant redelivery that the (idempotent) delta handlers absorb.
 - GitHub's retention of the delivery log is not documented; anything beyond it is reconcile's job.
-- Only `direct` is wired and tested here; `tailscale` (#2143) must create its replayer through `newDeliveryReplayer` the same way.
+- `direct` is wired and tested here. `tailscale` (#2143) creates its replayer through `newDeliveryReplayer` the same way and is covered by `engine/tailnet_replay_test.go` (ADR 2143 decision 9).
 
 ## Amendment (#2143): redeliveries that fail, the follow-up pass and the startup grace
 
