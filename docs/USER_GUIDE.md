@@ -439,6 +439,63 @@ upgrade the GHES instance or remove the ghes_host configuration. See docs/USER_G
 
 If the `/meta` fetch itself fails (network error, auth problem), Fabrik logs a non-fatal warning and continues — connectivity issues surface more clearly moments later when the project board fetch runs. This preflight only applies when a GHES host is configured; github.com deployments never see it.
 
+#### Embedded Tailscale Funnel Receiver (`event_source: tailscale`)
+
+`event_source: direct` still needs you to run `tailscale funnel` by hand on the host, and every daemon on a machine shares one Funnel hostname, separated only by URL path. With one daemon per GitHub App (to keep each daemon's security scope narrow) that boundary stops short of the network edge: the hostname, listener and Funnel configuration are shared, and nothing about one daemon's public exposure can be seen or revoked on its own. `event_source: tailscale` embeds a Tailscale node in the daemon (via `tsnet`): the daemon joins your tailnet **as its own machine** (for example `fabrik-models`), exposes its own Funnel endpoint with TLS terminated on the node, and hands the requests to the very same App webhook transport `event_source: direct` uses — same signature check, delivery dedupe, fast ack and reconnect catch-up. Its exposure is visible and revocable per daemon in Tailscale's admin console. It requires GitHub App auth.
+
+**Every build carries it.** The embedded node (wireguard-go and a userspace network stack) adds about 19.5 MB to the binary, and it is part of every `fabrik` build, release binaries included, so there is nothing to build specially and self-upgrade works as for any other daemon.
+
+**Tailnet setup (once, in Tailscale's admin console — Fabrik does not change your tailnet):**
+
+1. **Enable HTTPS certificates** and MagicDNS for the tailnet (DNS page).
+2. **Tag the node.** Create a tag, for example `tag:fabrik`, in the access policy's `tagOwners`.
+3. **Grant Funnel to the tag** in the access policy's `nodeAttrs`:
+   ```json
+   "nodeAttrs": [{"target": ["tag:fabrik"], "attr": ["funnel"]}]
+   ```
+4. **Create an auth key** (Settings → Keys): reusable is not needed; make it **pre-approved** and give it the tag `tag:fabrik`. Put it in the environment variable `tailscale_auth_key_env` names (default `FABRIK_TS_AUTHKEY`).
+
+**Configuration:**
+
+```bash
+# Flags
+fabrik --event-source tailscale --tailscale-hostname fabrik-models \
+  --tailscale-auth-key-env FABRIK_TS_AUTHKEY --tailscale-state-dir .fabrik/state/tailscale \
+  --app-webhook-path /webhook --app-webhook-secret-env FABRIK_GITHUB_WEBHOOK_SECRET \
+  --github-app-id 123456 --github-app-private-key-path /path/to/key.pem --github-app-installation-id 789012 \
+  --owner myorg --project 5
+
+# Environment variables
+export FABRIK_EVENT_SOURCE=tailscale
+export FABRIK_TAILSCALE_HOSTNAME=fabrik-models
+export FABRIK_TAILSCALE_AUTH_KEY_ENV=FABRIK_TS_AUTHKEY
+export FABRIK_TAILSCALE_STATE_DIR=.fabrik/state/tailscale
+
+# .fabrik/config.yaml
+event_source: tailscale
+tailscale_hostname: fabrik-models              # required
+tailscale_auth_key_env: FABRIK_TS_AUTHKEY      # the variable NAME; default shown
+tailscale_state_dir: .fabrik/state/tailscale   # default shown; created with mode 0700
+app_webhook_path: /webhook                     # shared with direct
+app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET   # shared with direct
+```
+
+The auth key is needed **only until the node has joined**: once `tailscale_state_dir` holds the state of a node that has logged in (a stored profile with a node ID; a first start that failed on a bad or expired key leaves only a machine key, which does not count, so the key is still required), restarts (including the SIGHUP restart) reuse that node and the key is not required. If the key variable is set it is still handed to the node, which ignores it while the node is logged in; if the node's registration expired or was revoked (health shows `NeedsLogin`), restart with a fresh pre-approved key in the variable and the existing node re-authenticates, with no need to touch the state directory. That state directory is the node's only persisted credential — keep it out of version control, never share it between daemons, and do not delete it (a lost state directory with a valid key creates a *second* node and a new certificate request, and repeated requests can hit Let's Encrypt rate limits for over a day). Two daemons on one machine need distinct hostnames **and** distinct state directories. Fabrik never logs the key or writes it anywhere; the key variable and the variable `tailscale_auth_key_env` names are scrubbed from worker environments.
+
+**The webhook URL.** When the node is up the daemon logs it once, built from the name the node *reports* (Tailscale appends a suffix such as `-1` if the hostname was already taken, so it can differ from `tailscale_hostname`):
+
+```
+[tailscale] event_source: tailscale — node "fabrik-models" is up; App webhook URL: https://fabrik-models.tail1234.ts.net/webhook (secret from $FABRIK_GITHUB_WEBHOOK_SECRET)
+```
+
+Then, on the GitHub App's settings page: set the **Webhook URL** to it, the **Webhook secret** to the value of the variable `app_webhook_secret_env` names, and the **Content type** to `application/json`. A new node's public Funnel name can take several minutes to resolve publicly (an early lookup is negatively cached, and the first redelivery can fail with a 502 meanwhile), so redeliver from the App's Advanced tab once it does. At startup and on every reconcile tick the daemon reads the App's webhook configuration (`GET /app/hook/config`, with the App's own JWT) and raises a Warnings-panel entry (`tailscale_webhook_config`) if the URL or content type does not match; if the configuration cannot be read it logs one line and skips the check.
+
+**Failure visibility.** `fabrik_health` lists the transport under `webhook.transports` with the shared fields plus `tailnet` (the node's connection state, for example `Running`) and `funnel` (`ok`, `unavailable`, or `unknown` when the node's status could not be read). A lost tailnet connection makes the transport unhealthy (state `tailnet disconnected`; the other state this transport adds is `funnel unavailable`, below) and adds a `tailscale_connection` Warnings-panel entry; when the connection returns the entry clears and the delivery intake's catch-up reconcile runs (never on the first connect). A node that stays connected but reports its Funnel `unavailable` (for example the `funnel` node attribute was revoked) is treated the same way: state `funnel unavailable`, a `tailscale_funnel` panel entry, and a catch-up reconcile when it returns. If the node cannot join the tailnet within 90 seconds, or Funnel cannot be opened (the usual cause is a missing `funnel` node attribute or HTTPS certificates being disabled), the daemon keeps running poll-only, the transport shows as `not listening` and a `tailscale_listen` panel entry names the cause; it clears on a later successful start. Signature-failure streaks behave as for `direct` (`tailscale_signature_drift`), and the installation-coverage check is `tailscale_coverage`.
+
+**Startup refusals** (each names the fix): the shared `direct` refusals (no GitHub App auth, an empty webhook secret, an `app_webhook_path` that does not start with `/`); a missing `tailscale_hostname`; and an empty auth key variable while `tailscale_state_dir` holds no logged-in node state.
+
+**Deliveries are lost while the daemon is down.** As for `direct` and Hookdeck, there is no relay buffer. Missed deliveries are asked back from GitHub by the delivery replay (#2144) that this event source shares with `direct` — once right after the Funnel listener is up and again whenever the tailnet connection (or the Funnel) recovers, see [Deliveries missed while the daemon is down are replayed](#direct-app-webhook-receiver-event_source-direct) — and the periodic reconcile stays the safety net. A brand-new node's public name can take several minutes to resolve, so the startup pass may find the first deliveries still failing; the startup pass waits 90 seconds for Funnel ingress and the follow-up pass about 3 minutes after it re-requests what still failed, and a later recovery pass covers the rest. Funnel is the only exposure mode: tailnet-only (non-Funnel) access is not supported.
+
 #### Known limitations
 
 A few advisory-only, non-gating features still hardcode `github.com` and have not been updated for GHES:
@@ -726,7 +783,7 @@ The same gap is surfaced as a coverage note next to the webhook health indicator
 
 #### Direct App Webhook Receiver (`event_source: direct`)
 
-Hookdeck puts a third-party account between GitHub and the daemon: every payload passes through it, and every daemon needs one more API key and secret. If you can already expose a local port publicly — Tailscale Funnel through the system `tailscaled`, Cloudflare Tunnel, a reverse proxy — you can point the GitHub App's webhook URL straight at the daemon instead. `event_source: direct` makes Fabrik listen for the App's webhook itself, verify the signature, and feed the same delivery intake Hookdeck uses (the same persisted `X-GitHub-Delivery` dedupe, the same fast ack, echo attribution and reconnect catch-up — see [Delivery Intake](#delivery-intake-dedupe-ordering-and-acknowledgement)). It requires GitHub App auth.
+Hookdeck puts a third-party account between GitHub and the daemon: every payload passes through it, and every daemon needs one more API key and secret. If you can already expose a local port publicly — Tailscale Funnel through the system `tailscaled` (or the daemon's own node — see [Embedded Tailscale Funnel Receiver](#embedded-tailscale-funnel-receiver-event_source-tailscale)), Cloudflare Tunnel, a reverse proxy — you can point the GitHub App's webhook URL straight at the daemon instead. `event_source: direct` makes Fabrik listen for the App's webhook itself, verify the signature, and feed the same delivery intake Hookdeck uses (the same persisted `X-GitHub-Delivery` dedupe, the same fast ack, echo attribution and reconnect catch-up — see [Delivery Intake](#delivery-intake-dedupe-ordering-and-acknowledgement)). It requires GitHub App auth.
 
 **Configuration:**
 
@@ -774,14 +831,14 @@ Binding a non-loopback address is allowed but is your choice: the endpoint is pr
 
 **Startup refusals** (each names the fix): `direct` without GitHub App auth; a missing `direct_listen`; a missing or empty secret in the variable `app_webhook_secret_env` names (default `FABRIK_GITHUB_WEBHOOK_SECRET`); an `app_webhook_path` that does not start with `/`.
 
-**Deliveries missed while the daemon is down are replayed.** There is no relay buffer and GitHub does not retry a failed delivery, but GitHub keeps the App's delivery log and will redeliver on request. Right after the listener is up, Fabrik (in the background, never delaying startup) lists the App's recent deliveries (`GET /app/hook/deliveries`, authenticated with the App's own JWT) and asks GitHub to redeliver each one that failed (a non-2xx status, or no response) and that the engine never received. The lookback runs from the newest delivery the persisted delivery record holds (minus a 5-minute clock-skew margin), never more than the record's 24 hours, and is 1 hour when that record is empty. Redelivered events come back to the listener like any other delivery and are deduplicated on `X-GitHub-Delivery` by the intake, so an event is applied once even if it had in fact arrived. A pass is bounded: at most 10 pages of 100 deliveries and 50 redelivery requests, paced about 250 ms apart; when a cap is hit the pass logs what was left (those are left to the periodic reconcile). A `ping`, a successful delivery, a delivery with a successful redelivery and a delivery already received are never redelivered. Replay is best effort: if the App cannot read its deliveries (403/404), GitHub rate limits, or GitHub refuses a redelivery (422), the pass logs one line and the daemon carries on exactly as without replay, with the periodic reconcile as the safety net. The last pass (time, deliveries found failed, redeliveries requested, capped and failed counts, and its outcome) is shown in the `replay` object of the transport's row in `fabrik_health`. Replay is on by default for `event_source: direct`; turn it off with `replay_failed_deliveries: false` in `.fabrik/config.yaml`, `--replay-failed-deliveries=false` or `FABRIK_REPLAY_FAILED_DELIVERIES=false` (flag over environment over YAML; the setting is ignored for every other event source, and Hookdeck, which buffers deliveries itself, is unaffected). With replay off, Fabrik makes no call to the deliveries API. Deliveries older than the lookback, or beyond what GitHub still keeps, are the reconcile's job, and a listener that is bound but never receives anything (a wrong URL) still looks healthy: poll remains the correctness backstop.
+**Deliveries missed while the daemon is down are replayed.** There is no relay buffer and GitHub does not retry a failed delivery, but GitHub keeps the App's delivery log and will redeliver on request. Right after the listener is up (for `event_source: tailscale`, 90 seconds after the node has joined the tailnet and its Funnel listener is open, because a new or restarted node is not reachable through the public Funnel relay for a while after `Up` returns and a redelivery requested earlier fails; and again whenever a lost tailnet connection or an unavailable Funnel recovers), Fabrik (in the background, never delaying startup) lists the App's recent deliveries (`GET /app/hook/deliveries`, authenticated with the App's own JWT) and asks GitHub to redeliver each one that failed (a non-2xx status, or no response) and that the engine never received. The lookback runs from the newest delivery the persisted delivery record holds (minus a 5-minute clock-skew margin), never more than the record's 24 hours, and is 1 hour when that record is empty. Redelivered events come back to the listener like any other delivery and are deduplicated on `X-GitHub-Delivery` by the intake, so an event is applied once even if it had in fact arrived. A pass is bounded: at most 10 pages of 100 deliveries and 50 redelivery requests, paced about 250 ms apart; when a cap is hit the pass logs what was left (those are left to the periodic reconcile). A `ping`, a successful delivery, a delivery with a successful redelivery and a delivery already received are never redelivered. GitHub accepts a redelivery request (202) before it attempts the delivery, so a pass cannot see how its requests turn out, and **`requested` counts requests, not deliveries**: a pass whose redeliveries later fail still reads `outcome: ok` until the follow-up pass has looked. A pass that requested anything therefore schedules one **follow-up pass** about 3 minutes later (once per pass; the follow-up schedules no further one). It reuses the first pass's lookback and requests a delivery again when its redelivery was attempted and failed (the newest attempt in the log is a failed redelivery, newer than the request). A GUID is requested at most twice per process, so an endpoint that stays down cannot loop; what still fails after that is left to the periodic reconcile. The follow-up replaces the summary, so the `replay` object of a settled daemon (`found_failed` 0) is the reliable "nothing left" reading. Replay is best effort: if the App cannot read its deliveries (403/404), GitHub rate limits, or GitHub refuses a redelivery (422), the pass logs one line and the daemon carries on exactly as without replay, with the periodic reconcile as the safety net. The last pass (time, deliveries found failed, redeliveries requested, capped and failed counts, and its outcome) is shown in the `replay` object of the transport's row in `fabrik_health`. Replay is on by default for `event_source: direct` and `event_source: tailscale`; turn it off with `replay_failed_deliveries: false` in `.fabrik/config.yaml`, `--replay-failed-deliveries=false` or `FABRIK_REPLAY_FAILED_DELIVERIES=false` (flag over environment over YAML; the setting is ignored for every other event source, and Hookdeck, which buffers deliveries itself, is unaffected). With replay off, Fabrik makes no call to the deliveries API. Deliveries older than the lookback, or beyond what GitHub still keeps, are the reconcile's job, and a listener that is bound but never receives anything (a wrong URL) still looks healthy: poll remains the correctness backstop.
 
 #### Known limitations
 
 - **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
 - **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or use `event_source: hookdeck` (see [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above) for real-time delivery under App auth, or drop the GitHub App config to use `--webhooks` with a personal access token.
 - **`event_source: hookdeck` requires App auth.** `event_source: hookdeck` with no GitHub App configured is refused explicitly at startup, naming both settings (Hookdeck has no PAT-mode equivalent — it consumes the App's own webhook). Since `--webhooks` is refused under App auth (previous bullet), `event_source: hookdeck` and `--webhooks` cannot both be active; the engine itself no longer carries a separate Hookdeck-versus-`--webhooks` refusal, because it supports more than one delivery transport. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above.
-- **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, `direct`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
+- **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, `direct`, `tailscale`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
 - **One installation, one account** (per instance). The engine holds a single GitHub client scoped to one App installation (one organization); two local instances may share it, each holding its own lock label (see "No user, no PAT" above). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
 - **HTTPS git needs `contents: write`.** Under App auth, HTTPS git (engine and workers) authenticates as the installation, which requires `contents: write`; with `git_ssh: true` or an `insteadOf` rewrite, git uses your SSH key instead. See "Git under App auth" above.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
@@ -1177,7 +1234,7 @@ user: your-github-username
 # "Browser-opening during reconcile" above.
 # no_browser: true
 
-# Event ingestion transport: "poll" (default), "hookdeck" or "direct". hookdeck and direct require
+# Event ingestion transport: "poll" (default), "hookdeck", "direct" or "tailscale". hookdeck, direct and tailscale require
 # GitHub App auth (which in turn cannot be combined with `webhooks: true`). The two *_env keys
 # name environment variables holding the secrets — never the secrets themselves.
 # See "Event-Driven Ingestion via Hookdeck (App Auth)" above.
@@ -1191,8 +1248,14 @@ user: your-github-username
 # app_webhook_path: /webhook
 # app_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
 # Ask GitHub to redeliver App webhook deliveries missed while the daemon was down
-# (event_source: direct only; default true). See "Direct App Webhook Receiver".
+# (event_source: direct or tailscale; default true). See "Direct App Webhook Receiver".
 # replay_failed_deliveries: true
+# event_source: tailscale embeds a Tailscale node (own tailnet machine + Funnel).
+# See "Embedded Tailscale Funnel Receiver".
+# event_source: tailscale
+# tailscale_hostname: fabrik-models
+# tailscale_auth_key_env: FABRIK_TS_AUTHKEY
+# tailscale_state_dir: .fabrik/state/tailscale
 
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
@@ -1464,13 +1527,16 @@ FABRIK_USER=my-personal-username
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
 | `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. Also `FABRIK_NO_BROWSER`. See [Browser-opening during reconcile](#browser-opening-during-reconcile). Distinct from `fabrik init --github-app --no-browser`'s setup-time flag, whose default is unchanged. | `true` (suppressed) |
-| `--event-source` | Event ingestion transport: `poll` (default), `hookdeck` or `direct`. `hookdeck` and `direct` require GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `--event-source` | Event ingestion transport: `poll` (default), `hookdeck`, `direct` or `tailscale`. `hookdeck`, `direct` and `tailscale` require GitHub App auth. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `--hookdeck-api-key-env` | Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
 | `--hookdeck-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
-| `--replay-failed-deliveries` | Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving (startup pass; `event_source: direct` only, ignored otherwise). Also `FABRIK_REPLAY_FAILED_DELIVERIES` and `replay_failed_deliveries`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | `true` |
+| `--replay-failed-deliveries` | Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving (startup pass and, for `tailscale`, tailnet recovery; `event_source: direct` or `tailscale`, ignored otherwise). Also `FABRIK_REPLAY_FAILED_DELIVERIES` and `replay_failed_deliveries`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | `true` |
 | `--direct-listen` | host:port the direct App webhook transport listens on (plain HTTP; bind loopback). Required with `--event-source direct`. Also `FABRIK_DIRECT_LISTEN`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | — |
 | `--app-webhook-path` | URL path the direct transport serves. Also `FABRIK_APP_WEBHOOK_PATH`. | `/webhook` |
-| `--app-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source direct`). Also `FABRIK_APP_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `--app-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source direct` or `tailscale`). Also `FABRIK_APP_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `--tailscale-hostname` | Tailnet hostname of the embedded Funnel node. Required with `--event-source tailscale`. Also `FABRIK_TAILSCALE_HOSTNAME`. See [Embedded Tailscale Funnel Receiver](#embedded-tailscale-funnel-receiver-event_source-tailscale). | — |
+| `--tailscale-auth-key-env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (required only until the node has state; a fresh key also re-authenticates a node whose registration expired). Also `FABRIK_TAILSCALE_AUTH_KEY_ENV`. | `FABRIK_TS_AUTHKEY` |
+| `--tailscale-state-dir` | Directory for the embedded Tailscale node's state. Also `FABRIK_TAILSCALE_STATE_DIR`. | `.fabrik/state/tailscale` |
 
 #### Unrecognized `config.yaml` Key Warnings
 
@@ -1556,13 +1622,16 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
 | `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
 | `FABRIK_NO_BROWSER` | `no_browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. See [Browser-opening during reconcile](#browser-opening-during-reconcile). | `true` (suppressed) |
-| `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default), `hookdeck` or `direct`. `hookdeck` and `direct` require GitHub App auth. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default), `hookdeck`, `direct` or `tailscale`. `hookdeck`, `direct` and `tailscale` require GitHub App auth. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `FABRIK_HOOKDECK_API_KEY_ENV` | `hookdeck_api_key_env` | Name of the environment variable holding the Hookdeck API key (only used when `event_source: hookdeck`). | `HOOKDECK_API_KEY` |
 | `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: hookdeck`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
-| `FABRIK_REPLAY_FAILED_DELIVERIES` | `replay_failed_deliveries` | Replay failed App webhook deliveries on startup (`event_source: direct`; default `true`, ignored for other sources). | `true` |
+| `FABRIK_REPLAY_FAILED_DELIVERIES` | `replay_failed_deliveries` | Replay failed App webhook deliveries on startup (`event_source: direct` or `tailscale`; default `true`, ignored for other sources). | `true` |
 | `FABRIK_DIRECT_LISTEN` | `direct_listen` | host:port the direct App webhook transport listens on. Required when `event_source: direct`. | — |
 | `FABRIK_APP_WEBHOOK_PATH` | `app_webhook_path` | URL path the direct transport serves. | `/webhook` |
-| `FABRIK_APP_WEBHOOK_SECRET_ENV` | `app_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: direct`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `FABRIK_APP_WEBHOOK_SECRET_ENV` | `app_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: direct` or `tailscale`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `FABRIK_TAILSCALE_HOSTNAME` | `tailscale_hostname` | Tailnet hostname of the embedded Funnel node. Required when `event_source: tailscale`. See [Embedded Tailscale Funnel Receiver](#embedded-tailscale-funnel-receiver-event_source-tailscale). | — |
+| `FABRIK_TAILSCALE_AUTH_KEY_ENV` | `tailscale_auth_key_env` | Name of the environment variable holding the tagged, pre-approved Tailscale auth key (required only until the node has state; a fresh key also re-authenticates a node whose registration expired). The key variable is scrubbed from workers. | `FABRIK_TS_AUTHKEY` |
+| `FABRIK_TAILSCALE_STATE_DIR` | `tailscale_state_dir` | Directory for the embedded node's state (the only persisted credential; created 0700; never shared between daemons). | `.fabrik/state/tailscale` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 

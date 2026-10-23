@@ -525,7 +525,8 @@ type TransportHealth struct {
 	// Name identifies the transport ("webhook", "hookdeck", "direct", ...).
 	Name string `json:"name"`
 	// State is the transport's own state: "listening", "not listening" or
-	// "signature drift" for the direct transport; "starting_up", "healthy" or
+	// "signature drift" for the direct transport (the tailscale transport adds
+	// "tailnet disconnected" and "funnel unavailable"); "starting_up", "healthy" or
 	// "unhealthy" (or "signature drift") for the others.
 	State string `json:"state"`
 	// LastDeliveryAt is the time of the last delivery the transport handed to
@@ -538,6 +539,11 @@ type TransportHealth struct {
 	// Nil (omitted) when replay does not apply to the transport; present with
 	// unknown values before the first pass has completed.
 	Replay *ReplayHealth `json:"replay,omitempty"`
+	// Tailnet is the embedded node's connection state (the tailscale transport
+	// only: "Running", "NeedsLogin", ...); Funnel is its Funnel status ("ok",
+	// "unavailable", or "unknown" when the status could not be read). Both are unknown for every other transport (#2143).
+	Tailnet Known[string] `json:"tailnet"`
+	Funnel  Known[string] `json:"funnel"`
 }
 
 // ReplayHealth is the summary of the last delivery replay pass.
@@ -545,7 +551,9 @@ type ReplayHealth struct {
 	// LastPassAt is when the last pass finished.
 	LastPassAt Known[time.Time] `json:"last_pass_at"`
 	// FoundFailed is how many failed, not-yet-received deliveries the pass
-	// found; Requested how many redeliveries it asked GitHub for; Capped how
+	// found; Requested how many redelivery REQUESTS it made (GitHub accepts a
+	// request before attempting the delivery, so this counts requests, not
+	// deliveries; a follow-up pass later re-checks them); Capped how
 	// many it left unrequested because a page or request cap was hit; Failed
 	// how many redelivery requests errored.
 	FoundFailed Known[int64] `json:"found_failed"`

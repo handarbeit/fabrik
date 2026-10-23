@@ -29,7 +29,8 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	wantWebhooks := e.cfg.Webhooks
 	wantHookdeck := e.cfg.EventSource == EventSourceHookdeck
 	wantDirect := e.cfg.EventSource == EventSourceDirect
-	if !wantWebhooks && !wantHookdeck && !wantDirect && len(e.extraTransports) == 0 {
+	wantTailscale := e.cfg.EventSource == EventSourceTailscale
+	if !wantWebhooks && !wantHookdeck && !wantDirect && !wantTailscale && len(e.extraTransports) == 0 {
 		return func() {}
 	}
 
@@ -99,8 +100,10 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	if wantDirect {
 		e.startDirectTransport(ctx, set, sink, initialRepos, bootstrap)
 	}
-	// Transports the engine has no built-in knowledge of (a test fake today; the
-	// Funnel receiver of #2143 tomorrow) attach through the very same wiring.
+	if wantTailscale {
+		e.startTailscaleTransport(ctx, set, sink, initialRepos, bootstrap)
+	}
+	// Transports the engine has no built-in knowledge of (a test fake today) attach through the very same wiring.
 	for _, t := range e.extraTransports {
 		e.attachTransport(ctx, set, t, sink, bootstrap)
 	}
@@ -248,28 +251,9 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	tr.SetCoverageCheck(func() {
 		e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"})
 	})
-	driftKey := warnings.Condition{Type: "direct_signature_drift", Subject: tr.Name()}.Key()
-	tr.SetDriftHandler(func(active bool) {
-		if !active {
-			if err := warnings.Resolve(driftKey); err != nil {
-				e.logf(0, "direct", "clearing signature-drift warning: %v\n", err)
-			}
-			return
-		}
-		if err := warnings.Report(e.warnWriter("direct"), warnings.Condition{
-			Type:    "direct_signature_drift",
-			Subject: tr.Name(),
-			Title:   "App webhook signatures are failing verification",
-			Detail: "Every recent delivery to the direct App webhook listener failed signature verification, so no events are being applied (the daemon is effectively poll-only).\n\n" +
-				"Fix: make the App's webhook secret equal the value of $" + secretEnvName + ", and set the App's webhook content type to application/json.",
-			Fingerprint: "direct_signature_drift",
-			LogLine:     "direct App webhook: signature verification is failing — check that the App's webhook secret equals $" + secretEnvName,
-		}); err != nil {
-			e.logf(0, "direct", "recording signature-drift warning: %v\n", err)
-		}
-	})
+	driftKey := e.wireAppWebhookWarnings(tr, "direct", "direct App webhook", secretEnvName)
 
-	e.replayer = e.newDeliveryReplayer(tr)
+	e.replayer = e.newDeliveryReplayer(tr, "direct")
 
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
 	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {
@@ -305,4 +289,33 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	// Replay failed deliveries from while the daemon was not receiving (#2144).
 	// Background, after the listener is up: it never delays startup.
 	e.startDeliveryReplay(ctx, e.replayer)
+}
+
+// wireAppWebhookWarnings installs the signature-drift handler the two App
+// webhook event sources (direct, tailscale) share and returns the panel key of
+// its entry. tag is the log tag and the panel-type prefix
+// (<tag>_signature_drift); desc names the receiver in the operator text.
+func (e *Engine) wireAppWebhookWarnings(tr *appWebhookTransport, tag, desc, secretEnvName string) string {
+	typ := tag + "_signature_drift"
+	driftKey := warnings.Condition{Type: typ, Subject: tr.Name()}.Key()
+	tr.SetDriftHandler(func(active bool) {
+		if !active {
+			if err := warnings.Resolve(driftKey); err != nil {
+				e.logf(0, tag, "clearing signature-drift warning: %v\n", err)
+			}
+			return
+		}
+		if err := warnings.Report(e.warnWriter(tag), warnings.Condition{
+			Type:    typ,
+			Subject: tr.Name(),
+			Title:   "App webhook signatures are failing verification",
+			Detail: "Every recent delivery to the " + desc + " listener failed signature verification, so no events are being applied (the daemon is effectively poll-only).\n\n" +
+				"Fix: make the App's webhook secret equal the value of $" + secretEnvName + ", and set the App's webhook content type to application/json.",
+			Fingerprint: typ,
+			LogLine:     desc + ": signature verification is failing — check that the App's webhook secret equals $" + secretEnvName,
+		}); err != nil {
+			e.logf(0, tag, "recording signature-drift warning: %v\n", err)
+		}
+	})
+	return driftKey
 }

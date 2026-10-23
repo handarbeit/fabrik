@@ -80,6 +80,8 @@ var Scrubbed = []Var{
 	{"FABRIK_HOOKDECK_API_KEY_ENV", GroupHookdeck, "names the variable holding the Hookdeck API key"},
 	{"FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the webhook secret"},
 	{"FABRIK_APP_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the App webhook secret (event_source: direct)"},
+	{"FABRIK_TAILSCALE_AUTH_KEY_ENV", GroupHookdeck, "names the variable holding the Tailscale auth key (event_source: tailscale)"},
+	cred("FABRIK_TS_AUTHKEY", "default Tailscale auth key variable; lets a worker join the tailnet as a tagged node"),
 	{DefaultHookdeckAPIKeyEnv, GroupHookdeck, "default Hookdeck API key variable (not FABRIK_-prefixed)"},
 
 	ident("FABRIK_OWNER"), ident("FABRIK_PROJECT_NUMBER"), ident("FABRIK_USER"),
@@ -91,6 +93,7 @@ var Scrubbed = []Var{
 	ident("FABRIK_WEBHOOKS"), ident("FABRIK_WEBHOOK_PORT"), ident("FABRIK_WEBHOOK_EVENTS"),
 	ident("FABRIK_STATUS_POLL"), ident("FABRIK_TEST_POLL_CONTROL"),
 	ident("FABRIK_LOCK_DIR"), ident("FABRIK_DIRECT_LISTEN"), ident("FABRIK_APP_WEBHOOK_PATH"),
+	ident("FABRIK_TAILSCALE_HOSTNAME"), ident("FABRIK_TAILSCALE_STATE_DIR"),
 
 	tune("FABRIK_POLL"), tune("FABRIK_REPLAY_FAILED_DELIVERIES"), tune("FABRIK_RETRY_BACKOFF"), tune("FABRIK_MAX_CONCURRENT"),
 	tune("FABRIK_MAX_RETRIES"), tune("FABRIK_MAX_SLICE_RETRIES"),

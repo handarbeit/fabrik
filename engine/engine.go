@@ -117,13 +117,23 @@ type Config struct {
 	DirectListen        string
 	AppWebhookPath      string
 	AppWebhookSecretEnv string
-	// ReplayFailedDeliveries enables the delivery replay pass of a direct App
-	// webhook receiver (#2144, ADR 2144): on startup (and on a transport
+	// ReplayFailedDeliveries enables the delivery replay pass of a direct or tailscale
+	// App webhook receiver (#2144, ADR 2144): on startup (and on a transport
 	// reconnect signal) the engine asks GitHub to redeliver App webhook
 	// deliveries that failed while it was not receiving. cmd resolves the
 	// default (true); the zero value is off, so NewWithDeps engines never
 	// replay. Ignored for event sources other than direct/tailscale.
-	ReplayFailedDeliveries   bool
+	ReplayFailedDeliveries bool
+	// TailscaleHostname / TailscaleAuthKeyEnv / TailscaleStateDir configure
+	// event_source: tailscale (#2143, ADR 2143): the embedded tsnet node's
+	// hostname (required), the *name* of the variable holding its tagged
+	// pre-approved auth key ("" = DefaultTailscaleAuthKeyEnv; needed only until
+	// node state exists) and the node's state directory ("" =
+	// DefaultTailscaleStateDir). AppWebhookPath and AppWebhookSecretEnv are
+	// shared with the direct transport.
+	TailscaleHostname        string
+	TailscaleAuthKeyEnv      string
+	TailscaleStateDir        string
 	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
 	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
@@ -181,6 +191,8 @@ const (
 	EventSourcePoll     = "poll"
 	EventSourceHookdeck = "hookdeck"
 	EventSourceDirect   = "direct"
+	// EventSourceTailscale is the embedded Tailscale Funnel receiver (#2143).
+	EventSourceTailscale = "tailscale"
 
 	DefaultEventSource              = EventSourcePoll
 	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
@@ -192,6 +204,11 @@ const (
 	// transports' keys stay uncoupled.
 	DefaultAppWebhookPath      = "/webhook"
 	DefaultAppWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+
+	// DefaultTailscaleAuthKeyEnv / DefaultTailscaleStateDir are event_source:
+	// tailscale's defaults (#2143). The state dir is relative to the fabrik dir.
+	DefaultTailscaleAuthKeyEnv = "FABRIK_TS_AUTHKEY"
+	DefaultTailscaleStateDir   = ".fabrik/state/tailscale"
 )
 
 // cloneCall coordinates concurrent bare-clone attempts for the same repo.
@@ -216,14 +233,15 @@ type cloneCall struct {
 type Engine struct {
 	cfg                                Config
 	client                             GitHubClient
-	releaseClient                      GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient                         *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
-	appIdent                           *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
-	replayAPIOverride                  hookDeliveryAPI        // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
-	replayer                           *deliveryReplayer      // direct-receiver delivery replay (#2144, ADR 2144); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport before any transport can signal a reconnect.
-	ghAppAuth                          *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
-	skillResolver                      *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
-	readClient                         boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	releaseClient                      GitHubClient                                    // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient                         *gh.Client                                      // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	appIdent                           *appIdentity                                    // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
+	replayAPIOverride                  hookDeliveryAPI                                 // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
+	replayWaitOverride                 func(ctx context.Context, d time.Duration) bool // test seam: stands in for the replayer's sleep (start grace, follow-up delay); set only by SetReplayWaitForTest.
+	replayer                           *deliveryReplayer                               // App webhook receiver delivery replay (#2144, ADR 2144; direct and tailscale); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport / startTailscaleTransport before the transport can signal a reconnect.
+	ghAppAuth                          *githubauth.Reconciler                          // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	skillResolver                      *skillResolver                                  // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
+	readClient                         boardcache.ReadClient                           // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                             ClaudeInvoker
 	statusField                        *gh.StatusField
 	boardProjectID                     string // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
@@ -430,6 +448,7 @@ type Engine struct {
 	pauseIssueMu                          map[string]*pauseIssueMuEntry             // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
 	baseBranchWarnedSet                   sync.Map                                  // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	ciGateCoverageWarnedSet               sync.Map                                  // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
+	hookCheckLog                          hookCheckLogState                         // throttle of the R7 webhook-config "could not read" log line (#2143); in memory
 	unknownMergeClocks                    unknownMergeClocks                        // per item+PR-head continuous unknown-merge-state clocks (#2302); in memory by design — a restart starts them again
 	ciJudgedHeads                         sync.Map                                  // key: "owner/repo#N" -> ciJudgedHead; the PR head the stage CI gate cleared this poll (#2342). Consumed by attemptMergeOnValidate. In memory by design.
 	ciBackstopLiveEvaluated               sync.Map                                  // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.
@@ -702,6 +721,10 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	if err := RefuseDirectMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg))); err != nil {
+		return nil, err
+	}
+	if err := RefuseTailscaleMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg)),
+		os.Getenv(tailscaleAuthKeyEnvName(cfg)), tailnetStateExists(tailscaleStateDir(cfg, fabrikDir))); err != nil {
 		return nil, err
 	}
 
