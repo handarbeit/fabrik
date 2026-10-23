@@ -27,6 +27,12 @@ const (
 	// tailnet. Start is synchronous before the first poll, so an unreachable
 	// control plane or a bad key must not hang the daemon.
 	tailnetUpTimeout = 90 * time.Second
+	// tailnetReplayStartGrace holds the startup delivery-replay pass back after
+	// the node and its Funnel listener are up. Up returning does not mean the
+	// public Funnel relay routes to the node yet (live: about two minutes), and a
+	// redelivery requested before then fails. It is a fixed grace; a real
+	// reachability probe (#2425) can replace it.
+	tailnetReplayStartGrace = 90 * time.Second
 	// tailnetFunnelAddr is the only Funnel port the daemon uses.
 	tailnetFunnelAddr = ":443"
 	// tailnetNodeStateFile is tsnet's default state file (a FileStore at
@@ -313,9 +319,10 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: tag, PanelType: "tailscale_coverage", Ref: "#2143"})
 	e.checkAppWebhookConfig(tag, u)
 	// Replay failed deliveries from while the daemon was not receiving (#2144).
-	// Background, after the node and its Funnel listener are up: it never delays
+	// Background, after the node and its Funnel listener are up and a fixed grace
+	// (tailnetReplayStartGrace) for Funnel ingress to reach the node: it never delays
 	// startup. A failed start (above) never reaches here, so no pass runs then.
-	e.startDeliveryReplay(ctx, e.replayer)
+	e.startDeliveryReplayAfter(ctx, e.replayer, tailnetReplayStartGrace)
 }
 
 // reportWarning records an operator warning, logging (not failing) on error.

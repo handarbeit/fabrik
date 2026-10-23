@@ -399,3 +399,159 @@ func TestDeliveryReplayNeverSubmits(t *testing.T) {
 		}
 	}
 }
+
+func redelivery(id int64, guid string, code int, ago time.Duration) gh.AppHookDelivery {
+	d := dlv(id, guid, code, ago)
+	d.Redelivery = true
+	return d
+}
+
+// GitHub accepts a redelivery request before it attempts it, so a GUID is done
+// only when an attempt succeeded. A redelivery that was attempted and failed is
+// requested again — once, and only once.
+func TestReplayPass_FailedRedeliveryIsRequestedOnceMore(t *testing.T) {
+	h := newReplayHarness(t, []gh.AppHookDelivery{dlv(10, "g", 500, 10*time.Minute)})
+
+	h.r.pass(context.Background())
+	if fmt.Sprint(h.api.redelivered) != "[10]" {
+		t.Fatalf("first pass requested %v, want [10]", h.api.redelivered)
+	}
+
+	// Requested but not yet attempted (nothing new in the log): not asked again.
+	h.api.redelivered = nil
+	h.r.pass(context.Background())
+	if len(h.api.redelivered) != 0 {
+		t.Fatalf("a request that has not been attempted yet was repeated: %v", h.api.redelivered)
+	}
+
+	// The redelivery was attempted and failed: requested once more, from the
+	// newest failed attempt.
+	h.api.pages[0] = append([]gh.AppHookDelivery{redelivery(11, "g", 500, 0)}, h.api.pages[0]...)
+	h.r.pass(context.Background())
+	if fmt.Sprint(h.api.redelivered) != "[11]" {
+		t.Fatalf("second request = %v, want [11]", h.api.redelivered)
+	}
+	if !strings.Contains(h.logText(), "requesting them once more") {
+		t.Errorf("no log line for the repeated request:\n%s", h.logText())
+	}
+
+	// ... and that one failing as well is the end: a dead endpoint must not loop.
+	h.api.redelivered = nil
+	h.api.pages[0] = append([]gh.AppHookDelivery{redelivery(12, "g", 502, 0)}, h.api.pages[0]...)
+	for i := 0; i < 3; i++ {
+		h.r.pass(context.Background())
+	}
+	if len(h.api.redelivered) != 0 {
+		t.Fatalf("a GUID was requested a third time: %v", h.api.redelivered)
+	}
+}
+
+// A redelivery that succeeded ends it; one a person made by hand before our
+// request does not count as ours.
+func TestReplayPass_SucceededOrForeignRedeliveryDoesNotTriggerARepeat(t *testing.T) {
+	h := newReplayHarness(t,
+		[]gh.AppHookDelivery{dlv(10, "ok-later", 500, 10*time.Minute), dlv(20, "old-redelivery", 500, 10*time.Minute)})
+	h.r.pass(context.Background())
+	h.api.redelivered = nil
+
+	// ok-later: the redelivery succeeded -> done.
+	// old-redelivery: a failed redelivery from long before our request (> skew margin).
+	h.api.pages[0] = append([]gh.AppHookDelivery{
+		redelivery(11, "ok-later", 200, 0),
+		redelivery(21, "old-redelivery", 500, 20*time.Minute),
+	}, h.api.pages[0]...)
+	h.r.pass(context.Background())
+	if len(h.api.redelivered) != 0 {
+		t.Fatalf("re-requested %v", h.api.redelivered)
+	}
+}
+
+// A request that errored is not counted: it can be made again, and still has
+// its full allowance.
+func TestReplayPass_ErroredRequestKeepsItsAllowance(t *testing.T) {
+	h := newReplayHarness(t, []gh.AppHookDelivery{dlv(10, "g", 500, 10*time.Minute)})
+	h.api.redeliverFn = func(int64) error { return errors.New("boom") }
+	h.r.pass(context.Background())
+	h.api.redeliverFn = nil
+	h.api.redelivered = nil
+	h.r.pass(context.Background())
+	if fmt.Sprint(h.api.redelivered) != "[10]" {
+		t.Fatalf("retry after an errored request = %v", h.api.redelivered)
+	}
+}
+
+// A pass that requested anything schedules exactly one follow-up pass; the
+// follow-up uses the lookback bound of the pass it follows (the live ledger has
+// moved on), re-requests a redelivery that failed, and schedules nothing more.
+func TestReplayer_FollowUpPass(t *testing.T) {
+	h := newReplayHarness(t, []gh.AppHookDelivery{dlv(10, "g", 500, 30*time.Minute)})
+	var mu sync.Mutex
+	var waits []time.Duration
+	release := make(chan struct{})
+	h.r.wait = func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		waits = append(waits, d)
+		mu.Unlock()
+		select {
+		case <-release:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.r.Run(ctx)
+	h.r.Trigger()
+	replayWaitFor(t, "first pass", func() bool { h.api.mu.Lock(); defer h.api.mu.Unlock(); return len(h.api.redelivered) == 1 })
+	replayWaitFor(t, "follow-up scheduled", func() bool { mu.Lock(); defer mu.Unlock(); return len(waits) == 1 })
+	mu.Lock()
+	if waits[0] != replayFollowUpDelay || replayFollowUpDelay != 3*time.Minute {
+		t.Errorf("follow-up delay = %s", waits[0])
+	}
+	mu.Unlock()
+
+	// Live deliveries moved the ledger's newest to now; the follow-up must still
+	// cover the 30-minute-old failure (it reuses the first pass's bound).
+	h.ledger.newest = replayTestNow
+	h.api.mu.Lock()
+	h.api.pages[0] = append([]gh.AppHookDelivery{redelivery(11, "g", 500, 0)}, h.api.pages[0]...)
+	h.api.mu.Unlock()
+	close(release)
+	replayWaitFor(t, "follow-up pass", func() bool { h.api.mu.Lock(); defer h.api.mu.Unlock(); return len(h.api.redelivered) == 2 })
+	h.api.mu.Lock()
+	if h.api.redelivered[1] != 11 {
+		t.Errorf("follow-up requested %v", h.api.redelivered)
+	}
+	h.api.mu.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := len(waits)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the follow-up scheduled another follow-up (%d waits)", n)
+	}
+}
+
+// A pass that requested nothing schedules no follow-up.
+func TestReplayer_NoFollowUpWithoutRequests(t *testing.T) {
+	h := newReplayHarness(t, []gh.AppHookDelivery{dlv(1, "ok", 200, time.Minute)})
+	waited := make(chan struct{}, 1)
+	h.r.wait = func(ctx context.Context, d time.Duration) bool {
+		waited <- struct{}{}
+		<-ctx.Done()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.r.Run(ctx)
+	h.r.Trigger()
+	replayWaitFor(t, "pass", func() bool { h.api.mu.Lock(); defer h.api.mu.Unlock(); return h.api.listCalls >= 1 })
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-waited:
+		t.Fatal("a follow-up was scheduled although nothing was requested")
+	default:
+	}
+}

@@ -13,6 +13,20 @@ import (
 // switch (#2144) and an injected delivery-log API.
 func startTailscaleEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI) (*Engine, func()) {
 	t.Helper()
+	// The startup grace passes at once; the follow-up delay never fires.
+	return startTailscaleEngineReplayWait(t, enabled, api, func(ctx context.Context, d time.Duration) bool {
+		if d == tailnetReplayStartGrace {
+			return true
+		}
+		<-ctx.Done()
+		return false
+	})
+}
+
+// startTailscaleEngineReplayWait is startTailscaleEngineReplay with the
+// replayer's sleep (start grace, follow-up delay) under the test's control.
+func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDeliveryAPI, wait func(context.Context, time.Duration) bool) (*Engine, func()) {
+	t.Helper()
 	isolateWarnings(t)
 	oldPace := replayPace
 	replayPace = 0
@@ -25,6 +39,7 @@ func startTailscaleEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI)
 	eng.cfg.TailscaleHostname = "fabrik-models"
 	eng.cfg.AppWebhookPath = directTestPath
 	eng.cfg.ReplayFailedDeliveries = enabled
+	eng.SetReplayWaitForTest(wait)
 	if api != nil {
 		eng.SetReplayAPIForTest(api)
 	}
@@ -122,5 +137,61 @@ func TestTailscaleReplay_FailedStartRunsNoPass(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if fake.listCount() != 0 {
 		t.Fatalf("a replay pass ran although the node never started (%d)", fake.listCount())
+	}
+}
+
+// The startup pass of a tailscale daemon waits tailnetReplayStartGrace after the
+// node and its listener are up (Funnel ingress needs a while to route to a new
+// node; a redelivery requested earlier fails), and shutdown cancels the wait.
+func TestTailscaleReplay_StartupPassWaitsForTheGrace(t *testing.T) {
+	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	fake := &fakeHookAPI{}
+	release := make(chan struct{})
+	waits := make(chan time.Duration, 4)
+	_, cleanup := startTailscaleEngineReplayWait(t, true, fake, func(ctx context.Context, d time.Duration) bool {
+		waits <- d
+		select {
+		case <-release:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+	defer cleanup()
+	select {
+	case d := <-waits:
+		if d != tailnetReplayStartGrace || tailnetReplayStartGrace != 90*time.Second {
+			t.Fatalf("grace = %s (constant %s), want 90s", d, tailnetReplayStartGrace)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup pass did not wait on the grace")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if fake.listCount() != 0 {
+		t.Fatalf("a pass ran before the grace elapsed (%d)", fake.listCount())
+	}
+	close(release)
+	replayWaitFor(t, "startup pass after the grace", func() bool { return fake.listCount() >= 1 })
+}
+
+func TestTailscaleReplay_ShutdownCancelsTheGrace(t *testing.T) {
+	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	fake := &fakeHookAPI{}
+	ctx, cancel := context.WithCancel(context.Background())
+	e := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	entered := make(chan struct{})
+	e.SetReplayWaitForTest(func(c context.Context, d time.Duration) bool {
+		close(entered)
+		<-c.Done()
+		return false
+	})
+	r := newDeliveryReplayer(fake, &fakeReplayLedger{seen: map[string]bool{}}, &recordingStatus{}, nil, time.Now)
+	r.wait = e.replayWaitOverride
+	e.startDeliveryReplayAfter(ctx, r, tailnetReplayStartGrace)
+	<-entered
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	if fake.listCount() != 0 {
+		t.Fatalf("a cancelled grace still ran a pass (%d)", fake.listCount())
 	}
 }

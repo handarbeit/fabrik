@@ -551,7 +551,9 @@ type ReplayHealth struct {
 	// LastPassAt is when the last pass finished.
 	LastPassAt Known[time.Time] `json:"last_pass_at"`
 	// FoundFailed is how many failed, not-yet-received deliveries the pass
-	// found; Requested how many redeliveries it asked GitHub for; Capped how
+	// found; Requested how many redelivery REQUESTS it made (GitHub accepts a
+	// request before attempting the delivery, so this counts requests, not
+	// deliveries; a follow-up pass later re-checks them); Capped how
 	// many it left unrequested because a page or request cap was hit; Failed
 	// how many redelivery requests errored.
 	FoundFailed Known[int64] `json:"found_failed"`

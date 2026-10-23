@@ -40,7 +40,24 @@ var (
 	replaySkewMargin = 5 * time.Minute
 	// replayEmptyLedgerLookback is the lookback when the ledger holds nothing.
 	replayEmptyLedgerLookback = time.Hour
+	// replayFollowUpDelay is how long after a pass that requested redeliveries the
+	// one follow-up pass runs. GitHub accepts a redelivery request (202) before it
+	// attempts the delivery, so a pass cannot see the outcome of what it asked for;
+	// the follow-up reads the log again and re-requests a redelivery that itself
+	// failed (once).
+	replayFollowUpDelay = 3 * time.Minute
 )
+
+// replayMaxRequestsPerGUID bounds how often one GUID is requested in this
+// process: the first request, plus one more when that redelivery itself failed.
+// A dead endpoint therefore cannot loop.
+const replayMaxRequestsPerGUID = 2
+
+// replayRequest records the requests made for one GUID.
+type replayRequest struct {
+	at time.Time // when the newest request was made
+	n  int       // requests made so far
+}
 
 // hookDeliveryAPI is the App-JWT surface a pass needs. *githubauth.Reconciler
 // implements it.
@@ -69,7 +86,12 @@ type deliveryReplayer struct {
 	logf   func(format string, args ...any)
 	now    func() time.Time
 
-	trigger chan struct{}
+	trigger       chan struct{}
+	followTrigger chan struct{}
+
+	// wait sleeps for d and reports false if ctx ended first. A field so tests
+	// (and the engine's seam) control the clock of the follow-up and start grace.
+	wait func(ctx context.Context, d time.Duration) bool
 
 	// startNewest is the ledger's newest receipt time, snapshotted when the
 	// replayer is built — before the listener accepts anything. The startup
@@ -79,9 +101,23 @@ type deliveryReplayer struct {
 	// whole outage. A zero snapshot means the ledger was empty at start.
 	startNewest time.Time
 
-	mu        sync.Mutex
-	startDone bool                 // the startup snapshot has been consumed by a pass
-	requested map[string]time.Time // guid -> when redelivery was requested
+	mu            sync.Mutex
+	startDone     bool                      // the startup snapshot has been consumed by a pass
+	requested     map[string]*replayRequest // guid -> requests made in this process
+	lastBound     time.Time                 // lookback bound of the last full pass; follow-up passes reuse it
+	followPending bool                      // a follow-up pass is already scheduled
+}
+
+// realReplayWait sleeps for d, returning false if ctx ends first.
+func realReplayWait(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func newDeliveryReplayer(api hookDeliveryAPI, ledger replayLedger, status replayStatusSink, logf func(format string, args ...any), now func() time.Time) *deliveryReplayer {
@@ -89,13 +125,15 @@ func newDeliveryReplayer(api hookDeliveryAPI, ledger replayLedger, status replay
 		now = time.Now
 	}
 	r := &deliveryReplayer{
-		api:       api,
-		ledger:    ledger,
-		status:    status,
-		logf:      logf,
-		now:       now,
-		trigger:   make(chan struct{}, 1),
-		requested: make(map[string]time.Time),
+		api:           api,
+		ledger:        ledger,
+		status:        status,
+		logf:          logf,
+		now:           now,
+		trigger:       make(chan struct{}, 1),
+		followTrigger: make(chan struct{}, 1),
+		wait:          realReplayWait,
+		requested:     make(map[string]*replayRequest),
 	}
 	if ledger != nil {
 		r.startNewest = ledger.ledgerNewest()
@@ -125,9 +163,40 @@ func (r *deliveryReplayer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-r.trigger:
-			r.pass(ctx)
+			if r.passMode(ctx, false) > 0 {
+				r.armFollowUp(ctx)
+			}
+		case <-r.followTrigger:
+			// A follow-up never schedules another: what it re-requests is bounded by
+			// replayMaxRequestsPerGUID.
+			r.passMode(ctx, true)
 		}
 	}
+}
+
+// armFollowUp schedules one follow-up pass replayFollowUpDelay from now, unless
+// one is already scheduled.
+func (r *deliveryReplayer) armFollowUp(ctx context.Context) {
+	r.mu.Lock()
+	if r.followPending {
+		r.mu.Unlock()
+		return
+	}
+	r.followPending = true
+	r.mu.Unlock()
+	go func() {
+		ok := r.wait(ctx, replayFollowUpDelay)
+		r.mu.Lock()
+		r.followPending = false
+		r.mu.Unlock()
+		if !ok {
+			return
+		}
+		select {
+		case r.followTrigger <- struct{}{}:
+		default:
+		}
+	}()
 }
 
 func (r *deliveryReplayer) log(format string, args ...any) {
@@ -166,13 +235,33 @@ type replayCandidate struct {
 	id   int64 // delivery id of the newest failed attempt
 }
 
-func (r *deliveryReplayer) pass(ctx context.Context) {
+// pass runs one full pass; it returns nothing to the caller that does not care
+// how many redeliveries were requested.
+func (r *deliveryReplayer) pass(ctx context.Context) { r.passMode(ctx, false) }
+
+// passMode runs one pass and returns how many redeliveries it requested. A
+// follow-up pass reuses the lookback bound of the pass it follows: the live
+// ledger has moved on since (live deliveries are accepted again), and a bound
+// derived from it would drop the outage the pass is meant to cover.
+func (r *deliveryReplayer) passMode(ctx context.Context, followUp bool) int {
 	now := r.now()
-	bound := r.lowerBound(now)
+	var bound time.Time
+	r.mu.Lock()
+	reuse := followUp && !r.lastBound.IsZero()
+	if reuse {
+		bound = r.lastBound
+	}
+	r.mu.Unlock()
+	if !reuse {
+		bound = r.lowerBound(now)
+		r.mu.Lock()
+		r.lastBound = bound
+		r.mu.Unlock()
+	}
 
 	r.mu.Lock()
-	for g, at := range r.requested {
-		if now.Sub(at) > deliveryLedgerWindow {
+	for g, rq := range r.requested {
+		if now.Sub(rq.at) > deliveryLedgerWindow {
 			delete(r.requested, g)
 		}
 	}
@@ -197,6 +286,12 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 		failedID int64 // newest failed attempt's delivery id (0 = none)
 		ok       bool  // some attempt returned 2xx
 		ping     bool
+		// newestRedelivery/newestAt describe the newest attempt in the log: a
+		// failed redelivery newer than our request means our request was attempted
+		// and failed.
+		seen            bool
+		newestRedeliver bool
+		newestAt        time.Time
 	}
 	groups := map[string]*group{}
 	var order []string
@@ -206,11 +301,11 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 		items, next, err := r.api.ListAppHookDeliveries(cursor, replayPerPage)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return 0
 			}
 			r.logDegraded("listing deliveries", err)
 			finish(0, 0, 0, 0, "degraded: "+shortErr(err))
-			return
+			return 0
 		}
 		reachedBound := false
 		for _, d := range items {
@@ -230,6 +325,11 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 			if d.Event == "ping" {
 				g.ping = true
 			}
+			if !g.seen {
+				g.seen = true
+				g.newestRedeliver = d.Redelivery
+				g.newestAt = d.DeliveredAt
+			}
 			if d.Succeeded() {
 				g.ok = true
 			} else if g.failedID == 0 {
@@ -247,16 +347,24 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 	}
 
 	var cands []replayCandidate
+	rerequest := 0
 	for _, guid := range order {
 		g := groups[guid]
 		if g.ok || g.ping || g.failedID == 0 || r.ledger.ledgerSeen(guid) {
 			continue
 		}
 		r.mu.Lock()
-		_, already := r.requested[guid]
+		rq := r.requested[guid]
 		r.mu.Unlock()
-		if already {
-			continue
+		if rq != nil {
+			// Requested before: ask again only when that redelivery was attempted
+			// and failed (the newest attempt is a redelivery newer than our
+			// request), and only once more per GUID.
+			attempted := g.newestRedeliver && g.newestAt.After(rq.at.Add(-replaySkewMargin))
+			if rq.n >= replayMaxRequestsPerGUID || !attempted {
+				continue
+			}
+			rerequest++
 		}
 		cands = append(cands, replayCandidate{guid: guid, id: g.failedID})
 	}
@@ -268,21 +376,29 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 		cands = cands[:replayMaxRedeliveries]
 	}
 
+	if rerequest > 0 {
+		r.log("replay: %d redelivery request(s) were attempted and failed — requesting them once more\n", rerequest)
+	}
 	requested, failed, consecutive := 0, 0, 0
 	outcome := "ok"
 	for i, c := range cands {
 		if ctx.Err() != nil {
-			return
+			return requested
 		}
 		if i > 0 && replayPace > 0 {
 			select {
 			case <-ctx.Done():
-				return
+				return requested
 			case <-time.After(replayPace):
 			}
 		}
 		r.mu.Lock()
-		r.requested[c.guid] = r.now()
+		prev := r.requested[c.guid]
+		n := 1
+		if prev != nil {
+			n = prev.n + 1
+		}
+		r.requested[c.guid] = &replayRequest{at: r.now(), n: n}
 		r.mu.Unlock()
 		err := r.api.RedeliverAppHookDelivery(c.id)
 		if err == nil {
@@ -292,7 +408,11 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 		}
 		// Not requested after all: let a later pass try again.
 		r.mu.Lock()
-		delete(r.requested, c.guid)
+		if prev != nil {
+			r.requested[c.guid] = prev
+		} else {
+			delete(r.requested, c.guid)
+		}
 		r.mu.Unlock()
 		failed++
 		consecutive++
@@ -301,7 +421,7 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 			capped += len(cands) - i - 1
 			outcome = "degraded: " + shortErr(err)
 			finish(found, requested, capped, failed, outcome)
-			return
+			return requested
 		}
 		r.log("replay: redelivery of %s (delivery %d) failed: %v\n", c.guid, c.id, err)
 		if consecutive >= replayAbortAfterFailed {
@@ -309,7 +429,7 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 			capped += len(cands) - i - 1
 			outcome = "degraded: repeated redelivery failures"
 			finish(found, requested, capped, failed, outcome)
-			return
+			return requested
 		}
 	}
 
@@ -322,6 +442,7 @@ func (r *deliveryReplayer) pass(ctx context.Context) {
 		outcome = "capped"
 	}
 	finish(found, requested, capped, failed, outcome)
+	return requested
 }
 
 func (r *deliveryReplayer) logDegraded(what string, err error) {
@@ -377,16 +498,37 @@ func (e *Engine) newDeliveryReplayer(tr replayStatusSink, tag string) *deliveryR
 	if !e.cfg.ReplayFailedDeliveries || api == nil || e.intake == nil {
 		return nil
 	}
-	return newDeliveryReplayer(api, e.intake, tr,
+	r := newDeliveryReplayer(api, e.intake, tr,
 		func(format string, args ...any) { e.logf(0, tag, format, args...) }, e.now)
+	if e.replayWaitOverride != nil {
+		r.wait = e.replayWaitOverride
+	}
+	return r
 }
 
 // startDeliveryReplay runs r in the background until ctx is cancelled and
 // requests the startup pass. nil r is a no-op.
 func (e *Engine) startDeliveryReplay(ctx context.Context, r *deliveryReplayer) {
+	e.startDeliveryReplayAfter(ctx, r, 0)
+}
+
+// startDeliveryReplayAfter is startDeliveryReplay with the startup pass held
+// back by grace (cancelled by ctx). The tailscale transport uses it: its node
+// is up when Up returns, but Funnel ingress needs a while longer to route to it,
+// and redeliveries requested before then fail (#2143). A trigger from a
+// reconnect during the grace still runs a pass at once.
+func (e *Engine) startDeliveryReplayAfter(ctx context.Context, r *deliveryReplayer, grace time.Duration) {
 	if r == nil {
 		return
 	}
 	go r.Run(ctx)
-	r.Trigger()
+	if grace <= 0 {
+		r.Trigger()
+		return
+	}
+	go func() {
+		if r.wait(ctx, grace) {
+			r.Trigger()
+		}
+	}()
 }
