@@ -149,6 +149,7 @@ func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 		CPUs:          g.CPUs,
 		LoadAvg:       g.LoadAvg,
 		Identity:      g.Identity,
+		Delivery:      g.Delivery,
 		schedWaitHook: g.schedWaitHook,
 		parent:        g,
 		bed:           &spec,

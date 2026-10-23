@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 )
 
 // LegResult is what a leg that reached a normal post-suite result hands to
@@ -145,7 +147,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	label := cell.Label()
 	// A multi-bed leg also aims the live harness at its own bed, repos and board
 	// (#1976, D2); bedEnv is nil on a single-bed run.
-	legEnv := withEnv(g.Env, append([]string{"E2E_AUTH_MODE=" + cell.Auth}, g.bedEnv()...)...)
+	legEnv := withEnv(g.Env, append([]string{"E2E_AUTH_MODE=" + cell.Auth, bedevents.RequestVar + "=" + g.Cfg.EventSource}, g.bedEnv()...)...)
 
 	// #1972: when the coverage ledger is live, this leg's logs are archived and
 	// its outcomes recorded as they stream in. The archive's sampler starts before
@@ -170,6 +172,14 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	// scheduled on.
 	if cell.Auth == "app" {
 		if err := g.verifyBedAppIdentity(label); err != nil {
+			return err
+		}
+	}
+
+	// #2408: a webhook leg proves GitHub's deliveries reach the restarted bed before
+	// it spends live budget on tests that need them. A poll leg is never probed.
+	if bedevents.Webhook(g.Cfg.EffectiveEventSource(cell.Auth)) {
+		if err := g.ProbeWebhookDelivery(ctx, cell); err != nil {
 			return err
 		}
 	}
