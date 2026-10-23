@@ -106,6 +106,11 @@ type ProjectConfig struct {
 	// pattern above: nil means "unset, use the default", distinct from an
 	// explicit false (re-enable browser-opening, AC2).
 	NoBrowser *bool `yaml:"no_browser"`
+	// ReplayFailedDeliveries controls the direct receiver's delivery replay
+	// (#2144, ADR 2144). *bool because the default (true) is the inverse of the
+	// zero value: nil means "unset, use the default". Ignored for event sources
+	// other than direct/tailscale.
+	ReplayFailedDeliveries *bool `yaml:"replay_failed_deliveries"`
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no

@@ -534,6 +534,26 @@ type TransportHealth struct {
 	RejectedSignatures Known[int64]     `json:"rejected_signatures"`
 	MalformedRequests  Known[int64]     `json:"malformed_requests"`
 	OversizedRequests  Known[int64]     `json:"oversized_requests"`
+	// Replay reports the last webhook-delivery replay pass (#2144, ADR 2144).
+	// Nil (omitted) when replay does not apply to the transport; present with
+	// unknown values before the first pass has completed.
+	Replay *ReplayHealth `json:"replay,omitempty"`
+}
+
+// ReplayHealth is the summary of the last delivery replay pass.
+type ReplayHealth struct {
+	// LastPassAt is when the last pass finished.
+	LastPassAt Known[time.Time] `json:"last_pass_at"`
+	// FoundFailed is how many failed, not-yet-received deliveries the pass
+	// found; Requested how many redeliveries it asked GitHub for; Capped how
+	// many it left unrequested because a page or request cap was hit; Failed
+	// how many redelivery requests errored.
+	FoundFailed Known[int64] `json:"found_failed"`
+	Requested   Known[int64] `json:"requested"`
+	Capped      Known[int64] `json:"capped"`
+	Failed      Known[int64] `json:"failed"`
+	// Outcome is "ok", "capped" or "degraded: <reason>"; empty before a pass.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // ReconcileHealth describes the periodic board reconcile.

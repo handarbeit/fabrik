@@ -1276,3 +1276,42 @@ func TestExecute_PluginDirsStartsWithValidExtra(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 }
+
+// #2144: replay_failed_deliveries resolves flag > env > config.yaml > default
+// (true).
+func TestExecute_ReplayFailedDeliveries(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		env  string
+		args []string
+		want bool
+	}{
+		{name: "default", want: true},
+		{name: "yaml false", yaml: "replay_failed_deliveries: false\n", want: false},
+		{name: "env false", env: "false", want: false},
+		{name: "env beats yaml", yaml: "replay_failed_deliveries: false\n", env: "true", want: true},
+		{name: "flag false", args: []string{"--replay-failed-deliveries=false"}, want: false},
+		{name: "flag beats env and yaml", yaml: "replay_failed_deliveries: false\n", env: "false", args: []string{"--replay-failed-deliveries=true"}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, stagesDir := setupValidStages(t)
+			chdirTest(t, dir)
+			if tc.yaml != "" {
+				os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+				os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(tc.yaml), 0644)
+			}
+			resetFlags()
+			t.Setenv("GITHUB_TOKEN", "tok")
+			if tc.env != "" {
+				t.Setenv("FABRIK_REPLAY_FAILED_DELIVERIES", tc.env)
+			}
+			os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, tc.args...)
+			cfg := executeWithConfigHook(t)
+			if cfg.ReplayFailedDeliveries != tc.want {
+				t.Errorf("ReplayFailedDeliveries = %v, want %v", cfg.ReplayFailedDeliveries, tc.want)
+			}
+		})
+	}
+}

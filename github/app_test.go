@@ -770,3 +770,137 @@ func TestAppRequest_ErrorStatus(t *testing.T) {
 		t.Fatal("expected error on 403, got nil")
 	}
 }
+
+func TestFetchAppHookDeliveries_PaginatesByLinkCursor(t *testing.T) {
+	var srvURL string
+	var gotAuth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/hook/deliveries" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
+		switch r.URL.Query().Get("cursor") {
+		case "":
+			w.Header().Set("Link", fmt.Sprintf(`<%s/app/hook/deliveries?per_page=100&cursor=abc123>; rel="next", <%s/app/hook/deliveries?per_page=100>; rel="first"`, srvURL, srvURL))
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 3, "guid": "g3", "delivered_at": "2026-10-22T12:00:00Z", "status": "Service Unavailable", "status_code": 503, "event": "issues", "action": "opened"},
+			})
+		case "abc123":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 2, "guid": "g2", "delivered_at": "2026-10-22T11:00:00Z", "redelivery": true, "status": "OK", "status_code": 200, "event": "ping"},
+			})
+		default:
+			t.Errorf("unexpected cursor %q", r.URL.Query().Get("cursor"))
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	page1, next, err := FetchAppHookDeliveries(srv.URL, "test-jwt", "", 100)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if next != "abc123" || len(page1) != 1 {
+		t.Fatalf("page 1: next=%q items=%d", next, len(page1))
+	}
+	d := page1[0]
+	if d.ID != 3 || d.GUID != "g3" || d.StatusCode != 503 || d.Succeeded() || d.Event != "issues" || d.DeliveredAt.IsZero() {
+		t.Errorf("decoded = %+v", d)
+	}
+	page2, next, err := FetchAppHookDeliveries(srv.URL, "test-jwt", next, 100)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if next != "" || len(page2) != 1 || !page2[0].Succeeded() || !page2[0].Redelivery {
+		t.Errorf("page 2: next=%q items=%+v", next, page2)
+	}
+	for _, a := range gotAuth {
+		if a != "Bearer test-jwt" {
+			t.Errorf("Authorization = %q", a)
+		}
+	}
+}
+
+func TestNextCursorFromLink(t *testing.T) {
+	cases := map[string]string{
+		"":                                   "",
+		"garbage":                            "",
+		`<%zz>; rel="next"`:                  "",
+		`<https://x/y?cursor=q>`:             "",
+		`<https://x/y?cursor=q>; rel="prev"`: "",
+		`<https://x/y?cursor=q>; rel="next"`: "q",
+		`<https://x/a>; rel="first", <https://x/y?a=1&cursor=z>; rel="next"`: "z",
+		`<https://x/y>; rel="next"`: "",
+	}
+	for in, want := range cases {
+		if got := nextCursorFromLink(in); got != want {
+			t.Errorf("nextCursorFromLink(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFetchAppHookDeliveries_ErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		wantIs  error
+		wantRL  bool
+		headers map[string]string
+	}{
+		{status: 401, wantIs: ErrAppUnauthorized},
+		{status: 403, wantIs: ErrAppUnauthorized},
+		{status: 404, wantIs: ErrNotFound},
+		{status: 403, wantRL: true, headers: map[string]string{"X-RateLimit-Remaining": "0"}},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for k, v := range tc.headers {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(tc.status)
+			io.WriteString(w, `{"message":"nope"}`)
+		}))
+		_, _, err := FetchAppHookDeliveries(srv.URL, "j", "", 100)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("status %d: expected error", tc.status)
+		}
+		if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+			t.Errorf("status %d: err = %v, want Is %v", tc.status, err, tc.wantIs)
+		}
+		if tc.wantRL {
+			var rl *RateLimitError
+			if !errors.As(err, &rl) {
+				t.Errorf("status %d: err = %v, want RateLimitError", tc.status, err)
+			}
+		}
+	}
+}
+
+func TestRedeliverAppHookDelivery(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	status := http.StatusAccepted
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		w.WriteHeader(status)
+		io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	if err := RedeliverAppHookDelivery(srv.URL, "test-jwt", 4242); err != nil {
+		t.Fatalf("RedeliverAppHookDelivery: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/app/hook/deliveries/4242/attempts" || gotAuth != "Bearer test-jwt" {
+		t.Errorf("got %s %s auth=%q", gotMethod, gotPath, gotAuth)
+	}
+
+	status = http.StatusUnprocessableEntity
+	err := RedeliverAppHookDelivery(srv.URL, "test-jwt", 1)
+	if err == nil {
+		t.Fatal("422: expected error")
+	}
+	if errors.Is(err, ErrAppUnauthorized) || errors.Is(err, ErrNotFound) {
+		t.Errorf("422 must be a plain error, got %v", err)
+	}
+}

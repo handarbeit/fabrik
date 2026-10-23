@@ -497,3 +497,21 @@ func deliveryKey(eventType string, payload []byte) string {
 func (d delivery) String() string {
 	return fmt.Sprintf("%s/%s(%s)", d.Transport, d.EventType, d.ID)
 }
+
+// ledgerSeen reports whether the delivery ledger holds id, recording nothing
+// (#2144). It is the only intake surface delivery replay uses.
+func (in *intake) ledgerSeen(id string) bool {
+	if in == nil {
+		return false
+	}
+	return in.ledger.Seen(id)
+}
+
+// ledgerNewest returns the receipt time of the newest recorded delivery, zero
+// when there is none (#2144).
+func (in *intake) ledgerNewest() time.Time {
+	if in == nil {
+		return time.Time{}
+	}
+	return in.ledger.Newest()
+}

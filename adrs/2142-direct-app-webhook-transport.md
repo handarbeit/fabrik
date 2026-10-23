@@ -25,7 +25,7 @@ Under GitHub App auth the only real-time event path was Hookdeck: a third-party 
 ## Consequences
 
 - An App-mode operator with a public route to the daemon needs no Hookdeck account, key or relay.
-- Deliveries sent while the daemon (or the route) is down are lost: there is no relay buffer. The reconcile ticker is the safety net and replay is #2144. A listener that is bound but never reached (a wrong webhook URL) looks healthy and widens the idle poll cap, the same weakness Hookdeck has when connected but silent; the reconcile ticker backstops it.
+- Deliveries sent while the daemon (or the route) is down are lost: there is no relay buffer. The reconcile ticker is the safety net and replay is #2144 (ADR 2144 now replays them at startup; decision 1's "reconnect handler is never called" stands, the replay trigger for this transport is startup). A listener that is bound but never reached (a wrong webhook URL) looks healthy and widens the idle poll cap, the same weakness Hookdeck has when connected but silent; the reconcile ticker backstops it.
 - The body is buffered up to the cap before HMAC verification (as in the gh-forward listener), so a non-loopback bind exposes a memory-pressure vector bounded only by the timeouts. The docs steer toward loopback plus a fronting proxy.
 - A failed listen is only retried by a restart (`Start` runs once per process); a retry loop is out of scope.
 - `fabrik_health` consumers see a new `webhook.transports` array (`[]` when poll-only).
