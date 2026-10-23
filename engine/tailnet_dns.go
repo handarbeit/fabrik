@@ -198,7 +198,9 @@ func (p *funnelDNSProbe) SetName(name string) {
 	p.cancel = cancel
 	p.mu.Unlock()
 	if oldKey != "" {
+		p.sinkMu.Lock()
 		p.cfg.Resolve(oldKey)
+		p.sinkMu.Unlock()
 	}
 	p.cfg.WG.Add(1)
 	go func() {
@@ -283,13 +285,16 @@ func (p *funnelDNSProbe) record(gen int, s dnsProbeState, name string, err error
 	}
 	p.mu.Unlock()
 	p.cfg.Sink.SetDNSProbeState(s)
+	// The panel report is ordered with SetName's clear of the old key (it takes
+	// sinkMu too): a loop replaced after the liveness check above must not
+	// re-add the entry SetName just cleared for the old name.
+	if pastGrace {
+		p.cfg.Report(funnelDNSCondition(name, err))
+	}
 	p.sinkMu.Unlock()
 	if replayNow && p.cfg.StartReplay != nil {
 		p.cfg.Logf("the probe cannot tell whether %s resolves — running the held-back startup delivery replay pass\n", name)
 		p.cfg.StartReplay()
-	}
-	if pastGrace {
-		p.cfg.Report(funnelDNSCondition(name, err))
 	}
 	return true
 }

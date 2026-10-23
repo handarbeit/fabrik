@@ -553,3 +553,64 @@ func TestFunnelDNSProbe_ReplacedLoopCannotOverwriteResolution(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A loop SetName has replaced must not re-add the panel entry SetName cleared
+// for the old name: here the old loop is inside its grace-period Report while
+// the name changes, and the clear must land after the report, not before it.
+func TestFunnelDNSProbe_ReplacedLoopCannotReAddClearedPanelEntry(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		events   []string
+		entered  = make(chan struct{})
+		release  = make(chan struct{})
+		once     sync.Once
+		nowCalls int
+	)
+	t0 := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	p := newFunnelDNSProbe(funnelDNSProbeConfig{
+		Tag:      "tailscale",
+		Resolver: namedResolver{},
+		Sink:     &fakeSink{},
+		Wait:     func(ctx context.Context, _ time.Duration) bool { <-ctx.Done(); return false },
+		// The first read starts the grace; every later one is past it.
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			nowCalls++
+			if nowCalls == 1 {
+				return t0
+			}
+			return t0.Add(funnelDNSGrace + time.Minute)
+		},
+		Logf: func(string, ...any) {},
+		Report: func(c warnings.Condition) {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+			mu.Lock()
+			events = append(events, "report:"+c.Subject)
+			mu.Unlock()
+		},
+		Resolve: func(key string) { mu.Lock(); events = append(events, "clear"); mu.Unlock() },
+		Ctx:     ctx,
+		WG:      &wg,
+	})
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	p.SetName("old.t.ts.net")
+	<-entered // the old loop is inside its Report
+	done := make(chan struct{})
+	go func() { p.SetName("new.t.ts.net"); close(done) }()
+	time.Sleep(50 * time.Millisecond) // let SetName reach its clear
+	close(release)
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) < 2 || events[0] != "report:old.t.ts.net" || events[1] != "clear" {
+		t.Fatalf("panel events = %v, want the old report first, then its clear", events)
+	}
+}
