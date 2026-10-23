@@ -172,6 +172,12 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	tr := newAppWebhookTransport(tag, path, listenFn, os.Getenv(secretEnvName), e.logf, e.emit)
 	tr.UpdateRepos(initialRepos)
 	e.wireAppWebhookWarnings(tr, tag, "tailscale App webhook", secretEnvName)
+
+	// Delivery replay (#2144) applies to this transport as to direct. Built
+	// before attach, so the composite reconnect handler (reconcile + replay
+	// pass) that attachTransportErr installs reaches it: a tailnet recovery
+	// (SetNetworkCondition) then triggers a pass.
+	e.replayer = e.newDeliveryReplayer(tr, tag)
 	tr.SetCoverageCheck(func() {
 		e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: tag, PanelType: "tailscale_coverage", Ref: "#2143"})
 		nodeMu.Lock()
@@ -275,6 +281,10 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	}()
 	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: tag, PanelType: "tailscale_coverage", Ref: "#2143"})
 	e.checkAppWebhookConfig(tag, u)
+	// Replay failed deliveries from while the daemon was not receiving (#2144).
+	// Background, after the node and its Funnel listener are up: it never delays
+	// startup. A failed start (above) never reaches here, so no pass runs then.
+	e.startDeliveryReplay(ctx, e.replayer)
 }
 
 // reportWarning records an operator warning, logging (not failing) on error.

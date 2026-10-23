@@ -55,8 +55,8 @@ type replayLedger interface {
 	ledgerNewest() time.Time
 }
 
-// replayStatusSink receives the summary of the last pass; the direct transport
-// implements it so its health row reports it. Calling it with a zero value
+// replayStatusSink receives the summary of the last pass; the App webhook
+// transport (direct and tailscale) implements it so its health row reports it. Calling it with a zero value
 // before the first pass marks replay as enabled for the row.
 type replayStatusSink interface {
 	SetReplayStatus(localapi.ReplayHealth)
@@ -365,10 +365,11 @@ func shortErr(err error) string {
 	return fmt.Sprint(msg)
 }
 
-// newDeliveryReplayer builds the replayer for transport tr, or nil when replay
-// is off or cannot work (no App auth, no intake): in those cases nothing is
-// reported on the health row either.
-func (e *Engine) newDeliveryReplayer(tr replayStatusSink) *deliveryReplayer {
+// newDeliveryReplayer builds the replayer for transport tr (log tag tag: the
+// transport's name, "direct" or "tailscale"), or nil when replay is off or
+// cannot work (no App auth, no intake): in those cases nothing is reported on
+// the health row either.
+func (e *Engine) newDeliveryReplayer(tr replayStatusSink, tag string) *deliveryReplayer {
 	var api hookDeliveryAPI = e.replayAPIOverride
 	if api == nil && e.ghAppAuth != nil {
 		api = e.ghAppAuth
@@ -377,7 +378,7 @@ func (e *Engine) newDeliveryReplayer(tr replayStatusSink) *deliveryReplayer {
 		return nil
 	}
 	return newDeliveryReplayer(api, e.intake, tr,
-		func(format string, args ...any) { e.logf(0, "direct", format, args...) }, e.now)
+		func(format string, args ...any) { e.logf(0, tag, format, args...) }, e.now)
 }
 
 // startDeliveryReplay runs r in the background until ctx is cancelled and

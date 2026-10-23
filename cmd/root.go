@@ -131,8 +131,8 @@ type Config struct {
 	// (#1763, R2). Also --no-browser=false / FABRIK_NO_BROWSER=false /
 	// config.yaml's no_browser: false (AC2, re-enables it).
 	NoBrowser bool
-	// ReplayFailedDeliveries enables delivery replay for a direct App webhook
-	// receiver (#2144). Default true; ignored for other event sources. Also
+	// ReplayFailedDeliveries enables delivery replay for a direct or tailscale App
+	// webhook receiver (#2144). Default true; ignored for other event sources. Also
 	// --replay-failed-deliveries=false / FABRIK_REPLAY_FAILED_DELIVERIES=false /
 	// config.yaml's replay_failed_deliveries: false.
 	ReplayFailedDeliveries bool
@@ -283,7 +283,7 @@ func Execute() error {
 	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
 	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
 	flag.Int64Var(&cfg.GitHubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID to authenticate as (also FABRIK_GITHUB_APP_INSTALLATION_ID)")
-	flag.BoolVar(&cfg.ReplayFailedDeliveries, "replay-failed-deliveries", true, "Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving, on startup and reconnect (event_source: direct; also FABRIK_REPLAY_FAILED_DELIVERIES and config.yaml replay_failed_deliveries; default true, ignored for other event sources; #2144)")
+	flag.BoolVar(&cfg.ReplayFailedDeliveries, "replay-failed-deliveries", true, "Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving, on startup and reconnect (event_source: direct or tailscale; also FABRIK_REPLAY_FAILED_DELIVERIES and config.yaml replay_failed_deliveries; default true, ignored for other event sources; #2144)")
 	flag.BoolVar(&cfg.NoBrowser, "no-browser", true, "Suppress automatic browser-opening for GitHub App guided-install prompts under App auth (also FABRIK_NO_BROWSER; default true — this is a daemon, opening a browser is opt-in; use --no-browser=false to re-enable, mirroring Pruefer's own no_browser)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {

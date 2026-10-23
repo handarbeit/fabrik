@@ -253,7 +253,7 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	})
 	driftKey := e.wireAppWebhookWarnings(tr, "direct", "direct App webhook", secretEnvName)
 
-	e.replayer = e.newDeliveryReplayer(tr)
+	e.replayer = e.newDeliveryReplayer(tr, "direct")
 
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
 	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {

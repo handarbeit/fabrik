@@ -4,7 +4,7 @@
 **Status**: Accepted
 **Issue**: #2143 — events: embedded Tailscale Funnel receiver — one tailnet node per daemon via tsnet
 **Builds on**: ADR 2142 (direct App webhook transport), ADR 2351 (transport-neutral intake), ADR 1142 (Hookdeck: secret in a named variable, worker scrub), ADR 2027 (worker secret scrub), ADR 043 (reconcile)
-**Chain**: second of #2081's chain; delivery replay is #2144.
+**Chain**: second of #2081's chain; delivery replay is #2144, which this transport uses (decision 9).
 
 ## Context
 
@@ -20,6 +20,7 @@
 6. **R7: the App's webhook config is checked.** `github.FetchAppHookConfig` reads `GET /app/hook/config` with the App JWT; its result type has no secret field, so the secret GitHub returns is never decoded. The URL (host case, default `:443`, trailing slash normalised) and content type (`json`/`application/json`) are compared with the node's; a mismatch reconciles `tailscale_webhook_config` entries, an unreadable config logs one line and changes nothing. It runs at startup and from the transport's coverage hook on every reconcile tick. The JWT is built in the engine from the configured key (`gh.BuildAppJWT`) rather than adding an accessor to `internal/githubauth`, which Pruefer shares.
 7. **Restart and exec.** SIGHUP already calls `transports.StopAll()`, which now closes the node; the new process reuses `state_dir` with no key. The self-upgrade exec does **not** stop transports: a successful exec replaces the process and the new one reuses the state; a failed exec leaves exactly one running listener (stopping and restarting it would need a restart mechanism `ingestTransport` does not have and would add a window with no listener for no benefit).
 8. **Self-upgrade is not special-cased.** Because every build carries the node, a release download or a dev rebuild produces a binary that can still run `event_source: tailscale`, so a tailscale daemon self-upgrades like any other.
+9. **Delivery replay is wired like `direct`'s (#2144).** `startTailscaleTransport` builds the replayer from its transport (`e.newDeliveryReplayer(tr, "tailscale")`) before attaching it, so the composite reconnect handler that `attachTransportErr` installs (`requestReconcile` + `replayer.Trigger()`) is what `SetNetworkCondition` calls on a tailnet or Funnel recovery, and starts it (`startDeliveryReplay`) once the node and Funnel listener are up. `replay_failed_deliveries` is event-source independent (default true in `cmd`; the flag, `FABRIK_REPLAY_FAILED_DELIVERIES` and YAML resolution is unchanged), and the transport's `fabrik_health` row reports the last pass through the shared `SetReplayStatus`. A node that fails to start never runs a pass. A brand-new node's public name can take minutes to resolve, so the startup pass can find early deliveries still failing; a later recovery pass and the reconcile cover the rest.
 
 ## Dependency and module graph
 
@@ -50,7 +51,7 @@ No extra job or step is needed: the single `go vet ./...` and `go test -race ./.
 
 - Each daemon is its own tailnet machine with its own Funnel endpoint, visible and revocable in Tailscale's admin console.
 - Deleting `state_dir` while a valid key remains creates a second node and a new certificate request (Let's Encrypt rate limits can then block the listener for more than a day); the docs warn against it, and the reported-name URL plus the R7 check expose the resulting mismatch.
-- Deliveries sent while the node is down are lost, as for `direct`; reconcile is the safety net and replay is #2144.
+- Deliveries sent while the node is down are not buffered, as for `direct`; delivery replay (#2144, decision 9) asks GitHub to redeliver the failed ones at startup and on a tailnet recovery, and reconcile stays the safety net.
 - `Up` can wait up to 90 s at startup with no network. The result is bounded and visible (panel entry, poll-only), not a hang.
 
 ## Verification

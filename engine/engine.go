@@ -117,8 +117,8 @@ type Config struct {
 	DirectListen        string
 	AppWebhookPath      string
 	AppWebhookSecretEnv string
-	// ReplayFailedDeliveries enables the delivery replay pass of a direct App
-	// webhook receiver (#2144, ADR 2144): on startup (and on a transport
+	// ReplayFailedDeliveries enables the delivery replay pass of a direct or tailscale
+	// App webhook receiver (#2144, ADR 2144): on startup (and on a transport
 	// reconnect signal) the engine asks GitHub to redeliver App webhook
 	// deliveries that failed while it was not receiving. cmd resolves the
 	// default (true); the zero value is off, so NewWithDeps engines never
@@ -237,7 +237,7 @@ type Engine struct {
 	hostClient                         *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	appIdent                           *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
 	replayAPIOverride                  hookDeliveryAPI        // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
-	replayer                           *deliveryReplayer      // direct-receiver delivery replay (#2144, ADR 2144); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport before any transport can signal a reconnect.
+	replayer                           *deliveryReplayer      // App webhook receiver delivery replay (#2144, ADR 2144; direct and tailscale); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport / startTailscaleTransport before the transport can signal a reconnect.
 	ghAppAuth                          *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
 	skillResolver                      *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
 	readClient                         boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
