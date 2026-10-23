@@ -27,7 +27,7 @@ The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (pro
 
 | Seam | Where | Used by |
 |---|---|---|
-| `Cell` (auth, train, parallel, args) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976's bed assignment |
+| `Cell` (auth, train, **events**, **poll cadence**, parallel, args) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976's bed assignment |
 | `Scheduler` interface on `Gate` (`SerialScheduler` for one bed, `MultiBedScheduler` for two or more) | `schedule.go`, `multibed.go` | **#1976 multi-bed** (below) |
 | `Phase`, `PlanPhases`, `retryPhases` — a cell's shared / default-base-train / exclusive `go test` invocations | `phases.go` | **#1977's two-phase leg** (below) |
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
@@ -36,7 +36,7 @@ The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (pro
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974's host-load probe (`host-load-probe`) |
 | `[]Preflight` (`Gate.LivePreflights`, run **after** the pre-gate, before the bed is built) | `gate.go` | #1974's board-lag probe — a live write, so it cannot precede the pre-gate (ADR-1454) |
 | `[]Preflight` again: `bed-topology` (static) and `bed-identity` (live) | `beds.go`, `identity.go` | #1976 |
-| `bed-webhook-provisioning` (static, `E2E_EVENT_SOURCE=tailscale` only) and the **per-leg webhook delivery preflight** `ProbeWebhookDelivery` (live, called from `RunLeg` after the bed restart and identity check — not a `LivePreflights` entry, because it needs the running bed daemon) | `webhook_provisioning.go`, `delivery_probe.go`, `leg.go` | #2408 (below) |
+| `bed-webhook-provisioning` (static, when the plan has a webhook cell) and the **per-leg webhook delivery preflight** `ProbeWebhookDelivery` (live, called from `RunLeg` after the bed restart and identity check — not a `LivePreflights` entry, because it needs the running bed daemon) | `webhook_provisioning.go`, `delivery_probe.go`, `leg.go` | #2408 (below) |
 | `DeliveryOps` on `Gate.Delivery` (`TransportRow`, `AppHookURL`, `AppDeliveries`) | `delivery_probe.go` | #2408's delivery preflight; `nil` (a hand-built `Gate`) disables it |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed views |
 | `IdentityOps` (`ResolveLogin`, `Budget`, `MintAppToken`) on `Gate.Identity` | `identity.go` | #1976's identity scheduling and budget lines; `nil` (a hand-built `Gate`) disables both |
@@ -70,9 +70,40 @@ and `gate coverage`, and the registry is loaded for the plan whether or not the 
 The required set is still `RequiredTests(PlanCells(…))` with no caller arguments — the plan and the
 set cannot diverge. `gate run` prints `== E2E_MATRIX=<mode>: N cell(s): …` before the first leg, and
 the coverage summary ends with `required set (E2E_MATRIX=<mode>): N (test, leg) pairs of M in the
-full 2×2` (also on the release-notes line). `sparse_test.go` covers the plan, the filters, the
+full matrix` (also on the release-notes line; the full matrix is the four poll cells plus the two webhook cells, 6 × tests). `sparse_test.go` covers the plan, the filters, the
 the gate-level agreement of plan and required set, and `--resume` over
 a sparse plan, all with the fake `Commander`.
+
+## The events axis (#2426, ADR-2426)
+
+Event ingestion — poll-only vs webhook — is the third planned dimension. `Cell.Events` is `poll`
+(the zero value) or `webhook`; `Cell.Label()` stays `auth/train` for a poll cell (`app/on`, so every
+earlier ledger record, `app-on.jsonl` file and `app-on` archive directory keeps its key) and is
+`auth/train/webhook` for a webhook cell (`app-on-webhook`). Webhook cells are App-auth only.
+
+* **Sparse plan:** the four existing cells unchanged, plus `app/on/webhook` (planned last) running
+  every registry `events: sensitive` test, minus pairs `skip_ok_legs` marks structural there.
+  **`E2E_MATRIX=full`:** the four poll cells plus `app/on/webhook` and `app/off/webhook`, both over the
+  *whole* suite — use it for a release that changes ingestion.
+* **`E2E_EVENTS`** (`poll`, `webhook`, unset for both) restricts the plan; a filtered run is partial.
+  `E2E_EVENT_SOURCE=tailscale` is a deprecated alias for `E2E_EVENTS=webhook`. `Gate.buildPlanInput`
+  carries the filter, so `gate run` and `gate coverage` agree.
+* **Cadence is part of the cell:** `Cell.PollSeconds` (always `PlannedPollSeconds`, 60) is printed with the
+  plan, passed to the leg as `E2E_CELL_POLL_SECONDS` and archived (`bed.json`, `phases.json`). No planned
+  cell runs at 180 s. `E2E_BED_POLL_SECONDS` is the operator override: a value that differs from the plan
+  prints a banner, is recorded as `poll_override`, and the leg records **nothing** in the ledger.
+* **Scheduling:** `bed-webhook-provisioning` is per bed; a bed with its own hostname, secret and auth key
+  (or stored login) is webhook-capable. No capable bed → exit 7 up front; otherwise `MultiBedScheduler`
+  gives a webhook cell only to a capable bed. The identity set is unchanged.
+* **Preflight:** `RunLeg` runs the delivery preflight when `cell.Webhook()`; a failure ends the leg with
+  exit 4 and leaves the webhook pairs uncovered, with the poll cells (ordered first) unaffected.
+* **Leg summary:** `phases.json` `events` block — dimension, cadence, override and, for a webhook leg,
+  `deliveries` (App delivery log over the leg window), `deduped` and `dropped` (intake log lines). `gate
+  report` prints them; a rotated log or a very busy leg under-reports.
+* **Ledger:** `legFromFile` and `cellDirName` understand the three-part form; `registry.MatchLeg` treats a
+  two-part `skip_ok_legs` pattern as matching a webhook label on its first two parts.
+  `events_axis_test.go` covers env, override, counts, coverage/`--resume` over webhook labels and
+  pre-change records.
 
 ## `run.sh` function → Go
 
@@ -273,18 +304,19 @@ Two probes run before live budget is spent. `tests/e2e/README.md` has the knobs;
   list / swept-leftover count. A zero threshold (a hand-built `Config`) disables a probe, so the
   existing runner tests are undisturbed.
 
-## Webhook beds (#2408, ADR-2408)
+## Webhook beds (#2408, ADR-2408; planned per cell since #2426)
 
-`E2E_EVENT_SOURCE` (`poll` default, `tailscale`; anything else is `ExitUsage`) selects the bed's
-event source for the run. It is launch-injected: `BedStartCmd` strips the ambient event-source and
-receiver variables and injects `FABRIK_EVENT_SOURCE=poll` for the gate's initial start, and each
-leg's restart (`TestSwitchTrainMode` → the harness's `StartFabrikTestBed`) injects the leg's
-effective source — `tailscale` only on an `app` leg, `bedevents.Effective` — with the leg's own
-cadence (`180` s on a webhook leg, `60` otherwise, `E2E_BED_POLL_SECONDS` still wins). The single
-definition is `tests/e2e/bedevents`, an untagged package shared by both launch sites and the tests.
+The bed's event source is chosen **per cell** (see "The events axis" above), not by a run-wide
+variable. It is launch-injected: `BedStartCmd` strips the ambient event-source and receiver variables
+and injects `FABRIK_EVENT_SOURCE=poll` for the gate's initial start, and each leg's restart
+(`TestSwitchTrainMode` → the harness's `StartFabrikTestBed`) injects the cell's source — `tailscale` only
+for a webhook cell, which is App-auth only — with the cell's planned cadence (60 s for every planned
+cell; `E2E_BED_POLL_SECONDS` is the operator override and still wins). The single definition is
+`tests/e2e/bedevents`, an untagged package shared by both launch sites and the tests.
 
 * **`bed-webhook-provisioning`** (exit 7): per bed, a hostname distinct across beds, the webhook
-  secret variable, and an auth key variable or a stored tailscale login. Presence only.
+  secret variable, and an auth key variable or a stored tailscale login. Presence only. A bed that has
+  all three is webhook-capable; the check fails only when the plan has a webhook cell and no bed is.
 * **Delivery preflight** (exit 4, `RunLeg`, webhook cells only): the daemon's tailscale transport
   must be up (`transport-not-up`), the App's `GET /app/hook/config` URL must be the bed's Funnel URL
   as its startup log named it (`hook-url-mismatch`), and a label write on a scratch issue must
