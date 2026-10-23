@@ -62,3 +62,25 @@ func TestLoadConfigSharedIdentityFloor(t *testing.T) {
 		}
 	}
 }
+
+// #2408: E2E_EVENT_SOURCE defaults to poll-only, accepts tailscale, refuses
+// anything else, and a PAT leg is always poll whatever was requested.
+func TestLoadConfigEventSource(t *testing.T) {
+	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	c, err := LoadConfig(get(nil), "/repo")
+	if err != nil || c.EventSource != "poll" || c.EffectiveEventSource("app") != "poll" {
+		t.Fatalf("default = %q err=%v, want poll", c.EventSource, err)
+	}
+	c, err = LoadConfig(get(map[string]string{"E2E_EVENT_SOURCE": "tailscale"}), "/repo")
+	if err != nil || c.EffectiveEventSource("app") != "tailscale" || c.EffectiveEventSource("pat") != "poll" {
+		t.Fatalf("tailscale = app:%q pat:%q err=%v", c.EffectiveEventSource("app"), c.EffectiveEventSource("pat"), err)
+	}
+	if c.DeliveryProbeWait != 5*time.Minute {
+		t.Errorf("DeliveryProbeWait = %s, want 5m", c.DeliveryProbeWait)
+	}
+	for _, bad := range []string{"direct", "hookdeck", "gh-forward"} {
+		if _, err := LoadConfig(get(map[string]string{"E2E_EVENT_SOURCE": bad}), "/repo"); err == nil {
+			t.Errorf("E2E_EVENT_SOURCE=%s must be a usage error", bad)
+		}
+	}
+}

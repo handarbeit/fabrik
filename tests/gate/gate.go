@@ -139,6 +139,11 @@ type Gate struct {
 	// lines.
 	Identity IdentityOps
 
+	// Delivery is the seam over the webhook delivery preflight's reads of the bed
+	// daemon and the App (#2408). NewGate wires the real implementation; nil (a
+	// Gate built by hand) disables the preflight.
+	Delivery DeliveryOps
+
 	// parent is the invocation's root Gate when g is a per-bed view; nil on the root.
 	parent *Gate
 	// bed is this view's bed; nil on the root (and so on every single-bed run).
@@ -184,6 +189,7 @@ func NewGate(cfg Config, out, errw io.Writer) *Gate {
 	}
 	g.ProcCwd = g.defaultProcCwd
 	g.Identity = osIdentityOps{g: g}
+	g.Delivery = osDeliveryOps{}
 	g.Scheduler = SerialScheduler{}
 	g.Preflights = DefaultPreflights()
 	g.LivePreflights = DefaultLivePreflights()
@@ -198,6 +204,8 @@ func DefaultPreflights() []Preflight {
 		{Name: "auth-mode", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckAuthModePreconditions(p.AuthModes) }},
 		// Multi-bed only (#1976): beds that can never run together are refused here.
 		{Name: "bed-topology", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedTopology(p.AuthModes) }},
+		// E2E_EVENT_SOURCE=tailscale only (#2408): every bed has what its Funnel needs.
+		{Name: "bed-webhook-provisioning", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedWebhookProvisioning(p.AuthModes) }},
 		{Name: "competing-token-consumers", Run: func(ctx context.Context, g *Gate, p *Plan) error {
 			return g.CheckCompetingTokenConsumers(ctx, p.AuthModes)
 		}},

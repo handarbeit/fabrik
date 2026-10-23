@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 )
 
 // Pure-function tests for the cold-cache base-member scenario's helpers. Their
@@ -165,5 +167,41 @@ func TestParseTrainPRsDecodesBase(t *testing.T) {
 	}
 	if _, err := parseTrainPRs("not json", since, nil); err == nil {
 		t.Error("expected a parse error for malformed JSON")
+	}
+}
+
+// #2408: whether a leg has a webhook transport comes from the effective event
+// source the gate launched the bed with — tailscale on an App leg only.
+func TestBedEventSourceFollowsTheLeg(t *testing.T) {
+	for _, tt := range []struct {
+		src, auth, want string
+		webhook         bool
+	}{
+		{"", "app", "poll", false},
+		{"tailscale", "app", "tailscale", true},
+		{"tailscale", "pat", "poll", false},
+	} {
+		t.Setenv("E2E_EVENT_SOURCE", tt.src)
+		t.Setenv("E2E_AUTH_MODE", tt.auth)
+		if got := bedEventSource(); got != tt.want {
+			t.Errorf("bedEventSource(%q,%q) = %q, want %q", tt.src, tt.auth, got, tt.want)
+		}
+		if got := bedevents.Webhook(bedEventSource()); got != tt.webhook {
+			t.Errorf("webhook(%q,%q) = %v, want %v", tt.src, tt.auth, got, tt.webhook)
+		}
+		wantPoll := "60"
+		if tt.webhook {
+			wantPoll = "180"
+		}
+		t.Setenv("E2E_BED_POLL_SECONDS", "")
+		if got := bedPollSeconds(); got != wantPoll {
+			t.Errorf("bedPollSeconds(%q,%q) = %q, want %q", tt.src, tt.auth, got, wantPoll)
+		}
+	}
+	t.Setenv("E2E_EVENT_SOURCE", "tailscale")
+	t.Setenv("E2E_AUTH_MODE", "app")
+	t.Setenv("E2E_BED_POLL_SECONDS", "45")
+	if got := bedPollSeconds(); got != "45" {
+		t.Errorf("E2E_BED_POLL_SECONDS must still win, got %q", got)
 	}
 }

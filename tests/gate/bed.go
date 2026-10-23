@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"github.com/handarbeit/fabrik/tests/e2e/bedtimeout"
 )
 
@@ -271,6 +272,13 @@ func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
 	// wins over whatever the operator put there. lifecycle.go appends the same entries.
 	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed), "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0", "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**")
 	env = withEnv(env, bedtimeout.Env()...)
+	// The event source (#2408, ADR-2408): this initial start is always poll-only —
+	// every leg restarts the bed through TestSwitchTrainMode, whose harness launch
+	// injects that leg's own source — so the ambient event-source and receiver
+	// variables are stripped and an explicit poll is injected. The process
+	// environment beats the bed's .env, so a stale .env or shell value cannot make
+	// this start a webhook one. lifecycle.go strips and injects the same way.
+	env = withEnv(withoutEnv(env, bedevents.StripKeys()...), bedevents.Env(bedevents.Poll)...)
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

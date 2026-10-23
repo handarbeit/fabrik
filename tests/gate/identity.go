@@ -148,34 +148,45 @@ func parseBudget(out string) (remaining, limit int, resetAt string, err error) {
 	return n, l, reset, nil
 }
 
-func (o osIdentityOps) MintAppToken(ctx context.Context, bedDir string) (string, error) {
+// appCredentials reads the bed's App identity from bedDir/.env and builds an App
+// JWT. inst is the configured installation id. The JWT is a short-lived secret:
+// callers must never log it.
+func appCredentials(bedDir string) (jwt string, inst int64, err error) {
 	envFile := filepath.Join(bedDir, ".env")
 	appID := envFileLastValue(envFile, "E2E_APP_ID")
 	keyPath := envFileLastValue(envFile, "E2E_APP_PRIVATE_KEY_PATH")
 	instStr := envAppInstallationID(envFile)
 	if appID == "" || keyPath == "" || instStr == "" {
-		return "", fmt.Errorf("E2E_APP_ID / E2E_APP_PRIVATE_KEY_PATH / E2E_APP_INSTALLATION_ID not all set in %s", envFile)
+		return "", 0, fmt.Errorf("E2E_APP_ID / E2E_APP_PRIVATE_KEY_PATH / E2E_APP_INSTALLATION_ID not all set in %s", envFile)
 	}
-	inst, err := strconv.ParseInt(instStr, 10, 64)
+	inst, err = strconv.ParseInt(instStr, 10, 64)
 	if err != nil {
-		return "", fmt.Errorf("E2E_APP_INSTALLATION_ID=%q is not an integer", instStr)
+		return "", 0, fmt.Errorf("E2E_APP_INSTALLATION_ID=%q is not an integer", instStr)
 	}
 	if !filepath.IsAbs(keyPath) {
 		keyPath = filepath.Join(bedDir, keyPath)
 	}
 	pem, err := os.ReadFile(keyPath)
 	if err != nil {
-		return "", fmt.Errorf("reading the App private key: %v", err)
+		return "", 0, fmt.Errorf("reading the App private key: %v", err)
 	}
 	key, err := ghapi.ParseAppPrivateKey(pem)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	var issuer any = appID // a Client ID
 	if n, err := strconv.ParseInt(appID, 10, 64); err == nil {
 		issuer = n
 	}
-	jwt, err := ghapi.BuildAppJWT(issuer, key)
+	jwt, err = ghapi.BuildAppJWT(issuer, key)
+	if err != nil {
+		return "", 0, err
+	}
+	return jwt, inst, nil
+}
+
+func (o osIdentityOps) MintAppToken(ctx context.Context, bedDir string) (string, error) {
+	jwt, inst, err := appCredentials(bedDir)
 	if err != nil {
 		return "", err
 	}

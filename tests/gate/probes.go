@@ -53,9 +53,12 @@ const (
 type ProbeReport struct {
 	Load *LoadProbeResult `json:"load,omitempty"`
 	Lag  *LagProbeResult  `json:"lag,omitempty"`
+	// Delivery is the webhook delivery preflight, one entry per webhook leg and bed
+	// (#2408, delivery_probe.go).
+	Delivery []*DeliveryProbeResult `json:"delivery,omitempty"`
 }
 
-func (r ProbeReport) empty() bool { return r.Load == nil && r.Lag == nil }
+func (r ProbeReport) empty() bool { return r.Load == nil && r.Lag == nil && len(r.Delivery) == 0 }
 
 // LoadProbeResult is the host-load probe's record.
 type LoadProbeResult struct {
