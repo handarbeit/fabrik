@@ -151,7 +151,7 @@ In a multi-bed run, a webhook cell is scheduled only on a bed configured for web
 - The caller supplies `-run` (a selected run): the caller's selection is honoured on webhook cells as on poll cells, and a selected run is not treated as full coverage.
 - Webhook preflight fails: the webhook cell's tests are not run, pairs stay uncovered, exit is non-zero (the existing preflight exit code), poll cells proceed.
 - `--resume` on a SHA with webhook pairs already covered runs only what is missing.
-- A test legitimately cannot pass on a webhook cell for a reason unrelated to webhooks: it is listed with a reason (see FR-011), not silently skipped.
+- A test legitimately cannot pass on a webhook cell for a reason unrelated to webhooks: it is listed with a reason (see FR-012), not silently skipped.
 - A test that self-skips structurally on a leg uses the existing `skip_ok_legs` mechanism, whose patterns now match the three-part label (for example `*/off/*`, `*/*/webhook`).
 
 ## Requirements *(mandatory)*
