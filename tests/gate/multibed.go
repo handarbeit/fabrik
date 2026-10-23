@@ -130,7 +130,7 @@ type multiSched struct {
 	// only webhook-capable bed: it then takes the shared queue's webhook cells after
 	// its baseline, so a webhook cell is never left with no bed able to run it (#2426).
 	webhookOnly map[int]bool
-	held   map[string]*idHold
+	held        map[string]*idHold
 	// reserved maps an identity to the bed whose strict-queue head is waiting
 	// for it: a shared-queue bed may not take it first, so bed A's baseline is
 	// never starved by a bed that keeps re-acquiring a shared identity. The
@@ -207,7 +207,7 @@ func newMultiSched(g *Gate, cells []Cell) *multiSched {
 		wake:   make(chan struct{}),
 		fixed:  map[int][]*queued{},
 		serves: map[int]bool{}, webhookOnly: map[int]bool{},
-		held:   map[string]*idHold{}, reserved: map[string]resv{}, exhausted: map[string]bool{},
+		held: map[string]*idHold{}, reserved: map[string]resv{}, exhausted: map[string]bool{},
 		results: map[int][]string{}, waitedFor: map[string]bool{}, budget: map[string]reading{},
 	}
 	bedA, shared := assignCells(cells, g.Cfg.sparseMatrix())
