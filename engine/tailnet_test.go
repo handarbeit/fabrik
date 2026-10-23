@@ -592,3 +592,43 @@ func TestTailscale_NodeLogLinesEndWithNewline(t *testing.T) {
 		}
 	}
 }
+
+// Up can return before the node's DNS name is populated. The URL is then not
+// printed empty: the daemon says it is unknown, and takes the name (logging the
+// URL and running the R7 check) from the first watch state that carries it.
+func TestTailscale_WebhookURLAdoptedFromWatchWhenUpHasNoName(t *testing.T) {
+	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "") })
+	isolateWarnings(t)
+	stubHookConfig(t, gh.AppHookConfig{URL: "https://elsewhere.example/webhook", ContentType: "json"}, nil)
+	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
+	t.Setenv(DefaultTailscaleAuthKeyEnv, tailscaleTestKey)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.fabrikDir = t.TempDir()
+	eng.cfg.EventSource = EventSourceTailscale
+	eng.cfg.TailscaleHostname = "fabrik-models"
+	eng.cfg.AppWebhookPath = directTestPath
+	logs := &syncLog{}
+	eng.SetLogSinkForTest(func(_ int, tag, msg string) { logs.add("[%s] %s", tag, msg) })
+	cleanup := eng.setUpIngestion(t.Context(), nil)
+
+	if out := logs.String(); strings.Contains(out, "App webhook URL: \n") || strings.Contains(out, "App webhook URL: (") {
+		t.Fatalf("an empty webhook URL was printed:\n%s", out)
+	}
+	if out := logs.String(); !strings.Contains(out, "has not reported its tailnet DNS name yet") {
+		t.Fatalf("no unknown-URL notice:\n%s", out)
+	}
+	if k := warningKeys(t); k["tailscale_webhook_config:url"] {
+		t.Fatalf("R7 check ran with no known URL: %v", k)
+	}
+
+	(*nodes)[0].emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelOK, DNSName: "fabrik-models.tail1234.ts.net."})
+	want := "https://fabrik-models.tail1234.ts.net" + directTestPath
+	if out := logs.String(); !strings.Contains(out, "App webhook URL: "+want) {
+		t.Fatalf("the adopted URL was not logged:\n%s", out)
+	}
+	// Stop waits for the in-flight check, so the panel state is settled after it.
+	cleanup()
+	if k := warningKeys(t); !k["tailscale_webhook_config:url"] {
+		t.Fatalf("R7 check did not run once the name was known: %v", k)
+	}
+}

@@ -222,11 +222,42 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	nodeMu.Lock()
 	n, u, up := node, webURL, upSt
 	nodeMu.Unlock()
-	e.logf(0, tag, "event_source: tailscale — node %q is up; App webhook URL: %s (secret from $%s)\n", hostname, u, secretEnvName)
+	if u != "" {
+		e.logf(0, tag, "event_source: tailscale — node %q is up; App webhook URL: %s (secret from $%s)\n", hostname, u, secretEnvName)
+	} else {
+		// Up returned before the node reported its DNS name. The URL (and with it
+		// the R7 webhook-config check) is filled in from the first watch state that
+		// carries the name; say so rather than print an empty URL.
+		e.logf(0, tag, "event_source: tailscale — node %q is up but has not reported its tailnet DNS name yet; the App webhook URL is not known (it is logged, and checked against the App, once the name arrives)\n", hostname)
+	}
 
 	connKey := warnings.Condition{Type: "tailscale_connection", Subject: hostname}.Key()
 	funnelKey := warnings.Condition{Type: "tailscale_funnel", Subject: hostname}.Key()
+	// adoptName takes the node's reported DNS name from a watch state: the first
+	// time it is known (or when it changes) the webhook URL is updated, logged and
+	// checked against the App. Called from the watch callback, so watchWG (held by
+	// the Watch goroutine) is non-zero when the check is added to it.
+	adoptName := func(dns string) {
+		nu := funnelWebhookURL(dns, path)
+		if nu == "" {
+			return
+		}
+		nodeMu.Lock()
+		changed := nu != webURL
+		webURL = nu
+		nodeMu.Unlock()
+		if !changed {
+			return
+		}
+		e.logf(0, tag, "node %q reports its tailnet DNS name; App webhook URL: %s\n", hostname, nu)
+		watchWG.Add(1)
+		go func() {
+			defer watchWG.Done()
+			e.checkAppWebhookConfig(tag, nu)
+		}()
+	}
 	apply := func(st tailnetState) {
+		adoptName(st.DNSName)
 		tr.SetNetworkCondition(st.Connected, st.BackendState, st.Funnel)
 		if st.Connected {
 			e.resolveWarning(tag, connKey)

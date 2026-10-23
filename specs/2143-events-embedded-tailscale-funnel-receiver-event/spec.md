@@ -46,7 +46,7 @@ Out: delivery replay itself (#2144; superseded in part by ADR 2143 decision 9, w
 
 ## Acceptance
 
-- AC1: Configured, the daemon appears as its own tailnet node and logs its Funnel webhook URL; a signed delivery to it is applied (verified live once on a test bed, recorded in the PR; passed).
+- AC1: Configured, the daemon appears as its own tailnet node and logs its Funnel webhook URL; a signed delivery to it is applied (verified live once on a test bed, recorded in the PR; passed on the earlier tagged build at `ca9713df`, not yet re-run on the final build).
 - AC2: `direct` and `tailscale` construct the same transport type (pinned by a test).
 - AC3: Withdrawn. There is no build tag, so no build refuses `event_source: tailscale` for lack of the node.
 - AC4: R5 refusals tested.
