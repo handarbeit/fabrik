@@ -36,6 +36,8 @@ The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (pro
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974's host-load probe (`host-load-probe`) |
 | `[]Preflight` (`Gate.LivePreflights`, run **after** the pre-gate, before the bed is built) | `gate.go` | #1974's board-lag probe — a live write, so it cannot precede the pre-gate (ADR-1454) |
 | `[]Preflight` again: `bed-topology` (static) and `bed-identity` (live) | `beds.go`, `identity.go` | #1976 |
+| `bed-webhook-provisioning` (static, `E2E_EVENT_SOURCE=tailscale` only) and the **per-leg webhook delivery preflight** `ProbeWebhookDelivery` (live, called from `RunLeg` after the bed restart and identity check — not a `LivePreflights` entry, because it needs the running bed daemon) | `webhook_provisioning.go`, `delivery_probe.go`, `leg.go` | #2408 (below) |
+| `DeliveryOps` on `Gate.Delivery` (`TransportRow`, `AppHookURL`, `AppDeliveries`) | `delivery_probe.go` | #2408's delivery preflight; `nil` (a hand-built `Gate`) disables it |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed views |
 | `IdentityOps` (`ResolveLogin`, `Budget`, `MintAppToken`) on `Gate.Identity` | `identity.go` | #1976's identity scheduling and budget lines; `nil` (a hand-built `Gate`) disables both |
 
@@ -270,6 +272,28 @@ Two probes run before live budget is spent. `tests/e2e/README.md` has the knobs;
   `cancelled`, `skipped`), every reading, the threshold, attempts and seconds waited, and the orphan
   list / swept-leftover count. A zero threshold (a hand-built `Config`) disables a probe, so the
   existing runner tests are undisturbed.
+
+## Webhook beds (#2408, ADR-2408)
+
+`E2E_EVENT_SOURCE` (`poll` default, `tailscale`; anything else is `ExitUsage`) selects the bed's
+event source for the run. It is launch-injected: `BedStartCmd` strips the ambient event-source and
+receiver variables and injects `FABRIK_EVENT_SOURCE=poll` for the gate's initial start, and each
+leg's restart (`TestSwitchTrainMode` → the harness's `StartFabrikTestBed`) injects the leg's
+effective source — `tailscale` only on an `app` leg, `bedevents.Effective` — with the leg's own
+cadence (`180` s on a webhook leg, `60` otherwise, `E2E_BED_POLL_SECONDS` still wins). The single
+definition is `tests/e2e/bedevents`, an untagged package shared by both launch sites and the tests.
+
+* **`bed-webhook-provisioning`** (exit 7): per bed, a hostname distinct across beds, the webhook
+  secret variable, and an auth key variable or a stored tailscale login. Presence only.
+* **Delivery preflight** (exit 4, `RunLeg`, webhook cells only): the daemon's tailscale transport
+  must be up (`transport-not-up`), the App's `GET /app/hook/config` URL must be the bed's Funnel URL
+  as its startup log named it (`hook-url-mismatch`), and a label write on a scratch issue must
+  advance the transport's `last_delivery_at` past a baseline taken just before the write
+  (`no-delivery`, with the App's delivery log used to say whether GitHub sent it and got an HTTP
+  error). It retries within `E2E_DELIVERY_PROBE_WAIT` (default 300 s) to let a fresh Funnel
+  settle, **blocks on an unreadable reading** (a deliberate difference from the ADR-1974 probes) and
+  closes its scratch issue on every path. One `DeliveryProbeResult` per leg and bed lands in
+  `probes.json` under `delivery`; no token, auth key or secret is ever printed or archived.
 
 ## Multi-bed runs (#1976, ADR-1976)
 

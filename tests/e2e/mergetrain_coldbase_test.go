@@ -125,7 +125,7 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	requireTrainBed(t, env)
 
 	if bedWebhooksEnabled(env) {
-		t.Skip("bed has webhooks enabled — poll 1 hydrates Queued members before batching, so there is no cold window to exercise")
+		t.Skip("bed has a webhook transport on this leg — poll 1 hydrates Queued members before batching, so there is no cold window to exercise (run it on a poll leg; the event-source matrix axis that gives it a structural skip here is #2427)")
 	}
 
 	repo := env.RepoAlpha

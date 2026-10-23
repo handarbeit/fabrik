@@ -153,12 +153,143 @@ These tests assume:
    every bed's repos. Standing up the second bed is #1990; its prerequisites are listed
    under "Second bed" below.
 
+7. **For a webhook leg (`E2E_EVENT_SOURCE=tailscale`, #2408):** each bed also needs
+   its own tailnet node, auth key, App webhook URL and webhook secret — see
+   "Webhook delivery to the beds" below. A run that does not select the source needs
+   none of it.
+
 The harness reads `FABRIK_TEST_DIR`, the repo pair, `FABRIK_TEST_PROJECT_OWNER` and
 `FABRIK_TEST_PROJECT_NUMBER` (default `2`; a non-positive or non-integer value fails the
 test) from its environment; on a multi-bed run the gate runner sets all five per leg.
 
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
+
+## Webhook delivery to the beds (#2408)
+
+By default both beds run **poll-only**: no transport is attached, so the live suite
+never exercises event-driven ingestion (intake, dedupe, echo matching, replay,
+transport health) — the mode production daemons run in. A **webhook leg** starts the
+bed with `event_source: tailscale` (the embedded `tsnet` Funnel receiver, #2143), so
+GitHub's App deliveries reach the bed daemon, and the webhook-dependent live tests
+run instead of skipping. The same bed serves both kinds of leg.
+
+### Selecting the event source
+
+`E2E_EVENT_SOURCE` picks it for the run: `poll` (the default) or `tailscale`; anything
+else (`direct`, `hookdeck`, ...) is a usage error, since only Tailscale is a bed
+transport. It applies to every leg of the run, so a webhook run is a dedicated,
+test-selected run, for example:
+
+```bash
+E2E_EVENT_SOURCE=tailscale scripts/e2e/run.sh -run '^TestWebhookChangeSurvivesReconcile$'
+```
+
+The transport is App-auth only (the engine refuses it under a PAT), so a **PAT leg is
+always poll-only** whatever the variable says. (The event-source matrix axis and its
+ledger keys are #2427; this variable is the minimal input until then, and the
+webhook test's skip on a poll leg cites that issue.)
+
+The source is **launch-injected**, like the bed wait timeouts (ADR-2417): both bed
+launch sites (`tests/gate/bed.go` and `tests/e2e/lifecycle.go`, through
+`tests/e2e/bedevents`) strip the ambient `FABRIK_EVENT_SOURCE` and
+`FABRIK_TAILSCALE_*`/`FABRIK_APP_WEBHOOK_*`/`FABRIK_DIRECT_LISTEN` variables, then inject
+`FABRIK_EVENT_SOURCE=poll|tailscale`. The process environment beats the bed's `.env`,
+so a poll leg is genuinely poll-only whatever a stale `.env` or shell says — read the
+daemon's startup banner or `fabrik_health` (`webhook.transports`, empty when poll-only)
+to confirm. Because the shell's `FABRIK_TAILSCALE_HOSTNAME` is stripped, each bed's own
+`.env` supplies its hostname and two beds cannot share one.
+
+### Poll interval on a webhook leg
+
+A poll leg keeps the bed's 60 s cadence. A webhook leg runs with **180 s**: longer than the
+90 s window `TestWebhookChangeSurvivesReconcile` waits for the webhook-applied change,
+and six times the production default of 30 s, so an engine effect that arrives quickly on
+a webhook leg is evidence of the webhook path and not of a short poll (in production
+the poll is the correctness backstop, which is the shape this models). Override both
+cadences with `E2E_BED_POLL_SECONDS`. Many other scenarios' fixed waits are tuned to
+the 60 s cadence; that is why a webhook run is a selected run, and
+`E2E_BED_POLL_SECONDS=60` restores the shorter cadence if a scenario you add to a
+webhook run needs it.
+
+### Per-bed setup (manual, one-time per bed)
+
+Everything below is operator work; the gate only consumes the result and verifies it
+(the static provisioning check and the delivery preflight below).
+
+1. **Tailnet and tag.** Join the bed's host to your tailnet and enable **HTTPS
+   certificates** and **Funnel** for the tag the bed's node will carry (tailnet policy:
+   a `funnel` node attribute for the tag, and the tag in `tagOwners`). Funnel
+   serves `https://<hostname>.<tailnet>.ts.net` on port 443.
+2. **Auth key.** Create a **reusable, pre-approved** auth key tagged with that tag
+   (Settings → Keys). Put it in the bed's `.env` as `FABRIK_TS_AUTHKEY` (or another
+   variable name, naming it with `FABRIK_TAILSCALE_AUTH_KEY_ENV`). The key is needed
+   only until the node has joined: the node's state lives in
+   `<bed>/.fabrik/state/tailscale/` (per bed — never shared), and a node logged in
+   from stored state restarts without it.
+   **Rotation:** create the new key, replace the value in the bed's `.env`, and
+   revoke the old key. A node that is already logged in keeps working; to force a
+   re-join (a revoked or expired node), stop the bed, delete
+   `<bed>/.fabrik/state/tailscale/`, and let the next webhook leg join with the new key.
+3. **Hostname.** `FABRIK_TAILSCALE_HOSTNAME=<name>` in the bed's `.env`: a node name
+   unique to the bed (for example `fabrik-bed-a`, `fabrik-bed-b`).
+4. **Webhook secret.** A random string in the bed's `.env` as
+   `FABRIK_GITHUB_WEBHOOK_SECRET` (or the variable `FABRIK_APP_WEBHOOK_SECRET_ENV`
+   names), identical to the secret configured on the App.
+5. **App webhook URL.** In the bed's GitHub App settings (General → Webhook): Active,
+   Webhook URL `https://<hostname>.<tailnet>.ts.net/webhook` (the path is
+   `/webhook` unless `FABRIK_APP_WEBHOOK_PATH` is set), content type
+   `application/json`, the secret from step 4, and the App subscribed to the
+   events the tests exercise (at least **Issues**; also Issue comment, Pull request,
+   Pull request review and thread, Check run, Projects v2 item, Sub-issues).
+   Each bed's App points at that bed's own Funnel name; the `bed-topology` preflight
+   already refuses two beds sharing an App.
+
+The engine logs the URL it expects on startup
+(`App webhook URL: https://...` in `bed-run.log`), and raises the
+`tailscale_webhook_config` warning when the App's configured URL differs from it.
+
+### What the gate checks before a webhook leg spends budget
+
+* **Provisioning check** (`bed-webhook-provisioning`, no live spend, beside
+  `bed-topology`): for each bed, `FABRIK_TAILSCALE_HOSTNAME` is set and distinct
+  across beds, the webhook secret variable is set, and an auth key variable is set or
+  a stored tailscale login exists. Only the presence of values is checked; none is
+  ever printed. Failure is exit 7 naming the bed.
+* **Delivery preflight** (a live probe, so it runs after the pre-gate like the board-lag
+  probe, ADR 1454/1974 — but per webhook leg, after the leg's bed restart, because it needs
+  the running daemon with its transport). It makes a write that GitHub turns into an App
+  delivery — a label on a scratch issue in the bed's alpha repository, closed again on
+  every path — and waits (bound `E2E_DELIVERY_PROBE_WAIT` seconds, default 300, to let a
+  fresh Funnel name settle; each attempt writes a distinct label) for the daemon's
+  last-delivery time to move **past a baseline taken before the write**, confirmed
+  against the App's delivery log when it is readable. It **blocks** on a failed reading
+  as well as a failed delivery (a deliberate difference from ADR 1974's
+  "unavailable never blocks"). Failure is **exit 4** naming the bed and the step:
+
+  | Step | Meaning | Fix |
+  |---|---|---|
+  | `transport-not-up` | the daemon reports no tailscale transport, or it is not `listening`/Funnel not `ok`, or the daemon could not be asked | check `bed-run.log`, the auth key/state, that Funnel is enabled for the tag |
+  | `hook-url-mismatch` | the App's webhook URL is not this bed's Funnel URL (or the App config could not be read) | fix the URL in the App's settings (step 5) |
+  | `no-delivery` | transport up and URL right, but no delivery arrived; the message says whether GitHub sent it and got an HTTP error (Funnel unreachable) or created none (App not subscribed to Issues) | see the message; redeliver by hand (below) |
+
+  The result is archived in each leg's `probes.json` under `delivery`.
+
+### Checking a bed's delivery by hand
+
+```bash
+# 1. The transport: state, Funnel, last delivery (empty transports = poll-only)
+echo '{"id":"1","method":"health"}' | nc -U <bed>/.fabrik/state/fabrik.sock   # or the fabrik_health MCP tool
+# 2. The URL the engine expects
+grep 'App webhook URL' <bed>/bed-run.log | tail -1
+# 3. Cause a delivery: label any issue in the bed's alpha repo, then read health again;
+#    transports[].last_delivery_at must move.
+```
+
+On the App's settings → **Advanced** tab, "Recent Deliveries" shows each delivery's HTTP
+status and lets you **Redeliver**. A 502/404/0 there means GitHub reached for the Funnel
+and did not get an answer (Funnel down or the wrong URL); no delivery at all for your
+write means the App is not subscribed to that event.
 
 ## GraphQL budget
 
@@ -1265,7 +1396,7 @@ already exercise the PAT identity.
 comment authors at ingestion (tracked in #1898).** Research found (from the code, not confirmed live)
 that REST reports a bot comment's author as `fabrik-bed[bot]` but the GraphQL
 comment fragment (`author { login }`, no `__typename`) yields the bare
-`fabrik-bed`, and under App auth (webhooks are refused, ADR-1752) the engine reads
+`fabrik-bed`, and under App auth (the gh-forward `--webhooks` mode is refused, ADR-1752) the engine reads
 issue comments through GraphQL. If so, `IsBotLogin("fabrik-bed")` is false and
 `findBlockedComment` never matches, so A1 and A2 fail on a live App leg for a reason
 outside this change (mirror `applyLinkedPRs`'s review-author normalisation
@@ -2388,7 +2519,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — default-base-train class (#1977): the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — exclusive class (#1977): restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
-| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a webhook-enabled bed. Posts no comments. **Not parallel** — exclusive class (#1977): stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
+| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a leg whose bed has a webhook transport (a `E2E_EVENT_SOURCE=tailscale` App leg, see "Webhook delivery"). Posts no comments. **Not parallel** — exclusive class (#1977): stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — exclusive class (#1977): induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — default-base-train class (#1977): shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
@@ -2740,7 +2871,7 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
   - `fabrik.log` is a fresh file on every engine start (the previous run is rotated to `fabrik.log.1`), so it reads from offset 0
     and scopes every matcher to its own issue numbers and train key.
   - It fails (never passes) if a member has no "not yet hydrated" line, and skips
-    on a webhook-enabled bed, where poll 1 hydrates members before batching.
+    on a leg whose bed has a webhook transport (an `E2E_EVENT_SOURCE=tailscale` App leg), where poll 1 hydrates members before batching.
   - The healthy run is **not** expected to log #1773's `REFUSING to open/reuse
     integration PR` line, since #1772 prevents the contradiction; the scenario
     asserts its absence.

@@ -26,13 +26,16 @@ import (
 // the daemon still shows the new column.
 //
 // The item is filed paused at Specify, so no Claude stage runs; the move is
-// Specify to Research. It needs a bed whose engine receives webhooks (poll-only
-// beds, and App-auth legs, which refuse webhooks, skip).
+// Specify to Research. It needs a leg whose bed engine receives webhooks: the gate
+// starts it with the embedded Tailscale Funnel receiver for E2E_EVENT_SOURCE=
+// tailscale on an App leg (#2408, tests/e2e/bedevents), and a webhook delivery
+// preflight has by then proved delivery. A poll leg, and every PAT leg (the
+// transport is App-auth only), skip.
 func TestWebhookChangeSurvivesReconcile(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	if !bedWebhooksEnabled(env) {
-		t.Skip("bed has webhooks disabled — a column move would reach the daemon only through a listing, so there is no webhook-applied change to protect (bed webhook delivery: #2408)")
+		t.Skip("this leg has no webhook transport (poll-only event source, or a PAT leg) — a column move would reach the daemon only through a listing, so there is no webhook-applied change to protect; run it with E2E_EVENT_SOURCE=tailscale on an App leg (event-source matrix axis: #2427)")
 	}
 	repo := env.RepoAlpha
 

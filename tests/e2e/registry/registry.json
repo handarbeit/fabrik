@@ -679,12 +679,12 @@
         "TestWebhookOrdering_LateEchoDoesNotResurrectLabel",
         "TestWebhookOrdering_ReplayedSynchronizeDoesNotRegressHead"
       ],
-      "note": "the sim holds a stale listing with LagBoardStatus and delivers webhook payloads straight to the board cache; it cannot model GitHub's real read lag or real webhook delivery, which this test adds. Self-skips on a bed without webhooks and is Inconclusive when the daemon never shows the webhook move",
+      "note": "the sim holds a stale listing with LagBoardStatus and delivers webhook payloads straight to the board cache; it cannot model GitHub's real read lag or real webhook delivery, which this test adds. Self-skips on a leg with no webhook transport (poll-only, or any PAT leg) and is Inconclusive when the daemon never shows the webhook move. A webhook leg is selected with E2E_EVENT_SOURCE=tailscale; the event-source matrix axis that makes a poll leg's skip structural is #2427",
       "skip_ok_legs": [
-        "app/*"
+        "pat/*"
       ],
       "auth": "sensitive",
-      "auth_reason": "needs webhook delivery, which GitHub App auth refuses (ADR 1752): the App legs structurally skip",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
       "train": "neutral",
       "exclusive": true,
       "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only the webhook can move the daemon's copy, then triggers whole polls",
