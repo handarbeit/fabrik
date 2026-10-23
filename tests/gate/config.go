@@ -93,6 +93,19 @@ type Config struct {
 	ParallelOn string // E2E_PARALLEL_ON, default 2: the shared phase of a default-gate "on" leg (4 is the value to try)
 
 	BedPollSeconds string // E2E_BED_POLL_SECONDS, default 60
+	// BedPollOverride is the operator's E2E_BED_POLL_SECONDS exactly as set, or ""
+	// when unset or not a positive integer (#2426, FR-010). BedPollSeconds hides
+	// whether anything was set; the override is what makes a leg non-conforming
+	// when it differs from the cadence the plan gave the cell.
+	BedPollOverride string
+	// EventsFilter is E2E_EVENTS (#2426): "" plans both dimensions, bedevents-style
+	// "poll" only the poll cells, "webhook" only the webhook cells. A filtered run
+	// is partial, as E2E_AUTH_MODE=pat is. Setting the deprecated E2E_EVENT_SOURCE=
+	// tailscale is an alias for E2E_EVENTS=webhook (EventSourceAliased).
+	EventsFilter string
+	// EventSourceAliased reports that EventsFilter came from the deprecated
+	// E2E_EVENT_SOURCE, so the gate can say so once.
+	EventSourceAliased bool
 
 	// EventSource is E2E_EVENT_SOURCE (#2408): bedevents.Poll (default) or
 	// bedevents.Tailscale. A leg's effective source also depends on its auth
@@ -177,7 +190,7 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		Timeout:        orDefault(getenv("E2E_TIMEOUT"), "4h"),
 		Parallel:       orDefault(getenv("E2E_PARALLEL"), "4"),
 		ParallelOn:     orDefault(getenv("E2E_PARALLEL_ON"), "2"),
-		BedPollSeconds: orDefault(getenv("E2E_BED_POLL_SECONDS"), "60"),
+		BedPollSeconds: orDefault(getenv("E2E_BED_POLL_SECONDS"), PlannedPollSeconds),
 
 		StallCheckInterval: 60 * time.Second,
 		BannerWait:         90 * time.Second,
@@ -217,6 +230,15 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	}
 	if c.EventSource, err = bedevents.Parse(getenv(bedevents.RequestVar)); err != nil {
 		return c, err
+	}
+	if c.EventsFilter, err = parseEventsFilter(getenv("E2E_EVENTS")); err != nil {
+		return c, err
+	}
+	if c.EventsFilter == "" && c.EventSource == bedevents.Tailscale {
+		c.EventsFilter, c.EventSourceAliased = EventsWebhook, true
+	}
+	if n, perr := strconv.Atoi(strings.TrimSpace(getenv("E2E_BED_POLL_SECONDS"))); perr == nil && n > 0 {
+		c.BedPollOverride = strconv.Itoa(n)
 	}
 	if c.DeliveryProbeWait, err = secsEnv(getenv, "E2E_DELIVERY_PROBE_WAIT", 300); err != nil {
 		return c, err
@@ -268,6 +290,19 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	// secsEnv returned the integer as seconds; this knob is in minutes.
 	c.StallWarn = mins * 60
 	return c, nil
+}
+
+// parseEventsFilter resolves E2E_EVENTS: unset plans both dimensions, "poll" or
+// "webhook" restricts the plan; anything else is rejected.
+func parseEventsFilter(v string) (string, error) {
+	switch s := strings.ToLower(strings.TrimSpace(v)); s {
+	case "":
+		return "", nil
+	case EventsPoll, EventsWebhook:
+		return s, nil
+	default:
+		return "", fmt.Errorf("E2E_EVENTS=%q is invalid (must be %s, %s, or unset for both)", v, EventsPoll, EventsWebhook)
+	}
 }
 
 // EffectiveEventSource is the event source a leg of the given auth runs with: the

@@ -151,7 +151,7 @@ type multiSched struct {
 func assignCells(cells []Cell, sparse bool) (bedA, shared []Cell) {
 	hasBaseline := false
 	for _, c := range cells {
-		if c.Auth == baselineAuth && c.Train == baselineTrain {
+		if c.isBaseline() {
 			hasBaseline = true
 		}
 	}
@@ -159,7 +159,7 @@ func assignCells(cells []Cell, sparse bool) (bedA, shared []Cell) {
 		return nil, cells
 	}
 	for _, c := range cells {
-		if c.Auth == baselineAuth && c.Train == baselineTrain {
+		if c.isBaseline() {
 			bedA = append(bedA, c)
 		} else {
 			shared = append(shared, c)
@@ -524,6 +524,9 @@ func (s *multiSched) next(ctx context.Context, i int) decision {
 	}
 	var waits []blocked
 	for k, cq := range s.shared {
+		if cq.cell.Webhook() && !b.bedWebhookCapable() {
+			continue // a webhook cell runs only on a webhook-capable bed (#2426); another bed may take it
+		}
 		cs := b.identitySet(cq.cell.Auth)
 		if exhausted(cs) {
 			continue // never on this bed; another bed may still take it

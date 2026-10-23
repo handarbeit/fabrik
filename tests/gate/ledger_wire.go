@@ -105,6 +105,7 @@ func (g *Gate) buildPlanInput(modes []string, callerArgs []string, sel *SparseIn
 	p := PlanInput{
 		AuthModes:    modes,
 		TrainMode:    g.Getenv("E2E_TRAIN_MODE"),
+		Events:       g.Cfg.EventsFilter,
 		CallerHasRun: HasRunFlag(callerArgs),
 		Parallel:     g.Cfg.Parallel,
 		ParallelOn:   g.Cfg.ParallelOn,
@@ -220,7 +221,7 @@ func (g *Gate) coverageReport(ctx context.Context, l *Ledger, in *covInputs, leg
 	ev := &Evaluator{Snap: l.Load(), Hashes: in.hashes, Entries: in.entries, States: g.newIssueStates()}
 	r := BuildReport(ctx, ev, l.SHA, legs, required)
 	r.Invocations = l.InvocationCount()
-	r.Matrix, r.FullMatrixPairs = g.Cfg.Matrix, 4*len(in.live)
+	r.Matrix, r.FullMatrixPairs = g.Cfg.Matrix, 6*len(in.live)
 	if withDrift {
 		d := g.DriftCheck(ctx, l.SHA)
 		r.Drift = &d

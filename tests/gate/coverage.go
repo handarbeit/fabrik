@@ -118,7 +118,7 @@ type Report struct {
 	Invocations int
 	Warnings    []string
 	// Matrix is the E2E_MATRIX mode the required set was planned under, and
-	// FullMatrixPairs the size of the full 2×2 over the same live set (4 × tests),
+	// FullMatrixPairs the size of the full matrix over the same live set (the four poll cells plus the two webhook cells, 6 × tests; #2426),
 	// so the summary can say how much narrower the sparse set is (#1975, R5).
 	Matrix          string
 	FullMatrixPairs int
@@ -194,9 +194,15 @@ func (r *Report) Format() string {
 	if r.Pregate != "" {
 		fmt.Fprintf(&b, "%s\n", r.Pregate)
 	}
+	w := 8
 	for _, l := range r.Legs {
-		fmt.Fprintf(&b, "  %-8s covered %d/%d  missing %d  known-skip %d  structural-skip %d  inconclusive %d\n",
-			l.Leg, l.count(PairCovered), len(l.Pairs), l.count(PairMissing), l.count(PairKnownSkip), l.count(PairStructural), l.count(PairInconclusive))
+		if len(l.Leg) > w {
+			w = len(l.Leg)
+		}
+	}
+	for _, l := range r.Legs {
+		fmt.Fprintf(&b, "  %-*s covered %d/%d  missing %d  known-skip %d  structural-skip %d  inconclusive %d\n",
+			w, l.Leg, l.count(PairCovered), len(l.Pairs), l.count(PairMissing), l.count(PairKnownSkip), l.count(PairStructural), l.count(PairInconclusive))
 		for _, p := range l.Pairs {
 			if p.Status == PairCovered {
 				continue
@@ -215,7 +221,7 @@ func (r *Report) Format() string {
 	fmt.Fprintf(&b, "== coverage %s: %d covered, %d missing, %d known-skip, %d structural-skip, %d inconclusive; %d invocation(s) ==",
 		verdict, cov, miss, known, structural, inc, r.Invocations)
 	if r.FullMatrixPairs > 0 {
-		fmt.Fprintf(&b, "\n== required set (E2E_MATRIX=%s): %d (test, leg) pairs of %d in the full 2×2 ==",
+		fmt.Fprintf(&b, "\n== required set (E2E_MATRIX=%s): %d (test, leg) pairs of %d in the full matrix ==",
 			orDefault(r.Matrix, MatrixFull), r.Required(), r.FullMatrixPairs)
 	}
 	return b.String()
@@ -232,7 +238,7 @@ func (r *Report) NotesLine() string {
 	}
 	matrix := ""
 	if r.FullMatrixPairs > 0 {
-		matrix = fmt.Sprintf(" under E2E_MATRIX=%s (%d required pairs of %d in the full 2×2)", orDefault(r.Matrix, MatrixFull), r.Required(), r.FullMatrixPairs)
+		matrix = fmt.Sprintf(" under E2E_MATRIX=%s (%d required pairs of %d in the full matrix)", orDefault(r.Matrix, MatrixFull), r.Required(), r.FullMatrixPairs)
 	}
 	return fmt.Sprintf("Live e2e gate: coverage complete for engine SHA %s (%d test/leg pairs passed, %d known skip(s), %d structural skip(s))%s across %d gate invocation%s.",
 		r.SHA, cov, known, structural, matrix, n, plural)

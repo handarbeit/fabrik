@@ -283,7 +283,7 @@ func TestRunLegProbesWebhookLegsOnly(t *testing.T) {
 		return lf, fd, err
 	}
 	t.Run("webhook leg fails before any test", func(t *testing.T) {
-		lf, fd, err := run(t, bedevents.Tailscale, Cell{Auth: "app", Train: "on", Parallel: "2"})
+		lf, fd, err := run(t, bedevents.Tailscale, Cell{Auth: "app", Train: "on", Events: EventsWebhook, Parallel: "2"})
 		msg := failureOf(t, err)
 		if !strings.Contains(msg, bedevents.StepTransportNotUp) || len(lf.suiteCmds) != 0 || fd.rowCalls == 0 {
 			t.Errorf("msg=%q suiteCmds=%d rowCalls=%d", msg, len(lf.suiteCmds), fd.rowCalls)
@@ -297,7 +297,7 @@ func TestRunLegProbesWebhookLegsOnly(t *testing.T) {
 		cell   Cell
 	}{
 		"poll source":     {bedevents.Poll, Cell{Auth: "app", Train: "on", Parallel: "2"}},
-		"pat leg":         {bedevents.Tailscale, Cell{Auth: "pat", Train: "on", Parallel: "2"}},
+		"pat poll leg":    {bedevents.Tailscale, Cell{Auth: "pat", Train: "on", Parallel: "2"}},
 		"default (empty)": {"", Cell{Auth: "app", Train: "off", Parallel: "2"}},
 	} {
 		t.Run(name+" is never probed", func(t *testing.T) {
@@ -313,7 +313,7 @@ func TestRunLegProbesWebhookLegsOnly(t *testing.T) {
 // archive's Finish must rewrite it: on a failed probe (RunLeg returns at once) and
 // on a pass alike, the result and failed step must reach the file (SC-004).
 func TestDeliveryProbeResultIsArchivedInTheLegDirectory(t *testing.T) {
-	cell := Cell{Auth: "app", Train: "on", Parallel: "2"}
+	cell := Cell{Auth: "app", Train: "on", Events: EventsWebhook, Parallel: "2"}
 	run := func(t *testing.T, fd *fakeDelivery) (string, error) {
 		lf := &legFake{suiteOut: passStream}
 		g, _, _ := newLegGate(t, lf)

@@ -36,8 +36,9 @@ func TestLoadConfigMatrix(t *testing.T) {
 func sparseFixture() *SparseInput {
 	S, N := registry.Sensitive, registry.Neutral
 	ent := func(name string, a, tr registry.Sensitivity, skip ...string) registry.Entry {
-		return registry.Entry{Name: name, Auth: a, Train: tr, SkipOKLegs: skip}
+		return registry.Entry{Name: name, Auth: a, Train: tr, Events: N, SkipOKLegs: skip}
 	}
+	evt := func(e registry.Entry) registry.Entry { e.Events = S; return e }
 	es := []registry.Entry{
 		ent("TestAuthOnly", S, N),
 		ent("TestBoth", S, S),
@@ -46,6 +47,8 @@ func sparseFixture() *SparseInput {
 		ent("TestPATOnly", S, N, "app/*"),
 		ent("TestAppOnly", S, N, "pat/*"),
 		ent("TestTrainOnly", N, S),
+		evt(ent("TestEventsOnly", N, N)),
+		evt(ent("TestSkipsOnWebhook", N, N, "*/*/webhook")),
 	}
 	in := &SparseInput{Entries: map[string]registry.Entry{}}
 	for _, e := range es {
@@ -71,6 +74,9 @@ func TestPlanCellsSparseDefault(t *testing.T) {
 		"pat/on@2 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$",
 		// diagonal: sensitive on both axes
 		"pat/off@4 -run ^(TestBoth)$",
+		// the events axis (#2426): events-sensitive tests, minus the structural
+		// webhook skip; planned last, App-only
+		"app/on/webhook@2 -run ^(TestEventsOnly)$",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sparse plan\n got: %q\nwant: %q", got, want)
@@ -83,10 +89,13 @@ func TestPlanCellsSparseRequiredSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(legs, []string{"app/on", "app/off", "pat/on", "pat/off"}) {
+	if !reflect.DeepEqual(legs, []string{"app/on", "app/off", "pat/on", "pat/off", "app/on/webhook"}) {
 		t.Fatalf("legs = %v", legs)
 	}
-	if len(req["app/on"]) != 7 {
+	if !reflect.DeepEqual(req["app/on/webhook"], []string{"TestEventsOnly"}) {
+		t.Errorf("the webhook cell must require exactly the events-sensitive tests (minus structural skips): %v", req["app/on/webhook"])
+	}
+	if len(req["app/on"]) != 9 {
 		t.Errorf("the baseline must require every live test: %v", req["app/on"])
 	}
 	if !reflect.DeepEqual(req["app/off"], []string{"TestBoth", "TestTrainOnly"}) ||
@@ -118,9 +127,9 @@ func TestPlanCellsSparseNarrowingFilters(t *testing.T) {
 		{"E2E_AUTH_MODE=pat is a partial run: no baseline", func(p *PlanInput) { p.AuthModes = []string{"pat"} },
 			[]string{"pat/on@2 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$", "pat/off@4 -run ^(TestBoth)$"}},
 		{"E2E_AUTH_MODE=app", func(p *PlanInput) { p.AuthModes = []string{"app"} },
-			[]string{"app/on@2", "app/off@4 -run ^(TestBoth|TestTrainOnly)$"}},
+			[]string{"app/on@2", "app/off@4 -run ^(TestBoth|TestTrainOnly)$", "app/on/webhook@2 -run ^(TestEventsOnly)$"}},
 		{"E2E_TRAIN_MODE=on runs at E2E_PARALLEL", func(p *PlanInput) { p.TrainMode = "on" },
-			[]string{"app/on@4", "pat/on@4 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$"}},
+			[]string{"app/on@4", "pat/on@4 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$", "app/on/webhook@4 -run ^(TestEventsOnly)$"}},
 		{"E2E_TRAIN_MODE=off", func(p *PlanInput) { p.TrainMode = "off" },
 			[]string{"app/off@4 -run ^(TestBoth|TestTrainOnly)$", "pat/off@4 -run ^(TestBoth)$"}},
 		{"a caller -run is intersected with every cell and keeps passthrough args", func(p *PlanInput) {
@@ -141,10 +150,11 @@ func TestPlanCellsSparseNarrowingFilters(t *testing.T) {
 		}, []string{
 			"app/on@2 -v",
 			"app/off@4 -run ^(TestBoth|TestTrainOnly)$ -v", "pat/on@2 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$ -v",
-			"pat/off@4 -run ^(TestBoth)$ -v"}},
+			"pat/off@4 -run ^(TestBoth)$ -v",
+			"app/on/webhook@2 -run ^(TestEventsOnly)$ -v"}},
 		{"an unrecognised forced train mode falls through to the full plan (the restart step rejects it)", func(p *PlanInput) {
 			p.TrainMode = "maybe"
-		}, []string{"app/maybe@4", "pat/maybe@4"}},
+		}, []string{"app/maybe@4", "pat/maybe@4", "app/maybe/webhook@4"}},
 	}
 	for _, c := range cases {
 		in := sparseIn("app", "pat")
@@ -162,8 +172,8 @@ func TestPlanCellsNilSparseIsTheFullMatrix(t *testing.T) {
 	in := PlanInput{AuthModes: []string{"pat", "app"}, Parallel: "4", ParallelOn: "2"}
 	withNil := in
 	withNil.Sparse = nil
-	if !reflect.DeepEqual(PlanCells(in), PlanCells(withNil)) || len(PlanCells(in)) != 4 {
-		t.Fatalf("a nil Sparse must plan the full 2×2: %q", summaries(PlanCells(in)))
+	if !reflect.DeepEqual(PlanCells(in), PlanCells(withNil)) || len(PlanCells(in)) != 6 {
+		t.Fatalf("a nil Sparse must plan the full matrix (four poll cells and two webhook cells): %q", summaries(PlanCells(in)))
 	}
 }
 
@@ -210,8 +220,8 @@ func TestGateRunsOnlyTheSparseCellsAndRequiresExactlyThem(t *testing.T) {
 	if code := f.g.Coverage(context.Background(), []string{"--sha", covSHA}); code != 0 {
 		t.Fatalf("coverage exit = %d\n%s", code, co.String())
 	}
-	if !strings.Contains(co.String(), "required set (E2E_MATRIX=sparse): 1 (test, leg) pairs of 8 in the full 2×2") {
-		t.Errorf("coverage summary should state the required-set size against the full 2×2:\n%s", co.String())
+	if !strings.Contains(co.String(), "required set (E2E_MATRIX=sparse): 1 (test, leg) pairs of 12 in the full matrix") {
+		t.Errorf("coverage summary should state the required-set size against the full matrix:\n%s", co.String())
 	}
 }
 
@@ -260,7 +270,7 @@ func TestSparseResumeOverASparsePlan(t *testing.T) {
 func TestReportNotesLineNamesTheMatrix(t *testing.T) {
 	r := &Report{SHA: covSHA, Invocations: 2, Matrix: MatrixSparse, FullMatrixPairs: 208,
 		Legs: []LegReport{{Leg: "app/on", Pairs: []Pair{{Test: "TestA", Status: PairCovered}}}}}
-	if got := r.NotesLine(); !strings.Contains(got, "E2E_MATRIX=sparse (1 required pairs of 208 in the full 2×2)") {
+	if got := r.NotesLine(); !strings.Contains(got, "E2E_MATRIX=sparse (1 required pairs of 208 in the full matrix)") {
 		t.Errorf("notes line = %q", got)
 	}
 	if got := (&Report{SHA: covSHA}).NotesLine(); strings.Contains(got, "E2E_MATRIX") {

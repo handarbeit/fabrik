@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -207,13 +206,11 @@ const defaultBedPollSeconds = bedevents.PollOnlySeconds
 // path and not of a short poll.
 func bedEventSource() string { return bedevents.FromEnv(os.Getenv) }
 
+// bedPollSeconds resolves the bed's `-poll` cadence: the operator's
+// E2E_BED_POLL_SECONDS override, then the cadence the gate's plan gave this leg's
+// cell (E2E_CELL_POLL_SECONDS, #2426), then the source's ad hoc default.
 func bedPollSeconds() string {
-	if s := os.Getenv("E2E_BED_POLL_SECONDS"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			return s
-		}
-	}
-	return bedevents.PollSeconds(bedEventSource())
+	return bedevents.ResolvePollSeconds(os.Getenv, bedEventSource())
 }
 
 // markInheritedFDsCloseOnExec marks every descriptor above stdio close-on-exec,
