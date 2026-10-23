@@ -178,6 +178,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		defer arch.Finish()
 	}
 
+	legStart, legLogFrom := g.Now(), logSize(g.Cfg.EngineLog)
 	if err := g.restartBed(ctx, cell, legEnv); err != nil {
 		return err
 	}
@@ -342,6 +343,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		summary.PeakLoad1m, summary.LoadSamples, summary.HasLoad = arch.LoadStats()
 	}
 	summary.BedMaxConcurrent = g.noteBedConcurrency(arch, cell, phases)
+	summary.Events = g.eventsSummary(ctx, cell, legStart, legLogFrom)
 	suiteExit := g.Now()
 
 	// R2 (#1676): post-suite watchdog. From here through this function's return

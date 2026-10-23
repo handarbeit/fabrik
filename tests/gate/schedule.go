@@ -379,7 +379,8 @@ func describePlan(cells []Cell) string {
 	}
 	parts := make([]string, len(cells))
 	for i, c := range cells {
-		parts[i] = c.Label()
+		// The cadence is part of the cell (#2426, FR-008): it is printed with the plan.
+		parts[i] = c.Label() + "@" + c.pollSeconds() + "s"
 	}
-	return fmt.Sprintf("%d cell(s): %s", len(cells), strings.Join(parts, ", "))
+	return fmt.Sprintf("%d cell(s) (label@poll cadence): %s", len(cells), strings.Join(parts, ", "))
 }

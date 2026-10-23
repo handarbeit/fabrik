@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -181,5 +182,13 @@ func TestCellLabelsKeepPollCellsTwoPart(t *testing.T) {
 	// A pre-change outcome file keeps its key.
 	if got := legFromFile("pat-off.jsonl"); got != "pat/off" {
 		t.Errorf("legFromFile(pat-off.jsonl) = %q", got)
+	}
+}
+
+func TestDescribePlanPrintsEachCellsCadence(t *testing.T) {
+	cells := PlanCells(PlanInput{AuthModes: []string{"app"}, TrainMode: "on", Parallel: "4", ParallelOn: "2"})
+	got := describePlan(cells)
+	if !strings.Contains(got, "app/on@60s, app/on/webhook@60s") {
+		t.Errorf("describePlan = %q", got)
 	}
 }

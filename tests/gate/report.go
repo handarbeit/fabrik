@@ -307,6 +307,7 @@ func (r RuntimeReport) formatPhases(b *strings.Builder) {
 			continue
 		}
 		fmt.Fprintf(b, "  %s  %s\n", cp.Cell, cp.Invocation)
+		b.WriteString(strings.ReplaceAll(cp.Summary.Events.Format(), "\n   ", "\n  "))
 		for _, p := range cp.Summary.stats() {
 			fmt.Fprintf(b, "    %-19s %2d test(s)  -parallel=%-2s  wall %s\n", p.label(), p.Tests, p.Parallel, p.Wall.Round(time.Second))
 		}
