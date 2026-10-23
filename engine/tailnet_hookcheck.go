@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/warnings"
@@ -53,19 +54,50 @@ func normalizeWebhookURL(raw string) string {
 	return out
 }
 
+// hookCheckLogState throttles the "could not read" line of the R7 check, which
+// runs at startup and on every reconcile tick: a persistent failure (a rotated
+// key path, a JWT or clock problem, a standing 401/403) must not repeat the line
+// for the life of the process. It logs the first failure of a streak and again
+// whenever the error text changes; a successful read ends the streak.
+type hookCheckLogState struct {
+	mu      sync.Mutex
+	lastErr string
+}
+
+// failed reports whether this failure should be logged.
+func (s *hookCheckLogState) failed(err error) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if msg := err.Error(); msg != s.lastErr {
+		s.lastErr = msg
+		return true
+	}
+	return false
+}
+
+// succeeded ends a failure streak, so the next failure is logged again.
+func (s *hookCheckLogState) succeeded() {
+	s.mu.Lock()
+	s.lastErr = ""
+	s.mu.Unlock()
+}
+
 // checkAppWebhookConfig is the R7 check (#2143): the App's configured webhook
 // URL must be this node's Funnel URL and its content type json. A mismatch is a
-// warnings-panel entry; an unreadable config is one log line, never fatal and
-// never a panel entry. wantURL "" (the node name is not known) skips the check.
+// warnings-panel entry; an unreadable config is one log line per failure streak
+// (hookCheckLogState), never fatal and never a panel entry. wantURL "" (the node name is not known) skips the check.
 func (e *Engine) checkAppWebhookConfig(tag, wantURL string) {
 	if wantURL == "" {
 		return
 	}
 	cfg, err := fetchAppHookConfigFn(e)
 	if err != nil {
-		e.logf(0, tag, "could not read the App's webhook configuration (%v) — skipping the webhook URL check\n", err)
+		if e.hookCheckLog.failed(err) {
+			e.logf(0, tag, "could not read the App's webhook configuration (%v) — skipping the webhook URL check (repeats of the same error are not logged)\n", err)
+		}
 		return
 	}
+	e.hookCheckLog.succeeded()
 	var conds []warnings.Condition
 	if normalizeWebhookURL(cfg.URL) != normalizeWebhookURL(wantURL) {
 		conds = append(conds, warnings.Condition{

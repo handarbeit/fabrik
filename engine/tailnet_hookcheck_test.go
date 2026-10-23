@@ -94,6 +94,41 @@ func TestCheckAppWebhookConfig_UnreadableIsSkipped(t *testing.T) {
 	}
 }
 
+// The check runs on every reconcile tick, so a standing failure logs once per
+// streak: the first failure, then again only when the error text changes or after
+// a successful read ended the streak.
+func TestCheckAppWebhookConfig_UnreadableLogsOncePerStreak(t *testing.T) {
+	isolateWarnings(t)
+	const want = "https://n.t.ts.net/webhook"
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	logs := &syncLog{}
+	eng.SetLogSinkForTest(func(_ int, tag, msg string) { logs.add("[%s] %s", tag, msg) })
+	lines := func(sub string) int { return strings.Count(logs.String(), sub) }
+
+	stubHookConfig(t, gh.AppHookConfig{}, errors.New("403 forbidden"))
+	for i := 0; i < 5; i++ {
+		eng.checkAppWebhookConfig("tailscale", want)
+	}
+	if n := lines("403 forbidden"); n != 1 {
+		t.Fatalf("a standing failure logged %d times, want 1:\n%s", n, logs.String())
+	}
+
+	stubHookConfig(t, gh.AppHookConfig{}, errors.New("401 bad credentials"))
+	eng.checkAppWebhookConfig("tailscale", want)
+	eng.checkAppWebhookConfig("tailscale", want)
+	if n := lines("401 bad credentials"); n != 1 {
+		t.Fatalf("a changed error logged %d times, want 1", n)
+	}
+
+	stubHookConfig(t, gh.AppHookConfig{URL: want, ContentType: "json"}, nil)
+	eng.checkAppWebhookConfig("tailscale", want)
+	stubHookConfig(t, gh.AppHookConfig{}, errors.New("401 bad credentials"))
+	eng.checkAppWebhookConfig("tailscale", want)
+	if n := lines("401 bad credentials"); n != 2 {
+		t.Fatalf("a failure after a successful read logged %d times in total, want 2", n)
+	}
+}
+
 // The check rides the transport's coverage hook, so reconcile re-runs it.
 func TestTailscale_CoverageHookRunsWebhookConfigCheck(t *testing.T) {
 	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net.") })
