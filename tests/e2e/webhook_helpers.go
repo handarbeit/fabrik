@@ -73,7 +73,7 @@ func bedStatus(env *Env, repo string, issue int) (*localapi.StatusResult, error)
 	return &res, nil
 }
 
-// hasAnyLabel reports whether labels contains want.
+// hasLabel reports whether labels contains want.
 func hasLabel(labels []string, want string) bool {
 	for _, l := range labels {
 		if l == want {
@@ -482,4 +482,25 @@ func healthTransport(env *Env) (*localapi.TransportHealth, error) {
 	}
 	row := h.Webhook.Transports[0]
 	return &row, nil
+}
+
+// fileInertItem files a paused issue, places it at Specify on the board and waits
+// until both GitHub and the daemon show it there, so no Claude stage runs on it and
+// the daemon already holds it before a test holds polls. The issue is closed in
+// t.Cleanup. It is Inconclusive when the daemon never shows the starting state: with
+// no starting state there is nothing to attribute to a delivery.
+func fileInertItem(t *testing.T, env *Env, repo, title, body string, labels ...string) (issue int, itemID string) {
+	t.Helper()
+	stamp := time.Now().UTC().Format("20060102-150405")
+	all := append([]string{"fabrik:paused", "fabrik:awaiting-input"}, labels...)
+	issue = FileIssue(t, env, repo, title+" "+stamp, body, all...)
+	t.Cleanup(func() { CloseIssue(env, repo, issue) })
+	itemID = AddIssueToProject(t, env, repo, issue)
+	SetIssueStatus(t, env, itemID, "Specify")
+	AwaitStatusVisible(t, env, repo, issue, "Specify", awaitSeedTimeout)
+	column := func() (string, error) { return daemonColumn(env, repo, issue) }
+	if !awaitColumn(column, "Specify", 3*time.Minute) {
+		Inconclusive(t, "the daemon never showed %s#%d at Specify within 3m, so there is no starting state", repo, issue)
+	}
+	return issue, itemID
 }

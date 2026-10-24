@@ -190,3 +190,18 @@ func completeCheckRun(token, repo string, id int64, conclusion string) error {
 	}
 	return nil
 }
+
+// FetchPRFilePath returns the path of the first file the PR changes, the target of
+// an inline review comment.
+func FetchPRFilePath(t *testing.T, env *Env, repo string, prNumber int) string {
+	t.Helper()
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/pulls/%d/files", repo, prNumber), "--jq", ".[0].filename")
+	if err != nil {
+		t.Fatalf("listing the files of %s PR #%d: %v\n%s", repo, prNumber, err, out)
+	}
+	p := lastNonEmpty(out)
+	if p == "" || p == "null" {
+		t.Fatalf("%s PR #%d changes no file to comment on", repo, prNumber)
+	}
+	return p
+}
