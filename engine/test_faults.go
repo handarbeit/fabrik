@@ -2,7 +2,15 @@ package engine
 
 import (
 	"strings"
+	"time"
 )
+
+// noIntakeDrainApplyDelay (a variable only so a test can shorten it) is how long the no-intake-drain fault holds each apply
+// before running it. Applies normally take milliseconds, so the intake queue is
+// usually empty when a SIGHUP arrives and skipping the drain would lose nothing;
+// the delay guarantees a delivery is still queued at the exec, so the fault
+// really does lose it (#2427).
+var noIntakeDrainApplyDelay = 10 * time.Second
 
 // TestFaultsEnv names the hidden, TEST-ONLY environment variable that disables
 // one ingestion behaviour in a bed daemon so a live e2e test can be proven
@@ -23,7 +31,8 @@ const (
 	// FaultNoReplay turns delivery replay off.
 	FaultNoReplay = "no-replay"
 	// FaultNoIntakeDrain makes the SIGHUP restart and the self-upgrade exec skip
-	// the intake drain/quiesce, so queued deliveries are lost to the exec.
+	// the intake drain/quiesce, and delays every apply by noIntakeDrainApplyDelay
+	// so queued deliveries are lost to the exec.
 	FaultNoIntakeDrain = "no-intake-drain"
 	// FaultObservedOrdering turns the observed-at ordering rule off (ADR 2348).
 	FaultObservedOrdering = "observed-ordering"

@@ -20,7 +20,7 @@ Each live webhook test must be shown to fail when the behaviour it guards is dis
    | `no-dedupe` | the ledger's rejection is ignored, so a redelivered copy is applied again | FR-008 |
    | `no-echo` | the echo registry never matches | FR-004 |
    | `no-replay` | no delivery replayer is built | FR-009 |
-   | `no-intake-drain` | the SIGHUP restart closes the intake with no grace and a self-upgrade exec skips the quiesce, so queued deliveries are lost to the exec | FR-011 |
+   | `no-intake-drain` | the SIGHUP restart closes the intake with no grace and a self-upgrade exec skips the quiesce, and every apply is held 10 s first so a delivery is still queued at the exec and is really lost to it | FR-011 |
    | `observed-ordering` | turns the observed-at ordering rule off (the existing Store seam) | FR-001 |
    | `no-hook-config-check` | skips the App webhook-config check (R7) | FR-010 |
 

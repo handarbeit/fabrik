@@ -168,6 +168,28 @@ func awaitApplied(env *Env, base intakeCounters, eventType string, timeout time.
 	return got, ok
 }
 
+// awaitIntakeQuiet waits until the daemon has accepted no new delivery for quiet,
+// so stragglers of earlier writes (a label-creation event arrives separately from
+// the label-applied one) cannot be mistaken for the delivery a test is about to
+// cause. It returns false if the counter never settles within timeout.
+func awaitIntakeQuiet(env *Env, quiet, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	var last int64 = -1
+	stableSince := time.Now()
+	for time.Now().Before(deadline) {
+		c, err := readIntake(env)
+		if err == nil {
+			if c.Accepted != last {
+				last, stableSince = c.Accepted, time.Now()
+			} else if time.Since(stableSince) >= quiet {
+				return true
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
+}
+
 // ---- channel subscriber (attribution) ----
 
 // eventCollector is a channel subscriber attached to the bed's local API socket

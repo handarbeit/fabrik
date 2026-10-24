@@ -81,7 +81,8 @@ func TestWebhookReplayAcrossDowntime(t *testing.T) {
 // TestWebhookRestartUnderLoad (FR-011): a SIGHUP restart (ADR 2259) while label
 // changes are being delivered loses none and applies none twice. The intake drains
 // before the exec and replay or reconcile covers the gap; every label ends up in the
-// daemon and is announced exactly once.
+// daemon and is announced exactly once, and the labels already queued at the signal
+// are announced as the human's own (applied by the drain, not healed by reconcile).
 func TestWebhookRestartUnderLoad(t *testing.T) {
 	env := LoadEnv(t)
 	webhookLegSetup(t, env)
@@ -97,12 +98,27 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 	}
 	coll := startLabelCollector(t, env, "restart-load")
 
-	var signalled time.Time
-	for i, l := range labels {
-		if i == 2 {
-			signalled = time.Now()
-			signalBed(t, env, syscall.SIGHUP)
-		}
+	// The first two labels are delivered and queued at the intake BEFORE the signal,
+	// so they are applied by the pre-exec drain (ADR 2259, ADR 2351) — or lost to the
+	// exec when the drain is neutralised. The rest are added around the restart and
+	// reach the daemon by replay or reconcile if the transport was down for them.
+	const before = 2
+	if !awaitIntakeQuiet(env, 12*time.Second, 2*time.Minute) {
+		Inconclusive(t, "the daemon's intake never went quiet after the scratch labels were created, so the deliveries this test counts cannot be told from stragglers")
+	}
+	base := mustReadIntake(t, env)
+	for _, l := range labels[:before] {
+		AddLabel(t, env, repo, issue, l)
+	}
+	if !awaitCond(webhookApplyWait, func() bool {
+		c, err := readIntake(env)
+		return err == nil && c.Accepted >= base.Accepted+before
+	}) {
+		webhookEffectMissing(t, env, "the daemon did not accept the %d label deliveries made before the restart within %v (intake counters before %+v)", before, webhookApplyWait, base)
+	}
+	signalled := time.Now()
+	signalBed(t, env, syscall.SIGHUP)
+	for _, l := range labels[before:] {
 		AddLabel(t, env, repo, issue, l)
 		time.Sleep(2 * time.Second)
 	}
@@ -120,9 +136,18 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 		}
 	}
 	time.Sleep(20 * time.Second)
-	for _, l := range labels {
-		if got := len(coll.allLabelEvents(channelevents.LabelApplied, repo, issue, l)); got != 1 {
-			t.Errorf("label %s was announced %d times across the restart, want exactly 1", l, got)
+	for i, l := range labels {
+		evs := coll.allLabelEvents(channelevents.LabelApplied, repo, issue, l)
+		if len(evs) != 1 {
+			t.Errorf("label %s was announced %d times across the restart, want exactly 1", l, len(evs))
+			continue
+		}
+		// A delivery already queued when the signal came must have been applied by the
+		// drain, so its change is attributed to the human who made it. A delivery lost to
+		// the exec is healed by reconcile and announced with no sender (actor unknown),
+		// which is what the no-intake-drain fault produces.
+		if a := evs[0].Meta["actor"]; i < before && a != "human" {
+			t.Errorf("label %s was queued at the intake before the SIGHUP but is attributed actor=%q, want human: the pre-exec drain did not apply it", l, a)
 		}
 	}
 }

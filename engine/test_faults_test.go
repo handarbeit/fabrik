@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestParseTestFaults(t *testing.T) {
@@ -75,6 +76,26 @@ func TestIntakeFault_NoDedupe(t *testing.T) {
 	in.Drain()
 	if applied.Load() != 2 {
 		t.Errorf("applied %d, want 2 with dedupe neutralised", applied.Load())
+	}
+}
+
+// no-intake-drain holds every apply so a delivery is still queued or applying when
+// the exec comes; without the fault the apply is immediate.
+func TestIntakeFault_NoIntakeDrainHoldsApplies(t *testing.T) {
+	old := noIntakeDrainApplyDelay
+	noIntakeDrainApplyDelay = 300 * time.Millisecond
+	t.Cleanup(func() { noIntakeDrainApplyDelay = old })
+	var applied atomic.Int32
+	in := newTestIntake(func(string, []byte) { applied.Add(1) })
+	in.faults, _ = parseTestFaults(FaultNoIntakeDrain)
+	in.Submit(delivery{ID: "A", EventType: "issues", Payload: payloadFor("o/r", 1)})
+	time.Sleep(100 * time.Millisecond)
+	if applied.Load() != 0 {
+		t.Fatal("the apply ran before the fault's delay elapsed")
+	}
+	in.Drain()
+	if applied.Load() != 1 {
+		t.Errorf("applied %d after the delay, want 1", applied.Load())
 	}
 }
 

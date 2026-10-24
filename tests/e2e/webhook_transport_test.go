@@ -57,7 +57,19 @@ func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
 	}
 
 	// Baseline: healthy only with the Funnel name resolving and a delivery received.
-	probe("e2e-webhook-health-1")
+	// The setup deliveries may already have made LastDeliveryAt valid, so wait for
+	// probe 1's own issues delivery to be applied and for the intake to go quiet before
+	// recording the baseline; otherwise a straggler would later look like a delivery
+	// that arrived while the route was broken.
+	ensureLabel(t, env, repo, "e2e-webhook-health-1")
+	base := mustReadIntake(t, env)
+	AddLabel(t, env, repo, issue, "e2e-webhook-health-1")
+	if _, ok := awaitApplied(env, base, "issues", webhookApplyWait); !ok {
+		webhookEffectMissing(t, env, "the probe label delivery was not applied within %v, so the baseline delivery was never received", webhookApplyWait)
+	}
+	if !awaitIntakeQuiet(env, 12*time.Second, 2*time.Minute) {
+		Inconclusive(t, "the daemon's intake never went quiet after the baseline probe, so the last-delivery baseline cannot be fixed")
+	}
 	var tr *localapi.TransportHealth
 	if !awaitCond(12*time.Minute, func() bool {
 		row, err := healthTransport(env)

@@ -251,6 +251,9 @@ func (in *intake) run(d delivery) {
 		in.log("TEST FAULT: dropping the apply of %s delivery %s\n", d.EventType, d.ID)
 		return
 	}
+	if in.faults.active(FaultNoIntakeDrain) {
+		time.Sleep(noIntakeDrainApplyDelay) // TEST-ONLY (#2427): keep deliveries queued until the exec
+	}
 	switch {
 	case in.applyAt != nil:
 		in.applyAt(d.EventType, d.Payload, d.ReceivedAt)
