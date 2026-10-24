@@ -31,8 +31,9 @@ const (
 	// tailnetReplayStartGrace holds the startup delivery-replay pass back after
 	// the node and its Funnel listener are up. Up returning does not mean the
 	// public Funnel relay routes to the node yet (live: about two minutes), and a
-	// redelivery requested before then fails. It is a fixed grace; a real
-	// reachability probe (#2425) can replace it.
+	// redelivery requested before then fails. It is a fixed grace, and since #2425
+	// (ADR 2425) it is also skipped while the Funnel name does not resolve
+	// publicly: the probe's resolution then triggers the pass (startTailnetReplay).
 	tailnetReplayStartGrace = 90 * time.Second
 	// tailnetFunnelAddr is the only Funnel port the daemon uses.
 	tailnetFunnelAddr = ":443"
@@ -44,6 +45,7 @@ const (
 	tailnetFunnelOK          = "ok"
 	tailnetFunnelUnavailable = "unavailable"
 	tailnetFunnelUnknown     = "unknown"
+	// tailnetFunnelPendingDNS ("pending-dns") is in tailnet_dns.go.
 )
 
 // tailnetState is a snapshot of the embedded node.
@@ -201,6 +203,9 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	}
 
 	tr := newAppWebhookTransport(tag, path, listenFn, os.Getenv(secretEnvName), e.logf, e.emit)
+	// The Funnel name's public DNS is probed (#2425): the transport starts out
+	// "listening (not publicly resolvable)" so it never flashes healthy.
+	tr.EnableDNSProbe()
 	tr.UpdateRepos(initialRepos)
 	e.wireAppWebhookWarnings(tr, tag, "tailscale App webhook", secretEnvName)
 
@@ -262,6 +267,21 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 		e.logf(0, tag, "event_source: tailscale — node %q is up but has not reported its tailnet DNS name yet; the App webhook URL is not known (it is logged, and checked against the App, once the name arrives)\n", hostname)
 	}
 
+	// The probe is owned by watchCtx/watchWG, so the stop hook cancels and joins
+	// it. It never runs inline: startup stays synchronous and unblocked.
+	probe := newFunnelDNSProbe(funnelDNSProbeConfig{
+		Tag:         tag,
+		Resolver:    funnelDNSResolverFactory(),
+		Sink:        tr,
+		StartReplay: func() { e.replayer.Trigger() },
+		Wait:        e.funnelDNSWait(),
+		Now:         e.now,
+		Logf:        func(format string, args ...any) { e.logf(0, tag, "funnel dns: "+format, args...) },
+		Report:      func(c warnings.Condition) { e.reportWarning(tag, c) },
+		Resolve:     func(key string) { e.resolveWarning(tag, key) },
+		Ctx:         watchCtx,
+		WG:          &watchWG,
+	})
 	connKey := warnings.Condition{Type: "tailscale_connection", Subject: hostname}.Key()
 	funnelKey := warnings.Condition{Type: "tailscale_funnel", Subject: hostname}.Key()
 	// adoptName takes the node's reported DNS name from a watch state: the first
@@ -281,6 +301,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 			return
 		}
 		e.logf(0, tag, "node %q reports its tailnet DNS name; App webhook URL: %s\n", hostname, nu)
+		probe.SetName(strings.TrimSuffix(strings.TrimSpace(dns), "."))
 		watchWG.Add(1)
 		go func() {
 			defer watchWG.Done()
@@ -341,13 +362,19 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 			e.logf(0, tag, "tailnet watch ended: %v\n", err)
 		}
 	}()
+	// Probe the node's reported name (the Watch goroutine above holds watchWG, so
+	// adding the probe to it is safe). A name not yet reported is supplied by
+	// adoptName later.
+	probe.SetName(strings.TrimSuffix(strings.TrimSpace(up.DNSName), "."))
 	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: tag, PanelType: "tailscale_coverage", Ref: "#2143"})
 	e.checkAppWebhookConfig(tag, u)
 	// Replay failed deliveries from while the daemon was not receiving (#2144).
 	// Background, after the node and its Funnel listener are up and a fixed grace
 	// (tailnetReplayStartGrace) for Funnel ingress to reach the node: it never delays
-	// startup. A failed start (above) never reaches here, so no pass runs then.
-	e.startDeliveryReplayAfter(ctx, e.replayer, tailnetReplayStartGrace)
+	// startup. While the Funnel name does not resolve publicly the pass is held
+	// back and the probe's resolution triggers it (#2425). A failed start (above)
+	// never reaches here, so no pass runs then.
+	e.startTailnetReplay(ctx, e.replayer, probe)
 }
 
 // reportWarning records an operator warning, logging (not failing) on error.

@@ -526,7 +526,9 @@ type TransportHealth struct {
 	Name string `json:"name"`
 	// State is the transport's own state: "listening", "not listening" or
 	// "signature drift" for the direct transport (the tailscale transport adds
-	// "tailnet disconnected" and "funnel unavailable"); "starting_up", "healthy" or
+	// "tailnet disconnected", "funnel unavailable" and, while the Funnel name does
+	// not resolve publicly yet, "listening (not publicly resolvable)", #2425);
+	// "starting_up", "healthy" or
 	// "unhealthy" (or "signature drift") for the others.
 	State string `json:"state"`
 	// LastDeliveryAt is the time of the last delivery the transport handed to
@@ -541,7 +543,9 @@ type TransportHealth struct {
 	Replay *ReplayHealth `json:"replay,omitempty"`
 	// Tailnet is the embedded node's connection state (the tailscale transport
 	// only: "Running", "NeedsLogin", ...); Funnel is its Funnel status ("ok",
-	// "unavailable", or "unknown" when the status could not be read). Both are unknown for every other transport (#2143).
+	// "unavailable", "pending-dns" while the Funnel name does not resolve publicly
+	// yet (#2425), or "unknown" when the status, or the public-DNS probe, could
+	// not be read). Both are unknown for every other transport (#2143).
 	Tailnet Known[string] `json:"tailnet"`
 	Funnel  Known[string] `json:"funnel"`
 }

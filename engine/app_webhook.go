@@ -39,6 +39,18 @@ func (c networkCondition) reachable() bool {
 	return c.connected && c.funnel != tailnetFunnelUnavailable
 }
 
+// dnsProbeState is the result of the tailscale transport's public-DNS probe
+// (#2425). It is its own dimension, not a value of networkCondition.funnel:
+// every tsnet state change overwrites that field, which would clobber it.
+type dnsProbeState int
+
+const (
+	dnsProbeOff      dnsProbeState = iota // no probe (the direct transport)
+	dnsProbePending                       // the name does not resolve publicly (yet)
+	dnsProbeResolved                      // it does
+	dnsProbeUnknown                       // the probe could not find out
+)
+
 // appWebhookTransport is the direct App webhook transport (#2142, ADR 2142):
 // the daemon receives a GitHub App's own webhook straight from an HTTP request
 // the operator's tunnel or proxy forwards to it, with no third-party relay.
@@ -90,6 +102,7 @@ type appWebhookTransport struct {
 	replay         *localapi.ReplayHealth // last delivery replay pass (#2144); nil = replay not enabled for this transport
 	stopHook       func()                 // run at the end of Stop (the tailscale transport closes its node)
 	network        networkCondition
+	dnsProbe       dnsProbeState // #2425; dnsProbeOff unless EnableDNSProbe
 	coverageFn     func()
 	srv            *http.Server
 	ln             net.Listener
@@ -215,6 +228,44 @@ func (t *appWebhookTransport) SetNetworkCondition(connected bool, tailnet, funne
 		if fn != nil {
 			fn()
 		}
+	}
+}
+
+// EnableDNSProbe turns the public-DNS probe input on, starting in pending: call
+// it before Start so the transport never reports healthy before the first
+// answer. The direct transport never calls it.
+func (t *appWebhookTransport) EnableDNSProbe() {
+	t.mu.Lock()
+	t.dnsProbe = dnsProbePending
+	t.mu.Unlock()
+}
+
+// SetDNSProbeState records the probe result and re-derives health. Only
+// pending makes the transport unhealthy; an unknown result (the probe itself
+// failed) never stops it serving.
+func (t *appWebhookTransport) SetDNSProbeState(s dnsProbeState) {
+	t.mu.Lock()
+	prev := t.dnsProbe
+	t.dnsProbe = s
+	t.mu.Unlock()
+	if prev == s {
+		return
+	}
+	reason := ""
+	if s == dnsProbePending {
+		reason = "Funnel name not publicly resolvable"
+	}
+	t.recomputeState(reason)
+}
+
+// FireReconnect calls the reconnect handler (outside any lock): the intake's
+// catch-up reconcile and, with #2144, a delivery replay pass.
+func (t *appWebhookTransport) FireReconnect() {
+	t.mu.Lock()
+	fn := t.reconnectFn
+	t.mu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -428,8 +479,9 @@ func (t *appWebhookTransport) state() WebhookHealthState {
 	t.mu.Lock()
 	listening, cacheDrift := t.listening, t.cacheDrift
 	netDown := t.network.set && !t.network.reachable()
+	dnsPending := t.dnsProbe == dnsProbePending
 	t.mu.Unlock()
-	if !listening || cacheDrift || netDown || t.sigDrift.Active() {
+	if !listening || cacheDrift || netDown || dnsPending || t.sigDrift.Active() {
 		return WebhookStreamUnhealthy
 	}
 	return WebhookStreamHealthy
@@ -536,7 +588,7 @@ func (t *appWebhookTransport) setInstallationCoverageNote(missing []string, trun
 // HealthRow implements ingestTransport.
 func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 	t.mu.Lock()
-	listening, last, nw := t.listening, t.lastDeliveryAt, t.network
+	listening, last, nw, dns := t.listening, t.lastDeliveryAt, t.network, t.dnsProbe
 	var replay *localapi.ReplayHealth
 	if t.replay != nil {
 		cp := *t.replay
@@ -551,6 +603,8 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 		state = "tailnet disconnected"
 	case nw.set && !nw.reachable():
 		state = "funnel unavailable"
+	case listening && dns == dnsProbePending:
+		state = tailnetStateNotResolvable
 	case listening:
 		state = "listening"
 	}
@@ -566,6 +620,15 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 	if nw.set {
 		row.Tailnet = localapi.Some(nw.tailnet)
 		row.Funnel = localapi.Some(nw.funnel)
+	}
+	// Funnel precedence: unavailable (tsnet) > pending-dns > unknown (the probe
+	// failed) > tsnet's own value. A probe-less transport is unchanged.
+	if (dns == dnsProbePending || dns == dnsProbeUnknown) && !(nw.set && nw.funnel == tailnetFunnelUnavailable) {
+		if dns == dnsProbePending {
+			row.Funnel = localapi.Some(tailnetFunnelPendingDNS)
+		} else {
+			row.Funnel = localapi.Some(tailnetFunnelUnknown)
+		}
 	}
 	return row
 }

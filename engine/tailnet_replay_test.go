@@ -47,7 +47,9 @@ func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDelivery
 	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
-	return eng, eng.setUpIngestion(context.Background(), cache)
+	cleanup := eng.setUpIngestion(context.Background(), cache)
+	awaitFirstDNSProbe(eng)
+	return eng, cleanup
 }
 
 // #2144 for the tailscale transport: with replay enabled, a pass runs at start
