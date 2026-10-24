@@ -84,6 +84,8 @@ type intake struct {
 	// stats counts accepted, duplicate, dropped and applied deliveries since
 	// process start (#2427); read-only for the local API's fabrik_health.
 	stats intakeStats
+	// faults is the TEST-ONLY fault set (#2427); nil in production.
+	faults *testFaults
 
 	sem chan struct{}
 
@@ -151,7 +153,7 @@ func (in *intake) Submit(d delivery) bool {
 		return false
 	}
 	in.mu.Unlock()
-	if !in.ledger.Accept(d.ID, now) {
+	if !in.ledger.Accept(d.ID, now) && !in.faults.active(FaultNoDedupe) {
 		in.stats.noteDuplicate()
 		in.log("duplicate delivery %s (%s via %s) — already applied\n", d.ID, d.EventType, d.Transport)
 		return false
@@ -245,6 +247,10 @@ func (in *intake) run(d delivery) {
 			in.log("panic applying %s delivery %s: %v\n%s", d.EventType, d.ID, r, debug.Stack())
 		}
 	}()
+	if in.faults.dropsEvent(d.EventType) {
+		in.log("TEST FAULT: dropping the apply of %s delivery %s\n", d.EventType, d.ID)
+		return
+	}
 	switch {
 	case in.applyAt != nil:
 		in.applyAt(d.EventType, d.Payload, d.ReceivedAt)

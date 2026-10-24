@@ -62,6 +62,8 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	in.note = func() { e.health.noteWebhookEvent(e.now()) }
 	e.intake = in
 	e.echo.onMatch = in.stats.noteEchoMatched
+	in.faults = e.faults
+	e.echo.disabled = e.faults.active(FaultNoEcho)
 	sink := func(d delivery) { in.Submit(d) }
 
 	// Bootstrap the cache before accepting events so no delta is dropped into an

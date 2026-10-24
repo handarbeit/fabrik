@@ -46,6 +46,8 @@ type echoRegistry struct {
 	// onMatch is called once per inbound delivery matched as an engine write's
 	// echo (#2427 intake counters). Set once before deliveries arrive.
 	onMatch func()
+	// disabled makes every match miss (TEST-ONLY fault no-echo, #2427).
+	disabled bool
 
 	// nowFn is the clock; time.Now unless a test overrides it.
 	nowFn func() time.Time
@@ -206,6 +208,9 @@ func (r *echoRegistry) MatchEchoReported(eventType, action, key string) bool {
 // recorded with the reservation ("" when none), consuming the entry (#2125).
 func (r *echoRegistry) MatchEchoVia(eventType, action, key string) (bool, string) {
 	if r == nil {
+		return false, ""
+	}
+	if r.disabled {
 		return false, ""
 	}
 	k := echoKey(eventType, action, key)

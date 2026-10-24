@@ -175,6 +175,9 @@ type Config struct {
 	// cmd/root.go, with no flag, no YAML key and no documentation; empty (the
 	// production state) leaves the poll loop untouched.
 	PollControlFile string
+	// TestFaults is the raw FABRIK_TEST_FAULTS value (#2427, ADR 2427-b):
+	// TEST-ONLY, env only, honoured only with PollControlFile also set.
+	TestFaults string
 }
 
 // EventSource values and defaults for the Hookdeck (App-auth-only) ingestion
@@ -351,6 +354,7 @@ type Engine struct {
 	// subprocesses. Production leaves this nil.
 	stalenessCompareFn   func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
 	lastProjectUpdatedAt time.Time            // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	faults               *testFaults          // TEST-ONLY (#2427): deliberately disabled ingestion behaviours for non-vacuity runs; nil in production
 	pollSeam             *pollSeam            // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
 	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
@@ -911,6 +915,8 @@ func New(cfg Config) (*Engine, error) {
 	// hold tracker (#2393). NewWithDeps engines have no github.Client; the sim
 	// wires its fault table to ObserveForgeResult instead.
 	ghClient.SetResultObserver(eng.ObserveForgeResult)
+
+	eng.installTestFaults() // TEST-ONLY (#2427): inert unless FABRIK_TEST_FAULTS is set on a bed
 
 	return eng, nil
 }

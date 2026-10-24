@@ -495,7 +495,7 @@ func (e *Engine) newDeliveryReplayer(tr replayStatusSink, tag string) *deliveryR
 	if api == nil && e.ghAppAuth != nil {
 		api = e.ghAppAuth
 	}
-	if !e.cfg.ReplayFailedDeliveries || api == nil || e.intake == nil {
+	if !e.cfg.ReplayFailedDeliveries || api == nil || e.intake == nil || e.faults.active(FaultNoReplay) {
 		return nil
 	}
 	r := newDeliveryReplayer(api, e.intake, tr,
