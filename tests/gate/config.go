@@ -98,6 +98,11 @@ type Config struct {
 	// whether anything was set; the override is what makes a leg non-conforming
 	// when it differs from the cadence the plan gave the cell.
 	BedPollOverride string
+	// Neutralise is the operator's E2E_NEUTRALISE (#2427, ADR 2427-b): a fault list
+	// that disables one ingestion behaviour in the bed daemon for a non-vacuity run
+	// of a webhook live test. A leg run with it is archived and printed but never
+	// recorded in the coverage ledger.
+	Neutralise string
 	// EventsFilter is E2E_EVENTS (#2426): "" plans both dimensions, bedevents-style
 	// "poll" only the poll cells, "webhook" only the webhook cells. A filtered run
 	// is partial, as E2E_AUTH_MODE=pat is. Setting the deprecated E2E_EVENT_SOURCE=
@@ -237,6 +242,7 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	if c.EventsFilter == "" && c.EventSource == bedevents.Tailscale {
 		c.EventsFilter, c.EventSourceAliased = EventsWebhook, true
 	}
+	c.Neutralise = strings.TrimSpace(getenv(bedevents.NeutraliseVar))
 	if n, perr := strconv.Atoi(strings.TrimSpace(getenv("E2E_BED_POLL_SECONDS"))); perr == nil && n > 0 {
 		c.BedPollOverride = strconv.Itoa(n)
 	}

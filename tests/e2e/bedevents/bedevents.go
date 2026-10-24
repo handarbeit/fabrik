@@ -36,6 +36,15 @@ const (
 	CellPollVar = "E2E_CELL_POLL_SECONDS"
 	// OverrideVar is the operator override of the planned cadence.
 	OverrideVar = "E2E_BED_POLL_SECONDS"
+	// NeutraliseVar is the operator input that disables one ingestion behaviour in
+	// the bed daemon for a non-vacuity run of a webhook live test (#2427, ADR
+	// 2427-b). Its value (a comma-separated fault list, see engine.TestFaultsEnv)
+	// is injected into the bed as FaultsLaunchVar; a leg run with it is archived
+	// but never recorded in the coverage ledger.
+	NeutraliseVar = "E2E_NEUTRALISE"
+	// FaultsLaunchVar is the engine's hidden, test-only fault variable
+	// (engine.TestFaultsEnv). It is honoured by the engine only on a bed.
+	FaultsLaunchVar = "FABRIK_TEST_FAULTS"
 	// AuthVar is the leg's auth mode variable the gate sets (E2E_AUTH_MODE).
 	AuthVar = "E2E_AUTH_MODE"
 	// LaunchVar is the engine's own variable (cmd/root.go) the launch sites inject.
@@ -164,4 +173,16 @@ func PollSeconds(effective string) string {
 		return WebhookPollSeconds
 	}
 	return PollOnlySeconds
+}
+
+// FaultsEnv is the launch-environment entry that carries the operator's
+// E2E_NEUTRALISE value to the bed as FABRIK_TEST_FAULTS, or nil when none is set.
+// Both bed launch sites append it after stripping any ambient FaultsLaunchVar, so
+// an operator's shell value cannot leak into an ordinary leg.
+func FaultsEnv(getenv func(string) string) []string {
+	v := strings.TrimSpace(getenv(NeutraliseVar))
+	if v == "" {
+		return nil
+	}
+	return []string{FaultsLaunchVar + "=" + v}
 }

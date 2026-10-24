@@ -517,6 +517,23 @@ type WebhookHealth struct {
 	// always a list (empty when poll-only), never null. The aggregate fields
 	// above are unchanged.
 	Transports []TransportHealth `json:"transports"`
+	// Intake is the delivery intake's counters since process start (#2427);
+	// omitted when the daemon is poll-only. Live tests compare deltas.
+	Intake *IntakeHealth `json:"intake,omitempty"`
+}
+
+// IntakeHealth counts what the transport-neutral delivery intake did since the
+// process started. In memory only: a restart resets every value.
+type IntakeHealth struct {
+	// Accepted is deliveries queued for apply; Duplicates those the persisted
+	// ledger rejected; Dropped those refused on queue overflow.
+	Accepted   int64 `json:"accepted"`
+	Duplicates int64 `json:"duplicates"`
+	Dropped    int64 `json:"dropped"`
+	// EchoMatched is deliveries matched as the echo of an engine write.
+	EchoMatched int64 `json:"echo_matched"`
+	// Applied counts completed applies per GitHub event type.
+	Applied map[string]int64 `json:"applied"`
 }
 
 // TransportHealth is one event transport's own health row. Whatever a

@@ -46,7 +46,9 @@ func (e *Engine) checkAndUpgrade() {
 // because a failed exec leaves this process running; resumeAfterFailedExec
 // returns the intake to service then.
 func (e *Engine) flushBeforeExec() {
-	e.intake.Quiesce(intakeQuiesceGrace) // nil-safe
+	if !e.faults.active(FaultNoIntakeDrain) {
+		e.intake.Quiesce(intakeQuiesceGrace) // nil-safe
+	}
 	e.flushChannelEvents()
 	e.intake.Flush() // nil-safe
 }

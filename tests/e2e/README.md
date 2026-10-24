@@ -303,6 +303,61 @@ status and lets you **Redeliver**. A 502/404/0 there means GitHub reached for th
 and did not get an answer (Funnel down or the wrong URL); no delivery at all for your
 write means the App is not subscribed to that event.
 
+## Webhook coverage tests (#2427)
+
+Eleven live tests guard how the daemon handles webhook deliveries. They run only on
+the webhook cell (`app/on/webhook`, ADR 2426) and skip structurally on a poll cell and
+on every PAT leg (`skip_ok_legs`: `pat/*`, `*/*/poll`). On a webhook leg a missing
+webhook effect is a failure, not Inconclusive. All are `exclusive` (they hold the bed's
+polls, restart it, or edit the App's hook URL), `events: sensitive`, and read the
+daemon through its local API — never GitHub: `fabrik_status`, `fabrik_health` (the
+`webhook.intake` counters and the transport row) and a channel subscriber for
+attribution. The reasoning behind the observable chosen for each, including the spec
+claims that cannot be observed literally, is in ADR 2427-a.
+
+| Test | Guards | Neutralise with |
+|---|---|---|
+| `TestWebhookChangeSurvivesReconcile` (FR-001) | a webhook-applied column move survives whole polls (ADR 2348) | `observed-ordering` |
+| `TestWebhookHumanLabelByWebhook` (FR-002) | a human label reaches the Store by webhook, `actor=human`, survives polls | `drop-event:issues` |
+| `TestWebhookCommentWakesItem` (FR-003) | a human comment is delivered with polls held and admits the paused item | `drop-event:issue_comment` |
+| `TestWebhookEngineEchoMatched` (FR-004) | an engine label write's echo is matched (no `unknown`/`human` event, one event) | `no-echo` |
+| `TestWebhookReviewThreadFacts` (FR-005) | thread resolution lowers outstanding findings; a review-comment edit is applied (ADR 2352) | `drop-event:pull_request_review_thread` (and `…_review_comment`) |
+| `TestWebhookCheckRunCompletion` (FR-006) | a `check_run` completion turns the CI verdict green with polls held | `drop-event:check_run` |
+| `TestWebhookDependencyRemovalWakes` (FR-007) | removing a `blockedBy` edge is delivered as `issue_dependencies` and unblocks the item (ADR 1995) | `drop-event:issue_dependencies` |
+| `TestWebhookRedeliveryAppliedOnce` (FR-008) | a redelivery through `/app/hook/deliveries/{id}/attempts` is rejected as a duplicate (ADR 2351) | `no-dedupe` |
+| `TestWebhookReplayAcrossDowntime` (FR-009) | a delivery that failed while the daemon was down is replayed (#2144), announced once | `no-replay` |
+| `TestWebhookRestartUnderLoad` (FR-011) | labels delivered around a SIGHUP restart are each present and announced once, and the two queued at the signal are announced `actor=human` (applied by the drain, not healed by reconcile) (ADR 2259) | `no-intake-drain` (also holds every apply 10 s so a delivery is queued at the exec) |
+| `TestWebhookTransportHealthAndBrokenRoute` (FR-010) | tailscale health is healthy only with Funnel ok and a delivery received; a broken hook URL shows `tailscale_webhook_config` | `no-hook-config-check` |
+
+**Side effects to know about.** `TestWebhookTransportHealthAndBrokenRoute` points the
+shared App's webhook URL elsewhere for several minutes; the original URL is recorded in
+`<bed>/.fabrik/state/e2e-hook-url.restore` first and restored in cleanup, and every
+webhook test restores from a stale marker at its start (a killed run is repaired by
+the next one). Its warning half reads `<bed>/.fabrik/warnings.json`, the one assertion
+that is not a local API read. `TestWebhookDependencyRemovalWakes` lets the unblocked
+item run one short Specify stage. `TestWebhookReplayAcrossDowntime` and
+`TestWebhookRestartUnderLoad` restart the bed (up to ~12 min each for the Funnel and
+the replay grace) and leave it running. The check-run test needs the App's
+`checks: write` (it is Inconclusive without it); the review-thread test needs
+`FABRIK_REVIEWER_TOKEN` in the bed's `.env`.
+
+### Proving a webhook test is not vacuous (`E2E_NEUTRALISE`, ADR 2427-b)
+
+Run the test on a webhook leg, then run it again with the behaviour it guards disabled
+in the bed daemon, and the second run must fail:
+
+```bash
+E2E_EVENTS=webhook E2E_NEUTRALISE=no-dedupe scripts/e2e/run.sh -run TestWebhookRedeliveryAppliedOnce
+```
+
+`E2E_NEUTRALISE` (a comma-separated fault list) reaches the bed as the engine's hidden
+`FABRIK_TEST_FAULTS`, honoured only on a bed. Confirm the bed log shows
+`TEST FAULTS ACTIVE` before trusting the result (a mistyped fault is ignored). A
+neutralised leg is archived and marked in `bed.json`/`phases.json` but **never recorded
+in the coverage ledger**, so it cannot satisfy a release. Faults: `drop-event:<type>`,
+`no-dedupe`, `no-echo`, `no-replay`, `no-intake-drain`, `observed-ordering`,
+`no-hook-config-check`.
+
 ## GraphQL budget
 
 The bed token has 5,000 GraphQL points/hour, shared by the suite and the

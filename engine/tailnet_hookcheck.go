@@ -87,7 +87,7 @@ func (s *hookCheckLogState) succeeded() {
 // warnings-panel entry; an unreadable config is one log line per failure streak
 // (hookCheckLogState), never fatal and never a panel entry. wantURL "" (the node name is not known) skips the check.
 func (e *Engine) checkAppWebhookConfig(tag, wantURL string) {
-	if wantURL == "" {
+	if wantURL == "" || e.faults.active(FaultNoHookConfigCheck) {
 		return
 	}
 	cfg, err := fetchAppHookConfigFn(e)
