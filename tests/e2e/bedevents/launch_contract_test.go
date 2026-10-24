@@ -21,7 +21,7 @@ func TestHarnessLaunchInjectsTheLegsEventSource(t *testing.T) {
 	for _, want := range []string{
 		"bedevents.StripKeys()",
 		"bedevents.Env(bedEventSource())...",
-		"bedevents.PollSeconds(bedEventSource())",
+		"bedevents.ResolvePollSeconds(os.Getenv, bedEventSource())",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("tests/e2e/lifecycle.go must contain %q (#2408)", want)

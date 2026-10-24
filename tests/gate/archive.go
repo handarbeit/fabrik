@@ -311,7 +311,15 @@ func (g *Gate) beginArchive(cell Cell, cs *covState) *legArchive {
 	bedRec := struct {
 		Name string `json:"name,omitempty"`
 		Dir  string `json:"dir"`
-	}{Dir: g.Cfg.TestBed}
+		// The leg's events dimension and planned poll cadence, and the operator's
+		// override when it differs (#2426, FR-008/FR-010).
+		Events       string `json:"events"`
+		PollSeconds  string `json:"poll_seconds"`
+		PollOverride string `json:"poll_override,omitempty"`
+	}{Dir: g.Cfg.TestBed, Events: cell.EventsKind(), PollSeconds: cell.pollSeconds()}
+	if g.pollOverridden(cell) {
+		bedRec.PollOverride = g.Cfg.BedPollOverride
+	}
 	if g.bed != nil {
 		bedRec.Name = g.bed.Name
 	}

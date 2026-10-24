@@ -126,7 +126,11 @@ type multiSched struct {
 	fixed  map[int][]*queued
 	shared []*queued
 	serves map[int]bool // beds that serve the shared queue
-	held   map[string]*idHold
+	// webhookOnly marks bed A when it does not serve the shared queue but is the
+	// only webhook-capable bed: it then takes the shared queue's webhook cells after
+	// its baseline, so a webhook cell is never left with no bed able to run it (#2426).
+	webhookOnly map[int]bool
+	held        map[string]*idHold
 	// reserved maps an identity to the bed whose strict-queue head is waiting
 	// for it: a shared-queue bed may not take it first, so bed A's baseline is
 	// never starved by a bed that keeps re-acquiring a shared identity. The
@@ -151,7 +155,7 @@ type multiSched struct {
 func assignCells(cells []Cell, sparse bool) (bedA, shared []Cell) {
 	hasBaseline := false
 	for _, c := range cells {
-		if c.Auth == baselineAuth && c.Train == baselineTrain {
+		if c.isBaseline() {
 			hasBaseline = true
 		}
 	}
@@ -159,7 +163,7 @@ func assignCells(cells []Cell, sparse bool) (bedA, shared []Cell) {
 		return nil, cells
 	}
 	for _, c := range cells {
-		if c.Auth == baselineAuth && c.Train == baselineTrain {
+		if c.isBaseline() {
 			bedA = append(bedA, c)
 		} else {
 			shared = append(shared, c)
@@ -202,8 +206,8 @@ func newMultiSched(g *Gate, cells []Cell) *multiSched {
 		g: g, beds: g.beds(),
 		wake:   make(chan struct{}),
 		fixed:  map[int][]*queued{},
-		serves: map[int]bool{},
-		held:   map[string]*idHold{}, reserved: map[string]resv{}, exhausted: map[string]bool{},
+		serves: map[int]bool{}, webhookOnly: map[int]bool{},
+		held: map[string]*idHold{}, reserved: map[string]resv{}, exhausted: map[string]bool{},
 		results: map[int][]string{}, waitedFor: map[string]bool{}, budget: map[string]reading{},
 	}
 	bedA, shared := assignCells(cells, g.Cfg.sparseMatrix())
@@ -219,7 +223,58 @@ func newMultiSched(g *Gate, cells []Cell) *multiSched {
 	for i := range s.beds {
 		s.serves[i] = bedA == nil || i > 0
 	}
+	s.planWebhookService()
 	return s
+}
+
+// planWebhookService makes sure every webhook cell in the shared queue has a bed
+// that can run it (#2426, FR-004). A webhook cell goes only to a webhook-capable
+// bed; when bed A holds the baseline it does not serve the shared queue, so if A is
+// the only capable bed it is allowed to take the webhook cells after its baseline.
+// A webhook cell no bed can run is dropped and reported as a precondition failure,
+// never silently left unrun.
+func (s *multiSched) planWebhookService() {
+	hasWebhook := false
+	for _, q := range s.shared {
+		if q.cell.Webhook() {
+			hasWebhook = true
+		}
+	}
+	if !hasWebhook {
+		return
+	}
+	servingCapable, aCapable := false, false
+	for i, b := range s.beds {
+		if !b.bedWebhookCapable() {
+			continue
+		}
+		if i == 0 {
+			aCapable = true
+		}
+		if s.serves[i] {
+			servingCapable = true
+		}
+	}
+	if !servingCapable && aCapable {
+		s.webhookOnly[0] = true
+		return
+	}
+	if servingCapable {
+		return
+	}
+	var kept []*queued
+	var dropped []string
+	for _, q := range s.shared {
+		if q.cell.Webhook() {
+			dropped = append(dropped, q.cell.Label())
+			continue
+		}
+		kept = append(kept, q)
+	}
+	s.shared = kept
+	if s.firstErr == nil {
+		s.firstErr = exitErr(ExitPreconditionFailed, "no bed is provisioned for webhook delivery, so the webhook cell(s) %s cannot run (a webhook cell is never run poll-only; see tests/e2e/README.md \"Webhook delivery\")", strings.Join(dropped, ", "))
+	}
 }
 
 func (s *multiSched) run(ctx context.Context) error {
@@ -512,7 +567,7 @@ func (s *multiSched) next(ctx context.Context, i int) decision {
 		return decision{q: head, set: hs, hooks: hooks}
 	}
 	unreserve()
-	if !s.serves[i] {
+	if !s.serves[i] && !s.webhookOnly[i] {
 		return decision{done: true}
 	}
 
@@ -524,6 +579,12 @@ func (s *multiSched) next(ctx context.Context, i int) decision {
 	}
 	var waits []blocked
 	for k, cq := range s.shared {
+		if !s.serves[i] && !cq.cell.Webhook() {
+			continue // bed A, after its baseline, takes only the webhook cells it alone can run
+		}
+		if cq.cell.Webhook() && !b.bedWebhookCapable() {
+			continue // a webhook cell runs only on a webhook-capable bed (#2426); another bed may take it
+		}
 		cs := b.identitySet(cq.cell.Auth)
 		if exhausted(cs) {
 			continue // never on this bed; another bed may still take it

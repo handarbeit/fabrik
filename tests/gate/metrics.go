@@ -58,6 +58,9 @@ type LegSummary struct {
 	LoadSamples int     `json:"load_samples"`
 	// BedMaxConcurrent is the bed engine's effective max_concurrent (0: unknown).
 	BedMaxConcurrent int `json:"bed_max_concurrent,omitempty"`
+	// Events is the leg's events dimension, cadence and webhook intake counts
+	// (#2426, FR-006).
+	Events *EventsSummary `json:"events,omitempty"`
 }
 
 // Wall is the leg's suite wall-clock: the sum of its phases and any retries.
@@ -128,6 +131,7 @@ func (s LegSummary) Format() string {
 	if s.BedMaxConcurrent > 0 {
 		fmt.Fprintf(&b, "   bed max_concurrent  %d\n", s.BedMaxConcurrent)
 	}
+	b.WriteString(s.Events.Format())
 	return b.String()
 }
 

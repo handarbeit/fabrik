@@ -78,3 +78,25 @@ func TestPollSecondsCadence(t *testing.T) {
 		t.Errorf("cadences: poll=%s tailscale=%s", PollSeconds(Poll), PollSeconds(Tailscale))
 	}
 }
+
+func TestResolvePollSecondsOrder(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	cases := []struct {
+		name string
+		env  map[string]string
+		src  string
+		want string
+	}{
+		{"ad hoc poll default", nil, Poll, "60"},
+		{"ad hoc webhook default (never the gate)", nil, Tailscale, "180"},
+		{"planned cell cadence beats the ad hoc default", map[string]string{CellPollVar: "60"}, Tailscale, "60"},
+		{"operator override beats the planned cadence", map[string]string{CellPollVar: "60", OverrideVar: "30"}, Tailscale, "30"},
+		{"invalid override is skipped", map[string]string{CellPollVar: "60", OverrideVar: "soon"}, Poll, "60"},
+		{"non-positive planned cadence is skipped", map[string]string{CellPollVar: "0"}, Poll, "60"},
+	}
+	for _, c := range cases {
+		if got := ResolvePollSeconds(env(c.env), c.src); got != c.want {
+			t.Errorf("%s: ResolvePollSeconds = %s, want %s", c.name, got, c.want)
+		}
+	}
+}

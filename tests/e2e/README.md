@@ -153,9 +153,9 @@ These tests assume:
    every bed's repos. Standing up the second bed is #1990; its prerequisites are listed
    under "Second bed" below.
 
-7. **For a webhook leg (`E2E_EVENT_SOURCE=tailscale`, #2408):** each bed also needs
+7. **For a webhook cell (the default plan has one, #2426; `E2E_EVENTS=poll` omits it), #2408:** at least one bed also needs
    its own tailnet node, auth key, App webhook URL and webhook secret — see
-   "Webhook delivery to the beds" below. A run that does not select the source needs
+   "Webhook delivery to the beds" below. A run restricted to `E2E_EVENTS=poll` needs
    none of it.
 
 The harness reads `FABRIK_TEST_DIR`, the repo pair, `FABRIK_TEST_PROJECT_OWNER` and
@@ -176,19 +176,23 @@ run instead of skipping. The same bed serves both kinds of leg.
 
 ### Selecting the event source
 
-`E2E_EVENT_SOURCE` picks it for the run: `poll` (the default) or `tailscale`; anything
-else (`direct`, `hookdeck`, ...) is a usage error, since only Tailscale is a bed
-transport. It applies to every leg of the run, so a webhook run is a dedicated,
-test-selected run, for example:
+Since #2426 (ADR-2426) the event source is a **planned axis of the gate**, not a run-wide
+switch: a leg is a *poll* cell (`app/on`, the label every earlier ledger record uses) or a
+*webhook* cell (`app/on/webhook`), and the gate sets `E2E_EVENT_SOURCE` per leg
+(`poll` or `tailscale`). The default (sparse) plan adds one cell, `app/on/webhook`, that runs
+every `events: sensitive` test; `E2E_MATRIX=full` adds `app/on/webhook` and `app/off/webhook`
+over the whole suite. `E2E_EVENTS=poll|webhook` restricts a run to one dimension (a partial run,
+like `E2E_AUTH_MODE=pat`), for example a webhook-only run of one test:
 
 ```bash
-E2E_EVENT_SOURCE=tailscale scripts/e2e/run.sh -run '^TestWebhookChangeSurvivesReconcile$'
+E2E_EVENTS=webhook scripts/e2e/run.sh -run '^TestWebhookChangeSurvivesReconcile$'
 ```
 
-The transport is App-auth only (the engine refuses it under a PAT), so a **PAT leg is
-always poll-only** whatever the variable says. (The event-source matrix axis and its
-ledger keys are #2427; this variable is the minimal input until then, and the
-webhook test's skip on a poll leg cites that issue.)
+`E2E_EVENT_SOURCE=tailscale` on the gate is a deprecated alias for `E2E_EVENTS=webhook`. The
+transport is App-auth only (the engine refuses it under a PAT), so a **PAT leg is always
+poll-only** and no `pat/*/webhook` cell is ever planned. A webhook cell goes only to a bed that
+is provisioned for webhooks (below); with none, the gate refuses the run up front instead of
+running the cell poll-only.
 
 The source is **launch-injected**, like the bed wait timeouts (ADR-2417): both bed
 launch sites (`tests/gate/bed.go` and `tests/e2e/lifecycle.go`, through
@@ -202,15 +206,22 @@ to confirm. Because the shell's `FABRIK_TAILSCALE_HOSTNAME` is stripped, each be
 
 ### Poll interval on a webhook leg
 
-A poll leg keeps the bed's 60 s cadence. A webhook leg runs with **180 s**: longer than the
-90 s window `TestWebhookChangeSurvivesReconcile` waits for the webhook-applied change,
-and six times the production default of 30 s, so an engine effect that arrives quickly on
-a webhook leg is evidence of the webhook path and not of a short poll (in production
-the poll is the correctness backstop, which is the shape this models). Override both
-cadences with `E2E_BED_POLL_SECONDS`. Many other scenarios' fixed waits are tuned to
-the 60 s cadence; that is why a webhook run is a selected run, and
-`E2E_BED_POLL_SECONDS=60` restores the shorter cadence if a scenario you add to a
-webhook run needs it.
+The poll cadence is part of the cell, planned and recorded (ADR-2426): **every planned cell,
+webhook cells included, runs at 60 s**, so the existing suite's fixed waits hold and an
+`events: neutral` test behaves on a webhook cell as it does on the matching poll cell. The
+gate passes the cell's cadence in `E2E_CELL_POLL_SECONDS`, prints it with the plan
+(`app/on/webhook@60s`) and archives it with the leg. Evidence that an effect arrived by webhook
+comes from structure, not from a long interval: the per-leg delivery preflight, a delivery
+observed in the bed's health or the leg's delivery count, an effect that lands while polls are
+held (`HoldPolls`), or the App's delivery log.
+
+`E2E_BED_POLL_SECONDS` is an **operator override** of the planned cadence. A value that differs from
+the plan is printed loudly, recorded on the leg as `poll_override`, and the leg runs but writes
+**no ledger records**, so it cannot satisfy its cell. The 180 s `bedevents.WebhookPollSeconds`
+is only the default of an ad hoc webhook bed run that does not go through the gate.
+
+On a webhook leg a test that expects a webhook effect and does not see it **fails** (the delivery
+preflight has proved delivery): `webhookEffectMissing`. On a poll leg it stays Inconclusive.
 
 ### Per-bed setup (manual, one-time per bed)
 
@@ -2872,7 +2883,7 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
   - `fabrik.log` is a fresh file on every engine start (the previous run is rotated to `fabrik.log.1`), so it reads from offset 0
     and scopes every matcher to its own issue numbers and train key.
   - It fails (never passes) if a member has no "not yet hydrated" line, and skips
-    on a leg whose bed has a webhook transport (an `E2E_EVENT_SOURCE=tailscale` App leg), where poll 1 hydrates members before batching.
+    on a webhook cell (`app/on/webhook`, #2426), where poll 1 hydrates members before batching.
   - The healthy run is **not** expected to log #1773's `REFUSING to open/reuse
     integration PR` line, since #1772 prevents the contradiction; the scenario
     asserts its absence.

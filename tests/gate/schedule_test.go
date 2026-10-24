@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -69,7 +70,7 @@ func TestPlanCells(t *testing.T) {
 			[]string{"pat/off@8", "pat/on@4"}},
 		{"default gate runs pat first, then app",
 			PlanInput{AuthModes: both, Parallel: "8", ParallelOn: "4"},
-			[]string{"pat/off@8", "pat/on@4", "app/off@8", "app/on@4"}},
+			[]string{"pat/off@8", "pat/on@4", "app/off@8", "app/on@4", "app/on/webhook@4", "app/off/webhook@8"}},
 		{"caller passthrough args reach every cell",
 			PlanInput{AuthModes: []string{"pat"}, Parallel: "8", ParallelOn: "4", Args: []string{"-v"}},
 			[]string{"pat/off@8 -v", "pat/on@4 -v"}},
@@ -87,10 +88,22 @@ func TestPlanCells(t *testing.T) {
 			[]string{"pat/on@8 -run=X"}},
 		{"an unrecognised forced mode is passed through verbatim (the restart step then rejects it)",
 			PlanInput{AuthModes: []string{"app"}, TrainMode: "maybe", Parallel: "8", ParallelOn: "4"},
-			[]string{"app/maybe@8"}},
+			[]string{"app/maybe@8", "app/maybe/webhook@8"}},
 		{"E2E_PARALLEL / E2E_PARALLEL_ON are passed through as given",
 			PlanInput{AuthModes: []string{"app"}, Parallel: "1", ParallelOn: "1"},
-			[]string{"app/off@1", "app/on@1"}},
+			[]string{"app/off@1", "app/on@1", "app/on/webhook@1", "app/off/webhook@1"}},
+		{"E2E_EVENTS=poll plans no webhook cell",
+			PlanInput{AuthModes: []string{"pat", "app"}, Events: EventsPoll, Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/off@8", "pat/on@4", "app/off@8", "app/on@4"}},
+		{"E2E_EVENTS=webhook plans only the webhook cells, App only",
+			PlanInput{AuthModes: []string{"pat", "app"}, Events: EventsWebhook, Parallel: "8", ParallelOn: "4"},
+			[]string{"app/on/webhook@4", "app/off/webhook@8"}},
+		{"a PAT-only plan never has a webhook cell",
+			PlanInput{AuthModes: []string{"pat"}, Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/off@8", "pat/on@4"}},
+		{"E2E_TRAIN_MODE=on with the full matrix: one poll and one webhook leg",
+			PlanInput{AuthModes: []string{"app"}, TrainMode: "on", Parallel: "8", ParallelOn: "4"},
+			[]string{"app/on@8", "app/on/webhook@8"}},
 	}
 	for _, c := range cases {
 		if got := summaries(PlanCells(c.in)); !reflect.DeepEqual(got, c.want) {
@@ -120,5 +133,62 @@ func TestSerialSchedulerStopsAtTheFirstFailingLeg(t *testing.T) {
 	}
 	if got := out.String(); got != "== auth leg: pat ==\n" {
 		t.Errorf("out=%q", got)
+	}
+}
+
+// Every planned cell carries the poll legs' 60 s cadence, webhook cells included
+// (#2426, FR-008/FR-009): no gate-planned cell runs at 180 s.
+func TestEveryPlannedCellCarriesTheSixtySecondCadence(t *testing.T) {
+	plans := []PlanInput{
+		{AuthModes: []string{"pat", "app"}, Parallel: "4", ParallelOn: "2"},
+		sparseIn("app", "pat"),
+	}
+	for _, p := range plans {
+		cells := PlanCells(p)
+		sawWebhook := false
+		for _, c := range cells {
+			sawWebhook = sawWebhook || c.Webhook()
+			if c.PollSeconds != "60" {
+				t.Errorf("cell %s PollSeconds = %q, want 60", c.Label(), c.PollSeconds)
+			}
+		}
+		if !sawWebhook {
+			t.Errorf("plan %v has no webhook cell", summaries(cells))
+		}
+	}
+}
+
+func TestCellLabelsKeepPollCellsTwoPart(t *testing.T) {
+	cases := []struct {
+		c    Cell
+		want string
+		dir  string
+	}{
+		{Cell{Auth: "app", Train: "on"}, "app/on", "app-on"},
+		{Cell{Auth: "app", Train: "on", Events: EventsPoll}, "app/on", "app-on"},
+		{Cell{Auth: "app", Train: "off", Events: EventsWebhook}, "app/off/webhook", "app-off-webhook"},
+	}
+	for _, c := range cases {
+		if got := c.c.Label(); got != c.want {
+			t.Errorf("Label() = %q, want %q", got, c.want)
+		}
+		if got := cellDirName(c.c); got != c.dir {
+			t.Errorf("cellDirName = %q, want %q", got, c.dir)
+		}
+		if got := legFromFile(legFile(c.want) + ".jsonl"); got != c.want {
+			t.Errorf("legFromFile(legFile(%q)) = %q", c.want, got)
+		}
+	}
+	// A pre-change outcome file keeps its key.
+	if got := legFromFile("pat-off.jsonl"); got != "pat/off" {
+		t.Errorf("legFromFile(pat-off.jsonl) = %q", got)
+	}
+}
+
+func TestDescribePlanPrintsEachCellsCadence(t *testing.T) {
+	cells := PlanCells(PlanInput{AuthModes: []string{"app"}, TrainMode: "on", Parallel: "4", ParallelOn: "2"})
+	got := describePlan(cells)
+	if !strings.Contains(got, "app/on@60s, app/on/webhook@60s") {
+		t.Errorf("describePlan = %q", got)
 	}
 }

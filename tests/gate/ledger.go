@@ -111,11 +111,18 @@ type Ledger struct {
 // legFile turns a leg label ("app/off") into its outcome file base name.
 func legFile(label string) string { return strings.ReplaceAll(label, "/", "-") }
 
-// legFromFile is the inverse of legFile for the auth-train pair.
+// legFromFile is the inverse of legFile for a leg label: the auth-train pair of a
+// poll cell ("app-on.jsonl" -> "app/on", unchanged since before the events axis)
+// and the auth-train-webhook triple of a webhook cell ("app-on-webhook.jsonl" ->
+// "app/on/webhook", #2426).
 func legFromFile(name string) string {
 	name = strings.TrimSuffix(name, ".jsonl")
-	if i := strings.IndexByte(name, '-'); i > 0 {
-		return name[:i] + "/" + name[i+1:]
+	parts := strings.Split(name, "-")
+	switch {
+	case len(parts) == 3 && parts[2] == EventsWebhook && parts[0] != "" && parts[1] != "":
+		return parts[0] + "/" + parts[1] + "/" + parts[2]
+	case len(parts) >= 2 && parts[0] != "":
+		return parts[0] + "/" + strings.Join(parts[1:], "-")
 	}
 	return name
 }

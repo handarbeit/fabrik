@@ -28,11 +28,11 @@ func mustContain(t *testing.T, problems []string, sub string) {
 
 func baseRegistry() *Registry {
 	return &Registry{Version: Version, Tests: []Entry{
-		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}, Auth: Neutral, Train: Neutral,
+		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}, Auth: Neutral, Train: Neutral, Events: Neutral,
 			EntryStage: StageSpecify, Traversal: TraversalSubject, TraversalReason: "the ordinary path to Done", FullTraversal: true},
-		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI, Auth: Sensitive, AuthReason: "identity", Train: Neutral,
+		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI, Auth: Sensitive, AuthReason: "identity", Train: Neutral, Events: Sensitive, EventsReason: "wake-up order",
 			EntryStage: StageValidate, Traversal: TraversalNone},
-		{Name: "TestC", Parity: ParityGap, Note: "unit only", Auth: Neutral, Train: Sensitive, TrainReason: "landing path",
+		{Name: "TestC", Parity: ParityGap, Note: "unit only", Auth: Neutral, Train: Sensitive, TrainReason: "landing path", Events: Neutral,
 			EntryStage: StageQueued, Traversal: TraversalNone},
 	}}
 }
@@ -120,7 +120,7 @@ func TestCheckMalformedEntries(t *testing.T) {
 
 func TestCheckSelfRecognitionMustBeAuthSensitive(t *testing.T) {
 	r := &Registry{Version: Version, Tests: []Entry{
-		{Name: "TestPATSelfRecognitionX", Parity: ParityGap, Auth: Neutral, Train: Neutral,
+		{Name: "TestPATSelfRecognitionX", Parity: ParityGap, Auth: Neutral, Train: Neutral, Events: Neutral,
 			EntryStage: StageSpecify, Traversal: TraversalSubject, TraversalReason: "x", FullTraversal: true},
 	}}
 	mustContain(t, Check(r, []string{"TestPATSelfRecognitionX"}, nil), "SelfRecognition test must be auth: sensitive")
@@ -360,6 +360,12 @@ func TestRegistryMatchesTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	problems = append(problems, CheckPollSeamCallers(reg, pollSeam)...)
+	// #2426: every test that reaches a webhook-mode call is events-sensitive.
+	webhookCallers, err := ScanBedWebhookCallers("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems = append(problems, CheckBedWebhookCallers(reg, webhookCallers)...)
 	// #1977: t.Parallel() matches the class — shared tests call it, serial classes do not.
 	parallel, err := ScanParallelTests("..")
 	if err != nil {
@@ -552,5 +558,89 @@ func helper(t *testing.T) { t.Parallel() }
 	}
 	if strings.Join(got, ",") != "TestPar,TestParLater" {
 		t.Fatalf("parallel = %v", got)
+	}
+}
+
+func TestCheckBedWebhookCallers(t *testing.T) {
+	r := baseRegistry()
+	p := CheckBedWebhookCallers(r, []string{"TestA", "TestB", "TestGone"})
+	if len(p) != 1 {
+		t.Fatalf("want exactly TestA (events: neutral) flagged, got %v", p)
+	}
+	mustContain(t, p, "TestA: reaches a webhook-mode call")
+}
+
+func TestScanBedWebhookCallers(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"w.go": `package e2e
+import "testing"
+func bedWebhooksEnabled() bool { return false }
+func webhookEffectMissing(t *testing.T, r string) { _ = bedWebhooksEnabled() }
+func viaHelper(t *testing.T) { webhookEffectMissing(t, "x") }
+func unrelated(t *testing.T) {}
+`,
+		"a_test.go": `package e2e
+import "testing"
+func TestDirect(t *testing.T) { _ = bedWebhooksEnabled() }
+func TestHeld(t *testing.T) { HoldPolls(t); viaHelper(t) }
+func TestClean(t *testing.T) { unrelated(t) }
+`,
+	})
+	got, err := ScanBedWebhookCallers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestDirect,TestHeld" {
+		t.Fatalf("callers = %v", got)
+	}
+}
+
+func TestCheckEventsAxis(t *testing.T) {
+	r := baseRegistry()
+	r.Tests[0].Events = ""
+	mustContain(t, Check(r, liveNames, simNames), `TestA: events is ""`)
+	r = baseRegistry()
+	r.Tests[1].EventsReason = ""
+	mustContain(t, Check(r, liveNames, simNames), "events is \"sensitive\" but events_reason is empty")
+	r = baseRegistry()
+	r.Tests[0].EventsReason = "stray"
+	mustContain(t, Check(r, liveNames, simNames), "events_reason is only valid with events \"sensitive\"")
+	r = baseRegistry()
+	r.Tests[0].Events = "maybe"
+	mustContain(t, Check(r, liveNames, simNames), "events is \"maybe\"")
+}
+
+func TestMatchLegEventsAxis(t *testing.T) {
+	cases := []struct {
+		pattern, label string
+		want           bool
+	}{
+		{"*/off", "app/off", true},
+		{"*/off", "app/off/webhook", true}, // two-part pattern ignores events
+		{"pat/*", "app/on/webhook", false},
+		{"*/*/webhook", "app/on/webhook", true},
+		{"*/*/webhook", "app/on", false},
+		{"*/*/poll", "app/on", true},
+		{"*/*/poll", "app/on/webhook", false},
+		{"app/on/webhook", "app/on/webhook", true},
+		{"app/on/webhook", "app/on", false},
+		{"*", "app/on", false},
+		{"*/*/*", "pat/off", true},
+	}
+	for _, c := range cases {
+		if got := MatchLeg(c.pattern, c.label); got != c.want {
+			t.Errorf("MatchLeg(%q, %q) = %v, want %v", c.pattern, c.label, got, c.want)
+		}
+	}
+	for _, p := range []string{"*/off", "pat/*", "*/*/webhook", "app/on/poll", "*/*/*"} {
+		if !validLegPattern(p) {
+			t.Errorf("validLegPattern(%q) = false", p)
+		}
+	}
+	for _, p := range []string{"*", "app", "app/on/maybe", "x/on", "app/on/webhook/x"} {
+		if validLegPattern(p) {
+			t.Errorf("validLegPattern(%q) = true", p)
+		}
 	}
 }

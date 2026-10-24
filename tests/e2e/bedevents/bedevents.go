@@ -20,6 +20,7 @@ package bedevents
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -29,6 +30,12 @@ const (
 	// test through the leg's environment, exactly as E2E_AUTH_MODE does. #2427
 	// replaces it with a real matrix axis.
 	RequestVar = "E2E_EVENT_SOURCE"
+	// CellPollVar carries the poll cadence (seconds) the gate's plan gave the leg's
+	// cell (#2426, FR-008). It is distinct from E2E_BED_POLL_SECONDS, which stays the
+	// operator's override, so a planned value is never mistaken for an override.
+	CellPollVar = "E2E_CELL_POLL_SECONDS"
+	// OverrideVar is the operator override of the planned cadence.
+	OverrideVar = "E2E_BED_POLL_SECONDS"
 	// AuthVar is the leg's auth mode variable the gate sets (E2E_AUTH_MODE).
 	AuthVar = "E2E_AUTH_MODE"
 	// LaunchVar is the engine's own variable (cmd/root.go) the launch sites inject.
@@ -48,11 +55,14 @@ const (
 const (
 	// PollOnlySeconds is the poll-only bed's cadence (unchanged since the beds existed).
 	PollOnlySeconds = "60"
-	// WebhookPollSeconds is a webhook leg's cadence. It is deliberately longer than
-	// the 90 s window TestWebhookChangeSurvivesReconcile waits and six times the
-	// production default of 30 s, so an engine effect that arrives quickly on a
-	// webhook leg is evidence of the webhook path and not of a short poll. The poll
-	// is the correctness backstop in production, which is the shape this models.
+	// WebhookPollSeconds is the cadence of an AD HOC webhook bed run — one that does
+	// not go through the gate's plan and so carries no planned cadence (#2426,
+	// ADR-2426, amending ADR-2408 decision 4). It is longer than the 90 s window
+	// TestWebhookChangeSurvivesReconcile waits and six times the production default
+	// of 30 s. The gate never uses it: every planned cell, webhook cells included,
+	// runs at PollOnlySeconds so the existing suite's fixed waits hold, and the
+	// webhook path is evidenced structurally (the delivery preflight, observed
+	// deliveries, HoldPolls), not by a long interval.
 	WebhookPollSeconds = "180"
 )
 
@@ -133,8 +143,22 @@ func StripKeys() []string {
 	}
 }
 
-// PollSeconds is the `-poll` cadence for an effective source, before any
-// E2E_BED_POLL_SECONDS override (which both launch sites apply on top).
+// ResolvePollSeconds is the `-poll` cadence a harness-side bed launch uses
+// (#2426, FR-008/FR-010): the operator override first, then the cadence the
+// gate's plan gave the cell, then the source's ad hoc default. A value that is not
+// a positive integer is skipped.
+func ResolvePollSeconds(getenv func(string) string, effective string) string {
+	for _, v := range []string{getenv(OverrideVar), getenv(CellPollVar)} {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return strconv.Itoa(n)
+		}
+	}
+	return PollSeconds(effective)
+}
+
+// PollSeconds is the `-poll` cadence for an effective source when neither the
+// operator nor the gate's plan has chosen one: PollOnlySeconds, or
+// WebhookPollSeconds for an ad hoc webhook run.
 func PollSeconds(effective string) string {
 	if effective == Tailscale {
 		return WebhookPollSeconds

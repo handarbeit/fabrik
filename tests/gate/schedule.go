@@ -5,8 +5,25 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/handarbeit/fabrik/tests/e2e/bedevents"
 	"github.com/handarbeit/fabrik/tests/e2e/registry"
 )
+
+// The events dimension of a cell (#2426, ADR-2426): how the bed's engine ingests
+// GitHub events on the leg.
+const (
+	// EventsPoll is a poll-only leg. It is the zero value of Cell.Events.
+	EventsPoll = "poll"
+	// EventsWebhook is a leg whose bed receives webhooks (the embedded Tailscale
+	// Funnel receiver, #2408). It is App-auth only.
+	EventsWebhook = "webhook"
+)
+
+// PlannedPollSeconds is the poll cadence the plan gives every cell, webhook cells
+// included (#2426, FR-009): the poll legs' 60 s, so the existing suite's fixed
+// waits hold. Webhook-path evidence comes from structure (the delivery preflight,
+// observed deliveries, HoldPolls), not from a longer interval.
+const PlannedPollSeconds = bedevents.PollOnlySeconds
 
 // Cell is one leg of the gate: one bed restart (TestSwitchTrainMode) followed
 // by one `go test` invocation over ./tests/e2e/.... Today the gate is a serial
@@ -15,6 +32,13 @@ import (
 type Cell struct {
 	Auth  string // "pat" | "app"
 	Train string // the E2E_TRAIN_MODE for the leg: "off" | "on" (passed through verbatim)
+	// Events is how the bed ingests events on the leg: EventsPoll (also the empty
+	// value) or EventsWebhook (#2426). A webhook cell is App-auth only.
+	Events string
+	// PollSeconds is the bed's `-poll` cadence for the leg, set when the plan is
+	// built, printed with it and archived with the leg (#2426, FR-008). Empty means
+	// a hand-built cell; the plan always fills it.
+	PollSeconds string
 	// Parallel is the `go test -parallel` cap, a string passed through verbatim.
 	Parallel string
 	// Args are the `go test` arguments after ./tests/e2e/... — the cell's own
@@ -23,14 +47,51 @@ type Cell struct {
 	Args []string
 }
 
-// Label is the report label: auth mode / train mode, e.g. "app/on" (#1861).
-func (c Cell) Label() string { return c.Auth + "/" + c.Train }
+// Label is the report label: auth mode / train mode, e.g. "app/on" (#1861). A
+// webhook cell appends its events dimension ("app/on/webhook"); a poll cell's
+// label stays two-part, so every ledger record written before the events axis
+// keeps its key (#2426, FR-001).
+func (c Cell) Label() string {
+	if c.Webhook() {
+		return c.Auth + "/" + c.Train + "/" + EventsWebhook
+	}
+	return c.Auth + "/" + c.Train
+}
+
+// Webhook reports whether the cell runs with a webhook transport.
+func (c Cell) Webhook() bool { return c.Events == EventsWebhook }
+
+// EventsKind is the cell's events dimension, with the zero value read as poll.
+func (c Cell) EventsKind() string {
+	if c.Webhook() {
+		return EventsWebhook
+	}
+	return EventsPoll
+}
+
+// EventSource is the E2E_EVENT_SOURCE value the cell's leg environment carries.
+func (c Cell) EventSource() string {
+	if c.Webhook() {
+		return bedevents.Tailscale
+	}
+	return bedevents.Poll
+}
+
+// isBaseline reports whether the cell is the sparse plan's baseline (app/on, poll).
+// A webhook cell on the same auth and train is not: it runs a different selection.
+func (c Cell) isBaseline() bool {
+	return c.Auth == baselineAuth && c.Train == baselineTrain && !c.Webhook()
+}
 
 // PlanInput is what the cell plan depends on.
 type PlanInput struct {
 	AuthModes []string
 	// TrainMode is E2E_TRAIN_MODE: when set the caller forces a single mode.
 	TrainMode string
+	// Events is E2E_EVENTS: "" plans both dimensions, EventsPoll only the poll
+	// cells, EventsWebhook only the webhook cells. A filtered plan is partial
+	// (#2426).
+	Events string
 	// CallerHasRun: the caller supplied -run/--run, so they are targeting
 	// specific scenarios; honour that exactly.
 	CallerHasRun bool
@@ -79,14 +140,31 @@ func PlanCells(p PlanInput) []Cell {
 	}
 	var cells []Cell
 	for _, auth := range p.AuthModes {
+		if p.Events == EventsWebhook {
+			break
+		}
 		mk := func(train, parallel string) Cell {
-			return Cell{Auth: auth, Train: train, Parallel: parallel, Args: p.Args}
+			return Cell{Auth: auth, Train: train, Parallel: parallel, Args: p.Args, PollSeconds: PlannedPollSeconds}
 		}
 		if p.TrainMode != "" {
 			cells = append(cells, mk(p.TrainMode, p.Parallel))
 			continue
 		}
 		cells = append(cells, mk("off", p.Parallel), mk("on", p.ParallelOn))
+	}
+	// Webhook cells run the WHOLE suite under the full matrix (#2426, FR-003): a
+	// release that changes ingestion must show every scenario still converges with
+	// webhooks as the primary wake source. They come last, after every poll cell,
+	// so a failed webhook preflight leaves the poll coverage already recorded.
+	if p.Events != EventsPoll && authModesInclude(p.AuthModes, baselineAuth) {
+		mk := func(train, parallel string) Cell {
+			return Cell{Auth: baselineAuth, Train: train, Events: EventsWebhook, Parallel: parallel, Args: p.Args, PollSeconds: PlannedPollSeconds}
+		}
+		if p.TrainMode != "" {
+			cells = append(cells, mk(p.TrainMode, p.Parallel))
+		} else {
+			cells = append(cells, mk("on", p.ParallelOn), mk("off", p.Parallel))
+		}
 	}
 	return cells
 }
@@ -201,6 +279,9 @@ func narrowArgs(args, names []string) []string {
 func planSparse(p PlanInput) []Cell {
 	var cells []Cell
 	for _, sc := range sparseOrder {
+		if p.Events == EventsWebhook {
+			break
+		}
 		if !authModesInclude(p.AuthModes, sc.auth) || (p.TrainMode != "" && p.TrainMode != sc.train) {
 			continue
 		}
@@ -210,9 +291,9 @@ func planSparse(p PlanInput) []Cell {
 		}
 		names := sparseSelection(p.Sparse, sc.auth, sc.train)
 		mk := func(args []string) Cell {
-			return Cell{Auth: sc.auth, Train: sc.train, Parallel: parallel, Args: args}
+			return Cell{Auth: sc.auth, Train: sc.train, Parallel: parallel, Args: args, PollSeconds: PlannedPollSeconds}
 		}
-		baseline := sc.auth == baselineAuth && sc.train == baselineTrain
+		baseline := Cell{Auth: sc.auth, Train: sc.train}.isBaseline()
 		if p.CallerHasRun {
 			sel, err := SelectedTests(names, p.Args)
 			switch {
@@ -232,7 +313,62 @@ func planSparse(p PlanInput) []Cell {
 			cells = append(cells, mk(narrowArgs(p.Args, names)))
 		}
 	}
-	return cells
+	return append(cells, planSparseWebhook(p)...)
+}
+
+// webhookCellTrain is the train mode of the sparse plan's webhook cell: the
+// baseline's, so the cell changes only the events axis.
+const webhookCellTrain = baselineTrain
+
+// webhookSelection returns the live tests the sparse webhook cell must run: every
+// test the registry marks events: sensitive, minus the pairs it marks structurally
+// skipped on that cell (skip_ok_legs, e.g. a test that skips itself on a webhook
+// leg). A test with no registry entry runs (the completeness test makes that
+// unreachable, and running too much is the safe failure).
+func webhookSelection(in *SparseInput) []string {
+	label := Cell{Auth: baselineAuth, Train: webhookCellTrain, Events: EventsWebhook}.Label()
+	var out []string
+	for _, name := range in.Live {
+		e, known := in.Entries[name]
+		if known && (e.Events != registry.Sensitive || e.SkipOK(label)) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// planSparseWebhook is the one extra cell of the sparse plan (#2426, FR-003):
+// app/on/webhook running every events: sensitive test. It is App-auth only and is
+// planned last. A caller -run is intersected with the selection, as for any
+// narrowed cell.
+func planSparseWebhook(p PlanInput) []Cell {
+	if p.Events == EventsPoll || !authModesInclude(p.AuthModes, baselineAuth) ||
+		(p.TrainMode != "" && p.TrainMode != webhookCellTrain) {
+		return nil
+	}
+	parallel := p.Parallel
+	if p.TrainMode == "" {
+		parallel = p.ParallelOn
+	}
+	names := webhookSelection(p.Sparse)
+	mk := func(args []string) []Cell {
+		return []Cell{{Auth: baselineAuth, Train: webhookCellTrain, Events: EventsWebhook, Parallel: parallel, Args: args, PollSeconds: PlannedPollSeconds}}
+	}
+	if p.CallerHasRun {
+		sel, err := SelectedTests(names, p.Args)
+		switch {
+		case err != nil:
+			return mk(p.Args)
+		case len(sel) > 0:
+			return mk(narrowArgs(p.Args, sel))
+		}
+		return nil
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return mk(narrowArgs(p.Args, names))
 }
 
 // describePlan is the one-line summary printed before the first leg: the cells in
@@ -243,7 +379,8 @@ func describePlan(cells []Cell) string {
 	}
 	parts := make([]string, len(cells))
 	for i, c := range cells {
-		parts[i] = c.Label()
+		// The cadence is part of the cell (#2426, FR-008): it is printed with the plan.
+		parts[i] = c.Label() + "@" + c.pollSeconds() + "s"
 	}
-	return fmt.Sprintf("%d cell(s): %s", len(cells), strings.Join(parts, ", "))
+	return fmt.Sprintf("%d cell(s) (label@poll cadence): %s", len(cells), strings.Join(parts, ", "))
 }

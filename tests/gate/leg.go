@@ -147,7 +147,20 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	label := cell.Label()
 	// A multi-bed leg also aims the live harness at its own bed, repos and board
 	// (#1976, D2); bedEnv is nil on a single-bed run.
-	legEnv := withEnv(g.Env, append([]string{"E2E_AUTH_MODE=" + cell.Auth, bedevents.RequestVar + "=" + g.Cfg.EventSource}, g.bedEnv()...)...)
+	// The leg's event source and poll cadence are the CELL's (#2426, FR-004/FR-008),
+	// planned, not inherited from a run-wide setting. The cadence travels in its own
+	// variable so the operator's E2E_BED_POLL_SECONDS stays distinguishable as an
+	// override.
+	legEnv := withEnv(g.Env, append([]string{
+		"E2E_AUTH_MODE=" + cell.Auth,
+		bedevents.RequestVar + "=" + cell.EventSource(),
+		bedevents.CellPollVar + "=" + cell.pollSeconds(),
+	}, g.bedEnv()...)...)
+	overridden := g.pollOverridden(cell)
+	if overridden {
+		g.outf("\n############################################################\n## POLL CADENCE OVERRIDE (leg %s): %s=%s, planned %s\n## This leg runs and is archived but is NOT recorded in the coverage ledger,\n## so it cannot satisfy its cell (ADR-2426).\n############################################################\n",
+			label, bedevents.OverrideVar, g.Cfg.BedPollOverride, cell.pollSeconds())
+	}
 
 	// #1972: when the coverage ledger is live, this leg's logs are archived and
 	// its outcomes recorded as they stream in. The archive's sampler starts before
@@ -165,6 +178,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		defer arch.Finish()
 	}
 
+	legStart, legLogFrom := g.Now(), logSize(g.Cfg.EngineLog)
 	if err := g.restartBed(ctx, cell, legEnv); err != nil {
 		return err
 	}
@@ -178,7 +192,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 
 	// #2408: a webhook leg proves GitHub's deliveries reach the restarted bed before
 	// it spends live budget on tests that need them. A poll leg is never probed.
-	if bedevents.Webhook(g.Cfg.EffectiveEventSource(cell.Auth)) {
+	if cell.Webhook() {
 		if err := g.ProbeWebhookDelivery(ctx, cell); err != nil {
 			return err
 		}
@@ -214,7 +228,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	g.logIdentityBudget(ctx, cell, "start") // R5 (#1976)
 
 	var recorder *legRecorder
-	if cs != nil && !cs.noRecord {
+	if cs != nil && !cs.noRecord && !overridden {
 		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
 		recorder.bed = g.Cfg.TestBed // R4 (#1976): which bed produced each record
 	}
@@ -329,6 +343,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		summary.PeakLoad1m, summary.LoadSamples, summary.HasLoad = arch.LoadStats()
 	}
 	summary.BedMaxConcurrent = g.noteBedConcurrency(arch, cell, phases)
+	summary.Events = g.eventsSummary(ctx, cell, legStart, legLogFrom)
 	suiteExit := g.Now()
 
 	// R2 (#1676): post-suite watchdog. From here through this function's return
@@ -372,6 +387,22 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		return &ExitError{Code: ExitPostSuiteWatchdog}
 	}
+}
+
+// pollSeconds is the cell's planned cadence, the plan's default for a hand-built
+// cell that carries none.
+func (c Cell) pollSeconds() string {
+	if c.PollSeconds == "" {
+		return PlannedPollSeconds
+	}
+	return c.PollSeconds
+}
+
+// pollOverridden reports whether the operator's E2E_BED_POLL_SECONDS differs from
+// the cadence the plan gave the cell (#2426, FR-010): an override equal to the plan
+// is not one.
+func (g *Gate) pollOverridden(cell Cell) bool {
+	return g.Cfg.BedPollOverride != "" && g.Cfg.BedPollOverride != cell.pollSeconds()
 }
 
 // restartBed is the leg's bed restart: the TestSwitchTrainMode invocation that

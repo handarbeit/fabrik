@@ -414,3 +414,28 @@ func TestRuntimeReportCarriesWallclockCategory(t *testing.T) {
 		t.Errorf("Format must print the category column:\n%s", rep.Format())
 	}
 }
+
+// `gate report` shows the events dimension, the cadence and a webhook leg's intake
+// counts beside each cell's phases (#2426, FR-006).
+func TestReportShowsTheEventsDimension(t *testing.T) {
+	r := RuntimeReport{Phases: []CellPhases{
+		{Cell: "app-on", Invocation: "i1", Summary: &LegSummary{Label: "app/on", Events: &EventsSummary{Events: EventsPoll, PollSeconds: "60"}}},
+		{Cell: "app-on-webhook", Invocation: "i1", Summary: &LegSummary{Label: "app/on/webhook",
+			Events: &EventsSummary{Events: EventsWebhook, PollSeconds: "60", Deliveries: 12, Deduped: 3, Dropped: 1}}},
+		{Cell: "app-off-webhook", Invocation: "i1", Summary: &LegSummary{Label: "app/off/webhook",
+			Events: &EventsSummary{Events: EventsWebhook, PollSeconds: "60", PollOverride: "180", Deliveries: -1}}},
+	}}
+	var b strings.Builder
+	r.formatPhases(&b)
+	out := b.String()
+	for _, want := range []string{
+		"app-on  i1", "events              poll  poll cadence 60s",
+		"app-on-webhook  i1", "events              webhook  poll cadence 60s",
+		"deliveries 12  deduped 3  dropped 1",
+		"OPERATOR OVERRIDE 180s", "deliveries unknown",
+	} {
+		if !strings.Contains(strings.ReplaceAll(out, "\n  ", "\n   "), want) && !strings.Contains(out, want) {
+			t.Errorf("report lacks %q:\n%s", want, out)
+		}
+	}
+}

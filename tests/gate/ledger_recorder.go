@@ -88,6 +88,9 @@ func newLegRecorder(l *Ledger, cell Cell, invocation, head string, hashes map[st
 
 // cellDirName names a cell for the archive and for void scoping.
 func cellDirName(c Cell) string {
+	if c.Webhook() {
+		return c.Auth + "-" + c.Train + "-" + EventsWebhook
+	}
 	return c.Auth + "-" + c.Train
 }
 

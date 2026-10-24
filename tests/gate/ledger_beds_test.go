@@ -165,7 +165,11 @@ func TestArchiveRecordsItsBed(t *testing.T) {
 	a.Finish()
 	data, _ := os.ReadFile(filepath.Join(a.dir, "bed.json"))
 	var got map[string]string
-	if err := json.Unmarshal(data, &got); err != nil || got["dir"] != single.Cfg.TestBed || len(got) != 1 {
+	if err := json.Unmarshal(data, &got); err != nil || got["dir"] != single.Cfg.TestBed || got["name"] != "" {
 		t.Errorf("single-bed archive: %s %v", data, err)
+	}
+	// #2426: the archive also records the leg's events dimension and planned cadence.
+	if got["events"] != "poll" || got["poll_seconds"] != "60" || got["poll_override"] != "" {
+		t.Errorf("single-bed archive events/cadence: %s", data)
 	}
 }
