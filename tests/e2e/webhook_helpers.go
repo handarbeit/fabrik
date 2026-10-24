@@ -504,3 +504,39 @@ func fileInertItem(t *testing.T, env *Env, repo, title, body string, labels ...s
 	}
 	return issue, itemID
 }
+
+// allLabelEvents returns every label event of typ about repo#issue and label from
+// any origin (live, catch-up or downtime delta). The restart tests count these:
+// however a change reaches the daemon after a restart it must be announced once.
+func (c *eventCollector) allLabelEvents(typ channelevents.EventType, repo string, issue int, label string) []channelevents.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []channelevents.Event
+	for _, ev := range c.events {
+		if ev.Type == typ && ev.Repo == repo && ev.Issue == issue && ev.Label == label {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// ensureLabel creates a repo label if it does not exist (idempotent).
+func ensureLabel(t *testing.T, env *Env, repo, label string) {
+	t.Helper()
+	if out, err := ghOutput(env, "label", "create", label, "-R", repo, "--force", "--color", "ededed",
+		"--description", "e2e webhook test label (#2427)"); err != nil {
+		t.Fatalf("creating label %q on %s: %v\n%s", label, repo, err, out)
+	}
+}
+
+// ensureBedRunning restarts the bed in t.Cleanup if the test left it stopped, so a
+// failure between a stop and a start cannot wedge later tests.
+func ensureBedRunning(t *testing.T, env *Env) {
+	t.Helper()
+	t.Cleanup(func() {
+		if lockedPID(env) == 0 {
+			t.Logf("the bed daemon is not running at the end of the test — starting it")
+			StartFabrikTestBed(t, env)
+		}
+	})
+}
