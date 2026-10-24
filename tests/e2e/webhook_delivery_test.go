@@ -18,7 +18,8 @@ import (
 // redelivery request is never taken as proof of anything; only the daemon's own
 // state is.
 func TestWebhookRedeliveryAppliedOnce(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook redelivery dedupe",
 		"e2e scenario for #2427 FR-008: a redelivered webhook must be applied once. Paused so no stage runs.")

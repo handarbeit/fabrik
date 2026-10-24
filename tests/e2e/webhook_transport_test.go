@@ -45,7 +45,8 @@ func falseHealthy(h *localapi.HealthResult) bool {
 // clears and deliveries resume. The warning has no local API surface, so that half
 // reads the bed's warnings panel file (a documented exception, ADR 2427-a).
 func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook transport health",
 		"e2e scenario for #2427 FR-010: transport health with a healthy and a broken route. Paused so no stage runs.")

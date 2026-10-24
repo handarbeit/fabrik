@@ -30,7 +30,8 @@ const replayWait = 12 * time.Minute
 // have" is not provable (the startup poll precedes the 90 s replay grace), so the
 // replay is proven by its own health row: found_failed and requested are at least 1.
 func TestWebhookReplayAcrossDowntime(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	ensureBedRunning(t, env)
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook replay across downtime",
@@ -82,7 +83,8 @@ func TestWebhookReplayAcrossDowntime(t *testing.T) {
 // before the exec and replay or reconcile covers the gap; every label ends up in the
 // daemon and is announced exactly once.
 func TestWebhookRestartUnderLoad(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	ensureBedRunning(t, env)
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook restart under load",

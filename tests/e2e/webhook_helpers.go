@@ -29,18 +29,16 @@ import (
 // was applied / was a duplicate / was matched as an echo" observable; tests compare
 // deltas between two reads, because the counters are since process start.
 
-// webhookLegSetup is the common prologue of a webhook test: load the environment,
-// require a running bed, skip structurally on a leg without a webhook transport and
+// webhookLegSetup is the common prologue of a webhook test (the test body calls
+// LoadEnv itself, which the registry scan keys on): require a running bed, skip structurally on a leg without a webhook transport and
 // repair a hook URL a killed earlier run may have left pointing elsewhere.
-func webhookLegSetup(t *testing.T) *Env {
+func webhookLegSetup(t *testing.T, env *Env) {
 	t.Helper()
-	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	if !bedWebhooksEnabled(env) {
 		t.Skip("this leg has no webhook transport (poll-only event source, or a PAT leg) — the behaviour under test is the daemon's handling of webhook deliveries, so there is nothing to observe; a webhook cell of the gate plan (app/on/webhook) runs it and on a poll cell the skip is structural (*/*/poll), #2426")
 	}
 	restoreStaleHookURL(t, env)
-	return env
 }
 
 // ---- local API reads ----

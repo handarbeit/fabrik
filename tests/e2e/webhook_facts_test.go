@@ -48,7 +48,8 @@ func reviewerOutstanding(env *Env, repo string, issue int, reviewer string) (int
 // (fabrik_status pr.reviewers); the comment edit is proven by the
 // pull_request_review_comment apply counter (the edited text is on no API surface).
 func TestWebhookReviewThreadFacts(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	reviewerToken := readEnvFileReviewerToken(t, env)
 	if reviewerToken == "" {
@@ -93,7 +94,8 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 // controllable check (a check run it creates and completes as the App), so it does
 // not depend on production CI timing.
 func TestWebhookCheckRunCompletion(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	leg := requireAppLeg(t, env)
 	issue, pr := seedInertPRItem(t, env, "webhook-check-run-"+time.Now().UTC().Format("150405.000"))
@@ -136,7 +138,8 @@ func TestWebhookCheckRunCompletion(t *testing.T) {
 // cannot do from the dep-blocked cooldown alone — the delivery drops it. The item
 // runs its Specify stage once it is unblocked, which costs one short real run.
 func TestWebhookDependencyRemovalWakes(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	stamp := time.Now().UTC().Format("20060102-150405")
 	blocker := FileIssue(t, env, repo, "e2e webhook dependency blocker "+stamp,

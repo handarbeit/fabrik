@@ -761,6 +761,212 @@
       "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's copy of the column is exercised"
     },
     {
+      "name": "TestWebhookCheckRunCompletion",
+      "parity": "live-only",
+      "live_only_reason": "real-ci",
+      "note": "a real check_run delivery clearing a pending CI verdict; the sim cannot model real check-run delivery timing",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the check_run webhook delivery clearing the daemon's CI verdict without a poll",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy after the check is pending",
+      "entry": "Review",
+      "traversal": "none"
+    },
+    {
+      "name": "TestWebhookCommentWakesItem",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "real delivery of a human comment waking a paused item; the sim cannot model delivery timing",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is an issue_comment delivery reaching the daemon, proven by the intake apply counter, then admitting the paused item",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy and triggers one poll",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookDependencyRemovalWakes",
+      "parity": "sim",
+      "sim": [
+        "TestIssueDependencies_RemovedEdgeUnblocksOnNextWake"
+      ],
+      "note": "the sim applies the issue_dependencies payload and shows the removed edge unblocking on the next wake; this adds the real GitHub delivery",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the issue_dependencies delivery waking a blocked item (ADR 1995)",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy, then triggers one poll",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed blocked at Specify; once unblocked the item runs one short Specify stage after the assertion"
+    },
+    {
+      "name": "TestWebhookEngineEchoMatched",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "the real webhook echo of an engine label write (set_autonomy) matched by the echo registry over a real delivery; the sim delivers payloads straight to the cache",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the engine's echo registry matching the real delivery of its own write",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookHumanLabelByWebhook",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "real delivery and real sender attribution (actor=human) of a human label; the sim has no transport layer or sender identity",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is a human label reaching the daemon by webhook with actor=human and surviving a reconcile",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy, then triggers whole polls",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookRedeliveryAppliedOnce",
+      "parity": "sim",
+      "sim": [
+        "TestWebhookIntake_DuplicateAppliesOnce",
+        "TestWebhookIntake_DuplicateAppliesOnceAcrossRestart"
+      ],
+      "note": "the sim proves the ledger drops a duplicate delivery; only a live run can redeliver through the App's /app/hook/deliveries/{id}/attempts",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is a real redelivery being dropped by the persisted delivery ledger",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookReplayAcrossDowntime",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "replay of a delivery GitHub recorded as failed while the daemon was down (#2144) needs the App's real delivery log and the real Funnel outage; the sim has no transport layer",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is delivery replay across daemon downtime over the tailscale transport",
+      "exclusive": true,
+      "exclusive_reason": "stops and restarts the bed daemon",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookRestartUnderLoad",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "a SIGHUP restart (ADR 2259) with real deliveries arriving; the sim has no transport layer or real exec",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the intake drain and replay/reconcile coverage across a restart under delivery load",
+      "exclusive": true,
+      "exclusive_reason": "restarts the bed daemon with SIGHUP",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
+      "name": "TestWebhookReviewThreadFacts",
+      "parity": "sim",
+      "sim": [
+        "TestWebhookThreadResolve_SeenWithoutRefetch",
+        "TestWebhookCommentEditDelete_SeenWithoutRefetch"
+      ],
+      "note": "the sim applies recorded thread-resolve and comment-edit payloads without a re-fetch; this adds the real delivery and a real second reviewer identity",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the ADR 2352 review-thread and review-comment webhook facts reaching the feedback view",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so only a webhook delivery can move the daemon's copy after the review is hydrated",
+      "entry": "Review",
+      "traversal": "none"
+    },
+    {
+      "name": "TestWebhookTransportHealthAndBrokenRoute",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "tailscale transport health, Funnel public-DNS state and the App webhook-config check (#2143, #2425) need the real Funnel and the real App configuration",
+      "skip_ok_legs": [
+        "pat/*",
+        "*/*/poll"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "the webhook transport (event_source: tailscale) is App-auth only, so a PAT leg can never receive webhooks and structurally skips",
+      "train": "neutral",
+      "events": "sensitive",
+      "events_reason": "subject is the tailscale transport's health row and webhook-config warning with a healthy and a broken route",
+      "exclusive": true,
+      "exclusive_reason": "edits the shared App's webhook URL (restored in cleanup) and must not coexist with any other webhook test",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only the daemon's webhook handling is exercised"
+    },
+    {
       "name": "TestYoloAutoMergeLabel",
       "parity": "sim",
       "sim": [

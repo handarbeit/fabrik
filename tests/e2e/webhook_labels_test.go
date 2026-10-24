@@ -24,7 +24,8 @@ const webhookApplyWait = 90 * time.Second
 // daemon's Store with polls held, attributed actor=human (not unknown), and survives
 // whole polls afterwards.
 func TestWebhookHumanLabelByWebhook(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	if login := TokenLogin(t, env.GHToken); login == "" {
 		t.Fatal("cannot resolve the harness account's login")
@@ -76,7 +77,8 @@ func TestWebhookHumanLabelByWebhook(t *testing.T) {
 // bed runs no cycle), so the structural proof the comment came by delivery is the
 // issue_comment apply counter, which nothing but a delivery increments.
 func TestWebhookCommentWakesItem(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	assertHarnessAccountIsHuman(t, env)
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook comment wakes item",
@@ -102,7 +104,8 @@ func TestWebhookCommentWakesItem(t *testing.T) {
 // event is attributed to the engine's actor (overseer, via the requesting
 // subscriber), never unknown or human, with no second event for the echo.
 func TestWebhookEngineEchoMatched(t *testing.T) {
-	env := webhookLegSetup(t)
+	env := LoadEnv(t)
+	webhookLegSetup(t, env)
 	repo := env.RepoAlpha
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook engine echo",
 		"e2e scenario for #2427 FR-004: the webhook echo of an engine label write must be matched as the engine's. Paused so no stage runs.")
