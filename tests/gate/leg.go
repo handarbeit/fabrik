@@ -157,6 +157,11 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		bedevents.CellPollVar + "=" + cell.pollSeconds(),
 	}, g.bedEnv()...)...)
 	overridden := g.pollOverridden(cell)
+	neutralised := g.Cfg.Neutralise != ""
+	if neutralised {
+		g.outf("\n############################################################\n## NEUTRALISED RUN (leg %s): %s=%s\n## The bed daemon is deliberately degraded for a non-vacuity run. This leg runs\n## and is archived but is NOT recorded in the coverage ledger.\n############################################################\n",
+			label, bedevents.NeutraliseVar, g.Cfg.Neutralise)
+	}
 	if overridden {
 		g.outf("\n############################################################\n## POLL CADENCE OVERRIDE (leg %s): %s=%s, planned %s\n## This leg runs and is archived but is NOT recorded in the coverage ledger,\n## so it cannot satisfy its cell (ADR-2426).\n############################################################\n",
 			label, bedevents.OverrideVar, g.Cfg.BedPollOverride, cell.pollSeconds())
@@ -228,7 +233,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	g.logIdentityBudget(ctx, cell, "start") // R5 (#1976)
 
 	var recorder *legRecorder
-	if cs != nil && !cs.noRecord && !overridden {
+	if cs != nil && !cs.noRecord && !overridden && !neutralised {
 		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
 		recorder.bed = g.Cfg.TestBed // R4 (#1976): which bed produced each record
 	}

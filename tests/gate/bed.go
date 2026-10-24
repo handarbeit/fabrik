@@ -279,6 +279,9 @@ func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
 	// environment beats the bed's .env, so a stale .env or shell value cannot make
 	// this start a webhook one. lifecycle.go strips and injects the same way.
 	env = withEnv(withoutEnv(env, bedevents.StripKeys()...), bedevents.Env(bedevents.Poll)...)
+	// A non-vacuity run (#2427) carries E2E_NEUTRALISE to the bed as the engine's
+	// test-only FABRIK_TEST_FAULTS; stripped first so an ambient value cannot leak.
+	env = withEnv(withoutEnv(env, bedevents.FaultsLaunchVar), bedevents.FaultsEnv(func(string) string { return g.Cfg.Neutralise })...)
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

@@ -316,10 +316,12 @@ func (g *Gate) beginArchive(cell Cell, cs *covState) *legArchive {
 		Events       string `json:"events"`
 		PollSeconds  string `json:"poll_seconds"`
 		PollOverride string `json:"poll_override,omitempty"`
+		Neutralise   string `json:"neutralise,omitempty"`
 	}{Dir: g.Cfg.TestBed, Events: cell.EventsKind(), PollSeconds: cell.pollSeconds()}
 	if g.pollOverridden(cell) {
 		bedRec.PollOverride = g.Cfg.BedPollOverride
 	}
+	bedRec.Neutralise = g.Cfg.Neutralise
 	if g.bed != nil {
 		bedRec.Name = g.bed.Name
 	}

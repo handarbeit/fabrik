@@ -19,6 +19,9 @@ type EventsSummary struct {
 	// PollOverride is the operator's E2E_BED_POLL_SECONDS when it differs from the
 	// planned cadence; such a leg is not recorded in the ledger (FR-010).
 	PollOverride string `json:"poll_override,omitempty"`
+	// Neutralise is the operator's E2E_NEUTRALISE fault list (#2427); such a leg is
+	// not recorded in the ledger.
+	Neutralise string `json:"neutralise,omitempty"`
 	// Deliveries is the number of GitHub deliveries the App's delivery log shows for
 	// the leg's window (webhook legs only; -1 when the log could not be read). The
 	// log read is the newest page, so a very busy leg can be under-reported.
@@ -81,6 +84,7 @@ func (g *Gate) eventsSummary(ctx context.Context, cell Cell, start time.Time, lo
 	if g.pollOverridden(cell) {
 		s.PollOverride = g.Cfg.BedPollOverride
 	}
+	s.Neutralise = g.Cfg.Neutralise
 	if !cell.Webhook() {
 		s.Deliveries = 0
 		return s
@@ -116,6 +120,9 @@ func (s *EventsSummary) Format() string {
 	line := fmt.Sprintf("   events              %s  poll cadence %ss", s.Events, s.PollSeconds)
 	if s.PollOverride != "" {
 		line += fmt.Sprintf("  (OPERATOR OVERRIDE %ss — not recorded in the ledger)", s.PollOverride)
+	}
+	if s.Neutralise != "" {
+		line += fmt.Sprintf("  (NEUTRALISED %s — not recorded in the ledger)", s.Neutralise)
 	}
 	line += "\n"
 	if s.Events == EventsWebhook {

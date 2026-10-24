@@ -94,6 +94,52 @@ func TestPollOverrideLegRecordsNothing(t *testing.T) {
 	}
 }
 
+// A leg run with E2E_NEUTRALISE (a non-vacuity run of a webhook live test, #2427)
+// runs and archives but records nothing, and says so.
+func TestNeutralisedLegRecordsNothing(t *testing.T) {
+	f := covFixture(t)
+	f.g.Cfg.Neutralise = "no-dedupe"
+	f.lf.suiteOut = stream(pass("TestAlpha"), pass("TestBravo"))
+	var so strings.Builder
+	f.g.Out = &so
+	if code := f.g.Run(context.Background(), nil); code != 0 {
+		t.Fatalf("exit = %d\n%s", code, so.String())
+	}
+	h := f.g.cov.inputs.hashes
+	if f.ledger(t).Load().Covered("pat/off", "TestAlpha", h["TestAlpha"]) {
+		t.Error("a neutralised leg must not be recorded in the ledger")
+	}
+	if !strings.Contains(so.String(), "NEUTRALISED RUN") {
+		t.Errorf("no neutralised banner\n%s", so.String())
+	}
+	if len(f.lf.suiteCmds) == 0 {
+		t.Error("a neutralised leg still runs the suite")
+	}
+	b, err := os.ReadFile(filepath.Join(f.ledger(t).ArchiveCellDir("pat-off", f.g.cov.invocation), "phases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"neutralise": "no-dedupe"`) && !strings.Contains(string(b), `"neutralise":"no-dedupe"`) {
+		t.Errorf("phases.json does not record the neutralisation\n%s", b)
+	}
+}
+
+// The bed's launch carries E2E_NEUTRALISE as FABRIK_TEST_FAULTS and only then.
+func TestBedStartCmdCarriesFaults(t *testing.T) {
+	g, _, _, _ := testGate(t, "FABRIK_TEST_FAULTS=ambient")
+	c := g.BedStartCmd("/bed/.fabrik/git-config-isolated")
+	for _, kv := range c.Env {
+		if strings.HasPrefix(kv, "FABRIK_TEST_FAULTS=") {
+			t.Errorf("an ordinary launch must not carry a fault: %q", kv)
+		}
+	}
+	g.Cfg.Neutralise = "no-echo"
+	c = g.BedStartCmd("/bed/.fabrik/git-config-isolated")
+	if !hasEnv(c.Env, "FABRIK_TEST_FAULTS=no-echo") {
+		t.Errorf("a neutralised launch must carry the fault: %v", c.Env)
+	}
+}
+
 func TestCountIntakeLines(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "fabrik.log")
