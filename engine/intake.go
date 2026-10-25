@@ -533,3 +533,12 @@ func (in *intake) ledgerNewest() time.Time {
 	}
 	return in.ledger.Newest()
 }
+
+// ledgerReceivedAt returns when the delivery ledger accepted id, false when it
+// is not recorded or has aged out of the window at now (#2452). Read-only.
+func (in *intake) ledgerReceivedAt(id string, now time.Time) (time.Time, bool) {
+	if in == nil {
+		return time.Time{}, false
+	}
+	return in.ledger.ReceivedAt(id, now)
+}

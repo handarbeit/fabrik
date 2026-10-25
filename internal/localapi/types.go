@@ -543,8 +543,9 @@ type TransportHealth struct {
 	Name string `json:"name"`
 	// State is the transport's own state: "listening", "not listening" or
 	// "signature drift" for the direct transport (the tailscale transport adds
-	// "tailnet disconnected", "funnel unavailable" and, while the Funnel name does
-	// not resolve publicly yet, "listening (not publicly resolvable)", #2425);
+	// "tailnet disconnected" and "funnel unavailable"; both App receivers report
+	// "listening (route unreachable)" while GitHub's delivery log shows the route
+	// failing, #2452);
 	// "starting_up", "healthy" or
 	// "unhealthy" (or "signature drift") for the others.
 	State string `json:"state"`
@@ -560,11 +561,32 @@ type TransportHealth struct {
 	Replay *ReplayHealth `json:"replay,omitempty"`
 	// Tailnet is the embedded node's connection state (the tailscale transport
 	// only: "Running", "NeedsLogin", ...); Funnel is its Funnel status ("ok",
-	// "unavailable", "pending-dns" while the Funnel name does not resolve publicly
-	// yet (#2425), or "unknown" when the status, or the public-DNS probe, could
-	// not be read). Both are unknown for every other transport (#2143).
+	// "unavailable" or "unknown" when the status could not be read). Both are
+	// unknown for every other transport (#2143).
 	Tailnet Known[string] `json:"tailnet"`
 	Funnel  Known[string] `json:"funnel"`
+	// Route is the webhook route liveness from GitHub's own record of delivery
+	// attempts (#2452, ADR 2452): whether GitHub can deliver to the receiver. Nil
+	// (omitted) for transports it does not apply to.
+	Route *RouteLiveness `json:"route,omitempty"`
+}
+
+// Route liveness values.
+const (
+	RouteReachable   = "reachable"
+	RouteUnreachable = "unreachable"
+	RouteUnknown     = "unknown"
+)
+
+// RouteLiveness is whether GitHub can deliver webhooks to the receiver, derived
+// from the App's delivery log and, when that is silent, a probe redelivery.
+type RouteLiveness struct {
+	// Liveness is RouteReachable, RouteUnreachable or RouteUnknown.
+	Liveness string `json:"liveness"`
+	// Reason is GitHub's recorded status text; set only when unreachable.
+	Reason string `json:"reason,omitempty"`
+	// EvaluatedAt is when the value was last decided (unknown before the first).
+	EvaluatedAt Known[time.Time] `json:"evaluated_at"`
 }
 
 // ReplayHealth is the summary of the last delivery replay pass.
