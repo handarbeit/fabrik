@@ -105,8 +105,9 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 	}
 }
 
-// TestWebhookCheckRunCompletion (FR-006): a PR's CI verdict goes from pending to
-// green from the check_run delivery alone, with polls held. The test supplies its own
+// TestWebhookCheckRunCompletion (FR-006): a check run's completion reaches the
+// daemon by check_run delivery with polls held (the apply counter), and the next
+// poll turns the PR's CI verdict from pending to green. The test supplies its own
 // controllable check (a check run it creates and completes as the App), so it does
 // not depend on production CI timing.
 func TestWebhookCheckRunCompletion(t *testing.T) {
@@ -142,8 +143,14 @@ func TestWebhookCheckRunCompletion(t *testing.T) {
 	if _, ok := awaitApplied(env, base, "check_run", webhookApplyWait); !ok {
 		webhookEffectMissing(t, env, "the check_run completion delivery was not applied within %v while polls were held", webhookApplyWait)
 	}
+	// fabrik_status's pr.ci is the verdict the engine records when it evaluates CI
+	// (LinkedPRState.CIVerdict), not one recomputed from the cached runs, so with
+	// polls held it cannot move. The delivery is proven by the apply counter above;
+	// one triggered poll then evaluates CI from the runs the delivery updated (the
+	// documented proxy, ADR 2427-a decision 4, as FR-003 and FR-007 do).
+	TriggerPoll(t)
 	if !awaitCond(webhookApplyWait, func() bool { return ciVerdict() == "green" }) {
-		t.Fatalf("after the check run completed successfully the daemon's CI verdict for %s#%d is %q, want green (polls held): the check_run delivery did not clear the gate", repo, issue, ciVerdict())
+		t.Fatalf("after the check run completed successfully and one poll ran, the daemon's CI verdict for %s#%d is %q, want green: the check_run delivery did not clear the gate", repo, issue, ciVerdict())
 	}
 }
 
