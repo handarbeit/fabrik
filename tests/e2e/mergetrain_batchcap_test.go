@@ -251,7 +251,12 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	// stability, so name the environmental cause rather than blaming selection.
 	for _, l := range lines[:mergeIdx] {
 		for _, n := range nums {
-			if strings.Contains(l, fmt.Sprintf("review-thread finding(s) on Queued member #%d ", n)) ||
+			// The engine's queued-review-settle wording (engine/queued_review_settle.go):
+			// "N unprocessed review finding(s) (threads or review bodies) on Queued
+			// member #M — …" since #1953 counted review bodies; the older
+			// "review-thread finding(s) on Queued member #M" is kept for older beds.
+			if strings.Contains(l, fmt.Sprintf("review finding(s) (threads or review bodies) on Queued member #%d ", n)) ||
+				strings.Contains(l, fmt.Sprintf("review-thread finding(s) on Queued member #%d ", n)) ||
 				strings.Contains(l, fmt.Sprintf("unprocessed human comment(s) on Queued member #%d ", n)) {
 				// A precondition guard (#1973): fires before any A2 assertion, caused by
 				// the bed's reviewer rather than the engine under test. A1 has passed to
