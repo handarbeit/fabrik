@@ -516,3 +516,11 @@ func unionRecentComments(cur, read []gh.Comment, cutoff time.Time) []gh.Comment 
 	out = append(out, read...)
 	return append(out, extra...)
 }
+
+// SetThreadResolveByIdentityDisabledForTest restores the pre-#2444 resolve
+// match: a ReviewThreadResolved drops only comments whose ReviewThreadID equals
+// the thread's, so a comment stored from a webhook (no thread ID) survives. Test
+// seam only, used to show the sim twin is not vacuous.
+func (s *Store) SetThreadResolveByIdentityDisabledForTest(off bool) {
+	s.threadResolveByIdentityOff.Store(off)
+}
