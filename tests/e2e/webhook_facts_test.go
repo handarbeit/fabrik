@@ -42,6 +42,11 @@ func reviewerOutstanding(env *Env, repo string, issue int, reviewer string) (int
 	return 0, false
 }
 
+// threadHydrationGrace is one planned poll interval (60 s) and a margin: long
+// enough for the poll after a webhook-delivered review comment to deep-fetch the
+// item and give the comment its thread ID.
+const threadHydrationGrace = 75 * time.Second
+
 // TestWebhookReviewThreadFacts (FR-005): a review-thread resolution and a review
 // comment edit, each by webhook, reach the daemon with polls held. The thread
 // resolution lowers the reviewer's outstanding findings in the feedback view
@@ -59,6 +64,12 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 	issue, pr := seedInertPRItem(t, env, "webhook-review-thread-"+time.Now().UTC().Format("150405.000"))
 
 	// A review with one unresolved inline thread, free-running so the daemon hydrates it.
+	// The review's body counts as an outstanding finding too (the item is paused, so the
+	// engine never addresses it), so the thread's resolution lowers the count by one
+	// rather than to zero. A comment that arrives by webhook carries no thread ID until
+	// the next deep fetch fills it in (boardcache's pull_request_review_comment delta
+	// invalidates the deep cache for that), so the polls run free for one more poll
+	// interval before the hold: only then can a resolution delivery find the thread.
 	files := FetchPRFilePath(t, env, repo, pr)
 	ref := SubmitPRReviewWithThread(t, env, reviewerToken, repo, pr, files, "e2e webhook finding: please resolve this thread")
 	if !awaitCond(5*time.Minute, func() bool {
@@ -66,6 +77,11 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 		return ok && n >= 1
 	}) {
 		Inconclusive(t, "the daemon never showed an outstanding finding from %s on %s#%d within 5m, so there is no thread to resolve by webhook", reviewer, repo, issue)
+	}
+	time.Sleep(threadHydrationGrace)
+	before, ok := reviewerOutstanding(env, repo, issue, reviewer)
+	if !ok || before < 1 {
+		Inconclusive(t, "the daemon's outstanding count from %s on %s#%d was unreadable or zero after hydration (%d, known=%v)", reviewer, repo, issue, before, ok)
 	}
 
 	HoldPolls(t)
@@ -76,10 +92,10 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 	}
 	if !awaitCond(webhookApplyWait, func() bool {
 		n, ok := reviewerOutstanding(env, repo, issue, reviewer)
-		return ok && n == 0
+		return ok && n == before-1
 	}) {
 		n, _ := reviewerOutstanding(env, repo, issue, reviewer)
-		t.Fatalf("after the thread was resolved the daemon still counts %d outstanding finding(s) from %s on %s#%d (polls held): the resolution did not reach the feedback view", n, reviewer, repo, issue)
+		t.Fatalf("after the thread was resolved the daemon counts %d outstanding finding(s) from %s on %s#%d, want %d (one fewer than before; polls held): the resolution did not reach the feedback view", n, reviewer, repo, issue, before-1)
 	}
 
 	base = mustReadIntake(t, env)
