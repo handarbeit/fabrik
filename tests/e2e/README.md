@@ -327,7 +327,7 @@ claims that cannot be observed literally, is in ADR 2427-a.
 | `TestWebhookRedeliveryAppliedOnce` (FR-008) | a redelivery through `/app/hook/deliveries/{id}/attempts` is rejected as a duplicate (ADR 2351) | `no-dedupe` |
 | `TestWebhookReplayAcrossDowntime` (FR-009) | a delivery that failed while the daemon was down is replayed (#2144), announced once | `no-replay` |
 | `TestWebhookRestartUnderLoad` (FR-011) | labels delivered around a SIGHUP restart are each present and announced once, and the two queued at the signal are announced `actor=human` (applied by the drain, not healed by reconcile) (ADR 2259) | `no-intake-drain` (also holds every apply 10 s so a delivery is queued at the exec) |
-| `TestWebhookTransportHealthAndBrokenRoute` (FR-010) | tailscale health is healthy only with Funnel ok and a delivery received; a broken hook URL shows `tailscale_webhook_config` | `no-hook-config-check` |
+| `TestWebhookTransportHealthAndBrokenRoute` (FR-010) | tailscale health is healthy only while listening with a delivery received and the Funnel not pending (`ok`, or `unknown` on a host whose DNS is intercepted — logged as unverified); a broken hook URL shows `tailscale_webhook_config` | `no-hook-config-check` |
 
 **Side effects to know about.** `TestWebhookTransportHealthAndBrokenRoute` points the
 shared App's webhook URL elsewhere for several minutes; the original URL is recorded in

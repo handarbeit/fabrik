@@ -19,10 +19,14 @@ const brokenHookURL = "https://fabrik-e2e-broken-route.invalid/webhook"
 
 // transportHealthy is the definition of "healthy" this test holds the daemon to
 // (#2143, #2425): the transport is listening, the Funnel name resolves publicly and a
-// delivery has been received.
+// delivery has been received. A Funnel of "unknown" (the public-DNS probe could not
+// get an authoritative answer, ADR 2425: the daemon stays healthy) is accepted too,
+// because a host whose network intercepts outbound DNS can never prove "ok" (the
+// 0.0.90 gate host answers REFUSED for every query to the root servers); the test
+// logs that the public-DNS half went unverified. "pending-dns" still fails.
 func transportHealthy(tr *localapi.TransportHealth) bool {
 	return tr != nil && tr.State == "listening" &&
-		tr.Funnel.Valid && tr.Funnel.V == "ok" &&
+		(!tr.Funnel.Valid || tr.Funnel.V == "ok") &&
 		tr.LastDeliveryAt.Valid
 }
 
@@ -77,6 +81,9 @@ func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
 		return err == nil && transportHealthy(row)
 	}) {
 		webhookEffectMissing(t, env, "the tailscale transport did not report healthy (listening, Funnel ok, a delivery received) within 12m on a leg whose delivery preflight passed: %+v", tr)
+	}
+	if !tr.Funnel.Valid {
+		t.Logf("NOTE: the Funnel's public-DNS probe reports unknown (no authoritative DNS answer from this host), so FR-010's \"resolves publicly\" half is unverified on this run; listening, delivery and the broken-route half are still asserted")
 	}
 	if h, err := bedHealth(env); err == nil && falseHealthy(h) {
 		t.Errorf("fabrik_health reports webhook mode healthy while the transport row is not: %+v", h.Webhook)
