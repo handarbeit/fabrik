@@ -143,6 +143,7 @@ func (e *Engine) attachTransportErr(ctx context.Context, set *transportSet, t in
 	t.SetReconnectHandler(func() {
 		e.requestReconcile()
 		e.replayer.Trigger()
+		e.liveness.Trigger()
 	})
 	bootstrap()
 	if err := t.Start(ctx); err != nil {
@@ -257,6 +258,7 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	driftKey := e.wireAppWebhookWarnings(tr, "direct", "direct App webhook", secretEnvName)
 
 	e.replayer = e.newDeliveryReplayer(tr, "direct")
+	e.liveness = e.newRouteLiveness(tr, "direct", nil, 0)
 
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
 	if err := e.attachTransportErr(ctx, set, tr, sink, bootstrap); err != nil {
@@ -292,6 +294,8 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	// Replay failed deliveries from while the daemon was not receiving (#2144).
 	// Background, after the listener is up: it never delays startup.
 	e.startDeliveryReplay(ctx, e.replayer)
+	// Webhook route liveness from GitHub's delivery log (#2452).
+	e.startRouteLiveness(ctx, e.liveness)
 }
 
 // wireAppWebhookWarnings installs the signature-drift handler the two App
