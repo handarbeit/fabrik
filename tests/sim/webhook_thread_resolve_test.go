@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/tests/sim/simgh"
 )
@@ -184,6 +185,114 @@ func TestWebhookCommentEditDelete_SeenWithoutRefetch(t *testing.T) {
 		if c.DatabaseID == dbID {
 			t.Fatalf("deleted comment still cached: %+v", c)
 		}
+	}
+	if got := readCalls(env) - before; got != 0 {
+		t.Fatalf("the deliveries made %d GitHub reads, want 0", got)
+	}
+}
+
+// webhookThreadEnv returns an Env whose paused item has a linked PR in the Store
+// and NO review thread yet, plus the sim comment seeded afterwards. Nothing
+// polls after the seed, so the Store learns of the comment only from a delivery.
+func webhookThreadEnv(t *testing.T) (env *Env, issue, pr int, thread string, dbID int) {
+	t.Helper()
+	env = NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
+	issue = FileIssue(t, env, "thread resolve by webhook", "body", "Specify", "fabrik:paused", "fabrik:awaiting-input")
+	branch := fmt.Sprintf("fabrik/issue-%d", issue)
+	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, branch, "", map[string]string{"a.txt": "one\n"}, "sim: thread resolve")
+	env.Sim.Sim().SeedPR(env.OwnerRepo, simgh.PRSeed{Title: "thread resolve", Head: branch, IssueNumber: issue})
+	linked, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, issue)
+	if err != nil || linked == nil || linked.Number == 0 {
+		t.Fatalf("expected a linked PR, got %+v (err %v)", linked, err)
+	}
+	pr = linked.Number
+	for i := 0; i < 12; i++ {
+		RunPolls(t, env, 1)
+		if st, ok := env.Engine.StoreItemForTest(env.OwnerRepo, issue); ok && st.LinkedPR != nil && st.LinkedPR.Number == pr {
+			break
+		}
+	}
+	if st, ok := env.Engine.StoreItemForTest(env.OwnerRepo, issue); !ok || st.LinkedPR == nil {
+		t.Fatalf("the linked PR never reached the Store")
+	}
+	env.Sim.Sim().SeedReviewThreadComment(env.OwnerRepo, pr, "reviewer", "please rename this", "a.txt", 1)
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	// Read the sim's identifiers straight from the sim, not through the engine.
+	st0, _ := env.Engine.StoreItemForTest(env.OwnerRepo, issue)
+	probe := &gh.ProjectItem{ItemID: st0.ItemID, Repo: env.OwnerRepo, Number: issue, LinkedPRNumber: pr}
+	if err := env.Sim.Sim().FetchItemDetails(probe); err != nil || len(probe.LinkedPRReviewThreadComments) != 1 {
+		t.Fatalf("probing the sim thread: err=%v comments=%+v", err, probe.LinkedPRReviewThreadComments)
+	}
+	c := probe.LinkedPRReviewThreadComments[0]
+	return env, issue, pr, c.ReviewThreadID, c.DatabaseID
+}
+
+// threadCommentCreated is a pull_request_review_comment "created" delivery for
+// the sim's comment (DERIVED: built here, the sim has no webhook transport). It
+// carries no thread ID, exactly as GitHub's does not.
+func threadCommentCreated(env *Env, pr, dbID int) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"action": "created",
+		"comment": map[string]any{
+			"node_id": fmt.Sprintf("comment:%d", dbID), "id": dbID, "body": "please rename this",
+			"created_at": iso(time.Now()), "path": "a.txt", "line": 1,
+			"user": map[string]any{"login": "reviewer"},
+		},
+		"pull_request": map[string]any{"number": pr},
+		"repository":   map[string]any{"full_name": env.OwnerRepo},
+	})
+	return b
+}
+
+// #2444 (ADR 2444): a thread comment that reached the Store by webhook has no
+// thread ID, so the thread's resolution must find it by the identities the
+// delivery lists, before any deep fetch.
+func TestWebhookThreadResolve_WebhookAddedCommentIsDropped(t *testing.T) {
+	t.Parallel()
+	env, issue, pr, thread, dbID := webhookThreadEnv(t)
+	runThreadResolveByWebhook(t, env, issue, pr, thread, dbID, true)
+}
+
+// Non-vacuity: with identity matching neutralised the same sequence leaves the
+// resolved thread's comment in the Store.
+func TestWebhookThreadResolve_WebhookAddedCommentSurvivesWithoutTheFix(t *testing.T) {
+	t.Parallel()
+	env, issue, pr, thread, dbID := webhookThreadEnv(t)
+	env.Engine.SetThreadResolveByIdentityDisabledForTest(true)
+	runThreadResolveByWebhook(t, env, issue, pr, thread, dbID, false)
+}
+
+func runThreadResolveByWebhook(t *testing.T, env *Env, issue, pr int, thread string, dbID int, wantDropped bool) {
+	t.Helper()
+	before := readCalls(env)
+	env.BoardCache.ApplyDelta("pull_request_review_comment", threadCommentCreated(env, pr, dbID))
+	st, _ := env.Engine.StoreItemForTest(env.OwnerRepo, issue)
+	if len(st.LinkedPR.ThreadComments) != 1 || st.LinkedPR.ThreadComments[0].ReviewThreadID != "" {
+		t.Fatalf("the created delivery should store one thread-less comment, got %+v", st.LinkedPR.ThreadComments)
+	}
+	if err := env.Sim.Sim().ResolveReviewThread(thread); err != nil {
+		t.Fatalf("resolve on GitHub: %v", err)
+	}
+	env.BoardCache.ApplyDelta("pull_request_review_thread", capturedDelivery(t, "pull_request_review_thread_resolved", func(d map[string]any) {
+		th := d["thread"].(map[string]any)
+		th["node_id"] = thread
+		cm := th["comments"].([]any)[0].(map[string]any)
+		cm["node_id"] = fmt.Sprintf("comment:%d", dbID)
+		cm["id"] = dbID
+		d["pull_request"].(map[string]any)["number"] = pr
+		d["repository"].(map[string]any)["full_name"] = env.OwnerRepo
+		d["updated_at"] = iso(time.Now().Add(time.Second))
+	}))
+	st, _ = env.Engine.StoreItemForTest(env.OwnerRepo, issue)
+	if wantDropped {
+		if len(st.LinkedPR.ThreadComments) != 0 || st.LinkedPR.ResolvedThreadCount != 1 {
+			t.Fatalf("resolved thread's webhook-added comment still cached: comments=%+v resolved=%d",
+				st.LinkedPR.ThreadComments, st.LinkedPR.ResolvedThreadCount)
+		}
+	} else if len(st.LinkedPR.ThreadComments) != 1 {
+		t.Fatalf("neutralised run should leave the comment (non-vacuity), got %+v", st.LinkedPR.ThreadComments)
 	}
 	if got := readCalls(env) - before; got != 0 {
 		t.Fatalf("the deliveries made %d GitHub reads, want 0", got)
