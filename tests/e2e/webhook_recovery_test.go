@@ -106,6 +106,13 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 	if !awaitIntakeQuiet(env, 12*time.Second, 2*time.Minute) {
 		Inconclusive(t, "the daemon's intake never went quiet after the scratch labels were created, so the deliveries this test counts cannot be told from stragglers")
 	}
+	// Polls are held from before these two land until the restart, so each label
+	// reaches the Store from its own delivery (attributed to its sender) or, when
+	// the drain is neutralised, from reconcile after the exec. With polls running,
+	// the first label's delivery wakes a poll whose listing can carry the second
+	// label before its own delivery is applied, and a listing-applied label has no
+	// sender (actor unknown, ADR 2125) — the 0.0.90 gate's failure, not a drain fault.
+	HoldPolls(t)
 	base := mustReadIntake(t, env)
 	for _, l := range labels[:before] {
 		AddLabel(t, env, repo, issue, l)
@@ -116,6 +123,9 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 	}) {
 		webhookEffectMissing(t, env, "the daemon did not accept the %d label deliveries made before the restart within %v (intake counters before %+v)", before, webhookApplyWait, base)
 	}
+	// The hold stays on through the SIGHUP: the restarted process starts released
+	// and clears the request (ADR 1978), so the ReleasePolls below is a no-op unless
+	// the restart failed.
 	signalled := time.Now()
 	signalBed(t, env, syscall.SIGHUP)
 	for _, l := range labels[before:] {
@@ -129,6 +139,7 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 			t.Fatalf("the bed daemon did not restart after SIGHUP within 8m")
 		}
 	}
+	ReleasePolls(t)
 
 	for _, l := range labels {
 		if !awaitDaemonLabel(env, repo, issue, l, true, replayWait) {
