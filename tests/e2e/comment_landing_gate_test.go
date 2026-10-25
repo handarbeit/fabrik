@@ -3,11 +3,16 @@
 package e2e
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 // TestCommentLandingGateHolds is the live-e2e proof of the #1862 landing gate
@@ -84,8 +89,18 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	SubmitPRReview(t, env, reviewerToken, repo, pr, "APPROVE")
 	WaitForIssueLabel(t, env, repo, issue, "stage:Validate:complete", 60*time.Minute)
 
-	// Hide the item from the engine, then make it a landing candidate.
+	// Hide the item from the engine, then make it a landing candidate. The yolo
+	// label goes on only once the daemon itself no longer holds the item at
+	// Validate, plus one poll's grace for a poll that read the board before the
+	// clear: a webhook bed ignores a Status-clear delivery and leaves it to the
+	// next reconcile (#2383), so without this wait a running poll still sees the
+	// item at Validate with yolo and advances it before the comment exists (0.0.90
+	// gate, app/on/webhook: three inconclusive attempts).
 	clearIssueStatus(t, env, itemID)
+	if !awaitDaemonOffColumn(env, repo, issue, "Validate", 10*time.Minute) {
+		Inconclusive(t, "the daemon still held %s#%d at Validate 10m after its Status was cleared, so the item cannot be hidden from the landing decision", repo, issue)
+	}
+	time.Sleep(hiddenItemPollGrace)
 	AddLabel(t, env, repo, issue, "fabrik:yolo")
 	t.Logf("Validate complete on %s#%d; Status cleared and fabrik:yolo applied", repo, issue)
 
@@ -213,4 +228,34 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	}
 	AssertLabelWasNeverApplied(t, env, repo, issue, "fabrik:paused")
 	t.Logf("TestCommentLandingGateHolds passed (train mode %s): held until 🚀, then landed (closed %s)", trainMode, closedAt.Format(time.RFC3339))
+}
+
+// hiddenItemPollGrace is how long TestCommentLandingGateHolds waits after the
+// daemon stops holding the item at Validate: one planned poll interval (60 s) and
+// a margin, so a poll that read the board before the clear has finished.
+const hiddenItemPollGrace = 75 * time.Second
+
+// awaitDaemonOffColumn polls the bed daemon's local API until it no longer holds
+// the issue in column (no column at all, or another one), or timeout expires. A
+// failed read is retried, never taken as "off the column"; a not-found answer
+// (the daemon dropped the item) counts as off it.
+func awaitDaemonOffColumn(env *Env, repo string, issue int, column string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var res localapi.StatusResult
+		err := localapi.Call(ctx, localapi.SocketPath(env.FabrikTestDir), localapi.MethodStatus,
+			localapi.StatusParams{Issue: fmt.Sprintf("%s#%d", repo, issue)}, &res)
+		cancel()
+		if err == nil && (!res.Place.Status.Valid || strings.TrimSpace(res.Place.Status.V) != column) {
+			return true
+		}
+		// An item the daemon no longer caches is off every column too.
+		var apiErr *localapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == localapi.CodeNotFound {
+			return true
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return false
 }
