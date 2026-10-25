@@ -32,6 +32,14 @@ type channelTestSettings struct {
 	settleCauseOff     atomic.Bool
 	situationDedupOff  atomic.Bool
 	reviewReinvokeOff  atomic.Bool
+
+	// #2450: finalFlushOff skips the publish-on-stop of the queued events,
+	// liveLabelDedupOff skips the pending-prior adjustment and same-call dedup of
+	// live label deltas, consumerParked makes the consumer skip its drain on
+	// wake/timer/tick (it still honours stop).
+	finalFlushOff     atomic.Bool
+	liveLabelDedupOff atomic.Bool
+	consumerParked    atomic.Bool
 }
 
 // Production defaults. Nothing mutates them. The debounce and the ticker are
@@ -95,6 +103,8 @@ func (e *Engine) CopyChannelTestSettingsFrom(old *Engine) {
 	s.settleCauseOff.Store(o.settleCauseOff.Load())
 	s.situationDedupOff.Store(o.situationDedupOff.Load())
 	s.reviewReinvokeOff.Store(o.reviewReinvokeOff.Load())
+	s.finalFlushOff.Store(o.finalFlushOff.Load())
+	s.liveLabelDedupOff.Store(o.liveLabelDedupOff.Load())
 }
 
 // idle reports whether the consumer has nothing left to do: no queued events,

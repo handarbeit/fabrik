@@ -168,3 +168,34 @@ func (e *Engine) SetSituationDedupDisabledForTest() (restore func()) {
 	e.chanTest.situationDedupOff.Store(true)
 	return func() { e.chanTest.situationDedupOff.Store(false) }
 }
+
+// Seams for #2450 (announce-once across a SIGHUP restart). The first two are
+// neutralisations: they show the twin's positive assertions fail without the
+// fix. The third parks the consumer so a change is deterministically "queued
+// after the last drain".
+
+// SetFinalChannelFlushDisabledForTest stops the consumer publishing its queued
+// events when it is stopped (the pre-#2450 behaviour) and returns the restore
+// function.
+func (e *Engine) SetFinalChannelFlushDisabledForTest() (restore func()) {
+	e.chanTest.finalFlushOff.Store(true)
+	return func() { e.chanTest.finalFlushOff.Store(false) }
+}
+
+// SetLiveLabelDeltaDedupDisabledForTest turns off the adjustment of a pending
+// restart prior by live label deltas (the pre-#2450 behaviour) and returns the
+// restore function.
+func (e *Engine) SetLiveLabelDeltaDedupDisabledForTest() (restore func()) {
+	e.chanTest.liveLabelDedupOff.Store(true)
+	return func() { e.chanTest.liveLabelDedupOff.Store(false) }
+}
+
+// SetChannelConsumerParkedForTest parks or releases the channel consumer: while
+// parked it does not drain on a wake, timer or tick, but still stops. Changes
+// applied meanwhile stay queued.
+func (e *Engine) SetChannelConsumerParkedForTest(parked bool) {
+	e.chanTest.consumerParked.Store(parked)
+	if ce := e.channelEvents(); ce != nil {
+		ce.signal()
+	}
+}
