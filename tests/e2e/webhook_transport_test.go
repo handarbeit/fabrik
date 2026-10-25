@@ -17,16 +17,19 @@ const tailscaleHookWarning = "tailscale_webhook_config:url"
 // brokenHookURL can never reach the bed: .invalid is reserved and never resolves.
 const brokenHookURL = "https://fabrik-e2e-broken-route.invalid/webhook"
 
+// routeIs reports whether the transport row carries route liveness want
+// (#2452): GitHub's own record of delivery to the receiver.
+func routeIs(tr *localapi.TransportHealth, want string) bool {
+	return tr != nil && tr.Route != nil && tr.Route.Liveness == want
+}
+
 // transportHealthy is the definition of "healthy" this test holds the daemon to
-// (#2143, #2425): the transport is listening, the Funnel name resolves publicly and a
-// delivery has been received. A Funnel of "unknown" (the public-DNS probe could not
-// get an authoritative answer, ADR 2425: the daemon stays healthy) is accepted too,
-// because a host whose network intercepts outbound DNS can never prove "ok" (the
-// 0.0.90 gate host answers REFUSED for every query to the root servers); the test
-// logs that the public-DNS half went unverified. "pending-dns" still fails.
+// (#2143, #2452): the transport is listening, GitHub's delivery log (or a probe
+// redelivery) shows the route reachable, and a delivery has been received. There
+// is no DNS half: a host whose network intercepts outbound DNS still proves
+// "reachable" the same way, and "unknown" is not accepted.
 func transportHealthy(tr *localapi.TransportHealth) bool {
-	return tr != nil && tr.State == "listening" &&
-		(!tr.Funnel.Valid || tr.Funnel.V == "ok") &&
+	return tr != nil && tr.State == "listening" && routeIs(tr, localapi.RouteReachable) &&
 		tr.LastDeliveryAt.Valid
 }
 
@@ -37,15 +40,16 @@ func falseHealthy(h *localapi.HealthResult) bool {
 		return false
 	}
 	tr := h.Webhook.Transports[0]
-	return tr.State != "listening" || (tr.Funnel.Valid && tr.Funnel.V != "ok")
+	return tr.State != "listening" || routeIs(&tr, localapi.RouteUnreachable)
 }
 
-// TestWebhookTransportHealthAndBrokenRoute (FR-010): fabrik_health reports the
-// tailscale transport healthy only once the Funnel name resolves publicly and a
-// delivery has been received. With the App's hook URL deliberately pointed elsewhere
+// TestWebhookTransportHealthAndBrokenRoute (FR-010, #2452): fabrik_health reports
+// the tailscale transport healthy only once its route liveness is reachable
+// (asserted, not tolerated as unknown) and a delivery has been received. With the App's hook URL deliberately pointed elsewhere
 // (restored in cleanup, with a durable marker so a killed run is repaired by the next
-// webhook test) the daemon shows the tailscale_webhook_config warning, receives no
-// further delivery, and never reports a false healthy; after the restore the warning
+// webhook test) the daemon shows the tailscale_webhook_config warning, reports the
+// route unreachable with GitHub's reason, receives no further delivery, and never
+// reports a false healthy; after the restore the warning
 // clears and deliveries resume. The warning has no local API surface, so that half
 // reads the bed's warnings panel file (a documented exception, ADR 2427-a).
 func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
@@ -80,10 +84,7 @@ func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
 		tr = row
 		return err == nil && transportHealthy(row)
 	}) {
-		webhookEffectMissing(t, env, "the tailscale transport did not report healthy (listening, Funnel ok, a delivery received) within 12m on a leg whose delivery preflight passed: %+v", tr)
-	}
-	if !tr.Funnel.Valid {
-		t.Logf("NOTE: the Funnel's public-DNS probe reports unknown (no authoritative DNS answer from this host), so FR-010's \"resolves publicly\" half is unverified on this run; listening, delivery and the broken-route half are still asserted")
+		webhookEffectMissing(t, env, "the tailscale transport did not report healthy (listening, route reachable, a delivery received) within 12m on a leg whose delivery preflight passed: %+v route=%+v", tr, tr.Route)
 	}
 	if h, err := bedHealth(env); err == nil && falseHealthy(h) {
 		t.Errorf("fabrik_health reports webhook mode healthy while the transport row is not: %+v", h.Webhook)
@@ -100,7 +101,19 @@ func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
 		t.Fatalf("with the App's webhook URL pointed elsewhere the daemon never raised the %s warning within 10m", tailscaleHookWarning)
 	}
 	probe("e2e-webhook-health-2")
-	time.Sleep(60 * time.Second)
+	// GitHub's delivery log shows the failing attempts (the label delivery above and
+	// the daemon's own probe redelivery), so the route turns unreachable with
+	// GitHub's reason; this is the broken-route half of #2452.
+	var broken *localapi.TransportHealth
+	if !awaitCond(15*time.Minute, func() bool {
+		row, err := healthTransport(env)
+		broken = row
+		return err == nil && routeIs(row, localapi.RouteUnreachable) && row.Route.Reason != ""
+	}) {
+		t.Fatalf("with the App's webhook URL pointed elsewhere the route never became unreachable with a reason within 15m: %+v", broken)
+	}
+	t.Logf("route unreachable, GitHub's reason: %q", broken.Route.Reason)
+	time.Sleep(30 * time.Second)
 	h, err := bedHealth(env)
 	if err != nil {
 		t.Fatalf("reading fabrik_health with the route broken: %v", err)
@@ -125,7 +138,7 @@ func TestWebhookTransportHealthAndBrokenRoute(t *testing.T) {
 	probe("e2e-webhook-health-3")
 	if !awaitCond(5*time.Minute, func() bool {
 		row, err := healthTransport(env)
-		return err == nil && row.LastDeliveryAt.Valid && row.LastDeliveryAt.V.After(lastDelivery)
+		return err == nil && row.LastDeliveryAt.Valid && row.LastDeliveryAt.V.After(lastDelivery) && routeIs(row, localapi.RouteReachable)
 	}) {
 		webhookEffectMissing(t, env, "no delivery arrived within 5m of restoring the App's webhook URL")
 	}
