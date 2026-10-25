@@ -80,8 +80,9 @@ func startIngestion(t *testing.T, eng *Engine, cache *boardcache.CacheImpl) func
 	return eng.setUpIngestion(ctx, cache)
 }
 
-// Registered first via the helpers, so a test that builds a replayer directly
-// (newDeliveryReplayer) tracks it explicitly.
+// trackReplayer guards a replayer a test builds directly (not through an
+// Engine start path, so replayBuilt never sees it). Register it before the
+// cleanup that cancels the replayer's context.
 func trackReplayer(t *testing.T, r *deliveryReplayer) {
 	t.Helper()
 	g := &replayGuard{}
