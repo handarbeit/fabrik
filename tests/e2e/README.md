@@ -322,7 +322,7 @@ claims that cannot be observed literally, is in ADR 2427-a.
 | `TestWebhookCommentWakesItem` (FR-003) | a human comment is delivered with polls held and admits the paused item | `drop-event:issue_comment` |
 | `TestWebhookEngineEchoMatched` (FR-004) | an engine label write's echo is matched (no `unknown`/`human` event, one event) | `no-echo` |
 | `TestWebhookReviewThreadFacts` (FR-005) | thread resolution lowers outstanding findings; a review-comment edit is applied (ADR 2352) | `drop-event:pull_request_review_thread` (and `…_review_comment`) |
-| `TestWebhookCheckRunCompletion` (FR-006) | a `check_run` completion is applied with polls held, and the next poll turns the CI verdict green | `drop-event:check_run` |
+| `TestWebhookCheckRunCompletion` (FR-006) | a `check_run` completion is applied with polls held; with polls running again the CI verdict turns green | `drop-event:check_run` |
 | `TestWebhookDependencyRemovalWakes` (FR-007) | removing a `blockedBy` edge is delivered as `issue_dependencies` and unblocks the item (ADR 1995) | `drop-event:issue_dependencies` |
 | `TestWebhookRedeliveryAppliedOnce` (FR-008) | a redelivery through `/app/hook/deliveries/{id}/attempts` is rejected as a duplicate (ADR 2351) | `no-dedupe` |
 | `TestWebhookReplayAcrossDowntime` (FR-009) | a delivery that failed while the daemon was down is replayed (#2144), announced once | `no-replay` |
