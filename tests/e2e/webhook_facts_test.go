@@ -42,6 +42,12 @@ func reviewerOutstanding(env *Env, repo string, issue int, reviewer string) (int
 	return 0, false
 }
 
+// verdictRotationWait bounds how long TestWebhookCheckRunCompletion waits, polls
+// running, for the CI verdict to be refreshed: the refresher rotates through the
+// board's open items with linked PRs eight a poll (60 s), so a bed board of a few
+// dozen such items needs several polls.
+const verdictRotationWait = 8 * time.Minute
+
 // threadHydrationGrace is one planned poll interval (60 s) and a margin: long
 // enough for the poll after a webhook-delivered review comment to deep-fetch the
 // item and give the comment its thread ID.
@@ -106,8 +112,8 @@ func TestWebhookReviewThreadFacts(t *testing.T) {
 }
 
 // TestWebhookCheckRunCompletion (FR-006): a check run's completion reaches the
-// daemon by check_run delivery with polls held (the apply counter), and the next
-// poll turns the PR's CI verdict from pending to green. The test supplies its own
+// daemon by check_run delivery with polls held (the apply counter), and with polls
+// running again the PR's CI verdict goes from pending to green. The test supplies its own
 // controllable check (a check run it creates and completes as the App), so it does
 // not depend on production CI timing.
 func TestWebhookCheckRunCompletion(t *testing.T) {
@@ -143,14 +149,16 @@ func TestWebhookCheckRunCompletion(t *testing.T) {
 	if _, ok := awaitApplied(env, base, "check_run", webhookApplyWait); !ok {
 		webhookEffectMissing(t, env, "the check_run completion delivery was not applied within %v while polls were held", webhookApplyWait)
 	}
-	// fabrik_status's pr.ci is the verdict the engine records when it evaluates CI
-	// (LinkedPRState.CIVerdict), not one recomputed from the cached runs, so with
-	// polls held it cannot move. The delivery is proven by the apply counter above;
-	// one triggered poll then evaluates CI from the runs the delivery updated (the
-	// documented proxy, ADR 2427-a decision 4, as FR-003 and FR-007 do).
-	TriggerPoll(t)
-	if !awaitCond(webhookApplyWait, func() bool { return ciVerdict() == "green" }) {
-		t.Fatalf("after the check run completed successfully and one poll ran, the daemon's CI verdict for %s#%d is %q, want green: the check_run delivery did not clear the gate", repo, issue, ciVerdict())
+	// fabrik_status's pr.ci is the verdict the poll-side refresher records
+	// (settlePRFacts -> LinkedPRState.CIVerdict), not one recomputed from the cached
+	// runs, so with polls held it cannot move; the refresher also checks at most
+	// prFactsCheckBudgetPerPoll items a poll, least recently checked first, so on a
+	// busy bed board one poll may not reach this item. The delivery — this test's
+	// subject — is proven by the apply counter above, under the hold. The verdict
+	// is then a bounded sanity check with free-running polls (ADR 2427-a decision 4).
+	ReleasePolls(t)
+	if !awaitCond(verdictRotationWait, func() bool { return ciVerdict() == "green" }) {
+		t.Fatalf("the check_run completion was applied, but %v of free-running polls later the daemon's CI verdict for %s#%d is still %q, want green", verdictRotationWait, repo, issue, ciVerdict())
 	}
 }
 
