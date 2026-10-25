@@ -78,6 +78,10 @@ type channelEvents struct {
 
 	mu    sync.Mutex
 	queue []channelevents.Event
+	// pubMu serialises taking the queue and publishing it, so the consumer's drain
+	// and the final flush (flushQueue, from stop and from the self-upgrade exec)
+	// publish in queue order (#2450). Lock order: pubMu, then mu.
+	pubMu sync.Mutex
 	dirty map[string]*dirtyItem
 	// settleCand holds items whose Validate stage reached the engine's own
 	// "gates clear" point (runCatchUpPhase2) since the last drain.
@@ -212,6 +216,7 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 // leaves this process running. Safe with no hub, and idempotent.
 func (e *Engine) flushChannelEvents() {
 	if ce := e.channelEvents(); ce != nil {
+		ce.flushQueue()
 		ce.spillWarm()
 		ce.ledger.Flush()
 		ce.hub.Flush()
@@ -383,6 +388,16 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	// (#2169). Its column and closed deltas replace the live column-changed and
 	// closed for this change, which would otherwise report the same move again.
 	dtEvs, dtColumn, dtClosed := ce.downtimeCheck(key, &st)
+	// A label this change added or removed is announced once (#2450): a delta the
+	// diff just emitted for it replaces the live event, and one announced live
+	// while the item's labels are still unknown is folded into the pending prior,
+	// so the later diff does not announce it again.
+	dtLabels := downtimeLabelSet(dtEvs)
+	dedup := !ce.e.chanTest.liveLabelDedupOff.Load()
+	var skipLabels map[string]bool
+	if dedup {
+		skipLabels = ce.noteLiveLabelDeltas(key, c.LabelDeltas, dtLabels)
+	}
 	ce.observeLedger(key, &st)
 	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
 	diverged := len(evs) // events from here on are built from the suspect change
@@ -399,6 +414,9 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 			ce.ledger.MarkRevalidated(key)
 		}
 		ce.noteAutonomyWrite(key, d, ce.e.labelAttribute(c))
+		if skipLabels[labelDeltaKey(d)] {
+			continue // announced already (by the diff just built, or before the restart)
+		}
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"
@@ -466,8 +484,14 @@ func (ce *channelEvents) run() {
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 	for {
-		ce.safely("drain", ce.drain)
+		parked := ce.e.chanTest.consumerParked.Load()
+		if !parked {
+			ce.safely("drain", ce.drain)
+		}
 		wait := ce.nextDue()
+		if parked {
+			wait = time.Hour
+		}
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -477,11 +501,19 @@ func (ce *channelEvents) run() {
 		timer.Reset(wait)
 		select {
 		case <-ce.stop:
+			// A change observed (and recorded in the restart ledger) since the last
+			// drain must reach the hub before the process goes: the new process
+			// diffs against the ledger and would otherwise find nothing (#2450).
+			if !ce.e.chanTest.finalFlushOff.Load() {
+				ce.safely("final flush", ce.flushQueue)
+			}
 			return
 		case <-ce.wake:
 		case <-timer.C:
 		case <-tick.C:
-			ce.safely("tick", ce.onTick)
+			if !ce.e.chanTest.consumerParked.Load() {
+				ce.safely("tick", ce.onTick)
+			}
 		case <-prune.C:
 			ce.hub.Prune(ce.e.now())
 			ce.pruneLifecycle()
@@ -517,9 +549,38 @@ func (ce *channelEvents) nextDue() time.Duration {
 	return wait
 }
 
+// flushQueue publishes the events queued so far, and nothing else: no readiness
+// pass, no re-evaluation, no catch-up, because a process that is going away must
+// not start new work. Events held for an item with an unpublished downtime delta
+// stay held (holdWarm) and reach the hub through spillWarm. Safe from any
+// goroutine; ordered against drain by pubMu (#2450).
+func (ce *channelEvents) flushQueue() {
+	ce.pubMu.Lock()
+	defer ce.pubMu.Unlock()
+	ce.mu.Lock()
+	q := ce.queue
+	ce.queue = nil
+	ce.mu.Unlock()
+	for _, ev := range q {
+		if ce.holdWarm(ev) {
+			continue
+		}
+		ce.hub.Publish(finishEvent(ev))
+	}
+}
+
 // drain publishes queued events in order, then evaluates every item whose
 // debounce has elapsed.
 func (ce *channelEvents) drain() {
+	ce.pubMu.Lock()
+	published := false
+	unlockPub := func() {
+		if !published {
+			published = true
+			ce.pubMu.Unlock()
+		}
+	}
+	defer unlockPub()
 	ce.mu.Lock()
 	ce.busy = true
 	defer func() {
@@ -550,6 +611,7 @@ func (ce *channelEvents) drain() {
 		}
 		ce.hub.Publish(finishEvent(ev))
 	}
+	unlockPub()
 	ce.checkReady()
 	for _, k := range due {
 		ce.evaluateItem(k, flags[k])

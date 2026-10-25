@@ -908,7 +908,7 @@
       "name": "TestWebhookRestartUnderLoad",
       "parity": "live-only",
       "live_only_reason": "other",
-      "note": "a SIGHUP restart (ADR 2259) with real deliveries arriving; the sim has no transport layer or real exec",
+      "note": "a SIGHUP restart (ADR 2259) with real deliveries arriving; the sim has no transport layer or real exec. The exactly-once announcement count across the restart tail has a sim twin: tests/sim/channel_sighup_restart_test.go (ADR 2450)",
       "skip_ok_legs": [
         "pat/*",
         "*/*/poll"

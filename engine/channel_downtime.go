@@ -148,6 +148,78 @@ func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs
 	return evs, column, closed
 }
 
+// labelDeltaKey identifies one label change: the label and its direction.
+func labelDeltaKey(d itemstate.LabelDelta) string {
+	if d.Added {
+		return "+" + d.Label
+	}
+	return "-" + d.Label
+}
+
+// downtimeLabelSet lists the label changes among evs (downtime deltas just built
+// by downtimeCheck).
+func downtimeLabelSet(evs []channelevents.Event) map[string]bool {
+	var out map[string]bool
+	for _, ev := range evs {
+		if ev.Type != channelevents.LabelApplied && ev.Type != channelevents.LabelRemoved {
+			continue
+		}
+		if out == nil {
+			out = map[string]bool{}
+		}
+		out[labelDeltaKey(itemstate.LabelDelta{Label: ev.Label, Added: ev.Type == channelevents.LabelApplied})] = true
+	}
+	return out
+}
+
+// noteLiveLabelDeltas applies label changes seen live to the item's pending prior
+// and returns the ones the live path must not announce (#2450). An item whose
+// labels are not known yet still receives webhook label events, which are
+// announced at once; its prior's label diff runs only when a listing or deep fetch
+// makes the labels known, and would announce the same change a second time as a
+// downtime delta. Applying each live change to the prior, in order, leaves that
+// diff with only what was not announced, so an add, remove and re-add nets out per
+// change, not per label name. A change that leaves the prior as it was (a replayed
+// delivery of a change the previous process had already recorded) is returned too:
+// the previous process announced it, and the diff will report any net difference.
+// covered holds the changes downtimeCheck has just announced itself; they are
+// returned as skipped and not applied again.
+func (ce *channelEvents) noteLiveLabelDeltas(key string, deltas []itemstate.LabelDelta, covered map[string]bool) map[string]bool {
+	skip := map[string]bool{}
+	for k := range covered {
+		skip[k] = true
+	}
+	if len(deltas) == 0 {
+		return skip
+	}
+	ce.dmu.Lock()
+	defer ce.dmu.Unlock()
+	p := ce.pend[key]
+	if p == nil || p.labelsDone {
+		return skip
+	}
+	labels := append([]string(nil), p.rec.Labels...)
+	for _, d := range deltas {
+		if covered[labelDeltaKey(d)] || len(channelevents.LedgerLabels([]string{d.Label})) == 0 {
+			continue
+		}
+		i := sort.SearchStrings(labels, d.Label)
+		has := i < len(labels) && labels[i] == d.Label
+		switch {
+		case d.Added && !has:
+			labels = append(labels, "")
+			copy(labels[i+1:], labels[i:])
+			labels[i] = d.Label
+		case !d.Added && has:
+			labels = append(labels[:i], labels[i+1:]...)
+		default:
+			skip[labelDeltaKey(d)] = true
+		}
+	}
+	p.rec.Labels = labels
+	return skip
+}
+
 // diffLabelSets lists the labels added to and removed from before to reach after
 // (both sorted, ledger form).
 func diffLabelSets(before, after []string) []itemstate.LabelDelta {
