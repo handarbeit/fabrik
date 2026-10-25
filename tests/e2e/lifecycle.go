@@ -318,6 +318,10 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		cmd.Env = stripEnv(cmd.Env, k)
 	}
 	cmd.Env = append(cmd.Env, bedevents.Env(bedEventSource())...)
+	// A non-vacuity run (#2427): E2E_NEUTRALISE becomes the engine's test-only
+	// FABRIK_TEST_FAULTS. Stripped first so an ambient value cannot reach a normal leg.
+	cmd.Env = stripEnv(cmd.Env, bedevents.FaultsLaunchVar)
+	cmd.Env = append(cmd.Env, bedevents.FaultsEnv(os.Getenv)...)
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

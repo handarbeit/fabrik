@@ -1175,7 +1175,8 @@ func Execute() error {
 		NoBrowser:                  cfg.NoBrowser,
 		ReplayFailedDeliveries:     cfg.ReplayFailedDeliveries,
 		ReadyCh:                    testReadyCh,
-		PollControlFile:            os.Getenv(pollctl.EnvVar), // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry
+		TestFaults:                 os.Getenv(engine.TestFaultsEnv), // TEST-ONLY (#2427): env only, honoured only on a bed
+		PollControlFile:            os.Getenv(pollctl.EnvVar),       // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry
 	})
 	if err != nil {
 		return err

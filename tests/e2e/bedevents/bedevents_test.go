@@ -100,3 +100,17 @@ func TestResolvePollSecondsOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestFaultsEnv(t *testing.T) {
+	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	if got := FaultsEnv(get(nil)); got != nil {
+		t.Errorf("unset = %v, want none", got)
+	}
+	if got := FaultsEnv(get(map[string]string{NeutraliseVar: "  "})); got != nil {
+		t.Errorf("blank = %v, want none", got)
+	}
+	got := FaultsEnv(get(map[string]string{NeutraliseVar: " no-dedupe,no-echo "}))
+	if len(got) != 1 || got[0] != "FABRIK_TEST_FAULTS=no-dedupe,no-echo" {
+		t.Errorf("got %v", got)
+	}
+}

@@ -65,7 +65,11 @@ func performSighupRestart(e *Engine, locks *instanceLocks) {
 	e.transports.StopAll()
 	// An exec skips deferred cleanup: stop taking deliveries and persist the
 	// dedupe record first (#2351). Bounded, so it cannot extend the SIGHUP drain.
-	e.intake.Close(intakeCloseGrace)
+	closeGrace := intakeCloseGrace
+	if e.faults.active(FaultNoIntakeDrain) {
+		closeGrace = 0 // TEST-ONLY (#2427): lose queued deliveries to the exec
+	}
+	e.intake.Close(closeGrace)
 	// An exec never runs deferred cleanup: close the local API (unlinking its
 	// socket) first. The next process also replaces a stale socket at startup.
 	e.closeLocalAPI()

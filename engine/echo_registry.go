@@ -43,6 +43,12 @@ type echoRegistry struct {
 	// their registration times. Set once before the sweep starts.
 	missFn func(registeredAt []time.Time)
 
+	// onMatch is called once per inbound delivery matched as an engine write's
+	// echo (#2427 intake counters). Set once before deliveries arrive.
+	onMatch func()
+	// disabled makes every match miss (TEST-ONLY fault no-echo, #2427).
+	disabled bool
+
 	// nowFn is the clock; time.Now unless a test overrides it.
 	nowFn func() time.Time
 }
@@ -204,11 +210,17 @@ func (r *echoRegistry) MatchEchoVia(eventType, action, key string) (bool, string
 	if r == nil {
 		return false, ""
 	}
+	if r.disabled {
+		return false, ""
+	}
 	k := echoKey(eventType, action, key)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.pending[k]
 	delete(r.pending, k)
+	if ok && r.onMatch != nil {
+		r.onMatch()
+	}
 	return ok, e.via
 }
 

@@ -172,12 +172,28 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 // need them (cursor pagination via the Link header). On an error response the
 // returned headers are nil.
 func appDo(method, baseURL, path, jwt string, result interface{}) (http.Header, error) {
+	return appDoBody(method, baseURL, path, jwt, nil, result)
+}
+
+// appDoBody is appDo with an optional JSON request body (nil = none).
+func appDoBody(method, baseURL, path, jwt string, reqBody interface{}, result interface{}) (http.Header, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	req, err := http.NewRequest(method, baseURL+path, nil)
+	var bodyReader io.Reader
+	if reqBody != nil {
+		b, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("encoding request: %w", err)
+		}
+		bodyReader = strings.NewReader(string(b))
+	}
+	req, err := http.NewRequest(method, baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -535,4 +551,44 @@ func FetchAppHookConfig(baseURL, jwt string) (AppHookConfig, error) {
 		return AppHookConfig{}, err
 	}
 	return cfg, nil
+}
+
+// UpdateAppHookConfig changes the App's webhook URL via PATCH /app/hook/config
+// with the App's JWT (#2427). Only the url is sent: the secret, content type and
+// TLS setting are left as they are, and the response (which carries the secret)
+// is decoded into AppHookConfig, which has no secret field. The live webhook
+// e2e transport-health test uses it to point the hook elsewhere and restore it.
+func UpdateAppHookConfig(baseURL, jwt, hookURL string) (AppHookConfig, error) {
+	var cfg AppHookConfig
+	body := map[string]string{"url": hookURL}
+	if _, err := appDoBody("PATCH", baseURL, "/app/hook/config", jwt, body, &cfg); err != nil {
+		return AppHookConfig{}, fmt.Errorf("updating app webhook config: %w", err)
+	}
+	return cfg, nil
+}
+
+// AppHookDeliveryDetail is one delivery of the App's delivery log with the
+// payload GitHub sent, as returned by GET /app/hook/deliveries/{id} (#2427).
+type AppHookDeliveryDetail struct {
+	AppHookDelivery
+	// Payload is the delivered JSON body; the request headers (which can carry
+	// the signature) are deliberately not decoded.
+	Payload json.RawMessage `json:"-"`
+}
+
+// FetchAppHookDelivery reads one delivery of the App's delivery log, payload
+// included, so a caller can identify its own delivery by content rather than by
+// position in the log.
+func FetchAppHookDelivery(baseURL, jwt string, deliveryID int64) (AppHookDeliveryDetail, error) {
+	var raw struct {
+		AppHookDelivery
+		Request struct {
+			Payload json.RawMessage `json:"payload"`
+		} `json:"request"`
+	}
+	path := fmt.Sprintf("/app/hook/deliveries/%d", deliveryID)
+	if err := appRequest("GET", baseURL, path, jwt, &raw); err != nil {
+		return AppHookDeliveryDetail{}, fmt.Errorf("reading app webhook delivery %d: %w", deliveryID, err)
+	}
+	return AppHookDeliveryDetail{AppHookDelivery: raw.AppHookDelivery, Payload: raw.Request.Payload}, nil
 }

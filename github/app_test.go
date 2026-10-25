@@ -943,3 +943,66 @@ func TestFetchAppHookConfig_Unauthorized(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// UpdateAppHookConfig sends only the url, with the JWT, and never decodes the
+// secret GitHub echoes back (#2427).
+func TestUpdateAppHookConfig_SendsOnlyURL(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PATCH" || r.URL.Path != "/app/hook/config" || r.Header.Get("Authorization") != "Bearer jwt-1" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"url":"https://elsewhere.invalid/hook","content_type":"json","secret":"********","insecure_ssl":"0"}`))
+	}))
+	defer srv.Close()
+	got, err := UpdateAppHookConfig(srv.URL, "jwt-1", "https://elsewhere.invalid/hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotBody) != 1 || gotBody["url"] != "https://elsewhere.invalid/hook" {
+		t.Fatalf("request body = %v, want only url", gotBody)
+	}
+	if got.URL != "https://elsewhere.invalid/hook" || strings.Contains(fmt.Sprintf("%+v", got), "***") {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestUpdateAppHookConfig_ErrorWraps(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	if _, err := UpdateAppHookConfig(srv.URL, "jwt", "https://x"); !errors.Is(err, ErrAppUnauthorized) {
+		t.Fatalf("err = %v, want ErrAppUnauthorized", err)
+	}
+}
+
+// FetchAppHookDelivery returns the delivered payload and not the headers.
+func TestFetchAppHookDelivery_ReturnsPayload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/hook/deliveries/42" || r.Header.Get("Authorization") != "Bearer jwt-1" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":42,"guid":"g-1","event":"issues","action":"labeled","status_code":200,"request":{"headers":{"X-Hub-Signature-256":"sha256=secret"},"payload":{"action":"labeled","issue":{"number":7}}}}`))
+	}))
+	defer srv.Close()
+	got, err := FetchAppHookDelivery(srv.URL, "jwt-1", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GUID != "g-1" || got.Event != "issues" || !got.Succeeded() {
+		t.Fatalf("got %#v", got)
+	}
+	if !strings.Contains(string(got.Payload), `"number":7`) {
+		t.Errorf("payload = %s", got.Payload)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", got), "secret") {
+		t.Error("request headers leaked into the decoded delivery")
+	}
+}

@@ -81,6 +81,11 @@ type intake struct {
 	// note is called once per Submit before dedupe, so liveness counters see
 	// every arriving delivery, duplicates included.
 	note func()
+	// stats counts accepted, duplicate, dropped and applied deliveries since
+	// process start (#2427); read-only for the local API's fabrik_health.
+	stats intakeStats
+	// faults is the TEST-ONLY fault set (#2427); nil in production.
+	faults *testFaults
 
 	sem chan struct{}
 
@@ -148,7 +153,8 @@ func (in *intake) Submit(d delivery) bool {
 		return false
 	}
 	in.mu.Unlock()
-	if !in.ledger.Accept(d.ID, now) {
+	if !in.ledger.Accept(d.ID, now) && !in.faults.active(FaultNoDedupe) {
+		in.stats.noteDuplicate()
 		in.log("duplicate delivery %s (%s via %s) — already applied\n", d.ID, d.EventType, d.Transport)
 		return false
 	}
@@ -164,6 +170,7 @@ func (in *intake) Submit(d delivery) bool {
 		(in.total > 0 && in.bytes+len(d.Payload) > intakeMaxBytes) {
 		in.mu.Unlock()
 		in.ledger.Forget(d.ID)
+		in.stats.noteDropped()
 		in.log("intake queue full for %s — dropping %s delivery %s; reconcile will heal it\n", key, d.EventType, d.ID)
 		return false
 	}
@@ -171,6 +178,7 @@ func (in *intake) Submit(d delivery) bool {
 	in.queues[key] = append(q, d)
 	in.total++
 	in.bytes += len(d.Payload)
+	in.stats.noteAccepted()
 	if !running {
 		in.wg.Add(1)
 		go in.work(key)
@@ -239,12 +247,22 @@ func (in *intake) run(d delivery) {
 			in.log("panic applying %s delivery %s: %v\n%s", d.EventType, d.ID, r, debug.Stack())
 		}
 	}()
+	if in.faults.dropsEvent(d.EventType) {
+		in.log("TEST FAULT: dropping the apply of %s delivery %s\n", d.EventType, d.ID)
+		return
+	}
+	if in.faults.active(FaultNoIntakeDrain) {
+		time.Sleep(noIntakeDrainApplyDelay) // TEST-ONLY (#2427): keep deliveries queued until the exec
+	}
 	switch {
 	case in.applyAt != nil:
 		in.applyAt(d.EventType, d.Payload, d.ReceivedAt)
 	case in.apply != nil:
 		in.apply(d.EventType, d.Payload)
+	default:
+		return
 	}
+	in.stats.noteApplied(d.EventType)
 }
 
 // Drain blocks until every queued delivery has been applied (tests, shutdown).
