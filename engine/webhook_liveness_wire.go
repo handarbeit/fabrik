@@ -51,13 +51,24 @@ func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL fu
 	return rl
 }
 
-// startRouteLiveness runs rl in the background until ctx ends. nil is a no-op.
-// A stale panel entry from a previous run is cleared first: the in-memory
-// verdict starts unknown, and unknown raises nothing.
-func (e *Engine) startRouteLiveness(ctx context.Context, rl *routeLiveness) {
+// startRouteLiveness runs rl in the background until ctx ends or the returned
+// stop function is called; stop waits for the goroutine to exit, so a transport
+// shutting down never leaves it reading engine state. nil rl is a no-op (stop is
+// still callable). A stale panel entry from a previous run is cleared first: the
+// in-memory verdict starts unknown, and unknown raises nothing.
+func (e *Engine) startRouteLiveness(ctx context.Context, rl *routeLiveness) (stop func()) {
 	if rl == nil {
-		return
+		return func() {}
 	}
 	e.resolveWarning(rl.cfg.Tag, warnings.Condition{Type: livenessPanelType, Subject: rl.cfg.Tag}.Key())
-	go rl.Run(ctx)
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rl.Run(rctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }

@@ -295,7 +295,8 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	// Background, after the listener is up: it never delays startup.
 	e.startDeliveryReplay(ctx, e.replayer)
 	// Webhook route liveness from GitHub's delivery log (#2452).
-	e.startRouteLiveness(ctx, e.liveness)
+	stopLiveness := e.startRouteLiveness(ctx, e.liveness)
+	tr.SetStopHook(stopLiveness)
 }
 
 // wireAppWebhookWarnings installs the signature-drift handler the two App

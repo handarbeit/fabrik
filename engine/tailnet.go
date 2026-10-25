@@ -227,9 +227,13 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	var watchWG sync.WaitGroup
+	var stopLiveness func() // set once the route-liveness controller is started
 	tr.SetStopHook(func() {
 		cancelWatch()
 		watchWG.Wait()
+		if stopLiveness != nil {
+			stopLiveness()
+		}
 		nodeMu.Lock()
 		n := node
 		nodeMu.Unlock()
@@ -357,7 +361,7 @@ func (e *Engine) startTailscaleTransport(ctx context.Context, set *transportSet,
 	// startup. A failed start (above) never reaches here, so no pass runs then.
 	e.startDeliveryReplayAfter(ctx, e.replayer, tailnetReplayStartGrace)
 	// Webhook route liveness from GitHub's delivery log (#2452).
-	e.startRouteLiveness(ctx, e.liveness)
+	stopLiveness = e.startRouteLiveness(ctx, e.liveness)
 }
 
 // reportWarning records an operator warning, logging (not failing) on error.
