@@ -259,6 +259,72 @@ func TestCapturedThreadResolvedIsSeenWithoutRefetch(t *testing.T) {
 	}
 }
 
+// seedWebhookAddedThreadItem stores the captured thread's comment the way a
+// pull_request_review_comment "created" delivery does: node and database ID, no
+// ReviewThreadID (#2444). The comment is derived in test code from the captured
+// thread payload's thread.comments[0]; the other comment belongs to a thread
+// the resolved delivery does not list.
+func seedWebhookAddedThreadItem(t *testing.T, e *captureEnv) {
+	t.Helper()
+	e.open(t, 8766)
+	testSetLinkedPR(e.c, captureRepo, 8766, 8769)
+	for _, cm := range []gh.Comment{
+		{ID: "PRRC_kwDOSmuv9s8AAAABAOxKXA", DatabaseID: 4310452828, Body: "probe thread (webhook-added)", FromPR: 8769},
+		{ID: "PRRC_unlisted", DatabaseID: 4310452999, Body: "another thread (webhook-added)", FromPR: 8769},
+	} {
+		e.c.store.Apply(itemstate.ReviewThreadCommentAdded{Repo: captureRepo, IssueNumber: 8766, Comment: cm})
+	}
+	e.reset()
+}
+
+func TestCapturedThreadResolvedDropsWebhookAddedComments(t *testing.T) {
+	e := newCaptureEnv(t)
+	seedWebhookAddedThreadItem(t, e)
+	e.c.ApplyDelta("pull_request_review_thread", loadCapture(t, "pull_request_review_thread_resolved"))
+	lpr := e.state(t, 8766).LinkedPR
+	if len(lpr.ThreadComments) != 1 || lpr.ThreadComments[0].ID != "PRRC_unlisted" || lpr.ResolvedThreadCount != 1 {
+		t.Fatalf("after resolve: %+v", lpr)
+	}
+	if e.changesWith(itemstate.CommentsChanged|itemstate.LinkedPRChanged) != 1 {
+		t.Fatalf("resolve must raise a waking change once; changes=%+v", e.changes)
+	}
+	// Replay is a no-op.
+	e.reset()
+	e.c.ApplyDelta("pull_request_review_thread", loadCapture(t, "pull_request_review_thread_resolved"))
+	if len(e.changes) != 0 || e.state(t, 8766).LinkedPR.ResolvedThreadCount != 1 {
+		t.Fatalf("replay changed state")
+	}
+}
+
+func TestCapturedThreadResolvedMatchesWebhookAddedByDatabaseID(t *testing.T) {
+	e := newCaptureEnv(t)
+	e.open(t, 8766)
+	testSetLinkedPR(e.c, captureRepo, 8766, 8769)
+	// A node ID in a different format still matches through the numeric ID.
+	e.c.store.Apply(itemstate.ReviewThreadCommentAdded{Repo: captureRepo, IssueNumber: 8766,
+		Comment: gh.Comment{ID: "other-format", DatabaseID: 4310452828, FromPR: 8769}})
+	e.reset()
+	e.c.ApplyDelta("pull_request_review_thread", loadCapture(t, "pull_request_review_thread_resolved"))
+	if lpr := e.state(t, 8766).LinkedPR; len(lpr.ThreadComments) != 0 || lpr.ResolvedThreadCount != 1 {
+		t.Fatalf("after resolve: %+v", lpr)
+	}
+}
+
+func TestCapturedThreadResolvedKeepsCommentOfAnotherThread(t *testing.T) {
+	e := newCaptureEnv(t)
+	e.open(t, 8766)
+	testSetLinkedPR(e.c, captureRepo, 8766, 8769)
+	// Same identity as the listed comment but tagged with another thread: never
+	// removed by this thread's resolution.
+	e.c.store.Apply(itemstate.ReviewThreadCommentAdded{Repo: captureRepo, IssueNumber: 8766,
+		Comment: gh.Comment{ID: "PRRC_kwDOSmuv9s8AAAABAOxKXA", DatabaseID: 4310452828, ReviewThreadID: "PRRT_other", FromPR: 8769}})
+	e.reset()
+	e.c.ApplyDelta("pull_request_review_thread", loadCapture(t, "pull_request_review_thread_resolved"))
+	if lpr := e.state(t, 8766).LinkedPR; len(lpr.ThreadComments) != 1 || lpr.ResolvedThreadCount != 0 {
+		t.Fatalf("other thread's comment was touched: %+v", lpr)
+	}
+}
+
 func TestCapturedThreadUnresolvedInvalidatesDeepCache(t *testing.T) {
 	e := newCaptureEnv(t)
 	seedThreadItem(t, e)
