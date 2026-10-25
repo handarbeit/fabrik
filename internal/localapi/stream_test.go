@@ -308,17 +308,15 @@ func TestStreamWatchdogDropsSilentConnection(t *testing.T) {
 
 func unmarshal(b []byte, f *Frame) error { return json.Unmarshal(bytes.TrimSpace(b), f) }
 
-// recordingStreamer records the CatchUp flag of every attach.
+// recordingStreamer records the CatchUp flag of every attach, in order, on a
+// channel.
 type recordingStreamer struct {
 	hubStreamer
-	mu      sync.Mutex
-	catchUp []bool
+	catchUp chan bool
 }
 
 func (r *recordingStreamer) Attach(p AttachParams, sink channelevents.Sink) (func(), error) {
-	r.mu.Lock()
-	r.catchUp = append(r.catchUp, p.CatchUp)
-	r.mu.Unlock()
+	r.catchUp <- p.CatchUp
 	return r.hubStreamer.Attach(p, sink)
 }
 
@@ -328,7 +326,7 @@ func TestStreamAsksForCatchUpOnFirstAttachOnly(t *testing.T) {
 	sock := filepath.Join(shortDir(t), "s.sock")
 	hub := newHub(t, t.TempDir())
 	defer hub.Close()
-	rec := &recordingStreamer{hubStreamer: hubStreamer{hub}}
+	rec := &recordingStreamer{hubStreamer: hubStreamer{hub}, catchUp: make(chan bool, 10)}
 	start := func() *Server {
 		srv := NewServer(sock, echoBackend(), nil)
 		srv.Streamer = rec
@@ -362,10 +360,20 @@ func TestStreamAsksForCatchUpOnFirstAttachOnly(t *testing.T) {
 		t.Fatalf("expected reconnect, got %+v", st)
 	}
 
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.catchUp) != 2 || !rec.catchUp[0] || rec.catchUp[1] {
-		t.Fatalf("catch_up flags per attach = %v, want [true false]", rec.catchUp)
+	// The server calls Streamer.Attach only after it has written the
+	// acknowledgement that makes the client report Connected, so the second
+	// attach may not have been recorded yet: wait for it.
+	var got []bool
+	for len(got) < 2 {
+		select {
+		case c := <-rec.catchUp:
+			got = append(got, c)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("catch_up flags per attach = %v, want [true false]; timed out waiting for the second attach", got)
+		}
+	}
+	if !got[0] || got[1] {
+		t.Fatalf("catch_up flags per attach = %v, want [true false]", got)
 	}
 }
 
