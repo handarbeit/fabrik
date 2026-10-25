@@ -414,3 +414,80 @@ func TestAuthModePreconditionsCoverEveryBed(t *testing.T) {
 		t.Errorf("only bed B is missing its App settings: %v", err)
 	}
 }
+
+// singleEnvBed builds a single-bed gate whose bed is named by E2E_BEDS and whose
+// .env names other repos and another board than the defaults (#2440).
+func singleEnvBed(t *testing.T, envFile string, env ...string) (*Gate, *fakeExec) {
+	t.Helper()
+	g, fe, _, _ := testGate(t, env...)
+	g.Env = append(g.Env, "E2E_BEDS="+g.Cfg.TestBed)
+	mustWrite(t, g.Cfg.TestBed+"/.env", envFile)
+	return g, fe
+}
+
+const otherBedEnv = "FABRIK_TOKEN=tok\nFABRIK_TEST_REPO_ALPHA=handarbeit/fabrik-test-gamma\nFABRIK_TEST_REPO_BETA=handarbeit/fabrik-test-delta\nFABRIK_TEST_PROJECT_OWNER=handarbeit\nFABRIK_TEST_PROJECT_NUMBER=7\n"
+
+func TestSingleEnvBedLegCarriesItsOwnReposAndBoard(t *testing.T) {
+	g, fe := singleEnvBed(t, otherBedEnv)
+	lf := &legFake{suiteOut: passStream}
+	fe.handler = lf.handle
+	if err := g.RunLeg(context.Background(), defaultCell); err != nil {
+		t.Fatal(err)
+	}
+	cmds := append(append([]Cmd{}, lf.switchCmds...), lf.suiteCmds...)
+	if len(cmds) == 0 {
+		t.Fatal("no leg commands recorded")
+	}
+	for _, c := range cmds {
+		for k, want := range map[string]string{
+			"FABRIK_TEST_DIR": g.Cfg.TestBed, "FABRIK_TEST_REPO_ALPHA": "handarbeit/fabrik-test-gamma",
+			"FABRIK_TEST_REPO_BETA": "handarbeit/fabrik-test-delta", "FABRIK_TEST_PROJECT_OWNER": "handarbeit",
+			"FABRIK_TEST_PROJECT_NUMBER": "7",
+		} {
+			if got := envValue(c.Env, k); got != want {
+				t.Errorf("%s: %s=%q, want %q", argsLine(c), k, got, want)
+			}
+		}
+	}
+	if g.bed != nil {
+		t.Error("a single bed must not become a multi-bed view")
+	}
+}
+
+func TestSingleEnvBedResolvesLikeAMultiBedElement(t *testing.T) {
+	// bed .env > environment > default, per key: alpha from the .env (the
+	// environment disagrees), beta from the environment, owner/number defaults.
+	env := []string{"FABRIK_TEST_REPO_ALPHA=env/alpha", "FABRIK_TEST_REPO_BETA=env/beta"}
+	g, _ := singleEnvBed(t, "FABRIK_TOKEN=tok\nFABRIK_TEST_REPO_ALPHA=bed/alpha\n", env...)
+	want := g.resolveBedSpec("", g.Cfg.TestBed).Reset
+	if got := g.resetConfig(); got != want {
+		t.Errorf("resetConfig = %+v, want the resolveBedSpec result %+v", got, want)
+	}
+	if want.Alpha != "bed/alpha" || want.Beta != "env/beta" || want.ProjectOwner != defaultProjectOwner || want.ProjectNumber != defaultProjectNumber {
+		t.Errorf("precedence wrong: %+v", want)
+	}
+	if got := envValue(g.bedEnv(), "FABRIK_TEST_REPO_BETA"); got != "env/beta" {
+		t.Errorf("bedEnv beta = %q", got)
+	}
+
+	// A missing .env falls through to the environment, then the defaults.
+	m, _, _, _ := testGate(t, append(env, "E2E_BEDS=x")...)
+	if rc := m.resetConfig(); rc.Alpha != "env/alpha" || rc.ProjectNumber != defaultProjectNumber {
+		t.Errorf("missing .env: %+v", rc)
+	}
+}
+
+func TestBedNamedByTestDirAloneKeepsTheEnvironment(t *testing.T) {
+	// FABRIK_TEST_DIR only (no E2E_BEDS, or a blank one): the bed's .env repos are
+	// not read, and the leg inherits the gate's environment.
+	for _, env := range [][]string{nil, {"E2E_BEDS=  "}} {
+		g, _, _, _ := testGate(t, env...)
+		mustWrite(t, g.Cfg.TestBed+"/.env", otherBedEnv)
+		if got := g.bedEnv(); got != nil {
+			t.Errorf("env %v: bedEnv = %v, want nil", env, got)
+		}
+		if rc := g.resetConfig(); rc.Alpha != defaultRepoAlpha || rc.ProjectNumber != defaultProjectNumber {
+			t.Errorf("env %v: resetConfig read the bed .env: %+v", env, rc)
+		}
+	}
+}
