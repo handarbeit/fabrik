@@ -523,7 +523,9 @@ func (r *routeLiveness) classifyLog(lr logRead, hookURL string, now time.Time) p
 		}
 		return normalizeWebhookURL(d.URL) == want, true
 	}
+	r.mu.Lock()
 	floor := r.started.Add(r.cfg.Warmup)
+	r.mu.Unlock()
 	return classifyAttempts(lr.attempts, now, floor, verify)
 }
 
