@@ -188,6 +188,32 @@ func (l *deliveryLedger) Seen(id string) bool {
 	return ok
 }
 
+// ReceivedAt returns when id was accepted, and whether it is recorded and still
+// inside the window at now. Read-only, like Seen, but unlike Seen it judges
+// expiry: Seen does not prune, so it can report an entry that Accept would no
+// longer treat as a duplicate (#2452). The route-liveness probe uses it to pick
+// a delivery whose redelivered copy the intake is certain to dedupe.
+func (l *deliveryLedger) ReceivedAt(id string, now time.Time) (time.Time, bool) {
+	if l == nil || id == "" {
+		return time.Time{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.seen[id]; !ok {
+		return time.Time{}, false
+	}
+	for i := len(l.entries) - 1; i >= 0; i-- {
+		if l.entries[i].ID == id {
+			at := l.entries[i].At
+			if now.Sub(at) > l.window {
+				return time.Time{}, false
+			}
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // Newest returns the receipt time of the most recently accepted delivery, or
 // the zero time when the ledger is empty. Read-only, like Seen.
 func (l *deliveryLedger) Newest() time.Time {

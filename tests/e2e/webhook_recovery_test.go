@@ -19,8 +19,8 @@ import (
 // subscription is persisted by the daemon, so it survives the restart.
 
 // replayWait bounds the wait for the replay pass after a start: the tailscale
-// transport holds the startup pass back 90 s for Funnel ingress, and a
-// not-yet-resolvable Funnel name holds it back further (#2143, #2425).
+// transport holds the startup pass back 90 s for Funnel ingress (#2143); nothing
+// else holds it back since the public-DNS probe was removed (#2452).
 const replayWait = 12 * time.Minute
 
 // TestWebhookReplayAcrossDowntime (FR-009): with the bed daemon stopped, a human

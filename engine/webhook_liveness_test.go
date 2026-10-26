@@ -1,0 +1,964 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/warnings"
+)
+
+const livenessHookURL = "https://n.t.ts.net/webhook"
+
+// livenessAPI fake: a mutable delivery log, per-attempt URLs for the detail
+// read and recorded redelivery requests.
+type fakeLivenessAPI struct {
+	mu          sync.Mutex
+	log         []gh.AppHookDelivery // newest first
+	urls        map[int64]string     // attempt id -> URL; missing = livenessHookURL
+	listErr     error
+	detailErr   error
+	redeliverEr error
+	onRedeliver func(id int64)
+	redelivered []int64
+	detailReads int
+	listCalls   int
+	nextID      int64
+}
+
+func (f *fakeLivenessAPI) ListAppHookDeliveries(cursor string, perPage int) ([]gh.AppHookDelivery, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, "", f.listErr
+	}
+	return append([]gh.AppHookDelivery(nil), f.log...), "", nil
+}
+
+func (f *fakeLivenessAPI) RedeliverAppHookDelivery(id int64) error {
+	f.mu.Lock()
+	f.redelivered = append(f.redelivered, id)
+	err, fn := f.redeliverEr, f.onRedeliver
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		fn(id)
+	}
+	return nil
+}
+
+func (f *fakeLivenessAPI) FetchAppHookDelivery(id int64) (gh.AppHookDeliveryDetail, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detailReads++
+	if f.detailErr != nil {
+		return gh.AppHookDeliveryDetail{}, f.detailErr
+	}
+	u, ok := f.urls[id]
+	if !ok {
+		u = livenessHookURL
+	}
+	return gh.AppHookDeliveryDetail{URL: u}, nil
+}
+
+// add prepends an attempt (newest first).
+func (f *fakeLivenessAPI) add(d gh.AppHookDelivery) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log = append([]gh.AppHookDelivery{d}, f.log...)
+}
+
+func (f *fakeLivenessAPI) requests() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.redelivered...)
+}
+
+type fakeLivenessLedger struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+func (l *fakeLivenessLedger) ledgerReceivedAt(id string, now time.Time) (time.Time, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	at, ok := l.at[id]
+	if !ok || now.Sub(at) > deliveryLedgerWindow {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+type recRouteSink struct {
+	mu   sync.Mutex
+	last localapi.RouteLiveness
+}
+
+func (s *recRouteSink) SetRouteLiveness(rl localapi.RouteLiveness) {
+	s.mu.Lock()
+	s.last = rl
+	s.mu.Unlock()
+}
+
+func (s *recRouteSink) get() localapi.RouteLiveness {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+type livenessHarness struct {
+	t         *testing.T
+	api       *fakeLivenessAPI
+	ledger    *fakeLivenessLedger
+	sink      *recRouteSink
+	r         *routeLiveness
+	mu        sync.Mutex
+	now       time.Time
+	hookURL   string
+	hookErr   error
+	hookCalls int
+	reported  []warnings.Condition
+	resolved  []string
+}
+
+func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
+	t.Helper()
+	h := &livenessHarness{
+		t:       t,
+		api:     &fakeLivenessAPI{urls: map[int64]string{}},
+		ledger:  &fakeLivenessLedger{at: map[string]time.Time{}},
+		sink:    &recRouteSink{},
+		now:     time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC),
+		hookURL: livenessHookURL,
+	}
+	h.r = newRouteLiveness(routeLivenessConfig{
+		Tag:    "tailscale",
+		API:    h.api,
+		Ledger: h.ledger,
+		Sink:   h.sink,
+		HookURL: func() (string, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.hookCalls++
+			return h.hookURL, h.hookErr
+		},
+		Logf: func(string, ...any) {},
+		Now:  h.clock,
+		// The fake clock advances by what is slept; nothing really waits.
+		Wait: func(ctx context.Context, d time.Duration) bool {
+			if ctx.Err() != nil {
+				return false
+			}
+			h.advance(d)
+			return true
+		},
+		Warmup:  warmup,
+		Report:  func(c warnings.Condition) { h.mu.Lock(); h.reported = append(h.reported, c); h.mu.Unlock() },
+		Resolve: func(k string) { h.mu.Lock(); h.resolved = append(h.resolved, k); h.mu.Unlock() },
+	})
+	if warmup == 0 {
+		// The daemon has been up a while: failures from the last hour count.
+		h.r.started = h.now.Add(-time.Hour)
+	}
+	return h
+}
+
+func (h *livenessHarness) clock() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
+func (h *livenessHarness) advance(d time.Duration) {
+	h.mu.Lock()
+	h.now = h.now.Add(d)
+	h.mu.Unlock()
+}
+
+func (h *livenessHarness) att(id int64, guid string, code int, status string, ago time.Duration, redelivery bool) gh.AppHookDelivery {
+	return gh.AppHookDelivery{ID: id, GUID: guid, StatusCode: code, Status: status, DeliveredAt: h.clock().Add(-ago), Redelivery: redelivery, Event: "issues"}
+}
+
+func (h *livenessHarness) liveness() string { return h.sink.get().Liveness }
+func (h *livenessHarness) reports() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.reported)
+}
+
+// A recent 2xx to the current URL makes the route reachable, with no warning,
+// and no redelivery is requested for it.
+func TestLiveness_Recent2xxIsReachable(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(1, "g1", 200, "OK", 2*time.Minute, false))
+	h.r.evaluate(context.Background(), true)
+	if got := h.sink.get(); got.Liveness != localapi.RouteReachable || !got.EvaluatedAt.Valid {
+		t.Fatalf("route = %+v", got)
+	}
+	if len(h.api.requests()) != 0 || h.reports() != 0 {
+		t.Fatalf("requests=%v reports=%d", h.api.requests(), h.reports())
+	}
+}
+
+// A run of failed attempts to the current URL with no later success is
+// unreachable with GitHub's status text; the panel entry appears only after the
+// verdict has held for the sustained window, and clears on the next success.
+func TestLiveness_FailureRunIsUnreachableAndPanelIsSustained(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false))
+	h.api.add(h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false))
+	// Newest first: put 2 ahead of 1.
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false), h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	got := h.sink.get()
+	if got.Liveness != localapi.RouteUnreachable || got.Reason != "failed to connect to host" {
+		t.Fatalf("route = %+v", got)
+	}
+	if h.reports() != 0 {
+		t.Fatal("a fresh unreachable verdict must not raise the panel entry yet")
+	}
+	// Still failing after the sustained window: one entry, naming the reason.
+	h.advance(livenessSustained + time.Minute)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(3, "g3", 502, "failed to connect to host", time.Minute, false), h.att(2, "g2", 502, "failed to connect to host", 3*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	if h.reports() != 1 || !strings.Contains(h.reported[0].Detail, "failed to connect to host") || h.reported[0].Type != livenessPanelType {
+		t.Fatalf("reports = %+v", h.reported)
+	}
+	// Recovery: a fresh 2xx is reachable and resolves the entry.
+	h.api.add(h.att(4, "g4", 200, "OK", 10*time.Second, false))
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	wantKey := warnings.Condition{Type: livenessPanelType, Subject: "tailscale"}.Key()
+	if len(h.resolved) != 1 || h.resolved[0] != wantKey {
+		t.Fatalf("resolved = %v", h.resolved)
+	}
+}
+
+// Failed attempts that went to an earlier hook URL do not count against the
+// current route; neither does a lone failure.
+func TestLiveness_EarlierURLAndLoneFailureDoNotCount(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.urls[1], h.api.urls[2] = "https://old.example/webhook", "https://old.example/webhook"
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "x", time.Minute, false), h.att(1, "g1", 502, "x", 2*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("old-URL failures decided %+v", h.sink.get())
+	}
+	// A lone failure to the current URL is not a run.
+	h.api.urls = map[int64]string{}
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(5, "g5", 502, "x", time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("a lone failure decided %+v", h.sink.get())
+	}
+}
+
+// A failure inside the warm-up (a tailscale Funnel still being routed) never
+// counts; the same failures after it do.
+func TestLiveness_WarmupFailuresDoNotCount(t *testing.T) {
+	h := newLivenessHarness(t, 90*time.Second)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "x", 10*time.Second, false), h.att(1, "g1", 502, "x", 20*time.Second, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("warm-up failures decided %+v", h.sink.get())
+	}
+	h.advance(3 * time.Minute)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(4, "g4", 502, "x", 10*time.Second, false), h.att(3, "g3", 502, "x", 20*time.Second, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("post-warm-up failures decided %+v", h.sink.get())
+	}
+}
+
+// FR-008/SC-005: failing to read the log, the config, an attempt's URL, or to
+// request a redelivery never produces unreachable.
+func TestLiveness_ReadFailuresAreNeverUnreachable(t *testing.T) {
+	forbidden := fmt.Errorf("403: %w", gh.ErrAppUnauthorized)
+	for name, setup := range map[string]func(*livenessHarness){
+		"list":   func(h *livenessHarness) { h.api.listErr = forbidden },
+		"rate":   func(h *livenessHarness) { h.api.listErr = &gh.RateLimitError{} },
+		"config": func(h *livenessHarness) { h.hookErr = errors.New("no key") },
+		"detail": func(h *livenessHarness) { h.api.detailErr = errors.New("boom") },
+		"redeliver": func(h *livenessHarness) {
+			h.api.redeliverEr = errors.New("returned 422")
+			h.ledger.at["g1"] = h.clock().Add(-time.Hour)
+			h.api.mu.Lock()
+			h.api.log = []gh.AppHookDelivery{h.att(1, "g1", 200, "OK", time.Hour, false)}
+			h.api.mu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newLivenessHarness(t, 0)
+			h.api.mu.Lock()
+			h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "x", time.Minute, false), h.att(1, "g1", 502, "x", 2*time.Minute, false)}
+			h.api.mu.Unlock()
+			setup(h)
+			h.r.evaluate(context.Background(), true)
+			if h.liveness() != localapi.RouteUnknown {
+				t.Fatalf("%s: route = %+v", name, h.sink.get())
+			}
+		})
+	}
+}
+
+// FR-007: with no delivery the ledger holds (or only one past the age margin),
+// nothing is requested and the state stays unknown.
+func TestLiveness_NoEligibleDeliveryRequestsNothing(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(1, "g1", 200, "OK", 3*time.Hour, false)) // old success: undecided
+	h.r.evaluate(context.Background(), true)                 // ledger empty
+	h.ledger.at["g1"] = h.clock().Add(-21 * time.Hour)       // held, but past the 20 h margin
+	h.api.add(h.att(2, "g2", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g2"] = h.clock().Add(-21 * time.Hour)
+	h.r.evaluate(context.Background(), true)
+	if len(h.api.requests()) != 0 || h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("requests=%v route=%+v", h.api.requests(), h.sink.get())
+	}
+	// A ping is never a probe candidate.
+	ping := h.att(3, "g3", 200, "OK", 3*time.Hour, false)
+	ping.Event = "ping"
+	h.api.add(ping)
+	h.ledger.at["g3"] = h.clock().Add(-time.Hour)
+	h.r.evaluate(context.Background(), true)
+	if len(h.api.requests()) != 0 {
+		t.Fatalf("a ping was probed: %v", h.api.requests())
+	}
+}
+
+// The probe's copy arriving at the receiver decides reachable; a real delivery
+// arriving is not a probe copy and decides reachable on its own.
+func TestLiveness_ProbeArrivalDecidesReachable(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	var probeFlag bool
+	h.api.onRedeliver = func(id int64) { probeFlag = h.r.Arrival("g-probe") }
+	h.r.evaluate(context.Background(), true)
+	if got := h.api.requests(); len(got) != 1 || got[0] != 7 {
+		t.Fatalf("requests = %v", got)
+	}
+	if !probeFlag {
+		t.Fatal("the redelivered copy was not recognised as a probe copy")
+	}
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+
+	// A real arrival, no probe outstanding.
+	h2 := newLivenessHarness(t, 0)
+	if h2.r.Arrival("real") {
+		t.Fatal("a real delivery was taken for a probe copy")
+	}
+	if h2.liveness() != localapi.RouteReachable {
+		t.Fatalf("real arrival decided %+v", h2.sink.get())
+	}
+}
+
+// A receiver that knows its own URL does not count a probe copy as proof while
+// the App points somewhere else (a redelivery that went to the old address).
+func TestLiveness_ProbeArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.api.onRedeliver = func(id int64) { h.r.Arrival("g-probe") }
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() == localapi.RouteReachable {
+		t.Fatal("a probe copy proved a route the App no longer points at")
+	}
+}
+
+// A real delivery proves the route only for the App's current hook URL: where
+// the receiver knows its own URL and the App points elsewhere, an arrival (for
+// example the replayer's redelivery to the old address) decides nothing.
+func TestLiveness_RealArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	h.r.evaluate(context.Background(), true) // reads the hook URL (livenessHookURL), nothing else
+	if h.r.Arrival("real") {
+		t.Fatal("a real delivery was taken for a probe copy")
+	}
+	h.waitRefreshIdle() // the mismatch re-reads the hook URL off the request path
+	if h.liveness() == localapi.RouteReachable {
+		t.Fatal("an arrival proved a route the App no longer points at")
+	}
+	// The same arrival at the URL the App is configured with does prove it.
+	h.r.cfg.OwnURL = func() string { return livenessHookURL }
+	h.r.Arrival("real-2")
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// waitRefreshIdle waits for the hook-URL re-read an arrival may have started.
+func (h *livenessHarness) waitRefreshIdle() {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.r.mu.Lock()
+		busy := h.r.refreshing
+		h.r.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.t.Fatal("the hook-URL re-read did not finish")
+}
+
+// The App's hook URL is broken, then the operator restores it to this receiver's
+// URL. The first real delivery must prove the route at once: the cached hook URL
+// is the stale broken one, so the arrival re-reads it instead of being dropped
+// until the next passive read.
+func TestLiveness_ArrivalAfterHookURLFixIsNotDropped(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return livenessHookURL }
+	h.hookURL = "https://broken.example/webhook"
+	h.api.urls[1], h.api.urls[2] = h.hookURL, h.hookURL
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", time.Minute, false))
+	h.api.add(h.att(1, "g1", 502, "failed to connect to host", 2*time.Minute, false))
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("setup: route = %+v", h.sink.get())
+	}
+	// The operator fixes the URL; no passive read has happened since.
+	h.mu.Lock()
+	h.hookURL = livenessHookURL
+	h.mu.Unlock()
+	h.r.Arrival("real")
+	h.waitRefreshIdle()
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("an arrival at the restored URL did not prove the route: %+v", h.sink.get())
+	}
+}
+
+// A stream of arrivals that do not match must not become a request loop on the
+// hook configuration: one re-read per gap.
+func TestLiveness_ArrivalRefreshIsRateLimited(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	h.r.evaluate(context.Background(), true)
+	h.mu.Lock()
+	base := h.hookCalls
+	h.mu.Unlock()
+	for i := 0; i < 20; i++ {
+		h.r.Arrival(fmt.Sprintf("g%d", i))
+		h.waitRefreshIdle()
+	}
+	h.mu.Lock()
+	extra := h.hookCalls - base
+	h.mu.Unlock()
+	if extra != 1 {
+		t.Fatalf("hook configuration read %d times for 20 arrivals inside one gap, want 1", extra)
+	}
+}
+
+// A persistent failure to read the hook configuration (403, 404, rate limit) is
+// one request per passive interval, not one per tick.
+func TestLiveness_ConfigReadFailureWaitsOutThePassiveInterval(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.hookErr = errors.New("403 forbidden")
+	for i := 0; i < 11; i++ { // eleven one-minute ticks
+		h.r.evaluate(context.Background(), false)
+		h.advance(time.Minute)
+	}
+	h.mu.Lock()
+	calls := h.hookCalls
+	h.mu.Unlock()
+	if want := 3; calls > want { // t=0, 5, 10 minutes
+		t.Fatalf("hook configuration read %d times in 11 ticks, want at most %d", calls, want)
+	}
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// A probe copy that arrives after the probe's wait ended is still the probe's:
+// it is not taken for a real delivery (the transport leaves last_delivery_at
+// alone), still proves the route, and is recognised once only and only inside
+// the grace.
+func TestLiveness_LateProbeCopyIsStillAProbeCopy(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.r.evaluate(context.Background(), true) // the wait times out: unknown
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	if !h.r.Arrival("g-probe") {
+		t.Fatal("a late probe copy was taken for a real delivery")
+	}
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a late probe copy did not prove the route: %+v", h.sink.get())
+	}
+	if h.r.Arrival("g-probe") {
+		t.Fatal("the late-copy allowance was not consumed")
+	}
+
+	// Past the grace the GUID is an ordinary delivery again.
+	h2 := newLivenessHarness(t, 0)
+	h2.api.add(h2.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h2.ledger.at["g-probe"] = h2.clock().Add(-3 * time.Hour)
+	h2.r.evaluate(context.Background(), true)
+	h2.advance(livenessLateGrace + time.Second)
+	if h2.r.Arrival("g-probe") {
+		t.Fatal("a copy past the grace was still taken for a probe copy")
+	}
+}
+
+// The probe's new attempt in the log decides when the copy never arrives.
+func TestLiveness_ProbeResolvedFromTheLog(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.api.onRedeliver = func(id int64) {
+		h.api.add(gh.AppHookDelivery{ID: 8, GUID: "g-probe", StatusCode: 200, Status: "OK", DeliveredAt: h.clock(), Redelivery: true, Event: "issues"})
+	}
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// A probe whose result never shows is unknown, never unreachable.
+func TestLiveness_ProbeTimeoutIsUnknown(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.r.evaluate(context.Background(), true)
+	if len(h.api.requests()) != 1 || h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("requests=%v route=%+v", h.api.requests(), h.sink.get())
+	}
+}
+
+// Two failed probe attempts (the early retry) make a run: unreachable, with
+// GitHub's reason, established from probes alone.
+func TestLiveness_FailedProbesEstablishUnreachable(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	next := int64(100)
+	h.api.onRedeliver = func(int64) {
+		next++
+		h.api.add(gh.AppHookDelivery{ID: next, GUID: "g-probe", StatusCode: 502, Status: "failed to connect to host", DeliveredAt: h.clock(), Redelivery: true, Event: "issues"})
+	}
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("one failed probe decided %+v", h.sink.get())
+	}
+	h.advance(livenessRetryDelay + time.Second)
+	h.r.evaluate(context.Background(), false)
+	if got := h.sink.get(); got.Liveness != localapi.RouteUnreachable || got.Reason != "failed to connect to host" {
+		t.Fatalf("route = %+v", got)
+	}
+	if n := len(h.api.requests()); n != 2 {
+		t.Fatalf("requests = %d, want the probe and one retry", n)
+	}
+}
+
+// The early retry picks the same delivery again. An attempt the log already
+// showed when the retry was requested (the first probe's) is not the retry's
+// result, however recent: with the new attempt lagging, the retry waits out its
+// full window and decides nothing instead of ending on stale evidence.
+func TestLiveness_RetryDoesNotMatchAnEarlierProbesAttempt(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.api.add(h.att(50, "g-probe", 502, "failed to connect to host", time.Minute, true)) // the first probe's attempt
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	start := h.clock()
+	h.r.evaluate(context.Background(), true) // the new attempt never shows
+	if got := h.clock().Sub(start); got < livenessResultWait {
+		t.Fatalf("the probe ended after %v on an earlier probe's attempt, want a full %v wait", got, livenessResultWait)
+	}
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// While the log still says unreachable (its failure window is 30 minutes) a quiet
+// bed has nothing real to say otherwise, so a bounded probe is how a repaired
+// route is noticed.
+func TestLiveness_RecoveryIsProbedWhileUnreachable(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-ok", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-ok"] = h.clock().Add(-3 * time.Hour)
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false))
+	h.api.add(h.att(3, "g3", 502, "failed to connect to host", time.Minute, false))
+	h.api.onRedeliver = func(int64) {
+		h.api.add(gh.AppHookDelivery{ID: 200, GUID: "g-ok", StatusCode: 200, Status: "OK", DeliveredAt: h.clock(), Redelivery: true, Event: "issues"})
+	}
+	h.r.evaluate(context.Background(), false) // a plain poll: no trigger, no start-up
+	if n := len(h.api.requests()); n != 1 {
+		t.Fatalf("requests = %d, want one recovery probe", n)
+	}
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a repaired route stayed %+v", h.sink.get())
+	}
+}
+
+// The warm-up is counted from when Run starts (the listener and Funnel are up),
+// not from construction: the controller is built before the node comes up, and a
+// slow Up must not leave failures from the ingress window eligible.
+func TestLiveness_WarmupCountsFromRunNotConstruction(t *testing.T) {
+	h := newLivenessHarness(t, 90*time.Second)
+	h.advance(10 * time.Minute) // the node took a long time to come up
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", 40*time.Second, false))
+	h.api.add(h.att(3, "g3", 502, "failed to connect to host", 20*time.Second, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Run evaluates once, then returns
+	h.r.Run(ctx)
+	if h.liveness() == localapi.RouteUnreachable {
+		t.Fatalf("failures inside the Funnel warm-up counted: %+v", h.sink.get())
+	}
+}
+
+// A real delivery newer than the failures a passive read decided on proves the
+// route: a stale read (taken before the delivery) must not overwrite reachable
+// with unreachable. Failures newer than the delivery still do.
+func TestLiveness_StaleUnreachableReadDoesNotOverwriteAnArrival(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false), h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.Arrival("g-real") // the first delivery after a repair
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	h.r.evaluate(context.Background(), true) // a read that only shows the old failures
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a stale read overwrote a newer arrival: %+v", h.sink.get())
+	}
+	// Failures newer than the arrival are genuine.
+	h.advance(5 * time.Minute)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(4, "g4", 502, "failed to connect to host", time.Minute, false), h.att(3, "g3", 502, "failed to connect to host", 2*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("newer failures were ignored: %+v", h.sink.get())
+	}
+}
+
+// An armed early retry that finds nothing to probe (the delivery's budget is
+// spent, or the hourly cap is) is consumed: left armed it would make every tick
+// a full evaluation, past the passive interval and the request bound.
+func TestLiveness_UnusableEarlyRetryIsConsumed(t *testing.T) {
+	for _, tc := range []string{"guid-budget-spent", "hourly-cap"} {
+		t.Run(tc, func(t *testing.T) {
+			h := newLivenessHarness(t, 0)
+			h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+			h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+			h.r.mu.Lock()
+			if tc == "guid-budget-spent" {
+				h.r.perGUID["g-probe"] = &guidProbe{n: livenessMaxProbesPerGUID, at: h.clock()}
+			} else {
+				for i := 0; i < livenessProbesPerHour; i++ {
+					h.r.probeLog = append(h.r.probeLog, h.clock())
+				}
+			}
+			h.r.retryUsed = true
+			h.r.retryAt = h.clock().Add(-time.Second)
+			h.r.lastPassive = h.clock()
+			h.r.mu.Unlock()
+
+			h.r.evaluate(context.Background(), false) // the retry is due, finds nothing
+			h.r.mu.Lock()
+			armed := !h.r.retryAt.IsZero()
+			h.r.mu.Unlock()
+			if armed {
+				t.Fatal("the unusable early retry stayed armed")
+			}
+			before := h.api.listCalls
+			for i := 0; i < 3; i++ {
+				h.advance(time.Minute)
+				h.r.evaluate(context.Background(), false)
+			}
+			if got := h.api.listCalls - before; got != 0 {
+				t.Fatalf("%d log reads inside the passive interval after the retry was consumed", got)
+			}
+		})
+	}
+}
+
+// blockingRouteSink blocks its first call until released, recording every value.
+type blockingRouteSink struct {
+	mu      sync.Mutex
+	got     []string
+	entered chan struct{}
+	release chan struct{}
+	first   bool
+}
+
+func (s *blockingRouteSink) SetRouteLiveness(rl localapi.RouteLiveness) {
+	s.mu.Lock()
+	block := !s.first
+	s.first = true
+	s.mu.Unlock()
+	if block {
+		close(s.entered)
+		<-s.release
+	}
+	s.mu.Lock()
+	s.got = append(s.got, rl.Liveness)
+	s.mu.Unlock()
+}
+
+// decide runs from the HTTP handler and the controller goroutine: two verdicts
+// racing must leave the sink on the same value as the controller's state, not on
+// the earlier writer's.
+func TestLiveness_ConcurrentVerdictsLeaveTheSinkInStep(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	bs := &blockingRouteSink{entered: make(chan struct{}), release: make(chan struct{}), first: true}
+	h.r.cfg.Sink = bs
+	bs.mu.Lock()
+	bs.first = false // block the first call made below
+	bs.mu.Unlock()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); h.r.decide(localapi.RouteUnreachable, "failed to connect to host") }()
+	<-bs.entered // the first verdict is inside the sink
+	go func() { defer wg.Done(); h.r.decide(localapi.RouteReachable, "") }()
+	time.Sleep(50 * time.Millisecond) // let the second verdict run if nothing stops it
+	close(bs.release)
+	wg.Wait()
+	h.r.mu.Lock()
+	state := h.r.state
+	h.r.mu.Unlock()
+	bs.mu.Lock()
+	last := bs.got[len(bs.got)-1]
+	bs.mu.Unlock()
+	if last != state {
+		t.Fatalf("sink ended on %q while the controller's state is %q", last, state)
+	}
+}
+
+// The panel entry is reported and resolved from decide's panel sync, which runs
+// from the HTTP handler and the controller goroutine. A Report that is still
+// in flight when a later verdict resolves must not land after the Resolve and
+// leave the entry raised on a reachable route.
+func TestLiveness_PanelReportNeverOutlivesAResolve(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	var evMu sync.Mutex
+	var events []string
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.r.cfg.Report = func(warnings.Condition) {
+		once.Do(func() { close(entered) })
+		<-release
+		evMu.Lock()
+		events = append(events, "report")
+		evMu.Unlock()
+	}
+	h.r.cfg.Resolve = func(string) {
+		evMu.Lock()
+		events = append(events, "resolve")
+		evMu.Unlock()
+	}
+	h.r.mu.Lock()
+	h.r.state, h.r.reason = localapi.RouteUnreachable, "failed to connect to host"
+	h.r.unreachAt = h.clock().Add(-livenessSustained - time.Minute)
+	h.r.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); h.r.syncPanel() }() // raises the entry; Report blocks
+	<-entered
+	h.r.mu.Lock() // the route recovers while the Report is in flight
+	h.r.state, h.r.reason, h.r.unreachAt = localapi.RouteReachable, "", time.Time{}
+	h.r.mu.Unlock()
+	go func() { defer wg.Done(); h.r.syncPanel() }() // resolves it
+	time.Sleep(50 * time.Millisecond)                // let the resolve run if nothing orders it
+	close(release)
+	wg.Wait()
+	evMu.Lock()
+	defer evMu.Unlock()
+	if len(events) != 2 || events[len(events)-1] != "resolve" {
+		t.Fatalf("panel events = %v, want the resolve last", events)
+	}
+}
+
+// One early retry per inconclusive episode: a retry spent in an earlier episode
+// (a probe that timed out on log lag, say) must not leave a later check, hours
+// on, without its early retry.
+func TestLiveness_EarlyRetryIsRearmedForANewProbeEpisode(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false)) // undecided: too old
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.r.mu.Lock()
+	h.r.retryUsed = true // spent by an earlier episode
+	h.r.mu.Unlock()
+	h.r.evaluate(context.Background(), true) // a fresh check; the probe times out
+	h.r.mu.Lock()
+	armed := !h.r.retryAt.IsZero()
+	h.r.mu.Unlock()
+	if len(h.api.requests()) != 1 {
+		t.Fatalf("requests = %v", h.api.requests())
+	}
+	if !armed {
+		t.Fatal("the new episode got no early retry: a stale retryUsed suppressed it")
+	}
+}
+
+// An unreachable verdict the log no longer supports (the deciding failures have
+// left the failure window) must not wait out the 24 h backstop when nothing else
+// decides: with no probe possible the passive read is undecided, and the value
+// drops to unknown, taking the panel entry with it.
+func TestLiveness_StaleUnreachableDropsToUnknownOnAQuietBed(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false), h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true) // no ledger entry: nothing can be probed
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	// Still inside the failure window and past the sustained window: panel raised.
+	h.advance(livenessSustained + 2*time.Minute)
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnreachable || h.reports() != 1 {
+		t.Fatalf("route = %+v reports = %d", h.sink.get(), h.reports())
+	}
+	// The route was fixed; nothing arrives and nothing can be probed. Once the
+	// failures are older than the failure window the verdict ends.
+	h.advance(livenessFailWindow)
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("a verdict the log no longer supports stayed %+v", h.sink.get())
+	}
+	wantKey := warnings.Condition{Type: livenessPanelType, Subject: "tailscale"}.Key()
+	h.mu.Lock()
+	resolved := append([]string(nil), h.resolved...)
+	h.mu.Unlock()
+	if len(resolved) != 1 || resolved[0] != wantKey {
+		t.Fatalf("panel entry not resolved: %v", resolved)
+	}
+}
+
+// A changed hook URL drops the old verdict and re-checks at once.
+func TestLiveness_HookURLChangeResets(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(1, "g1", 200, "OK", time.Minute, false))
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	h.mu.Lock()
+	h.hookURL = "https://new.example/webhook"
+	h.mu.Unlock()
+	h.api.urls[1] = livenessHookURL // the old success went to the old URL
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("a success for the old URL still counts: %+v", h.sink.get())
+	}
+}
+
+// Reachable evidence that is not refreshed ages out to unknown.
+func TestLiveness_ReachableAgesOut(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(1, "g1", 200, "OK", time.Minute, false))
+	h.r.evaluate(context.Background(), true)
+	h.advance(3 * livenessQuiet)
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("stale reachable stayed %+v", h.sink.get())
+	}
+}
+
+// SC-007: on a dead endpoint over 24 hours the probe stays inside the hourly
+// cap and the per-delivery cap, and never loops on one delivery.
+func TestLiveness_RequestVolumeIsBoundedOverADay(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	for i := 0; i < 6; i++ {
+		g := fmt.Sprintf("g%d", i)
+		h.api.add(h.att(int64(i+1), g, 200, "OK", time.Duration(i+3)*time.Hour, false))
+		h.ledger.at[g] = h.clock().Add(-time.Duration(i+3) * time.Hour)
+	}
+	h.r.evaluate(context.Background(), true)
+	for i := 0; i < 24*60; i++ {
+		h.advance(time.Minute)
+		h.r.evaluate(context.Background(), false)
+	}
+	reqs := h.api.requests()
+	if len(reqs) > livenessProbesPerHour*24 {
+		t.Fatalf("%d requests in 24 h, cap %d", len(reqs), livenessProbesPerHour*24)
+	}
+	per := map[int64]int{}
+	for _, id := range reqs {
+		per[id]++
+		if per[id] > livenessMaxProbesPerGUID {
+			t.Fatalf("delivery %d probed %d times", id, per[id])
+		}
+	}
+	if len(reqs) == 0 {
+		t.Fatal("no probe was ever made")
+	}
+}
+
+func TestClassifyAttempts_ThrottledAndPingAreIgnored(t *testing.T) {
+	now := time.Now()
+	thr := now
+	attempts := []gh.AppHookDelivery{
+		{ID: 4, GUID: "a", StatusCode: 502, Status: "x", DeliveredAt: now.Add(-time.Minute), ThrottledAt: &thr},
+		{ID: 3, GUID: "b", StatusCode: 200, Status: "OK", DeliveredAt: now.Add(-time.Minute), Event: "ping"},
+		{ID: 2, GUID: "c", StatusCode: 0, Status: "failed to connect to host", DeliveredAt: now.Add(-2 * time.Minute)},
+		{ID: 1, GUID: "d", StatusCode: 301, Status: "moved", DeliveredAt: now.Add(-3 * time.Minute)},
+	}
+	res := classifyAttempts(attempts, now, now.Add(-time.Hour), func(int64) (bool, bool) { return true, true })
+	if res.state != localapi.RouteUnreachable || res.reason != "failed to connect to host" {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestSanitizeStatusText(t *testing.T) {
+	if got := sanitizeStatusText("a\n`b`  c", 502); got != "a 'b' c" {
+		t.Errorf("got %q", got)
+	}
+	if got := sanitizeStatusText("", 504); got != "HTTP status 504" {
+		t.Errorf("got %q", got)
+	}
+	if got := sanitizeStatusText(strings.Repeat("x", 500), 0); len(got) > 170 {
+		t.Errorf("len %d", len(got))
+	}
+}
+
+// The probe never applies anything: this file talks to the GitHub API and the
+// read-only ledger lookup only (the replay file's twin of FR-008).
+func TestWebhookLivenessNeverSubmits(t *testing.T) {
+	src, err := os.ReadFile("webhook_liveness.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		code = append(code, line)
+	}
+	text := strings.Join(code, "\n")
+	for _, bad := range []string{".Submit(", "Accept(", "SetSink", "sink(", ".sink", "ledgerSeen", "Seen("} {
+		if strings.Contains(text, bad) {
+			t.Errorf("webhook_liveness.go must not reference %q", bad)
+		}
+	}
+}

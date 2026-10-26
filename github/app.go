@@ -460,6 +460,9 @@ type AppHookDelivery struct {
 	StatusCode  int       `json:"status_code"`
 	Event       string    `json:"event"`
 	Action      string    `json:"action"`
+	// ThrottledAt is set when GitHub throttled the attempt (#2452); such an
+	// attempt is neither success nor failure evidence for the route.
+	ThrottledAt *time.Time `json:"throttled_at,omitempty"`
 }
 
 // Succeeded reports whether GitHub recorded a 2xx response for the delivery.
@@ -574,6 +577,10 @@ type AppHookDeliveryDetail struct {
 	// Payload is the delivered JSON body; the request headers (which can carry
 	// the signature) are deliberately not decoded.
 	Payload json.RawMessage `json:"-"`
+	// URL is the address GitHub delivered this attempt to (#2452). The list
+	// endpoint omits it, so route-liveness reads it here to tie an attempt to the
+	// hook's current URL.
+	URL string `json:"-"`
 }
 
 // FetchAppHookDelivery reads one delivery of the App's delivery log, payload
@@ -582,6 +589,7 @@ type AppHookDeliveryDetail struct {
 func FetchAppHookDelivery(baseURL, jwt string, deliveryID int64) (AppHookDeliveryDetail, error) {
 	var raw struct {
 		AppHookDelivery
+		URL     string `json:"url"`
 		Request struct {
 			Payload json.RawMessage `json:"payload"`
 		} `json:"request"`
@@ -590,5 +598,5 @@ func FetchAppHookDelivery(baseURL, jwt string, deliveryID int64) (AppHookDeliver
 	if err := appRequest("GET", baseURL, path, jwt, &raw); err != nil {
 		return AppHookDeliveryDetail{}, fmt.Errorf("reading app webhook delivery %d: %w", deliveryID, err)
 	}
-	return AppHookDeliveryDetail{AppHookDelivery: raw.AppHookDelivery, Payload: raw.Request.Payload}, nil
+	return AppHookDeliveryDetail{AppHookDelivery: raw.AppHookDelivery, Payload: raw.Request.Payload, URL: raw.URL}, nil
 }

@@ -48,7 +48,6 @@ func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDelivery
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := startIngestion(t, eng, cache)
-	awaitFirstDNSProbe(eng)
 	return eng, cleanup
 }
 

@@ -1281,3 +1281,13 @@ func (r *Reconciler) RedeliverAppHookDelivery(deliveryID int64) error {
 	}
 	return gh.RedeliverAppHookDelivery(baseURL, jwt, deliveryID)
 }
+
+// FetchAppHookDelivery reads one delivery of the App's delivery log with its
+// target URL (GET /app/hook/deliveries/{id}, #2452).
+func (r *Reconciler) FetchAppHookDelivery(deliveryID int64) (gh.AppHookDeliveryDetail, error) {
+	jwt, baseURL, err := r.appHookJWT()
+	if err != nil {
+		return gh.AppHookDeliveryDetail{}, err
+	}
+	return gh.FetchAppHookDelivery(baseURL, jwt, deliveryID)
+}

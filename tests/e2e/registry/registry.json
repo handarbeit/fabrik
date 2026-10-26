@@ -950,7 +950,7 @@
       "name": "TestWebhookTransportHealthAndBrokenRoute",
       "parity": "live-only",
       "live_only_reason": "other",
-      "note": "tailscale transport health, Funnel public-DNS state and the App webhook-config check (#2143, #2425) need the real Funnel and the real App configuration",
+      "note": "tailscale transport health, webhook route liveness from the delivery log and the App webhook-config check (#2143, #2452) need the real Funnel and the real App configuration",
       "skip_ok_legs": [
         "pat/*",
         "*/*/poll"

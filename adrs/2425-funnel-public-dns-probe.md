@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 2143 (the fixed 90 s replay grace and the `funnel` health values) and builds on ADR 2142 and ADR 2144.
+Superseded by ADR 2452 (the probe, its states, panel entry and replay hold were removed; route liveness from the delivery log replaced them). Originally: amends ADR 2143 (the fixed 90 s replay grace and the `funnel` health values) and builds on ADR 2142 and ADR 2144.
 
 ## Context
 

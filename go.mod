@@ -12,7 +12,6 @@ require (
 	github.com/mattn/go-isatty v0.0.24
 	github.com/muesli/termenv v0.16.0
 	github.com/vektah/gqlparser/v2 v2.5.64
-	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.104.2
@@ -67,6 +66,7 @@ require (
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
