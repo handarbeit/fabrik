@@ -4518,7 +4518,7 @@ entry for the caller to log.
 
 **`allow_auto_merge` (repo-keyed, per-poll).** `sweepStaleAllowAutoMergeWarnings`
 (`engine/allow_auto_merge_settle.go`) is called from `poll()` immediately after `seenRepos` — the board
-repo set `poll()` already computes for the label-seeding path (`poll.go` ~line 925) — is built, before
+repo set `poll()` already computes for the label-seeding path in `engine/poll.go` — is built, before
 the label-seeding loop runs. It calls `warnings.ClearMissing("allow_auto_merge", present)` with `present`
 = `seenRepos` unioned with `e.defaultRepo()` (single-repo mode only). The union matters:
 `checkAllowAutoMerge(e.cfg.Owner, e.cfg.Repo)` fires unconditionally at `Run()` startup regardless of
@@ -6612,15 +6612,15 @@ In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub d
 
 **Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the main poll cadence (~15 s) — Layer 2 runs at the top of every `poll()` cycle. If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own mutations.
 
-**Layer 0 write-through convention**: Every engine call site that mutates dispatch-relevant cache state **must** call the corresponding `CacheImpl` write-through method immediately after the API call succeeds. The safe type-assertion pattern used at every site:
+**Layer 0 write-through convention**: Every engine call site that mutates dispatch-relevant cache state **must** call the corresponding `CacheImpl` write-through method immediately after the API call succeeds. Call sites get the cache through the `e.cache()` helper (`engine/mutate.go`) and key the item by its resolved `owner/repo`:
 
 ```go
-if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-    cacheImpl.<Method>(boardcache.ItemKey(item.Repo, item.Number), ...)
+if c := e.cache(); c != nil {
+    c.<Method>(boardcache.ItemKey(owner+"/"+repo, item.Number), ...)
 }
 ```
 
-This is a no-op when `e.readClient` is a `GitHubAdapter` (cache-disabled mode), so the guard is always safe to include.
+`e.cache()` returns nil when the read client is not a `CacheImpl` (cache-disabled mode), so the guard is always safe to include. **Never key on `item.Repo`:** it can be empty on single-repo code paths, which yields a key (`#N`) no cached item has, and the write-through then does nothing — no error, no log — until the next reconcile (#957; `TestAdvanceToNextStage_EmptyItemRepo_CacheWriteThroughSucceeds`).
 
 **Covered mutation types and their `CacheImpl` methods:**
 

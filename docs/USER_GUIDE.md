@@ -2357,10 +2357,11 @@ to resume it.
 > applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
 > `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
 > slices are needed) or split the issue into smaller pieces, then remove
-> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
-> reset the slice counter — it is already at the limit, so the very next
-> turn-cap exit re-pauses immediately unless the underlying job size or turn
-> budget actually changes. See #1199 and #1191.
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels resets the
+> slice counter (the engine recorded the pause, so the next pass clears it), but
+> on its own that only buys another `--max-slice-retries` slices: unless the turn
+> budget or the job size changes, the item will most likely pause again the same
+> way. See #1199 and #1191.
 
 > **Troubleshooting: an issue is paused with a "stage dispatch limit reached"
 > comment.** `--max-retries` counts failed runs and `max_turns` bounds one

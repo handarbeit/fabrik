@@ -2355,10 +2355,11 @@ to resume it.
 > applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
 > `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
 > slices are needed) or split the issue into smaller pieces, then remove
-> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
-> reset the slice counter — it is already at the limit, so the very next
-> turn-cap exit re-pauses immediately unless the underlying job size or turn
-> budget actually changes. See #1199 and #1191.
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels resets the
+> slice counter (the engine recorded the pause, so the next pass clears it), but
+> on its own that only buys another `--max-slice-retries` slices: unless the turn
+> budget or the job size changes, the item will most likely pause again the same
+> way. See #1199 and #1191.
 
 > **Troubleshooting: an issue is paused with a "stage dispatch limit reached"
 > comment.** `--max-retries` counts failed runs and `max_turns` bounds one
@@ -10121,7 +10122,7 @@ entry for the caller to log.
 
 **`allow_auto_merge` (repo-keyed, per-poll).** `sweepStaleAllowAutoMergeWarnings`
 (`engine/allow_auto_merge_settle.go`) is called from `poll()` immediately after `seenRepos` — the board
-repo set `poll()` already computes for the label-seeding path (`poll.go` ~line 925) — is built, before
+repo set `poll()` already computes for the label-seeding path in `engine/poll.go` — is built, before
 the label-seeding loop runs. It calls `warnings.ClearMissing("allow_auto_merge", present)` with `present`
 = `seenRepos` unioned with `e.defaultRepo()` (single-repo mode only). The union matters:
 `checkAllowAutoMerge(e.cfg.Owner, e.cfg.Repo)` fires unconditionally at `Run()` startup regardless of
@@ -12215,15 +12216,15 @@ In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub d
 
 **Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the main poll cadence (~15 s) — Layer 2 runs at the top of every `poll()` cycle. If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own mutations.
 
-**Layer 0 write-through convention**: Every engine call site that mutates dispatch-relevant cache state **must** call the corresponding `CacheImpl` write-through method immediately after the API call succeeds. The safe type-assertion pattern used at every site:
+**Layer 0 write-through convention**: Every engine call site that mutates dispatch-relevant cache state **must** call the corresponding `CacheImpl` write-through method immediately after the API call succeeds. Call sites get the cache through the `e.cache()` helper (`engine/mutate.go`) and key the item by its resolved `owner/repo`:
 
 ```go
-if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-    cacheImpl.<Method>(boardcache.ItemKey(item.Repo, item.Number), ...)
+if c := e.cache(); c != nil {
+    c.<Method>(boardcache.ItemKey(owner+"/"+repo, item.Number), ...)
 }
 ```
 
-This is a no-op when `e.readClient` is a `GitHubAdapter` (cache-disabled mode), so the guard is always safe to include.
+`e.cache()` returns nil when the read client is not a `CacheImpl` (cache-disabled mode), so the guard is always safe to include. **Never key on `item.Repo`:** it can be empty on single-repo code paths, which yields a key (`#N`) no cached item has, and the write-through then does nothing — no error, no log — until the next reconcile (#957; `TestAdvanceToNextStage_EmptyItemRepo_CacheWriteThroughSucceeds`).
 
 **Covered mutation types and their `CacheImpl` methods:**
 
@@ -13053,13 +13054,13 @@ After a stage runs, pre-existing user comments that are not pending get a rocket
 ### Completion Path
 
 When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
-1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
-2. Retry tracking cleared
-3. Draft PR created (if `create_draft_pr: true`)
+1. Draft PR created (if `create_draft_pr: true`); a creation failure counts against `max_retries` and the stage stays incomplete
+2. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
+3. Retry tracking cleared
 4. PR marked ready (if `mark_pr_ready_on_complete: true`)
 5. `stage:<name>:complete` label added
 6. **Validate only:** `ValidateCompletedAtSHA` mutation applied with the worktree's current `HEAD` SHA (`git rev-parse HEAD`). This records the exact post-commit SHA so the SHA-invalidation scan (`docs/state-machine.md` §2.16) can detect future SHA changes (force-push, external commits) and automatically re-enter Validate. On error (e.g. bare git call fails), the SHA is left empty — the SHA-invalidation scan's FR-5 guard treats empty completion SHA as "do nothing," preserving safe degraded behavior.
-7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+7. Auto-advance to next stage when the issue carries `fabrik:yolo` or `fabrik:cruise`; with neither label, the stage's `auto_advance` decides when set, and global `yolo` otherwise. `fabrik:cruise` never advances past Validate. Even then the advance is held while auto-merge was just enabled, the landing was deferred, or the item is paused (`handleStageComplete`, `engine/stages.go`)
 
 **Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), and the Validate stage's review gate is either not opted in (`wait_for_reviews` unset) or already satisfied — including, when `review_authority: authoritative` is set, no outstanding `CHANGES_REQUESTED` review (see `docs/state-machine.md` §6.1.1) — Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. If `enablePullRequestAutoMerge` fails (PR already in a terminal GitHub state — CLEAN, UNSTABLE, or similar), Fabrik falls back to a direct `MergePR` call — the only merge path with no independent `mergeable_state` gate upstream of it (reached whenever `wait_for_ci: false`). `MergePR` self-gates regardless of `enforce_admins`: it refuses to merge unless `mergeable_state ∈ {clean, unstable}`, returning the distinct sentinel `gh.ErrNotMergeableCI` when a required check is still `blocked` or pending (ADR-072). This is not a merge conflict — `fabrik:rebase-needed` is not applied and no rebase cycle is consumed; the item simply retries via a full Validate re-dispatch on the next poll. See `docs/state-machine.md` §5.4–5.5 for full details.
 
