@@ -29,12 +29,14 @@ type fakeLivenessAPI struct {
 	onRedeliver func(id int64)
 	redelivered []int64
 	detailReads int
+	listCalls   int
 	nextID      int64
 }
 
 func (f *fakeLivenessAPI) ListAppHookDeliveries(cursor string, perPage int) ([]gh.AppHookDelivery, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, "", f.listErr
 	}
@@ -567,6 +569,47 @@ func TestLiveness_StaleUnreachableReadDoesNotOverwriteAnArrival(t *testing.T) {
 	h.r.evaluate(context.Background(), true)
 	if h.liveness() != localapi.RouteUnreachable {
 		t.Fatalf("newer failures were ignored: %+v", h.sink.get())
+	}
+}
+
+// An armed early retry that finds nothing to probe (the delivery's budget is
+// spent, or the hourly cap is) is consumed: left armed it would make every tick
+// a full evaluation, past the passive interval and the request bound.
+func TestLiveness_UnusableEarlyRetryIsConsumed(t *testing.T) {
+	for _, tc := range []string{"guid-budget-spent", "hourly-cap"} {
+		t.Run(tc, func(t *testing.T) {
+			h := newLivenessHarness(t, 0)
+			h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+			h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+			h.r.mu.Lock()
+			if tc == "guid-budget-spent" {
+				h.r.perGUID["g-probe"] = &guidProbe{n: livenessMaxProbesPerGUID, at: h.clock()}
+			} else {
+				for i := 0; i < livenessProbesPerHour; i++ {
+					h.r.probeLog = append(h.r.probeLog, h.clock())
+				}
+			}
+			h.r.retryUsed = true
+			h.r.retryAt = h.clock().Add(-time.Second)
+			h.r.lastPassive = h.clock()
+			h.r.mu.Unlock()
+
+			h.r.evaluate(context.Background(), false) // the retry is due, finds nothing
+			h.r.mu.Lock()
+			armed := !h.r.retryAt.IsZero()
+			h.r.mu.Unlock()
+			if armed {
+				t.Fatal("the unusable early retry stayed armed")
+			}
+			before := h.api.listCalls
+			for i := 0; i < 3; i++ {
+				h.advance(time.Minute)
+				h.r.evaluate(context.Background(), false)
+			}
+			if got := h.api.listCalls - before; got != 0 {
+				t.Fatalf("%d log reads inside the passive interval after the retry was consumed", got)
+			}
+		})
 	}
 }
 

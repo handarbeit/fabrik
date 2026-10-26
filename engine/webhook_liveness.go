@@ -167,6 +167,9 @@ type routeLiveness struct {
 	// whose deciding failure is older than it is stale (the read can predate the
 	// delivery) and must not overwrite it.
 	arrivedAt time.Time
+	// noEligibleLogged keeps the "no delivery eligible" line to once per stretch
+	// without a probe.
+	noEligibleLogged bool
 }
 
 // lateProbe remembers the GUID of a probe whose wait ended, so a copy that
@@ -662,6 +665,11 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 	}
 	r.probeLog = r.probeLog[cut:]
 	if len(r.probeLog) >= livenessProbesPerHour {
+		if retryDue {
+			// The early retry is spent even though it could not run: left armed
+			// it would make every tick a full evaluation.
+			r.retryAt = time.Time{}
+		}
 		r.mu.Unlock()
 		return
 	}
@@ -692,7 +700,17 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 	}
 	r.mu.Unlock()
 	if pick == nil {
-		r.log("no delivery eligible for a route check — liveness stays unknown until one arrives\n")
+		r.mu.Lock()
+		if retryDue {
+			// Nothing to probe: consume the early retry (see the rolling-hour cap).
+			r.retryAt = time.Time{}
+		}
+		first := !r.noEligibleLogged
+		r.noEligibleLogged = true
+		r.mu.Unlock()
+		if first {
+			r.log("no delivery eligible for a route check — liveness stays unknown until one arrives\n")
+		}
 		return
 	}
 	id := pick.original
@@ -718,6 +736,7 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 	p.n++
 	p.at = now
 	r.retryAt = time.Time{}
+	r.noEligibleLogged = false
 	r.mu.Unlock()
 
 	if err := r.cfg.API.RedeliverAppHookDelivery(id); err != nil {
