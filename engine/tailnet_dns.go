@@ -381,8 +381,8 @@ func (e *Engine) startTailnetReplay(ctx context.Context, r *deliveryReplayer, pr
 	if r == nil {
 		return
 	}
-	go r.Run(ctx)
-	go func() {
+	r.goTracked(func() { r.Run(ctx) })
+	r.goTracked(func() {
 		if !r.wait(ctx, tailnetReplayStartGrace) {
 			return
 		}
@@ -391,5 +391,5 @@ func (e *Engine) startTailnetReplay(ctx context.Context, r *deliveryReplayer, pr
 			return
 		}
 		r.Trigger()
-	}()
+	})
 }

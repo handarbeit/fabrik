@@ -104,6 +104,9 @@ func newReplayHarness(t *testing.T, pages ...[]gh.AppHookDelivery) *replayHarnes
 	oldPace := replayPace
 	replayPace = 0
 	t.Cleanup(func() { replayPace = oldPace })
+	// A test that runs h.r must cancel its context and wait; the guard fails it
+	// otherwise (#2447). Registered first, so it checks after the test's own cleanups.
+	trackReplayer(t, h.r)
 	return h
 }
 
@@ -347,8 +350,9 @@ func TestReplayer_TriggerCoalescesAndStopsOnCancel(t *testing.T) {
 	nilR.Trigger() // must not panic
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	done := make(chan struct{})
-	go func() { h.r.Run(ctx); close(done) }()
+	h.r.goTracked(func() { h.r.Run(ctx); close(done) })
 	deadline := time.After(5 * time.Second)
 	for {
 		h.api.mu.Lock()
@@ -500,8 +504,8 @@ func TestReplayer_FollowUpPass(t *testing.T) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.r.Run(ctx)
+	t.Cleanup(cancel)
+	h.r.goTracked(func() { h.r.Run(ctx) })
 	h.r.Trigger()
 	replayWaitFor(t, "first pass", func() bool { h.api.mu.Lock(); defer h.api.mu.Unlock(); return len(h.api.redelivered) == 1 })
 	replayWaitFor(t, "follow-up scheduled", func() bool { mu.Lock(); defer mu.Unlock(); return len(waits) == 1 })
@@ -544,8 +548,8 @@ func TestReplayer_NoFollowUpWithoutRequests(t *testing.T) {
 		return false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.r.Run(ctx)
+	t.Cleanup(cancel)
+	h.r.goTracked(func() { h.r.Run(ctx) })
 	h.r.Trigger()
 	replayWaitFor(t, "pass", func() bool { h.api.mu.Lock(); defer h.api.mu.Unlock(); return h.api.listCalls >= 1 })
 	time.Sleep(50 * time.Millisecond)
