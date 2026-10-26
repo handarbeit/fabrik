@@ -35,9 +35,9 @@ import (
 
 // knownReaders are the non-Go files Go tests read, with the reader.
 var knownReaders = map[string]string{
-	"CLAUDE.md":                                "plugin/rebase_reset_regression_test.go",
-	"docs/state-machine.md":                    "plugin/labels_drift_test.go, internal/channelevents/docs_test.go",
-	"docs/USER_GUIDE.md":                       "internal/channelevents/docs_test.go",
+	"CLAUDE.md":             "plugin/rebase_reset_regression_test.go",
+	"docs/state-machine.md": "plugin/labels_drift_test.go, internal/channelevents/docs_test.go",
+	"docs/USER_GUIDE.md":    "internal/channelevents/docs_test.go",
 	"adrs/1966-b-fabrik-mcp-channel-events.md": "internal/channelevents/docs_test.go",
 	".claude-plugin/marketplace.json":          "plugin/pm_plugin_test.go, plugin/names_collision_test.go, tools/*/main_test.go",
 	"plugin/fabrik/hooks/version-check.sh":     "plugin/pm_hook_test.go",

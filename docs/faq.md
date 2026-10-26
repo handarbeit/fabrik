@@ -20,7 +20,7 @@ No — Claude Code writes the code. Fabrik is the orchestrator: it decides which
 
 ### What do I need to run it?
 
-Go 1.26+, the Claude Code CLI, and a GitHub token with `repo` and `project` scopes. Everything runs locally on your own machine — you bring your own token and Claude Code.
+Go 1.27.3+, the Claude Code CLI, and a GitHub token with `repo` and `project` scopes. Everything runs locally on your own machine — you bring your own token and Claude Code.
 
 ### Is it free?
 

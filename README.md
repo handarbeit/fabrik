@@ -10,7 +10,7 @@ are user input, and the board columns define the workflow.
 
 ## Quick Start
 
-Requires Go 1.26.1+, the [Claude Code CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview), and a GitHub token with `repo` and `project` scopes.
+Requires Go 1.27.3+, the [Claude Code CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview), and a GitHub token with `repo` and `project` scopes.
 
 ```bash
 # Install
@@ -583,7 +583,7 @@ See [adrs/](adrs/) for documented decisions and their rationale. Of particular n
 
 ## Requirements
 
-- Go 1.26.1+
+- Go 1.27.3+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
   - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
