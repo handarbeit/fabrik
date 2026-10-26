@@ -269,7 +269,7 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	var st tailnetState
 	if status != nil {
 		st = tsnetStateFrom(status, connected)
-		// A successful read with no Self (a transient gap while the netmap
+		// A successful read with no Self (a transient gap while the node state
 		// refreshes) says nothing about the Funnel or the name, so it must not
 		// overwrite what is known: reporting "unknown" would clear an active
 		// Funnel outage and fire a spurious catch-up reconcile.

@@ -106,7 +106,7 @@ func TestTsnetTracker_FailedReadKeepsLastFunnel(t *testing.T) {
 	}
 }
 
-// A successful read with no Self entry (a transient gap while the netmap
+// A successful read with no Self entry (a transient gap while the node state
 // refreshes) is not evidence that the Funnel came back either: the last known
 // Funnel status and name are kept, so an active outage is not cleared and no
 // spurious recovery follows.
