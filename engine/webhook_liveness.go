@@ -82,6 +82,9 @@ var (
 	// recognised as the probe's (the delivery log and the redelivery can lag by
 	// minutes) rather than taken for a real delivery.
 	livenessLateGrace = 10 * time.Minute
+	// livenessArrivalRefreshGap is the minimum gap between the hook-URL re-reads
+	// that an arrival not matching the cached URL triggers.
+	livenessArrivalRefreshGap = 30 * time.Second
 )
 
 const livenessPanelType = "webhook_route_unreachable"
@@ -177,6 +180,10 @@ type routeLiveness struct {
 	// is older than livenessFailWindow, and the verdict must not outlive it when
 	// nothing else (a probe, a real delivery) decides.
 	failAt time.Time
+	// refreshing / lastArrivalRefresh bound the hook-URL re-read an arrival that
+	// does not match the cached URL triggers.
+	refreshing         bool
+	lastArrivalRefresh time.Time
 	// noEligibleLogged keeps the "no delivery eligible" line to once per stretch
 	// without a probe.
 	noEligibleLogged bool
@@ -297,12 +304,73 @@ func (r *routeLiveness) Arrival(guid string) (probe bool) {
 	hook := r.lastURL
 	r.mu.Unlock()
 	if r.arrivalMatchesHook(hook) {
-		r.mu.Lock()
-		r.arrivedAt = r.cfg.Now()
-		r.mu.Unlock()
-		r.decide(localapi.RouteReachable, "")
+		r.noteRealArrival()
+	} else {
+		// The cached hook URL may be the one the operator just replaced: re-read it
+		// off the request path (the ack must not wait on GitHub) and judge this
+		// arrival against the fresh value.
+		r.refreshHookForArrival(r.cfg.Now())
 	}
 	return late
+}
+
+// noteRealArrival records a real delivery as proof of the route.
+func (r *routeLiveness) noteRealArrival() {
+	r.mu.Lock()
+	r.arrivedAt = r.cfg.Now()
+	r.mu.Unlock()
+	r.decide(localapi.RouteReachable, "")
+}
+
+// refreshHookForArrival re-reads the App's hook URL after an arrival that did not
+// match the cached one, then decides the arrival against the fresh URL. One read
+// in flight at a time and at most one per livenessArrivalRefreshGap, so a stream
+// of deliveries to a stale address cannot become a request loop; a skipped
+// arrival is covered by the next arrival or the passive read.
+func (r *routeLiveness) refreshHookForArrival(at time.Time) {
+	r.mu.Lock()
+	if r.refreshing || (!r.lastArrivalRefresh.IsZero() && at.Sub(r.lastArrivalRefresh) < livenessArrivalRefreshGap) {
+		r.mu.Unlock()
+		return
+	}
+	r.refreshing = true
+	r.lastArrivalRefresh = at
+	r.mu.Unlock()
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			r.refreshing = false
+			r.mu.Unlock()
+		}()
+		hookURL, err := r.hookURL()
+		if err != nil {
+			r.logOnce("could not read the App's webhook configuration (%v) — route liveness unchanged", err)
+			return
+		}
+		if r.adoptHookURL(hookURL) {
+			r.log("the App's webhook URL changed — re-checking the route\n")
+			r.decide(localapi.RouteUnknown, "")
+		}
+		if r.arrivalMatchesHook(hookURL) {
+			r.noteRealArrival()
+		}
+	}()
+}
+
+// adoptHookURL records the App's current hook URL and, when it differs from the
+// last one, forgets the verdict and its evidence (evidence for another URL says
+// nothing about this one). It reports whether the URL changed.
+func (r *routeLiveness) adoptHookURL(hookURL string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	changed := r.lastURL != "" && normalizeWebhookURL(r.lastURL) != normalizeWebhookURL(hookURL)
+	r.lastURL = hookURL
+	if changed {
+		r.state, r.reason, r.evidenceAt, r.unreachAt = localapi.RouteUnknown, "", time.Time{}, time.Time{}
+		r.arrivedAt, r.failAt = time.Time{}, time.Time{}
+		r.retryUsed, r.retryAt, r.lastProbeAt = false, time.Time{}, time.Time{}
+	}
+	return changed
 }
 
 // arrivalMatchesHook reports whether a request that reached this receiver counts
@@ -535,19 +603,21 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 
 	hookURL, err := r.hookURL()
 	if err != nil {
+		// A failed config read waits out the passive interval like a successful
+		// one (and defers a due retry by it), so a persistent 403/404/rate limit is
+		// one request per interval, not one per tick.
+		r.mu.Lock()
+		r.lastPassive = now
+		if !r.retryAt.IsZero() && !now.Before(r.retryAt) {
+			r.retryAt = now.Add(livenessPassiveInterval)
+		}
+		r.mu.Unlock()
 		r.logOnce("could not read the App's webhook configuration (%v) — route liveness unchanged", err)
 		r.age(now)
 		return
 	}
+	urlChanged := r.adoptHookURL(hookURL)
 	r.mu.Lock()
-	urlChanged := r.lastURL != "" && normalizeWebhookURL(r.lastURL) != normalizeWebhookURL(hookURL)
-	r.lastURL = hookURL
-	if urlChanged {
-		// Evidence for another URL says nothing about this one.
-		r.state, r.reason, r.evidenceAt, r.unreachAt = localapi.RouteUnknown, "", time.Time{}, time.Time{}
-		r.arrivedAt, r.failAt = time.Time{}, time.Time{}
-		r.retryUsed, r.retryAt, r.lastProbeAt = false, time.Time{}, time.Time{}
-	}
 	r.lastPassive = now
 	r.mu.Unlock()
 	if urlChanged {

@@ -117,17 +117,18 @@ func (s *recRouteSink) get() localapi.RouteLiveness {
 }
 
 type livenessHarness struct {
-	t        *testing.T
-	api      *fakeLivenessAPI
-	ledger   *fakeLivenessLedger
-	sink     *recRouteSink
-	r        *routeLiveness
-	mu       sync.Mutex
-	now      time.Time
-	hookURL  string
-	hookErr  error
-	reported []warnings.Condition
-	resolved []string
+	t         *testing.T
+	api       *fakeLivenessAPI
+	ledger    *fakeLivenessLedger
+	sink      *recRouteSink
+	r         *routeLiveness
+	mu        sync.Mutex
+	now       time.Time
+	hookURL   string
+	hookErr   error
+	hookCalls int
+	reported  []warnings.Condition
+	resolved  []string
 }
 
 func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
@@ -148,6 +149,7 @@ func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
 		HookURL: func() (string, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
+			h.hookCalls++
 			return h.hookURL, h.hookErr
 		},
 		Logf: func(string, ...any) {},
@@ -395,6 +397,7 @@ func TestLiveness_RealArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
 	if h.r.Arrival("real") {
 		t.Fatal("a real delivery was taken for a probe copy")
 	}
+	h.waitRefreshIdle() // the mismatch re-reads the hook URL off the request path
 	if h.liveness() == localapi.RouteReachable {
 		t.Fatal("an arrival proved a route the App no longer points at")
 	}
@@ -402,6 +405,89 @@ func TestLiveness_RealArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
 	h.r.cfg.OwnURL = func() string { return livenessHookURL }
 	h.r.Arrival("real-2")
 	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// waitRefreshIdle waits for the hook-URL re-read an arrival may have started.
+func (h *livenessHarness) waitRefreshIdle() {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.r.mu.Lock()
+		busy := h.r.refreshing
+		h.r.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.t.Fatal("the hook-URL re-read did not finish")
+}
+
+// The App's hook URL is broken, then the operator restores it to this receiver's
+// URL. The first real delivery must prove the route at once: the cached hook URL
+// is the stale broken one, so the arrival re-reads it instead of being dropped
+// until the next passive read.
+func TestLiveness_ArrivalAfterHookURLFixIsNotDropped(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return livenessHookURL }
+	h.hookURL = "https://broken.example/webhook"
+	h.api.urls[1], h.api.urls[2] = h.hookURL, h.hookURL
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", time.Minute, false))
+	h.api.add(h.att(1, "g1", 502, "failed to connect to host", 2*time.Minute, false))
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("setup: route = %+v", h.sink.get())
+	}
+	// The operator fixes the URL; no passive read has happened since.
+	h.mu.Lock()
+	h.hookURL = livenessHookURL
+	h.mu.Unlock()
+	h.r.Arrival("real")
+	h.waitRefreshIdle()
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("an arrival at the restored URL did not prove the route: %+v", h.sink.get())
+	}
+}
+
+// A stream of arrivals that do not match must not become a request loop on the
+// hook configuration: one re-read per gap.
+func TestLiveness_ArrivalRefreshIsRateLimited(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	h.r.evaluate(context.Background(), true)
+	h.mu.Lock()
+	base := h.hookCalls
+	h.mu.Unlock()
+	for i := 0; i < 20; i++ {
+		h.r.Arrival(fmt.Sprintf("g%d", i))
+		h.waitRefreshIdle()
+	}
+	h.mu.Lock()
+	extra := h.hookCalls - base
+	h.mu.Unlock()
+	if extra != 1 {
+		t.Fatalf("hook configuration read %d times for 20 arrivals inside one gap, want 1", extra)
+	}
+}
+
+// A persistent failure to read the hook configuration (403, 404, rate limit) is
+// one request per passive interval, not one per tick.
+func TestLiveness_ConfigReadFailureWaitsOutThePassiveInterval(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.hookErr = errors.New("403 forbidden")
+	for i := 0; i < 11; i++ { // eleven one-minute ticks
+		h.r.evaluate(context.Background(), false)
+		h.advance(time.Minute)
+	}
+	h.mu.Lock()
+	calls := h.hookCalls
+	h.mu.Unlock()
+	if want := 3; calls > want { // t=0, 5, 10 minutes
+		t.Fatalf("hook configuration read %d times in 11 ticks, want at most %d", calls, want)
+	}
+	if h.liveness() != localapi.RouteUnknown {
 		t.Fatalf("route = %+v", h.sink.get())
 	}
 }
