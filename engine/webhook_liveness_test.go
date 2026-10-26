@@ -613,6 +613,58 @@ func TestLiveness_UnusableEarlyRetryIsConsumed(t *testing.T) {
 	}
 }
 
+// blockingRouteSink blocks its first call until released, recording every value.
+type blockingRouteSink struct {
+	mu      sync.Mutex
+	got     []string
+	entered chan struct{}
+	release chan struct{}
+	first   bool
+}
+
+func (s *blockingRouteSink) SetRouteLiveness(rl localapi.RouteLiveness) {
+	s.mu.Lock()
+	block := !s.first
+	s.first = true
+	s.mu.Unlock()
+	if block {
+		close(s.entered)
+		<-s.release
+	}
+	s.mu.Lock()
+	s.got = append(s.got, rl.Liveness)
+	s.mu.Unlock()
+}
+
+// decide runs from the HTTP handler and the controller goroutine: two verdicts
+// racing must leave the sink on the same value as the controller's state, not on
+// the earlier writer's.
+func TestLiveness_ConcurrentVerdictsLeaveTheSinkInStep(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	bs := &blockingRouteSink{entered: make(chan struct{}), release: make(chan struct{}), first: true}
+	h.r.cfg.Sink = bs
+	bs.mu.Lock()
+	bs.first = false // block the first call made below
+	bs.mu.Unlock()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); h.r.decide(localapi.RouteUnreachable, "failed to connect to host") }()
+	<-bs.entered // the first verdict is inside the sink
+	go func() { defer wg.Done(); h.r.decide(localapi.RouteReachable, "") }()
+	time.Sleep(50 * time.Millisecond) // let the second verdict run if nothing stops it
+	close(bs.release)
+	wg.Wait()
+	h.r.mu.Lock()
+	state := h.r.state
+	h.r.mu.Unlock()
+	bs.mu.Lock()
+	last := bs.got[len(bs.got)-1]
+	bs.mu.Unlock()
+	if last != state {
+		t.Fatalf("sink ended on %q while the controller's state is %q", last, state)
+	}
+}
+
 // A changed hook URL drops the old verdict and re-checks at once.
 func TestLiveness_HookURLChangeResets(t *testing.T) {
 	h := newLivenessHarness(t, 0)

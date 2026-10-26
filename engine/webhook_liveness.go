@@ -146,6 +146,11 @@ type routeLiveness struct {
 	started time.Time
 	trigger chan struct{}
 
+	// decideMu serialises decide end to end (state write and sink call), so the
+	// sink always ends on the last verdict the controller recorded: decide runs
+	// from the HTTP handler (Arrival) and from the controller goroutine.
+	decideMu sync.Mutex
+
 	mu          sync.Mutex
 	state       string // localapi.RouteReachable / RouteUnreachable / RouteUnknown
 	reason      string
@@ -438,6 +443,7 @@ func sanitizeStatusText(s string, code int) string {
 
 // decide records a liveness verdict from evidence at now.
 func (r *routeLiveness) decide(state, reason string) {
+	r.decideMu.Lock()
 	now := r.cfg.Now()
 	r.mu.Lock()
 	prev, prevReason := r.state, r.reason
@@ -468,6 +474,7 @@ func (r *routeLiveness) decide(state, reason string) {
 			r.log("webhook route %s → %s\n", prev, state)
 		}
 	}
+	r.decideMu.Unlock()
 	r.syncPanel()
 }
 
