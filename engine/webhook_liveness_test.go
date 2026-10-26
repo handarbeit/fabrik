@@ -527,6 +527,22 @@ func TestLiveness_RecoveryIsProbedWhileUnreachable(t *testing.T) {
 	}
 }
 
+// The warm-up is counted from when Run starts (the listener and Funnel are up),
+// not from construction: the controller is built before the node comes up, and a
+// slow Up must not leave failures from the ingress window eligible.
+func TestLiveness_WarmupCountsFromRunNotConstruction(t *testing.T) {
+	h := newLivenessHarness(t, 90*time.Second)
+	h.advance(10 * time.Minute) // the node took a long time to come up
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", 40*time.Second, false))
+	h.api.add(h.att(3, "g3", 502, "failed to connect to host", 20*time.Second, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Run evaluates once, then returns
+	h.r.Run(ctx)
+	if h.liveness() == localapi.RouteUnreachable {
+		t.Fatalf("failures inside the Funnel warm-up counted: %+v", h.sink.get())
+	}
+}
+
 // A changed hook URL drops the old verdict and re-checks at once.
 func TestLiveness_HookURLChangeResets(t *testing.T) {
 	h := newLivenessHarness(t, 0)

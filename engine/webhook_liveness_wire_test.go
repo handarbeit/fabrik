@@ -163,12 +163,18 @@ func TestLivenessWire_UnreachableMakesTheTransportUnhealthy(t *testing.T) {
 	}
 	eng, tr, cleanup := startLivenessDirectEngine(t, fake, false)
 	defer cleanup()
-	// The daemon has to have been up for the failures to count.
-	eng.liveness.mu.Lock()
-	eng.liveness.started = time.Now().Add(-time.Hour)
-	eng.liveness.mu.Unlock()
-	tr.FireReconnect()
-	replayWaitFor(t, "unreachable", func() bool { r := routeOf(tr); return r != nil && r.Liveness == localapi.RouteUnreachable })
+	// The daemon has to have been up for the failures to count. Run stamps its
+	// start once, when it begins, so the back-dated start is re-applied on every
+	// poll of the wait: whichever order the two land in, a later reconnect
+	// evaluates against it.
+	replayWaitFor(t, "unreachable", func() bool {
+		eng.liveness.mu.Lock()
+		eng.liveness.started = time.Now().Add(-time.Hour)
+		eng.liveness.mu.Unlock()
+		tr.FireReconnect()
+		r := routeOf(tr)
+		return r != nil && r.Liveness == localapi.RouteUnreachable
+	})
 	row := tr.HealthRow()
 	if row.State != "listening (route unreachable)" || row.Route.Reason != "failed to connect to host" || tr.IsHealthyOrStartingUp() {
 		t.Fatalf("row = %+v healthy=%v", row, tr.IsHealthyOrStartingUp())

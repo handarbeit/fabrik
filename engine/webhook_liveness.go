@@ -220,6 +220,13 @@ func (r *routeLiveness) Trigger() {
 // Run evaluates at start, on every trigger and whenever a passive re-read or a
 // scheduled check is due, until ctx ends.
 func (r *routeLiveness) Run(ctx context.Context) {
+	// The warm-up is counted from here, when the listener (and, for tailscale, the
+	// node and its Funnel) is up: the controller is constructed before the node
+	// starts, and a slow Up must not use the warm-up and the start-up quiet period
+	// before the route can be routed to.
+	r.mu.Lock()
+	r.started = r.cfg.Now()
+	r.mu.Unlock()
 	r.evaluate(ctx, true)
 	for {
 		woke := make(chan bool, 1)
