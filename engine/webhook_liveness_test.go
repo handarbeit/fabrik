@@ -543,6 +543,33 @@ func TestLiveness_WarmupCountsFromRunNotConstruction(t *testing.T) {
 	}
 }
 
+// A real delivery newer than the failures a passive read decided on proves the
+// route: a stale read (taken before the delivery) must not overwrite reachable
+// with unreachable. Failures newer than the delivery still do.
+func TestLiveness_StaleUnreachableReadDoesNotOverwriteAnArrival(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false), h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.Arrival("g-real") // the first delivery after a repair
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	h.r.evaluate(context.Background(), true) // a read that only shows the old failures
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a stale read overwrote a newer arrival: %+v", h.sink.get())
+	}
+	// Failures newer than the arrival are genuine.
+	h.advance(5 * time.Minute)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(4, "g4", 502, "failed to connect to host", time.Minute, false), h.att(3, "g3", 502, "failed to connect to host", 2*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true)
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("newer failures were ignored: %+v", h.sink.get())
+	}
+}
+
 // A changed hook URL drops the old verdict and re-checks at once.
 func TestLiveness_HookURLChangeResets(t *testing.T) {
 	h := newLivenessHarness(t, 0)

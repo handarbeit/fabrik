@@ -163,6 +163,10 @@ type routeLiveness struct {
 	late        *lateProbe // a probe whose wait ended without its copy arriving
 	lastPassive time.Time
 	cfgLogged   string
+	// arrivedAt is when a real delivery last decided reachable. A passive read
+	// whose deciding failure is older than it is stale (the read can predate the
+	// delivery) and must not overwrite it.
+	arrivedAt time.Time
 }
 
 // lateProbe remembers the GUID of a probe whose wait ended, so a copy that
@@ -280,6 +284,9 @@ func (r *routeLiveness) Arrival(guid string) (probe bool) {
 	hook := r.lastURL
 	r.mu.Unlock()
 	if r.arrivalMatchesHook(hook) {
+		r.mu.Lock()
+		r.arrivedAt = r.cfg.Now()
+		r.mu.Unlock()
 		r.decide(localapi.RouteReachable, "")
 	}
 	return late
@@ -523,6 +530,7 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 	if urlChanged {
 		// Evidence for another URL says nothing about this one.
 		r.state, r.reason, r.evidenceAt, r.unreachAt = localapi.RouteUnknown, "", time.Time{}, time.Time{}
+		r.arrivedAt = time.Time{}
 		r.retryUsed, r.retryAt, r.lastProbeAt = false, time.Time{}, time.Time{}
 	}
 	r.lastPassive = now
@@ -543,6 +551,17 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 		return
 	}
 	res := r.classifyLog(lr, hookURL, now)
+	if res.state == localapi.RouteUnreachable {
+		// The log was read before a real delivery may have arrived: a delivery
+		// newer than the failures that decided this read proves the route at least
+		// as recently, so the stale verdict is dropped (the next read sees it).
+		r.mu.Lock()
+		stale := r.arrivedAt.After(res.at)
+		r.mu.Unlock()
+		if stale {
+			return
+		}
+	}
 	if res.state != "" {
 		r.decide(res.state, res.reason)
 		if res.state == localapi.RouteUnreachable {
