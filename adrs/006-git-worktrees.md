@@ -60,7 +60,7 @@ For example, issues in `widgets` and `widgets-framework` use:
 .fabrik/worktrees/org-widgets-framework/issue-42/
 ```
 
-One `WorktreeManager` instance is created per repo (see ADR 014). Each WM has
+One `WorktreeManager` instance is created per repo (see [ADR 014](014-per-repo-worktree-manager.md)). Each WM has
 its own mutex, so concurrent workers in different repos never contend on
 worktree creation; same-repo workers serialize as before.
 

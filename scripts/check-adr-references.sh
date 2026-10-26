@@ -19,8 +19,21 @@
 # both as written and zero-padded to three digits, since legacy ADRs 001-073
 # are zero-padded and issue-numbered ones are not.
 #
+# It also checks that a citation names exactly one ADR, which is just as
+# mechanical:
+#
+#   - No two unsuffixed ADR files share a number. The legacy numbers 014, 017,
+#     028 and 032 each name two or three ADRs from before issue-numbered ADRs;
+#     CLAUDE.md forbids renumbering legacy ADRs, so they are grandfathered and
+#     any other shared number fails.
+#   - A citation of one of those grandfathered numbers names its file on the
+#     same line (a link or path such as 032-webhook-event-delivery.md), since
+#     "ADR-032" alone could mean either ADR. Each file's own heading is exempt.
+#   - A citation of a suffixed set (1953-a, 1953-b, ...) carries the suffix.
+#   - Each ADR's "# ADR N:" heading carries its own file's number.
+#
 # Usage: scripts/check-adr-references.sh
-# Exit 0 if every cited ADR exists, 1 otherwise.
+# Exit 0 if every cited ADR exists and names one ADR, 1 otherwise.
 
 set -euo pipefail
 
@@ -72,4 +85,65 @@ if [ -n "$dangling" ]; then
   exit 1
 fi
 
-echo "check-adr-references: OK — all $count cited ADRs exist"
+# --- Each citation names exactly one ADR ---------------------------------
+
+failed=0
+fail() {
+  if [ "$failed" -eq 0 ]; then
+    echo "" >&2
+    echo "ADR reference integrity check FAILED." >&2
+  fi
+  failed=1
+  echo "" >&2
+  echo "$1" >&2
+}
+
+grandfathered="14 17 28 32"
+
+# Unsuffixed files sharing a number. Suffixed sets (1089-a-, 1089-b-) share one
+# by design and are excluded.
+dupes=$(ls adrs/*.md | grep -vE '^adrs/[0-9]+-[a-z]-' \
+  | sed -nE 's|^adrs/0*([0-9]+)-.*|\1|p' | sort -n | uniq -d)
+for n in $dupes; do
+  case " $grandfathered " in *" $n "*) continue ;; esac
+  fail "  ADR number $n is used by more than one file — number the new ADR after its own issue (CLAUDE.md, \"ADR numbering\"):"
+  ls adrs/ | grep -E "^0*${n}-" | sed 's/^/    adrs\//' >&2
+done
+
+# A citation of a grandfathered number must name its file on the same line.
+for n in $grandfathered; do
+  padded=$(printf "%03d" "$n")
+  hits=$(grep -niE "ADR[- ]0*${n}([^0-9-]|\$)" "${sources[@]}" 2>/dev/null \
+    | grep -viE "(^|[^0-9])0*${n}-[a-z]" \
+    | grep -vE "^adrs/${padded}-[^:]*:1:" || true)
+  if [ -n "$hits" ]; then
+    fail "  ADR-$padded names more than one ADR ($(ls adrs/ | grep -E "^${padded}-" | tr '\n' ' ')) — link the one you mean:"
+    echo "$hits" | sed 's/^/    /' >&2
+  fi
+done
+
+# A citation of a suffixed set must carry its suffix.
+suffixed=$(ls adrs/*.md | sed -nE 's|^adrs/0*([0-9]+)-[a-z]-.*|\1|p' | sort -u)
+for n in $suffixed; do
+  hits=$(grep -niE "ADR[- ]0*${n}([^0-9-]|\$)" "${sources[@]}" 2>/dev/null || true)
+  if [ -n "$hits" ]; then
+    fail "  ADR-$n is a suffixed set ($(ls adrs/ | grep -E "^0*${n}-[a-z]-" | tr '\n' ' ')) — cite it as ADR-$n-a, ADR-$n-b, ...:"
+    echo "$hits" | sed 's/^/    /' >&2
+  fi
+done
+
+# Each ADR's heading carries its own file's number (and suffix).
+for f in adrs/[0-9]*.md; do
+  file_id=$(basename "$f" | sed -nE 's/^0*([0-9]+)(-([a-z])-)?.*/\1\2/p' | sed -E 's/-$//')
+  got=$(grep -m1 -E '^# ' "$f" | sed -nE 's/^# *[Aa][Dd][Rr][- ]*0*([0-9]+(-[a-z])?)[^0-9a-z].*/\1/p')
+  if [ -n "$got" ] && [ "$got" != "$file_id" ]; then
+    fail "  $f is headed ADR $got — its file number is $file_id."
+  fi
+done
+
+if [ "$failed" -ne 0 ]; then
+  echo "" >&2
+  exit 1
+fi
+
+echo "check-adr-references: OK — all $count cited ADRs exist and each names one ADR"

@@ -5,7 +5,7 @@
 
 ## Context
 
-When Fabrik auto-advances from Implement to Review in `yolo` or `cruise` mode, bots such as GitHub Copilot and Gemini Code Assist may not have completed their automated reviews yet. The prior two-phase review gate (ADR 017) blocked advancement until all requested reviewers submitted, but it only waited — it did not actually address the submitted feedback.
+When Fabrik auto-advances from Implement to Review in `yolo` or `cruise` mode, bots such as GitHub Copilot and Gemini Code Assist may not have completed their automated reviews yet. The prior two-phase review gate ([ADR 017](017-review-gate-two-phase-design.md)) blocked advancement until all requested reviewers submitted, but it only waited — it did not actually address the submitted feedback.
 
 The result: Review runs, signals `FABRIK_STAGE_COMPLETE`, `fabrik:awaiting-review` fires, reviewers submit, gate clears... and the issue advances to Validate with the review feedback unaddressed.
 

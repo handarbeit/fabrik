@@ -49,7 +49,7 @@ Rather than build a symmetric ratio-based visibility model for both buckets — 
 plumbing live REST `Remaining`/`Limit` into `PollCompletedEvent` (REST and GraphQL exhaustion are
 not symmetric conditions: REST is a hard ≤1% pause with no ratio-recheck concept at all, while
 GraphQL's ratio check was redundant with its own explicit clear event, both already firing at the
-same 50% threshold per ADR-028) — `AlertBannerComponent` is rebuilt around the simpler model
+same 50% threshold per [ADR-028](028-rate-limit-backoff-hysteresis.md)) — `AlertBannerComponent` is rebuilt around the simpler model
 `ClaudeUsageLimitBannerComponent` (ADR-1120) already uses successfully for a structurally
 identical banner: a `rateLimitAlertState{active bool; reset time.Time}` per bucket, with
 `isVisible(now)` computed **only** from that bucket's own `active`/`reset` — no ratio, no
@@ -100,7 +100,7 @@ GraphQL-exhaustion banner now correctly names the same bucket the footer already
 - `AlertBannerComponent.graphqlStats`/`bannerActive` no longer exist; anything reading them
   (tests, or a future component) must be updated to `rest`/`graphql` `rateLimitAlertState` fields.
 - The GraphQL banner's visibility ratio recheck (redundant with the explicit clear event per
-  ADR-028) is gone. This is intentional — see "Drop the ratio-based visibility recheck" above —
+  [ADR-028](028-rate-limit-backoff-hysteresis.md)) is gone. This is intentional — see "Drop the ratio-based visibility recheck" above —
   and not a regression: GraphQL's actual exhaustion/clear semantics (the 20%/50% hysteresis) are
   unchanged; only the banner's *second, always-agreeing* check on top of them was removed.
 - A REST-only exhaustion now reliably renders (acceptance #6), closing a real, previously-silent
@@ -108,7 +108,7 @@ GraphQL-exhaustion banner now correctly names the same bucket the footer already
 
 ## Related
 
-- ADR-028 — GraphQL rate-limit backoff hysteresis (20%/50%); the source of the "clear at 50%"
+- [ADR-028](028-rate-limit-backoff-hysteresis.md) — GraphQL rate-limit backoff hysteresis (20%/50%); the source of the "clear at 50%"
   event this ADR's `graphql` state now tracks directly, with no independent recheck.
 - ADR-1120 — `ClaudeUsageLimitBannerComponent`, the reference model this ADR's
   `rateLimitAlertState` is deliberately modeled on.
