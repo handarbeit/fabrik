@@ -78,6 +78,10 @@ var (
 	livenessLogWindow = 24 * time.Hour
 	// livenessTick is the controller's idle wake-up.
 	livenessTick = time.Minute
+	// livenessLateGrace is how long after a probe's wait ended its copy is still
+	// recognised as the probe's (the delivery log and the redelivery can lag by
+	// minutes) rather than taken for a real delivery.
+	livenessLateGrace = 10 * time.Minute
 )
 
 const livenessPanelType = "webhook_route_unreachable"
@@ -152,8 +156,16 @@ type routeLiveness struct {
 	probeLog    []time.Time
 	perGUID     map[string]*guidProbe
 	out         *outstandingProbe
+	late        *lateProbe // a probe whose wait ended without its copy arriving
 	lastPassive time.Time
 	cfgLogged   string
+}
+
+// lateProbe remembers the GUID of a probe whose wait ended, so a copy that
+// arrives afterwards is still not taken for a real delivery.
+type lateProbe struct {
+	guid  string
+	until time.Time
 }
 
 type guidProbe struct {
@@ -228,10 +240,14 @@ func (r *routeLiveness) Run(ctx context.Context) {
 }
 
 // Arrival is called by the transport for every verified, non-ping request before
-// it is handed to the intake. It reports whether the request is the copy of an
-// outstanding probe redelivery, in which case the transport leaves its
-// last-delivery time alone. A request that is not a probe copy is a real
-// delivery from GitHub: it proves the route and decides reachable at once.
+// it is handed to the intake. It reports whether the request is the copy of a
+// probe redelivery (outstanding, or one whose wait ended less than
+// livenessLateGrace ago), in which case the transport leaves its last-delivery
+// time alone. Any other request is a real delivery from GitHub: it proves the
+// route and decides reachable at once. Where the receiver knows its own URL, an
+// arrival only proves the route while the App's hook URL (as last read) is that
+// URL: a redelivery GitHub sent to an older address says nothing about the
+// current one.
 func (r *routeLiveness) Arrival(guid string) (probe bool) {
 	if r == nil {
 		return false
@@ -246,9 +262,24 @@ func (r *routeLiveness) Arrival(guid string) (probe bool) {
 		r.mu.Unlock()
 		return true
 	}
+	late := r.late != nil && guid != "" && r.late.guid == guid && r.cfg.Now().Before(r.late.until)
+	if late {
+		r.late = nil
+	}
+	hook := r.lastURL
 	r.mu.Unlock()
-	r.decide(localapi.RouteReachable, "")
-	return false
+	if r.arrivalMatchesHook(hook) {
+		r.decide(localapi.RouteReachable, "")
+	}
+	return late
+}
+
+// arrivalMatchesHook reports whether a request that reached this receiver counts
+// as evidence for the App's hook URL. Unknown on either side counts: the passive
+// read corrects a wrong verdict within livenessPassiveInterval.
+func (r *routeLiveness) arrivalMatchesHook(hookURL string) bool {
+	own := r.cfg.OwnURL()
+	return own == "" || hookURL == "" || normalizeWebhookURL(own) == normalizeWebhookURL(hookURL)
 }
 
 // groupInfo summarises the attempts of one GUID.
@@ -667,6 +698,12 @@ func (r *routeLiveness) awaitProbe(ctx context.Context, out *outstandingProbe, h
 	defer func() {
 		r.mu.Lock()
 		r.out = nil
+		select {
+		case <-out.arrived:
+		default:
+			// The copy has not arrived (yet): keep recognising it for a while.
+			r.late = &lateProbe{guid: out.guid, until: r.cfg.Now().Add(livenessLateGrace)}
+		}
 		r.mu.Unlock()
 	}()
 	deadline := out.at.Add(livenessResultWait)

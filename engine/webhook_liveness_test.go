@@ -383,6 +383,60 @@ func TestLiveness_ProbeArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
 	}
 }
 
+// A real delivery proves the route only for the App's current hook URL: where
+// the receiver knows its own URL and the App points elsewhere, an arrival (for
+// example the replayer's redelivery to the old address) decides nothing.
+func TestLiveness_RealArrivalIgnoredWhenAppPointsElsewhere(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	h.r.evaluate(context.Background(), true) // reads the hook URL (livenessHookURL), nothing else
+	if h.r.Arrival("real") {
+		t.Fatal("a real delivery was taken for a probe copy")
+	}
+	if h.liveness() == localapi.RouteReachable {
+		t.Fatal("an arrival proved a route the App no longer points at")
+	}
+	// The same arrival at the URL the App is configured with does prove it.
+	h.r.cfg.OwnURL = func() string { return livenessHookURL }
+	h.r.Arrival("real-2")
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// A probe copy that arrives after the probe's wait ended is still the probe's:
+// it is not taken for a real delivery (the transport leaves last_delivery_at
+// alone), still proves the route, and is recognised once only and only inside
+// the grace.
+func TestLiveness_LateProbeCopyIsStillAProbeCopy(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.r.evaluate(context.Background(), true) // the wait times out: unknown
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	if !h.r.Arrival("g-probe") {
+		t.Fatal("a late probe copy was taken for a real delivery")
+	}
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a late probe copy did not prove the route: %+v", h.sink.get())
+	}
+	if h.r.Arrival("g-probe") {
+		t.Fatal("the late-copy allowance was not consumed")
+	}
+
+	// Past the grace the GUID is an ordinary delivery again.
+	h2 := newLivenessHarness(t, 0)
+	h2.api.add(h2.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h2.ledger.at["g-probe"] = h2.clock().Add(-3 * time.Hour)
+	h2.r.evaluate(context.Background(), true)
+	h2.advance(livenessLateGrace + time.Second)
+	if h2.r.Arrival("g-probe") {
+		t.Fatal("a copy past the grace was still taken for a probe copy")
+	}
+}
+
 // The probe's new attempt in the log decides when the copy never arrives.
 func TestLiveness_ProbeResolvedFromTheLog(t *testing.T) {
 	h := newLivenessHarness(t, 0)
