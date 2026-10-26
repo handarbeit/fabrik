@@ -67,16 +67,46 @@ func (m ReviewThreadCommentDeleted) itemKey() string { return itemKeyFor(m.Repo,
 // threads only (the deep fetch keeps nothing else), so the count moves only when
 // comments were actually removed: a replay, or a thread the Store never held (the
 // deep fetch caps at 50 threads, so "unknown" is not "absent"), changes nothing.
+//
+// A comment stored from a pull_request_review_comment delivery has no
+// ReviewThreadID (the payload carries none), so the thread ID alone cannot find
+// it (#2444, ADR 2444). CommentNodeIDs and CommentDatabaseIDs are the identities
+// the resolved delivery lists in thread.comments[]; they match only stored
+// comments whose ReviewThreadID is empty, never one tagged with another thread.
 type ReviewThreadResolved struct {
 	// At is the delivery's updated_at (else receipt time).
 	At          time.Time
 	Repo        string
 	IssueNumber int
 	ThreadID    string
+	// CommentNodeIDs and CommentDatabaseIDs are the thread's comments as the
+	// delivery lists them. Empty means thread-ID matching only.
+	CommentNodeIDs     []string
+	CommentDatabaseIDs []int
 }
 
 func (ReviewThreadResolved) isMutation()       {}
 func (m ReviewThreadResolved) itemKey() string { return itemKeyFor(m.Repo, m.IssueNumber) }
+
+// listsComment reports whether the delivery lists c by node ID or by a non-zero
+// database ID.
+func (m ReviewThreadResolved) listsComment(c gh.Comment) bool {
+	if c.ID != "" {
+		for _, id := range m.CommentNodeIDs {
+			if id == c.ID {
+				return true
+			}
+		}
+	}
+	if c.DatabaseID != 0 {
+		for _, id := range m.CommentDatabaseIDs {
+			if id == c.DatabaseID {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ReviewThreadUnresolved records that a thread was reopened and invalidates the
 // item's deep cache so the next fetch rebuilds the thread. A rebuild from the
@@ -203,7 +233,13 @@ func (s *Store) applyWebhookFact(item *ItemState, m Mutation) (flags ChangeFlags
 			return 0, true
 		}
 		var n int
-		item.LinkedPR.ThreadComments, n = removeComments(item.LinkedPR.ThreadComments, func(c gh.Comment) bool { return c.ReviewThreadID == v.ThreadID })
+		byIdentity := !s.threadResolveByIdentityOff.Load()
+		item.LinkedPR.ThreadComments, n = removeComments(item.LinkedPR.ThreadComments, func(c gh.Comment) bool {
+			if c.ReviewThreadID == v.ThreadID {
+				return true
+			}
+			return byIdentity && c.ReviewThreadID == "" && v.listsComment(c)
+		})
 		if n == 0 {
 			// Unknown thread: record nothing so a later unresolved or fetch is judged
 			// on its own merits.

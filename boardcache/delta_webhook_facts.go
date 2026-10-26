@@ -22,6 +22,12 @@ type reviewThreadEventPayload struct {
 	Action lenientString `json:"action"`
 	Thread struct {
 		NodeID lenientString `json:"node_id"`
+		// Comments lists the thread's comments; a resolve uses them to find
+		// stored comments that carry no thread ID (#2444).
+		Comments []struct {
+			NodeID lenientString `json:"node_id"`
+			ID     lenientInt    `json:"id"`
+		} `json:"comments"`
 	} `json:"thread"`
 	PullRequest struct {
 		Number int `json:"number"`
@@ -162,7 +168,16 @@ func (c *CacheImpl) applyReviewThreadDelta(payload []byte, receivedAt time.Time)
 		return
 	}
 	at := observedTime(p.UpdatedAt, receivedAt)
-	var m itemstate.Mutation = itemstate.ReviewThreadResolved{Repo: issRepo, IssueNumber: issNum, ThreadID: thread, At: at}
+	resolved := itemstate.ReviewThreadResolved{Repo: issRepo, IssueNumber: issNum, ThreadID: thread, At: at}
+	for _, tc := range p.Thread.Comments {
+		if tc.NodeID != "" {
+			resolved.CommentNodeIDs = append(resolved.CommentNodeIDs, string(tc.NodeID))
+		}
+		if tc.ID != 0 {
+			resolved.CommentDatabaseIDs = append(resolved.CommentDatabaseIDs, int(tc.ID))
+		}
+	}
+	var m itemstate.Mutation = resolved
 	if p.Action == "unresolved" {
 		m = itemstate.ReviewThreadUnresolved{Repo: issRepo, IssueNumber: issNum, ThreadID: thread, At: at}
 	}

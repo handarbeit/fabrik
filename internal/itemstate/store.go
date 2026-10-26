@@ -52,6 +52,11 @@ type Store struct {
 	// seam only (SetObservedOrderingDisabledForTest).
 	observedOrderingOff atomic.Bool
 
+	// threadResolveByIdentityOff restores the pre-#2444 ReviewThreadResolved
+	// match (thread ID only). Test seam only
+	// (SetThreadResolveByIdentityDisabledForTest).
+	threadResolveByIdentityOff atomic.Bool
+
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
