@@ -451,3 +451,24 @@ func TestProbeWebhookDeliveryWriteFailureIsProbeSetupAndNotRetried(t *testing.T)
 		t.Errorf("archived result = %+v", got)
 	}
 }
+
+func TestProbeWebhookDeliveryTargetsASingleEnvBedsOwnRepo(t *testing.T) {
+	fd := &fakeDelivery{row: upRow(), hookURL: probeFunnelURL, deliver: true}
+	g, fe, _ := deliveryGate(t, fd)
+	g.Env = append(g.Env, "E2E_BEDS="+g.Cfg.TestBed)
+	envFile := "FABRIK_TOKEN=" + probeSecretToken + "\nFABRIK_TAILSCALE_HOSTNAME=bed-a\nFABRIK_TEST_REPO_ALPHA=handarbeit/fabrik-test-gamma\n"
+	if err := os.WriteFile(filepath.Join(g.Cfg.TestBed, ".env"), []byte(envFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ProbeWebhookDelivery(context.Background(), Cell{Auth: "app", Train: "on"}); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	var onBed, onDefault bool
+	for _, l := range fe.lines() {
+		onBed = onBed || strings.Contains(l, "repos/handarbeit/fabrik-test-gamma/issues")
+		onDefault = onDefault || strings.Contains(l, "repos/handarbeit/fabrik-test-alpha/")
+	}
+	if !onBed || onDefault {
+		t.Errorf("the scratch issue must live on the bed's own alpha repo only (bed=%v default=%v): %v", onBed, onDefault, fe.lines())
+	}
+}
