@@ -50,8 +50,8 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.89: the engine stops looping on work it cannot finish. A stage that finished but could not post its output is published by retry instead of being run again, no work starts while GitHub cannot be written or reached, and one stage of one item is dispatched at most 25 times before the item is paused. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#recorded-stage-outcome-and-publication-retry">Recorded stage outcome and publication retry</a>.
+      New in v0.0.90: webhooks without a relay. Under GitHub App auth the daemon can receive App webhooks itself, directly behind your own tunnel or through an embedded Tailscale Funnel node, and asks GitHub to redeliver anything it missed while it was down. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#direct-app-webhook-receiver-event_source-direct">Direct App Webhook Receiver</a>.
     </p>
 
     <div class="hero-diagram">
@@ -524,7 +524,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">⚡</span>
         <div class="feature-title">Webhook Mode</div>
         <div class="feature-desc">
-          Optional GitHub event stream collapses event latency from ~30 s to near-zero and slashes GraphQL traffic — no public endpoint, no ngrok, no infra. Polling stays on as a safety net.
+          Optional GitHub event stream collapses event latency from ~30 s to near-zero and slashes GraphQL traffic — no public endpoint, no ngrok, no infra. Under GitHub App auth, receive events directly or through an embedded Tailscale Funnel node. Polling stays on as a safety net.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#merge-train--queued" aria-label="Merge Train &amp; Merge Queue — open documentation">
