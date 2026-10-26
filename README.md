@@ -124,7 +124,7 @@ Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead o
 
 > **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. Coordinate across your team so only one Fabrik instance runs with `--webhooks`; other instances can run without it and will still process issues via polling. See [§10 of the User Guide](docs/USER_GUIDE.md#10-webhook-mode) for full setup, configuration, and troubleshooting details.
 
-> **GitHub App auth:** `--webhooks` cannot be combined with [GitHub App authentication](#github-app-authentication). App-auth setups — including multi-repo ones — can get near-real-time delivery through Hookdeck instead (`--event-source hookdeck`); polling stays the correctness backstop either way. See [Event-Driven Ingestion via Hookdeck](docs/USER_GUIDE.md#event-driven-ingestion-via-hookdeck-app-auth).
+> **GitHub App auth:** `--webhooks` cannot be combined with [GitHub App authentication](#github-app-authentication). App-auth setups — including multi-repo ones — can get near-real-time delivery by receiving the App's webhook directly instead (`--event-source tailscale` for the daemon's own Tailscale Funnel node, or `--event-source direct` behind a proxy you run); polling stays the correctness backstop either way. See [Embedded Tailscale Funnel Receiver](docs/USER_GUIDE.md#embedded-tailscale-funnel-receiver-event_source-tailscale). `--event-source hookdeck` is deprecated and will be removed in v0.0.92.
 
 ### Merge Train & Merge Queue (Optional)
 
@@ -390,7 +390,7 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM (also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`) | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as (also `FABRIK_GITHUB_APP_INSTALLATION_ID`) | `0` |
 | `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts; use `--no-browser=false` to re-enable (also `FABRIK_NO_BROWSER`) | `true` |
-| `--event-source` | Event ingestion transport: `poll` or `hookdeck` (requires GitHub App auth; not combinable with `--webhooks`; also `FABRIK_EVENT_SOURCE`). The `--hookdeck-api-key-env` / `--hookdeck-webhook-secret-env` flags are described in the [User Guide](docs/USER_GUIDE.md#event-driven-ingestion-via-hookdeck-app-auth) | `poll` |
+| `--event-source` | Event ingestion transport: `poll`, `tailscale`, `direct` or `hookdeck` (deprecated, removed in v0.0.92). Every value but `poll` requires GitHub App auth and is not combinable with `--webhooks`; also `FABRIK_EVENT_SOURCE`. The `--hookdeck-api-key-env` / `--hookdeck-webhook-secret-env` flags are described in the [User Guide](docs/USER_GUIDE.md#event-driven-ingestion-via-hookdeck-app-auth) | `poll` |
 | `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
 > **Prerequisite for yolo auto-merge:** GitHub's `allow_auto_merge` setting must be enabled on the repository before Fabrik can enable native auto-merge on yolo PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:

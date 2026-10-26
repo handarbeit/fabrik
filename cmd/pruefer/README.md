@@ -372,6 +372,8 @@ On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc af
 
 ## Event-driven mode (Hookdeck)
 
+> **Deprecated in v0.0.90; removed in v0.0.92.** Pruefer's replacement is `event_source: tailscale` / `direct`, the receiver Fabrik already uses. Each Pruefer daemon needs its own GitHub App for it, because an App has a single webhook URL. That replacement is planned for v0.0.92. Until then, `event_source: poll` (the default) is the supported mode.
+
 By default (`event_source: poll`, unset), Pruefer's behavior is exactly what's described above — poll every `poll_interval_seconds`, list open PRs, review the eligible ones. `event_source: hookdeck` is an opt-in alternative: GitHub webhooks are forwarded through [Hookdeck](https://hookdeck.com) into Pruefer, which reviews a PR within moments of `opened`/`reopened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval. Polling is never removed in this mode — it's demoted to a low-frequency reconciliation safety net (`reconciliation.fallback_interval`, default `2m`), covering startup, a Hookdeck outage, and the moment right after reconnecting, so a missed or dropped event is never fatal.
 
 Pruefer is the deliberate test bed for this pattern before it's ported to Fabrik's own webhook infrastructure — see [adrs/1254-event-driven-hookdeck-ingestion.md](../../adrs/1254-event-driven-hookdeck-ingestion.md).
@@ -862,7 +864,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
 | `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
 | `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
-| `--event-source` | `PRUEFER_EVENT_SOURCE` | `event_source` | `poll` | `poll` (default, unchanged behavior) or `hookdeck` (event-driven — see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck)) |
+| `--event-source` | `PRUEFER_EVENT_SOURCE` | `event_source` | `poll` | `poll` (default, unchanged behavior) or `hookdeck` (event-driven, **deprecated, removed in v0.0.92** — see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck)) |
 | `--hookdeck-api-key-env` | `PRUEFER_HOOKDECK_API_KEY_ENV` | `hookdeck.api_key_env` | `HOOKDECK_API_KEY` | Name of the env var holding the Hookdeck API key. Only consulted when `event_source: hookdeck` |
 | `--hookdeck-webhook-secret-env` | `PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck.webhook_secret_env` | `PRUEFER_GITHUB_WEBHOOK_SECRET` | Name of the env var holding the GitHub App's webhook secret. Only consulted when `event_source: hookdeck` |
 | `--reconciliation-startup` | `PRUEFER_RECONCILIATION_STARTUP` | `reconciliation.startup` | `true` | Run a full poll reconciliation pass at startup before event delivery begins. Only consulted when `event_source: hookdeck` |
