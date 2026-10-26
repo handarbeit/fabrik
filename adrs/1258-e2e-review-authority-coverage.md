@@ -5,6 +5,7 @@
 Validate-stage review of this issue's own PR — see "Revision" — so this date marks
 final acceptance, not the first-draft column/stage-variant design)
 **Issue:** [#1258](https://github.com/handarbeit/fabrik/issues/1258)
+**Amended by:** [ADR 1375](1375-review-authority-reinvoke-not-pause.md) — `TestReviewAuthorityBlocksAndPausesOnChangesRequested` was retired and replaced by `TestReviewAuthorityReinvokesOnChangesRequested` (a `CHANGES_REQUESTED` review now reinvokes the stage; the cycle-limit pause is the terminal case, `TestReviewAuthorityCycleLimitPauses`). #1261 landed on 2026-07-30, so the "will fail until #1261 lands" passages below are historical.
 
 ## Context
 
@@ -155,7 +156,7 @@ gap requires either relaxing the `Validate`-name hardcoding (a production change
 not made here) or accepting the cross-scenario risk of authoritative-izing the bed's real
 `Validate` stage.
 
-**Three of the four scenarios have a hard dependency on #1261.** Until the engine reads
+**Three of the four scenarios have a hard dependency on #1261.** *(Historical: #1261 has landed, and the first scenario is now `TestReviewAuthorityReinvokesOnChangesRequested` — see the Amended by note at the top.)* Until the engine reads
 `review-authority:authoritative` and honors it as equivalent to the stage's `review_authority:
 authoritative` config, `TestReviewAuthorityBlocksAndPausesOnChangesRequested`,
 `TestReviewAuthorityClearsOnApproval`, and `TestReviewAuthorityYoloDoesNotBypassBlock` will fail
