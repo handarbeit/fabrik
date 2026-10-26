@@ -665,6 +665,41 @@ func TestLiveness_ConcurrentVerdictsLeaveTheSinkInStep(t *testing.T) {
 	}
 }
 
+// An unreachable verdict the log no longer supports (the deciding failures have
+// left the failure window) must not wait out the 24 h backstop when nothing else
+// decides: with no probe possible the passive read is undecided, and the value
+// drops to unknown, taking the panel entry with it.
+func TestLiveness_StaleUnreachableDropsToUnknownOnAQuietBed(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.mu.Lock()
+	h.api.log = []gh.AppHookDelivery{h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false), h.att(1, "g1", 502, "failed to connect to host", 4*time.Minute, false)}
+	h.api.mu.Unlock()
+	h.r.evaluate(context.Background(), true) // no ledger entry: nothing can be probed
+	if h.liveness() != localapi.RouteUnreachable {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+	// Still inside the failure window and past the sustained window: panel raised.
+	h.advance(livenessSustained + 2*time.Minute)
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnreachable || h.reports() != 1 {
+		t.Fatalf("route = %+v reports = %d", h.sink.get(), h.reports())
+	}
+	// The route was fixed; nothing arrives and nothing can be probed. Once the
+	// failures are older than the failure window the verdict ends.
+	h.advance(livenessFailWindow)
+	h.r.evaluate(context.Background(), false)
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("a verdict the log no longer supports stayed %+v", h.sink.get())
+	}
+	wantKey := warnings.Condition{Type: livenessPanelType, Subject: "tailscale"}.Key()
+	h.mu.Lock()
+	resolved := append([]string(nil), h.resolved...)
+	h.mu.Unlock()
+	if len(resolved) != 1 || resolved[0] != wantKey {
+		t.Fatalf("panel entry not resolved: %v", resolved)
+	}
+}
+
 // A changed hook URL drops the old verdict and re-checks at once.
 func TestLiveness_HookURLChangeResets(t *testing.T) {
 	h := newLivenessHarness(t, 0)

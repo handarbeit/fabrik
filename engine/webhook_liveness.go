@@ -172,6 +172,11 @@ type routeLiveness struct {
 	// whose deciding failure is older than it is stale (the read can predate the
 	// delivery) and must not overwrite it.
 	arrivedAt time.Time
+	// failAt is delivered_at of the newest failure that decided the current
+	// unreachable verdict. The passive read stops reporting a run once that failure
+	// is older than livenessFailWindow, and the verdict must not outlive it when
+	// nothing else (a probe, a real delivery) decides.
+	failAt time.Time
 	// noEligibleLogged keeps the "no delivery eligible" line to once per stretch
 	// without a probe.
 	noEligibleLogged bool
@@ -540,7 +545,7 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 	if urlChanged {
 		// Evidence for another URL says nothing about this one.
 		r.state, r.reason, r.evidenceAt, r.unreachAt = localapi.RouteUnknown, "", time.Time{}, time.Time{}
-		r.arrivedAt = time.Time{}
+		r.arrivedAt, r.failAt = time.Time{}, time.Time{}
 		r.retryUsed, r.retryAt, r.lastProbeAt = false, time.Time{}, time.Time{}
 	}
 	r.lastPassive = now
@@ -573,6 +578,9 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 		}
 	}
 	if res.state != "" {
+		if res.state == localapi.RouteUnreachable {
+			r.noteFailure(res.at)
+		}
 		r.decide(res.state, res.reason)
 		if res.state == localapi.RouteUnreachable {
 			r.maybeProbe(ctx, lr, hookURL, now, forced)
@@ -581,6 +589,31 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 	}
 	r.age(now)
 	r.maybeProbe(ctx, lr, hookURL, now, forced)
+	r.dropStaleUnreachable()
+}
+
+// noteFailure records the delivered_at of the failure behind an unreachable
+// verdict about to be decided.
+func (r *routeLiveness) noteFailure(at time.Time) {
+	r.mu.Lock()
+	r.failAt = at
+	r.mu.Unlock()
+}
+
+// dropStaleUnreachable ends an unreachable verdict the log no longer supports:
+// the passive read is undecided (the deciding failure has left
+// livenessFailWindow) and the probe that was allowed to run decided nothing. A
+// route that has since been fixed must not read unreachable on a quiet bed
+// until the 24 h backstop; the honest value with no evidence is unknown.
+func (r *routeLiveness) dropStaleUnreachable() {
+	now := r.cfg.Now()
+	r.mu.Lock()
+	stale := r.state == localapi.RouteUnreachable && !r.failAt.IsZero() && now.Sub(r.failAt) > livenessFailWindow
+	r.mu.Unlock()
+	if stale {
+		r.log("webhook route: no failed delivery to the App's webhook URL within %s any more — back to unknown\n", livenessFailWindow)
+		r.decide(localapi.RouteUnknown, "")
+	}
 }
 
 // classifyLog verifies attempt URLs through the detail endpoint when available.
@@ -818,6 +851,9 @@ func (r *routeLiveness) awaitProbe(ctx context.Context, out *outstandingProbe, h
 			full, ferr := r.readLog(r.cfg.Now(), livenessMaxPages)
 			if ferr == nil {
 				if res2 := r.classifyLog(full, hookURL, r.cfg.Now()); res2.state != "" {
+					if res2.state == localapi.RouteUnreachable {
+						r.noteFailure(res2.at)
+					}
 					r.decide(res2.state, res2.reason)
 					return
 				}

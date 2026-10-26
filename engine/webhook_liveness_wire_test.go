@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 // controller's own sleep blocks, so only the start-up check and explicit
 // triggers evaluate. neutraliseDedupe turns the intake's dedupe off (the
 // non-vacuity switch).
-func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedupe bool) (*Engine, *appWebhookTransport, func()) {
+func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedupe bool) (*Engine, *appWebhookTransport, func(), <-chan struct{}) {
 	t.Helper()
 	isolateWarnings(t)
 	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
@@ -27,7 +28,13 @@ func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedu
 	eng.cfg.AppWebhookPath = directTestPath
 	eng.cfg.ReplayFailedDeliveries = false
 	eng.SetReplayAPIForTest(api)
+	// The controller reaches its idle sleep only after its start-up evaluation has
+	// finished, so the first call to this wait is the positive "start-up
+	// evaluation done" signal the tests wait on.
+	idle := make(chan struct{})
+	var idleOnce sync.Once
 	eng.SetLivenessWaitForTest(func(ctx context.Context, d time.Duration) bool {
+		idleOnce.Do(func() { close(idle) })
 		<-ctx.Done()
 		return false
 	})
@@ -41,7 +48,7 @@ func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedu
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := startIngestion(t, eng, cache)
-	return eng, directFromEngine(t, eng), cleanup
+	return eng, directFromEngine(t, eng), cleanup, idle
 }
 
 func routeOf(tr *appWebhookTransport) *localapi.RouteLiveness { return tr.HealthRow().Route }
@@ -54,12 +61,25 @@ func routeOf(tr *appWebhookTransport) *localapi.RouteLiveness { return tr.Health
 func runProbeScenario(t *testing.T, neutraliseDedupe bool) (applied bool, tr *appWebhookTransport, eng *Engine, lastBefore, lastAfter time.Time, dupes int64) {
 	t.Helper()
 	fake := &fakeLivenessAPI{urls: map[int64]string{}}
-	e, transport, cleanup := startLivenessDirectEngine(t, fake, neutraliseDedupe)
+	e, transport, cleanup, idle := startLivenessDirectEngine(t, fake, neutraliseDedupe)
 	t.Cleanup(cleanup)
 	h := &directHarness{tr: transport, url: "http://" + transport.Addr() + directTestPath, logs: &syncLog{}}
 
-	// The start-up check found nothing eligible (empty ledger): still unknown.
-	replayWaitFor(t, "start-up evaluation", func() bool { r := routeOf(transport); return r != nil && !r.EvaluatedAt.Valid })
+	// The start-up check found nothing eligible (empty ledger): still unknown. Wait
+	// for the controller to have finished it (it is idle again) and to have read
+	// the log; the unknown value alone is true from construction and proves
+	// nothing, and an evaluation still in flight would race the state reset below.
+	select {
+	case <-idle:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the start-up route evaluation to finish")
+	}
+	fake.mu.Lock()
+	reads := fake.listCalls
+	fake.mu.Unlock()
+	if reads < 1 {
+		t.Fatalf("the start-up evaluation never read the delivery log (list calls = %d)", reads)
+	}
 	if r := routeOf(transport); r.Liveness != localapi.RouteUnknown {
 		t.Fatalf("start state = %+v", r)
 	}
@@ -145,7 +165,7 @@ func TestLivenessProbe_NonVacuity_NeutralisedDedupeApplies(t *testing.T) {
 func TestLivenessWire_HealthyLogIsReachableAtStart(t *testing.T) {
 	fake := &fakeLivenessAPI{urls: map[int64]string{}}
 	fake.log = []gh.AppHookDelivery{{ID: 1, GUID: "g1", StatusCode: 200, Status: "OK", Event: "issues", DeliveredAt: time.Now().Add(-time.Minute)}}
-	_, tr, cleanup := startLivenessDirectEngine(t, fake, false)
+	_, tr, cleanup, _ := startLivenessDirectEngine(t, fake, false)
 	defer cleanup()
 	replayWaitFor(t, "reachable", func() bool { r := routeOf(tr); return r != nil && r.Liveness == localapi.RouteReachable })
 	if !tr.IsHealthyOrStartingUp() || tr.HealthRow().State != "listening" {
@@ -161,7 +181,7 @@ func TestLivenessWire_UnreachableMakesTheTransportUnhealthy(t *testing.T) {
 		{ID: 2, GUID: "g2", StatusCode: 502, Status: "failed to connect to host", Event: "issues", DeliveredAt: time.Now().Add(-time.Minute)},
 		{ID: 1, GUID: "g1", StatusCode: 502, Status: "failed to connect to host", Event: "issues", DeliveredAt: time.Now().Add(-2 * time.Minute)},
 	}
-	eng, tr, cleanup := startLivenessDirectEngine(t, fake, false)
+	eng, tr, cleanup, _ := startLivenessDirectEngine(t, fake, false)
 	defer cleanup()
 	// The daemon has to have been up for the failures to count. Run stamps its
 	// start once, when it begins, so the back-dated start is re-applied on every
