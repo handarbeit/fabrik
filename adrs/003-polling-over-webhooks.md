@@ -41,5 +41,5 @@ support alongside polling, using polling as the fallback.
 
 ## Superseded by
 
-- **ADR 032** (Webhook-Driven Event Delivery via gh webhook forward) implements this future consideration: an optional `--webhooks` mode delivers events in real-time while retaining polling as a safety net.
-- **ADR 034** (Event-Sourced Board Cache via Webhook Deltas) extends ADR 032: incoming webhook payloads are applied as typed state deltas to an in-memory cache, reducing per-event GraphQL consumption. The core principle of this ADR — that polling is the reliable foundation — is preserved: the cache reconciles against GitHub every 60 minutes and falls back to live API calls when the webhook stream is unhealthy.
+- **[ADR 032](032-webhook-event-delivery.md)** (Webhook-Driven Event Delivery via gh webhook forward) implements this future consideration: an optional `--webhooks` mode delivers events in real-time while retaining polling as a safety net.
+- **ADR 034** (Event-Sourced Board Cache via Webhook Deltas) extends [ADR 032](032-webhook-event-delivery.md): incoming webhook payloads are applied as typed state deltas to an in-memory cache, reducing per-event GraphQL consumption. The core principle of this ADR — that polling is the reliable foundation — is preserved: the cache reconciles against GitHub every 60 minutes and falls back to live API calls when the webhook stream is unhealthy.

@@ -25,7 +25,7 @@ Add an echo-check subsystem to `webhookManager` that:
 
 ### Self-signal via Fabrik's own mutations
 
-Using Fabrik's own mutations as the health signal is sound because: (a) under a healthy webhook stream, Fabrik's mutations reliably produce webhook events (documented in ADR 032 §Self-feedback); (b) the K=3 threshold in a 60s window provides substantial margin against transient GitHub delivery lag (~2–10s typical, 15s cap); (c) the signal volume is highest exactly when false negatives are most costly (active pipeline runs).
+Using Fabrik's own mutations as the health signal is sound because: (a) under a healthy webhook stream, Fabrik's mutations reliably produce webhook events (documented in [ADR 032](032-webhook-event-delivery.md) §Self-feedback); (b) the K=3 threshold in a 60s window provides substantial margin against transient GitHub delivery lag (~2–10s typical, 15s cap); (c) the signal volume is highest exactly when false negatives are most costly (active pipeline runs).
 
 ### Rolling-window miss threshold (not consecutive)
 

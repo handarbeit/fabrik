@@ -2,12 +2,12 @@
 
 **Status**: Accepted  
 **Date**: 2026-05-03  
-**Supersedes (partially)**: ADR 032 (§Board-column changes and §`projects_v2_item` Event Support)  
+**Supersedes (partially)**: [ADR 032](032-webhook-event-delivery.md) (§Board-column changes and §`projects_v2_item` Event Support)  
 **Supplements**: ADR 034 (Event-Sourced Board Cache via Webhook Deltas)
 
 ## Context
 
-ADR 032 established that board-column changes in user mode are caught by the safety-net poll within `WebhookIdleCap` (60 minutes). ADR 034 added an in-memory board cache that is reconciled by a full `FetchProjectBoard` call every 60 minutes.
+[ADR 032](032-webhook-event-delivery.md) established that board-column changes in user mode are caught by the safety-net poll within `WebhookIdleCap` (60 minutes). ADR 034 added an in-memory board cache that is reconciled by a full `FetchProjectBoard` call every 60 minutes.
 
 This 60-minute window produces unacceptable latency for users who manually move issues between board columns to trigger stage transitions. Issue #467 demonstrated a concrete 76-minute gap: a column move at ~16:20Z was not detected until ~17:36Z. GitHub does **not** deliver `projects_v2_item` events in user mode (PAT-based, repo-level webhooks via `gh webhook forward`), making the webhook stream blind to column moves permanently in this configuration.
 
@@ -64,7 +64,7 @@ A `runReconciliationLoop` goroutine ticks at `ProjectStatusPollSeconds` (default
 | Column move with no other activity | Layer 2 periodic sweep | `ProjectStatusPollSeconds` (default 10 min) |
 | Stream recovery (gap in webhook delivery) | Full reconcile | Until stream recovers |
 
-The 60-minute worst-case latency from ADR 032 is reduced to the Layer 2 cadence (default 10 minutes) at significantly lower GraphQL cost than running the full reconcile more frequently.
+The 60-minute worst-case latency from [ADR 032](032-webhook-event-delivery.md) is reduced to the Layer 2 cadence (default 10 minutes) at significantly lower GraphQL cost than running the full reconcile more frequently.
 
 ### New exports from `boardcache`
 

@@ -6,7 +6,7 @@
 
 ## Context
 
-The original webhook health model (ADR-032) used an event-silence heuristic: if no verified webhook event arrived within `webhookHealthWindow` (10 minutes), the stream was declared `Unhealthy`, triggering a full `Reconcile` + `Pause`/`Resume` cycle.
+The original webhook health model ([ADR-032](032-webhook-event-delivery.md)) used an event-silence heuristic: if no verified webhook event arrived within `webhookHealthWindow` (10 minutes), the stream was declared `Unhealthy`, triggering a full `Reconcile` + `Pause`/`Resume` cycle.
 
 This conflated two fundamentally different conditions:
 

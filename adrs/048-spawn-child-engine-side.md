@@ -6,7 +6,7 @@
 
 ## Context
 
-ADR 017 introduced the `FABRIK_DECOMPOSED` marker: Plan calls `gh issue create` and `gh project item-add` directly inside its Claude session, then outputs `FABRIK_DECOMPOSED` to signal the engine to move the parent to Done. This mechanism has three structural problems:
+[ADR 017](017-decomposed-marker-state-machine.md) introduced the `FABRIK_DECOMPOSED` marker: Plan calls `gh issue create` and `gh project item-add` directly inside its Claude session, then outputs `FABRIK_DECOMPOSED` to signal the engine to move the parent to Done. This mechanism has three structural problems:
 
 1. **Engine-owns-state principle violated**: GitHub mutations (issue creation, board admission, blockedBy linking) happen inside a Claude subprocess, invisible to the engine and untestable via `GitHubClient`.
 2. **Hard depth-1 limit**: The skill refuses to decompose a `fabrik:sub-issue`, preventing recursive epic decomposition.
@@ -56,7 +56,7 @@ When a parent has no own implementation work, Implement runs after all children 
 
 ### No depth limit
 
-The ADR 017 depth-1 limit (skill-side `fabrik:sub-issue` check) is removed. A sub-issue is just a Fabrik issue; if its own Plan emits spawn blocks, the same `preImplement` mechanism applies. Depth limits are a prompt-quality concern, not an engine concern.
+The [ADR 017](017-decomposed-marker-state-machine.md) depth-1 limit (skill-side `fabrik:sub-issue` check) is removed. A sub-issue is just a Fabrik issue; if its own Plan emits spawn blocks, the same `preImplement` mechanism applies. Depth limits are a prompt-quality concern, not an engine concern.
 
 ### Worktree boundary guardrail
 
