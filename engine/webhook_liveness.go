@@ -134,6 +134,10 @@ type outstandingProbe struct {
 	guid    string
 	at      time.Time
 	arrived chan struct{}
+	// known holds the IDs of this delivery's attempts that the log already showed
+	// when the request was made: an earlier probe's attempt is not this probe's
+	// result, however recent it is.
+	known map[int64]bool
 }
 
 // routeLiveness is the controller; one per App webhook transport.
@@ -534,6 +538,9 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 	res := r.classifyLog(lr, hookURL, now)
 	if res.state != "" {
 		r.decide(res.state, res.reason)
+		if res.state == localapi.RouteUnreachable {
+			r.maybeProbe(ctx, lr, hookURL, now, forced)
+		}
 		return
 	}
 	r.age(now)
@@ -613,6 +620,10 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 	case retryDue:
 	case r.lastProbeAt.IsZero() && (forced || now.Sub(quietSince) >= livenessQuiet):
 	case forced && now.Sub(r.lastProbeAt) >= interval:
+	case r.state == localapi.RouteUnreachable && now.Sub(r.lastProbeAt) >= interval:
+		// Recovery: the log keeps saying unreachable for its failure window, and on
+		// a quiet bed nothing real arrives to say otherwise, so a (still bounded)
+		// probe is how a repaired route is noticed.
 	case now.Sub(quietSince) >= livenessQuiet && now.Sub(r.lastProbeAt) >= interval:
 	default:
 		r.mu.Unlock()
@@ -663,7 +674,12 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 		id = pick.any
 	}
 
-	out := &outstandingProbe{guid: pick.guid, at: now, arrived: make(chan struct{})}
+	out := &outstandingProbe{guid: pick.guid, at: now, arrived: make(chan struct{}), known: map[int64]bool{}}
+	for _, d := range lr.attempts {
+		if d.GUID == pick.guid {
+			out.known[d.ID] = true
+		}
+	}
 	r.mu.Lock()
 	r.out = out
 	r.lastProbeAt = now
@@ -737,7 +753,7 @@ func (r *routeLiveness) awaitProbe(ctx context.Context, out *outstandingProbe, h
 			continue
 		}
 		for _, d := range lr.attempts {
-			if d.GUID != out.guid || !d.Redelivery || d.DeliveredAt.Before(out.at.Add(-replaySkewMargin)) || d.ThrottledAt != nil {
+			if d.GUID != out.guid || !d.Redelivery || out.known[d.ID] || d.ThrottledAt != nil {
 				continue
 			}
 			res := r.classifyLog(logRead{attempts: []gh.AppHookDelivery{d}}, hookURL, r.cfg.Now())

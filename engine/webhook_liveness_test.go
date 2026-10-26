@@ -487,6 +487,46 @@ func TestLiveness_FailedProbesEstablishUnreachable(t *testing.T) {
 	}
 }
 
+// The early retry picks the same delivery again. An attempt the log already
+// showed when the retry was requested (the first probe's) is not the retry's
+// result, however recent: with the new attempt lagging, the retry waits out its
+// full window and decides nothing instead of ending on stale evidence.
+func TestLiveness_RetryDoesNotMatchAnEarlierProbesAttempt(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false))
+	h.api.add(h.att(50, "g-probe", 502, "failed to connect to host", time.Minute, true)) // the first probe's attempt
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	start := h.clock()
+	h.r.evaluate(context.Background(), true) // the new attempt never shows
+	if got := h.clock().Sub(start); got < livenessResultWait {
+		t.Fatalf("the probe ended after %v on an earlier probe's attempt, want a full %v wait", got, livenessResultWait)
+	}
+	if h.liveness() != localapi.RouteUnknown {
+		t.Fatalf("route = %+v", h.sink.get())
+	}
+}
+
+// While the log still says unreachable (its failure window is 30 minutes) a quiet
+// bed has nothing real to say otherwise, so a bounded probe is how a repaired
+// route is noticed.
+func TestLiveness_RecoveryIsProbedWhileUnreachable(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-ok", 200, "OK", 3*time.Hour, false))
+	h.ledger.at["g-ok"] = h.clock().Add(-3 * time.Hour)
+	h.api.add(h.att(2, "g2", 502, "failed to connect to host", 2*time.Minute, false))
+	h.api.add(h.att(3, "g3", 502, "failed to connect to host", time.Minute, false))
+	h.api.onRedeliver = func(int64) {
+		h.api.add(gh.AppHookDelivery{ID: 200, GUID: "g-ok", StatusCode: 200, Status: "OK", DeliveredAt: h.clock(), Redelivery: true, Event: "issues"})
+	}
+	h.r.evaluate(context.Background(), false) // a plain poll: no trigger, no start-up
+	if n := len(h.api.requests()); n != 1 {
+		t.Fatalf("requests = %d, want one recovery probe", n)
+	}
+	if h.liveness() != localapi.RouteReachable {
+		t.Fatalf("a repaired route stayed %+v", h.sink.get())
+	}
+}
+
 // A changed hook URL drops the old verdict and re-checks at once.
 func TestLiveness_HookURLChangeResets(t *testing.T) {
 	h := newLivenessHarness(t, 0)
