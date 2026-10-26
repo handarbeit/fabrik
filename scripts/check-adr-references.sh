@@ -111,10 +111,12 @@ for n in $dupes; do
 done
 
 # A citation of a grandfathered number must name its file on the same line.
+# The file-name test is applied to the line's text only: grep's "file:line:"
+# prefix would otherwise satisfy it for every line of adrs/032-*.md itself.
 for n in $grandfathered; do
   padded=$(printf "%03d" "$n")
   hits=$(grep -niE "ADR[- ]0*${n}([^0-9-]|\$)" "${sources[@]}" 2>/dev/null \
-    | grep -viE "(^|[^0-9])0*${n}-[a-z]" \
+    | awk -v re="(^|[^0-9])0*${n}-[a-z]" '{ text = $0; sub(/^[^:]*:[^:]*:/, "", text); if (tolower(text) !~ re) print }' \
     | grep -vE "^adrs/${padded}-[^:]*:1:" || true)
   if [ -n "$hits" ]; then
     fail "  ADR-$padded names more than one ADR ($(ls adrs/ | grep -E "^${padded}-" | tr '\n' ' ')) — link the one you mean:"
