@@ -90,7 +90,7 @@ description: >-
     <p class="section-label">Quickstart</p>
     <h2 class="section-title">From zero to pipeline in minutes</h2>
     <p class="section-subtitle">
-      Fabrik runs as a local CLI. You need Go 1.26+, Claude Code, and a GitHub token.
+      Fabrik runs as a local CLI. You need Go 1.27.3+, Claude Code, and a GitHub token.
     </p>
 
     <div class="quickstart-steps">
@@ -99,7 +99,7 @@ description: >-
           <div class="step-num">1</div>
           <div class="step-content">
             <div class="step-title">Prerequisites</div>
-            <div class="step-desc">Go 1.26.1+, Claude Code CLI, and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
+            <div class="step-desc">Go 1.27.3+, Claude Code CLI, and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
           </div>
         </div>
         <div class="step">

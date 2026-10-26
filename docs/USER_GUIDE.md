@@ -34,7 +34,7 @@ For the authoritative engine state-machine spec (label semantics, review gate tr
 
 ### Prerequisites
 
-- Go 1.26.1+
+- Go 1.27.3+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - A GitHub token with `repo`, `project`, and `workflow` scopes
   - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL doesn't work with them

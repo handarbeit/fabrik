@@ -11,7 +11,7 @@ go build -o fabrik .
 go test ./...
 ```
 
-You'll need Go 1.22+ and `git`. A few tests shell out to the real `git` binary and skip when it's unavailable.
+You'll need Go 1.27.3+ and `git`. A few tests shell out to the real `git` binary and skip when it's unavailable.
 
 ## Running checks before you push
 
