@@ -70,7 +70,7 @@ func newTestTracker() (*tsnetTracker, *[]tailnetState) {
 }
 
 // A Funnel revoked while the node stays Running changes no backend state: it
-// reaches the transport from a status re-read (netmap notification or timer).
+// reaches the transport from a status re-read (self-node change notification or timer).
 func TestTsnetTracker_FunnelRevokedWithoutStateChange(t *testing.T) {
 	tr, got := newTestTracker()
 	running := ipn.Running
@@ -106,7 +106,7 @@ func TestTsnetTracker_FailedReadKeepsLastFunnel(t *testing.T) {
 	}
 }
 
-// A successful read with no Self entry (a transient gap while the netmap
+// A successful read with no Self entry (a transient gap while the node state
 // refreshes) is not evidence that the Funnel came back either: the last known
 // Funnel status and name are kept, so an active outage is not cleared and no
 // spurious recovery follows.
@@ -182,7 +182,7 @@ func TestTsnetTracker_StatusReadBeatsStaleNotificationState(t *testing.T) {
 	if st := (*got)[1]; st.Connected || st.BackendState != "NeedsLogin" {
 		t.Fatalf("state = %#v, want disconnected / NeedsLogin", st)
 	}
-	// A netmap-only notification before its state notification, and a failed
+	// A self-change-only notification before its state notification, and a failed
 	// read afterwards, fall back to the last known state.
 	tr.observe(&running, nil)
 	if st := (*got)[len(*got)-1]; !st.Connected {

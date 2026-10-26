@@ -24,6 +24,8 @@
 
 ## Dependency and module graph
 
+> **Amended by [ADR 2472](2472-tailscale-1104-and-go-1273.md) (2026-10-25):** the pin below was lifted; `tailscale.com` is v1.104.2 and the module's `go` directive is 1.27.3.
+
 `tailscale.com` is pinned at **v1.96.5**, the newest release whose own `go` directive (1.26.0) is at or below the module's `go 1.26.1`. Newer lines require 1.26.2 (v1.98.x) and 1.27.x (v1.104.x), which would force a toolchain bump on every contributor and CI job and is hard to undo after release. `go mod tidy` leaves the `go` directive unchanged. The cost is an older Tailscale; a bump is a follow-up once the repository's Go version moves. A nested module was rejected: `engine` must import the adapter, so the root module would require `tailscale.com` anyway.
 
 `go.mod` and `go.sum` carry the dependency and its closure (`go.sum` grew from 67 to ~290 lines; `go.mod` from 26 to 83 requirement lines; `gorilla/websocket` and `golang.org/x/text` were bumped by the graph). Because the node is compiled into every build, all of it is in the shipped binary too.

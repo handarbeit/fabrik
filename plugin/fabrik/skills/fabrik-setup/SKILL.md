@@ -21,7 +21,7 @@ Confirm the user has — or help them obtain — each of these. Don't proceed pa
 
    **Identity-mismatch trap:** if they're reusing a token copied from another Fabrik project's `.env`, it may belong to a *different* GitHub account than the one the Project board is under — a classic, correctly-scoped token, so nothing about it looks wrong. It fails as `NOT_FOUND: Could not resolve to a ProjectV2`, which reads like a wrong project number, not a wrong identity. Have them check: `gh api user --jq .login` should match `user:` in `config.yaml`.
 4. **`gh` CLI authenticated** (`gh auth status`) — needed for the binary download path, for `FABRIK_TOKEN=$(gh auth token)` above, and convenient for many Fabrik workflows.
-5. **Go 1.26.1+** — only required if they want to build from source instead of downloading a release binary.
+5. **Go 1.27.3+** — only required if they want to build from source instead of downloading a release binary.
 
 If they're missing prerequisites, get them sorted first. Don't paper over a missing token with vague instructions; the real constraint (fine-grained tokens don't work) is a common trap even when the user believes they've followed "use a classic PAT" advice from elsewhere.
 

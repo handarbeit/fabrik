@@ -161,7 +161,7 @@ func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
 // tsnetStatusPoll is how often Watch re-reads the node status on its own. The
 // IPN bus is the fast path, but a Funnel can be revoked (node attribute or HTTPS
 // certificates) without a backend-state change, so the status is also re-read on
-// netmap notifications and on this timer.
+// self-node change notifications and on this timer.
 const tsnetStatusPoll = 30 * time.Second
 
 // tsnetFunnelPort is the port ListenFunnel is asked for (tailnetFunnelAddr).
@@ -175,10 +175,11 @@ func streamEndsFailureStreak(received bool, up time.Duration) bool {
 }
 
 // watchOnce runs one IPN bus stream. received reports whether a notification
-// arrived on it. A notification that carries the
-// backend state or the netmap triggers a status re-read.
+// arrived on it. A notification that carries the backend state, the initial
+// status or a change to this node's own node (addresses, name, capabilities,
+// among them the Funnel grant) triggers a status re-read.
 func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, tr *tsnetTracker) (received bool, err error) {
-	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyInitialNetMap|ipn.NotifyRateLimit)
+	w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyInitialStatus)
 	if err != nil {
 		return false, err
 	}
@@ -189,7 +190,7 @@ func (n *tsnetNode) watchOnce(ctx context.Context, lc *local.Client, tr *tsnetTr
 			return received, err
 		}
 		received = true
-		if note.State == nil && note.NetMap == nil {
+		if note.State == nil && note.InitialStatus == nil && note.SelfChange == nil {
 			continue
 		}
 		tr.refresh(ctx, lc.StatusWithoutPeers, note.State)
@@ -210,7 +211,7 @@ func (n *tsnetNode) pollStatus(ctx context.Context, lc *local.Client, tr *tsnetT
 	}
 }
 
-// tsnetTracker turns backend-state notifications, netmap notifications and the
+// tsnetTracker turns backend-state notifications, self-node change notifications and the
 // periodic re-read into deduplicated calls of fn. A failed status read, or a
 // successful one with no Self entry, keeps the last known Funnel status and name
 // (neither is evidence that the Funnel came back), and fn runs under the lock so calls are ordered.
@@ -250,7 +251,7 @@ func (t *tsnetTracker) refresh(ctx context.Context, read func(context.Context) (
 func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// A status read is the freshest source: the timer and netmap-only
+	// A status read is the freshest source: the timer and self-change-only
 	// notifications carry no state, and a notification's state may be older than
 	// the status read right after it. The cached notification state is only the
 	// fallback when no status is available.
@@ -268,7 +269,7 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	var st tailnetState
 	if status != nil {
 		st = tsnetStateFrom(status, connected)
-		// A successful read with no Self (a transient gap while the netmap
+		// A successful read with no Self (a transient gap while the node state
 		// refreshes) says nothing about the Funnel or the name, so it must not
 		// overwrite what is known: reporting "unknown" would clear an active
 		// Funnel outage and fire a spurious catch-up reconcile.
