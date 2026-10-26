@@ -4,7 +4,7 @@
 **Status**: Accepted (implementation tracked by the dependency-chained issues #828 → #888 → #887 → #889 → #890)
 **Issues**: #828, #888, #887, #889, #890 — chained via `blockedBy`; each carries its own self-contained spec
 **Supersedes**: ADR-053 (paused-item recovery loop — the *separate-loop-per-case* pattern)
-**Amends**: ADR-033 (mergeable-state over check-runs), ADR-050 (convergence budget + native auto-merge), ADR-032 (CI-gate conjunctive completion label)
+**Amends**: ADR-033 (mergeable-state over check-runs), ADR-050 (convergence budget + native auto-merge), [ADR-032](032-ci-gate-conjunctive-completion-label.md) (CI-gate conjunctive completion label)
 **Review**: `notes/state-machine-review-2026-06-17.md`
 
 ## Context
@@ -70,7 +70,7 @@ A single function/type answers "is this PR's merge + CI state final and stable?"
 typed result (e.g. `stable+mergeable`, `stable+blocked/conflicting`, `unsettled`, with a reason).
 `checkMergeabilityGate` and `checkCIGate` both consume it; neither reads the raw signals
 independently. This eliminates the split-brain and folds the #779/#845/#855/#871 timer band-aids
-into one settling model. `unsettled` produces no label churn (preserves ADR-032's R10c principle).
+into one settling model. `unsettled` produces no label churn (preserves [ADR-032](032-ci-gate-conjunctive-completion-label.md)'s R10c principle).
 
 This **amends ADR-033**: `mergeable_state` is still preferred, but it is no longer read in two places
 with two interpretations — the settling primitive is the sole interpreter.
@@ -93,14 +93,14 @@ the owner — only the *separate-loop* structure is replaced.
 ### D3 — Explicit gate precedence (#889)
 
 The catch-up loop's gate/recovery handlers become an ordered, individually-tested list with
-precedence expressed as data, not implied by `continue` placement. ADR-028's "merge gate before CI
+precedence expressed as data, not implied by `continue` placement. [ADR-028](028-merge-conflict-gate-and-rebase-reinvoke.md)'s "merge gate before CI
 gate" ordering becomes structurally enforced rather than positional.
 
 ### D4 — Fix the source first (#828) and reconcile the spec (#890)
 
 #828 (Validate falsely signals `FABRIK_STAGE_COMPLETE` on a non-mergeable PR) is the upstream
 trigger of the cascade and is sequenced first — it stops the lie cheaply before any structural work.
-#890 reconciles spec invariants the code already violates (notably ADR-032 / §6.4.1's "only place
+#890 reconciles spec invariants the code already violates (notably [ADR-032](032-ci-gate-conjunctive-completion-label.md) / §6.4.1's "only place
 `stage:X:complete` is added", which is false today) and defines the undefined "new comment during an
 active gate" transition.
 
@@ -133,7 +133,7 @@ close #883/#885 here) → `#889` + `#890` (lock in structure and docs).
 ## Non-goals
 
 This ADR does not change the human-in-the-loop pause semantics (ADR-008), the rebase-by-Claude
-decision (ADR-028 §6.5.4), the convergence budget concept (ADR-050) — only *where* and *how many
+decision ([ADR-028](028-merge-conflict-gate-and-rebase-reinvoke.md) §6.5.4), the convergence budget concept (ADR-050) — only *where* and *how many
 times* PR-state is interpreted and the board is advanced.
 
 ## Addendum (2026-06-19): closed-issue admit gate — the strand lived one layer up

@@ -747,13 +747,13 @@ After a stage runs, pre-existing user comments that are not pending get a rocket
 ### Completion Path
 
 When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
-1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
-2. Retry tracking cleared
-3. Draft PR created (if `create_draft_pr: true`)
+1. Draft PR created (if `create_draft_pr: true`); a creation failure counts against `max_retries` and the stage stays incomplete
+2. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
+3. Retry tracking cleared
 4. PR marked ready (if `mark_pr_ready_on_complete: true`)
 5. `stage:<name>:complete` label added
 6. **Validate only:** `ValidateCompletedAtSHA` mutation applied with the worktree's current `HEAD` SHA (`git rev-parse HEAD`). This records the exact post-commit SHA so the SHA-invalidation scan (`docs/state-machine.md` §2.16) can detect future SHA changes (force-push, external commits) and automatically re-enter Validate. On error (e.g. bare git call fails), the SHA is left empty — the SHA-invalidation scan's FR-5 guard treats empty completion SHA as "do nothing," preserving safe degraded behavior.
-7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+7. Auto-advance to next stage when the issue carries `fabrik:yolo` or `fabrik:cruise`; with neither label, the stage's `auto_advance` decides when set, and global `yolo` otherwise. `fabrik:cruise` never advances past Validate. Even then the advance is held while auto-merge was just enabled, the landing was deferred, or the item is paused (`handleStageComplete`, `engine/stages.go`)
 
 **Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), and the Validate stage's review gate is either not opted in (`wait_for_reviews` unset) or already satisfied — including, when `review_authority: authoritative` is set, no outstanding `CHANGES_REQUESTED` review (see `docs/state-machine.md` §6.1.1) — Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. If `enablePullRequestAutoMerge` fails (PR already in a terminal GitHub state — CLEAN, UNSTABLE, or similar), Fabrik falls back to a direct `MergePR` call — the only merge path with no independent `mergeable_state` gate upstream of it (reached whenever `wait_for_ci: false`). `MergePR` self-gates regardless of `enforce_admins`: it refuses to merge unless `mergeable_state ∈ {clean, unstable}`, returning the distinct sentinel `gh.ErrNotMergeableCI` when a required check is still `blocked` or pending (ADR-072). This is not a merge conflict — `fabrik:rebase-needed` is not applied and no rebase cycle is consumed; the item simply retries via a full Validate re-dispatch on the next poll. See `docs/state-machine.md` §5.4–5.5 for full details.
 

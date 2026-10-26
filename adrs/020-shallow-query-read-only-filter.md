@@ -1,4 +1,4 @@
-# ADR 017: Shallow Board Query is a Read-Only Filter
+# ADR 020: Shallow Board Query is a Read-Only Filter
 
 ## Status
 

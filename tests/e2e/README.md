@@ -142,7 +142,7 @@ These tests assume:
    full bed directory with its own `.env` naming **its own** repo pair and board —
    `FABRIK_TEST_REPO_ALPHA`, `FABRIK_TEST_REPO_BETA`, `FABRIK_TEST_PROJECT_OWNER`,
    `FABRIK_TEST_PROJECT_NUMBER` (each falls back to the environment, then to the
-   defaults above, which bed A normally keeps) — its own `FABRIK_TOKEN`, and, for app
+   defaults above, which bed A normally keeps; the gate injects the bed's resolved values for any `E2E_BEDS` run, one bed included, #2440) — its own `FABRIK_TOKEN`, and, for app
    legs, its **own** App (`E2E_APP_*`; an App installs once per org, so a second bed needs
    a second App such as `fabrik-bed-2`). The gate refuses two beds that share an App
    installation, a board or a repo. Two beds whose tokens

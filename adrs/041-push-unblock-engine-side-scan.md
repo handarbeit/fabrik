@@ -68,7 +68,7 @@ Two implementation variants were evaluated:
 
 The statement "BlockedByChanged is not used by the push path" in the Consequences section above is now superseded.
 
-`PushUnblockObserver.OnChange` was extended in issue #588 to also subscribe to `BlockedByChanged`. This fixes a deep-fetch ordering gap: after bootstrap every item has `BlockedBy = nil` (deep-fetch-only field, per ADR-017). If a blocker's `StateChanged` fires before the dependent's first `ItemDeepFetched`, the `store.All()` scan finds `BlockedBy = nil` and silently skips the dependent. When the dependent IS later deep-fetched and `BlockedBy` is populated, the store now emits `BlockedByChanged`, which triggers a second observer path that checks only the dependent item's blockers (O(k) rather than O(n)).
+`PushUnblockObserver.OnChange` was extended in issue #588 to also subscribe to `BlockedByChanged`. This fixes a deep-fetch ordering gap: after bootstrap every item has `BlockedBy = nil` (deep-fetch-only field, per [ADR-017](017-blockedby-moves-to-deep-fetch.md)). If a blocker's `StateChanged` fires before the dependent's first `ItemDeepFetched`, the `store.All()` scan finds `BlockedBy = nil` and silently skips the dependent. When the dependent IS later deep-fetched and `BlockedBy` is populated, the store now emits `BlockedByChanged`, which triggers a second observer path that checks only the dependent item's blockers (O(k) rather than O(n)).
 
 Both triggers are idempotent — double-removal is handled by treating `ErrNotFound` as success. Neither `StateChanged` nor `BlockedByChanged` is in `wakeChFlags` or `cycleSetFlags`; the label removal remains a direct side effect only.
 

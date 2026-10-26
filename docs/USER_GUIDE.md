@@ -2357,10 +2357,11 @@ to resume it.
 > applies `fabrik:paused` + `fabrik:awaiting-input` instead. To resume: either add
 > `fabrik:extend-turns` (grants a larger per-invocation turn budget, so fewer
 > slices are needed) or split the issue into smaller pieces, then remove
-> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels alone does not
-> reset the slice counter — it is already at the limit, so the very next
-> turn-cap exit re-pauses immediately unless the underlying job size or turn
-> budget actually changes. See #1199 and #1191.
+> `fabrik:paused` and `fabrik:awaiting-input`. Removing the labels resets the
+> slice counter (the engine recorded the pause, so the next pass clears it), but
+> on its own that only buys another `--max-slice-retries` slices: unless the turn
+> budget or the job size changes, the item will most likely pause again the same
+> way. See #1199 and #1191.
 
 > **Troubleshooting: an issue is paused with a "stage dispatch limit reached"
 > comment.** `--max-retries` counts failed runs and `max_turns` bounds one
@@ -3024,7 +3025,7 @@ For a repo whose required CI signal is a classic commit status rather than a nor
 
 #### Label Lifecycle
 
-When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, ADR 032). This label:
+When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, [ADR 032](../adrs/032-ci-gate-conjunctive-completion-label.md)). This label:
 
 - Makes the CI-blocked state visible on the project board; present whether checks are still running or have failed
 - Is cleared automatically when all CI checks pass, or when a genuine liveness dwell elapses (removed before pausing with `fabrik:awaiting-input`) — since ADR-1410, a confirmed CI failure does **not** clear this label via a timeout; it instead triggers the CI-fix re-invocation above, and the label stays applied while that plays out
@@ -3941,7 +3942,7 @@ added after it:
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new human comment posted after the pause, and an orphaned label that survived a manual `fabrik:paused` removal is removed after every comment pass and reinvoke, and whenever the item is processed, once a live read shows `fabrik:paused` absent (a real pause is never lifted this way) |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
-| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
+| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, [ADR 032](../adrs/032-ci-gate-conjunctive-completion-label.md)). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:validate-rerun` | Engine marker of a forced Validate re-run, added just before `stage:Validate:complete` is removed (by a new push after Validate, `fabrik:revalidate` or a merge-train auto-repair) and removed when a Validate **stage** run completes. While it is present, a comment-review pass cannot complete Validate, the stage runs before any pending comment, and the item is not landed. Do not remove it by hand. See [SHA-change Auto-Revalidation](#sha-change-auto-revalidation). |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |

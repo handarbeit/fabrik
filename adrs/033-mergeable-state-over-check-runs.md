@@ -21,7 +21,7 @@
 
 ## Context
 
-Fabrik's CI gate (ADR 027) and conjunctive completion label design (ADR 032) both rely on classifying raw check_runs from the GitHub Checks API to determine whether a PR is safe to merge or advance. Each check_run is categorized as NEW REGRESSION, pre-existing failure, pending, or green; the gate blocks until all NEW REGRESSION checks either pass or are resolved by a CI-fix re-invocation.
+Fabrik's CI gate (ADR 027) and conjunctive completion label design ([ADR 032](032-ci-gate-conjunctive-completion-label.md)) both rely on classifying raw check_runs from the GitHub Checks API to determine whether a PR is safe to merge or advance. Each check_run is categorized as NEW REGRESSION, pre-existing failure, pending, or green; the gate blocks until all NEW REGRESSION checks either pass or are resolved by a CI-fix re-invocation.
 
 This approach has a fundamental flaw: Fabrik's per-check classification does not know which checks are *required* by branch protection. A non-required check_run (e.g., a `Cleanup artifacts` workflow job, a notification step, or an informational check) can fail without affecting branch-protection-level mergeability — GitHub itself will allow the merge — but Fabrik's gate treats it as a blocking NEW REGRESSION and prevents auto-merge.
 

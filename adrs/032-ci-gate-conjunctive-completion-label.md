@@ -83,7 +83,7 @@ The bypass at `item.go` that forced a deep-fetch for `wait_for_ci: true + stage:
 
 Under ADR 027, `fabrik:awaiting-ci` meant "CI confirmed failed." It was explicitly NOT applied for pending/queued checks (R10c — no label churn for transient states).
 
-Under ADR 032, the semantics broaden to **"CI gate active"** — the label is present from the moment Claude signals FABRIK_STAGE_COMPLETE on a `wait_for_ci: true` stage. It covers both sub-states:
+Under this ADR, the semantics broaden to **"CI gate active"** — the label is present from the moment Claude signals FABRIK_STAGE_COMPLETE on a `wait_for_ci: true` stage. It covers both sub-states:
 - CI checks pending (running or queued)
 - CI checks failed (one or more `failure/timed_out/action_required` conclusions)
 

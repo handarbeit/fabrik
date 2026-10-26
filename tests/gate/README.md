@@ -339,7 +339,7 @@ process**, serialized only where they share a GitHub identity.
 | File | What |
 |---|---|
 | `config.go` | `Config.BedDirs`, `parseBeds` (absolute paths; an empty entry, a duplicate by real path — symlinks included — or more than 26 beds is `ExitUsage`) |
-| `beds.go` | `BedSpec`, `resolveBedSpec`, the per-bed views (`buildBedGates`/`newBedGate`), `bedEnv`, `prefixWriter`, `CheckBedTopology`, `prepareBeds` |
+| `beds.go` | `BedSpec`, `resolveBedSpec`, the per-bed views (`buildBedGates`/`newBedGate`), `bedEnv`, `envBedSpec`, `prefixWriter`, `CheckBedTopology`, `prepareBeds` |
 | `identity.go` | `Identity` + `Role` (engine/harness, #2263), `IdentityOps`/`osIdentityOps` (`Budget` returns the limit too), `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
 | `multibed.go` | `MultiBedScheduler`: assignment, the role-aware identity registry (`idHold`/`resv`), the shared-identity budget floor and its epoch-versioned probe, D8 failure semantics, the closing summary |
 | `consumers.go` | `FindCompetingTokenConsumersExcluding`; the #1684 check per bed |
@@ -357,7 +357,10 @@ process**, serialized only where they share a GitHub identity.
   `_NUMBER` come from its own `.env`, else the environment, else the defaults; its token is the
   `.env` `FABRIK_TOKEN`; its App installation is the `.env` `E2E_APP_INSTALLATION_ID`. Each leg's
   restart and suite invocations get `FABRIK_TEST_DIR` and those four (`bedEnv`, D2), and the live
-  harness honours `FABRIK_TEST_PROJECT_NUMBER`.
+  harness honours `FABRIK_TEST_PROJECT_NUMBER`. A single bed named by `E2E_BEDS` resolves the same
+  way (#2440, `envBedSpec` → `resolveBedSpec`, without making it a view): `bedEnv` and `resetConfig`
+  — and so the delivery preflight, the board-lag probe and reset — use its `.env` repos and board.
+  A single bed named by `FABRIK_TEST_DIR` alone is unchanged (environment, then defaults).
 * **Order (ADR-1454 kept).** Static preflights once per bed where bed-scoped — auth mode over every
   bed, then `bed-topology`, then the competing-consumer check per bed; the reviewer check, parity
   summary and host-load probe once. The pre-gate once (its record is repo-scoped, D10). Then the live

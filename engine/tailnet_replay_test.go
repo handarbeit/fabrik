@@ -47,7 +47,7 @@ func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDelivery
 	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
-	cleanup := eng.setUpIngestion(context.Background(), cache)
+	cleanup := startIngestion(t, eng, cache)
 	return eng, cleanup
 }
 
@@ -188,10 +188,14 @@ func TestTailscaleReplay_ShutdownCancelsTheGrace(t *testing.T) {
 	})
 	r := newDeliveryReplayer(fake, &fakeReplayLedger{seen: map[string]bool{}}, &recordingStatus{}, nil, time.Now)
 	r.wait = e.replayWaitOverride
+	trackReplayer(t, r)
+	t.Cleanup(cancel)
 	e.startDeliveryReplayAfter(ctx, r, tailnetReplayStartGrace)
 	<-entered
 	cancel()
-	time.Sleep(50 * time.Millisecond)
+	if !r.waitStopped(replayStopWait) {
+		t.Fatal("replayer goroutines did not exit after cancel")
+	}
 	if fake.listCount() != 0 {
 		t.Fatalf("a cancelled grace still ran a pass (%d)", fake.listCount())
 	}

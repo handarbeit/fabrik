@@ -2,11 +2,11 @@
 
 **Status**: Accepted  
 **Date**: 2026-05-02  
-**Supplements**: ADR 032 (Webhook-Driven Event Delivery)
+**Supplements**: [ADR 032](032-webhook-event-delivery.md) (Webhook-Driven Event Delivery)
 
 ## Context
 
-ADR 032 added webhook-driven event delivery: each verified payload wakes the poll loop, which immediately fetches the full board from GitHub GraphQL. This eliminated the 30-second polling wait but did not reduce the GraphQL points consumed _per event_. On a busy board with dozens of events per minute (CI check runs, PR review comments, label mutations), the board-fetch cost is replicated on every webhook wake.
+[ADR 032](032-webhook-event-delivery.md) added webhook-driven event delivery: each verified payload wakes the poll loop, which immediately fetches the full board from GitHub GraphQL. This eliminated the 30-second polling wait but did not reduce the GraphQL points consumed _per event_. On a busy board with dozens of events per minute (CI check runs, PR review comments, label mutations), the board-fetch cost is replicated on every webhook wake.
 
 Two additional problems motivate this ADR:
 
@@ -61,14 +61,14 @@ Each supported webhook event type maps to a typed delta function that parses the
 - The `ReadClient` abstraction is testable in isolation (`boardcache_test.go` tests the cache against a `mockClient` with call counters).
 
 **Costs:**
-- Cache coherence depends on the webhook stream. Missed events produce stale reads until the next reconciliation (up to 60 min). This was an accepted trade-off in ADR 032 for the poll loop; the same reasoning applies here.
+- Cache coherence depends on the webhook stream. Missed events produce stale reads until the next reconciliation (up to 60 min). This was an accepted trade-off in [ADR 032](032-webhook-event-delivery.md) for the poll loop; the same reasoning applies here.
 - A stream-healthy cache that reads stale data (e.g., a label change not yet delivered) may cause the poll loop to make a decision based on cached state. The reconciliation loop and the safety-net poll bound the staleness window.
 - Bootstrap requires a full `FetchProjectBoard` call at startup, adding one extra GraphQL request. This is amortized immediately.
 - Additional complexity: `CacheImpl`, delta functions, reconciliation loop, stream-health callbacks.
 
 ## Alternatives Rejected
 
-**Per-event live fetch (status quo):** The existing behavior after ADR 032. Simple but does not reduce per-event GraphQL cost.
+**Per-event live fetch (status quo):** The existing behavior after [ADR 032](032-webhook-event-delivery.md). Simple but does not reduce per-event GraphQL cost.
 
 **Full replacement of the poll loop with event sourcing:** Would require perfectly reliable webhook delivery and complex replay-on-restart logic. The existing poll-as-safety-net architecture is a better fit for a local CLI tool.
 
@@ -79,4 +79,4 @@ Each supported webhook event type maps to a typed delta function that parses the
 - Steady-state GraphQL usage for read paths drops proportionally to the fraction of reads that hit the cache. For a board in CI await (frequent check_run events), the reduction is significant.
 - The `boardcache` package is a new dependency of the `engine` package. It has no external imports beyond the existing `github` package types.
 - `engine.GitHubClient` remains the single write-path interface; `boardcache.ReadClient` is read-only. This separation is enforced by the type system.
-- ADR 032's health model (three states, grace period, unhealthy fallback) is reused as the cache failover trigger. No new health state is introduced.
+- [ADR 032](032-webhook-event-delivery.md)'s health model (three states, grace period, unhealthy fallback) is reused as the cache failover trigger. No new health state is introduced.

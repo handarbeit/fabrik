@@ -321,3 +321,105 @@ func TestSubIssueLinksChangedIsNotAWakeFlagValue(t *testing.T) {
 		}
 	}
 }
+
+// seedWithWebhookThreadComments holds the shapes #2444 is about: comments stored
+// from a pull_request_review_comment delivery have no ReviewThreadID.
+func seedWithWebhookThreadComments(t *testing.T) *Store {
+	t.Helper()
+	s := newStoreWithItem(t, testRepo, 1)
+	for _, c := range []gh.Comment{
+		{ID: "PRRC_w1", DatabaseID: 101, Body: "webhook-added, thread T1"},
+		{ID: "PRRC_w2", DatabaseID: 102, Body: "webhook-added, thread T1 (db id only)"},
+		{ID: "PRRC_f1", DatabaseID: 103, Body: "deep-fetched, thread T1", ReviewThreadID: "T1"},
+		{ID: "PRRC_o1", DatabaseID: 104, Body: "webhook-added, thread T2"},
+		{ID: "PRRC_t2", DatabaseID: 105, Body: "deep-fetched, thread T2", ReviewThreadID: "T2"},
+	} {
+		applyExpect(t, s, ReviewThreadCommentAdded{Repo: testRepo, IssueNumber: 1, Comment: c}, CommentsChanged)
+	}
+	return s
+}
+
+func resolveT1() ReviewThreadResolved {
+	return ReviewThreadResolved{
+		Repo: testRepo, IssueNumber: 1, ThreadID: "T1", At: time.Now(),
+		// PRRC_t2 is listed too: it is tagged with another thread, so it must stay.
+		CommentNodeIDs:     []string{"PRRC_w1", "PRRC_f1", "PRRC_t2"},
+		CommentDatabaseIDs: []int{101, 102, 103},
+	}
+}
+
+func threadCommentIDs(t *testing.T, s *Store) []string {
+	t.Helper()
+	var ids []string
+	for _, c := range getItem(t, s, testRepo, 1).LinkedPR.ThreadComments {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+func TestReviewThreadResolved_DropsThreadlessCommentsByIdentity(t *testing.T) {
+	s := seedWithWebhookThreadComments(t)
+	applyExpect(t, s, resolveT1(), LinkedPRChanged|CommentsChanged)
+	// w1 (node ID), w2 (database ID only) and f1 (thread ID) are gone; the
+	// thread-less comment of another thread and the T2-tagged comment remain,
+	// the latter although the payload listed its node ID (FR-004).
+	got := threadCommentIDs(t, s)
+	if len(got) != 2 || got[0] != "PRRC_o1" || got[1] != "PRRC_t2" {
+		t.Fatalf("remaining comments = %v, want [PRRC_o1 PRRC_t2]", got)
+	}
+	if n := getItem(t, s, testRepo, 1).LinkedPR.ResolvedThreadCount; n != 1 {
+		t.Fatalf("ResolvedThreadCount = %d, want 1", n)
+	}
+	// Replay changes nothing.
+	if _, ch, _ := s.Apply(resolveT1()); len(ch) != 0 {
+		t.Fatalf("replay produced changes")
+	}
+	if n := getItem(t, s, testRepo, 1).LinkedPR.ResolvedThreadCount; n != 1 {
+		t.Fatalf("count after replay = %d", n)
+	}
+}
+
+func TestReviewThreadResolved_NoListedCommentsKeepsThreadlessOnes(t *testing.T) {
+	s := seedWithWebhookThreadComments(t)
+	m := resolveT1()
+	m.CommentNodeIDs, m.CommentDatabaseIDs = nil, nil
+	applyExpect(t, s, m, LinkedPRChanged|CommentsChanged) // PRRC_f1 still matches by thread ID
+	if got := threadCommentIDs(t, s); len(got) != 4 {
+		t.Fatalf("remaining comments = %v, want the 4 others", got)
+	}
+}
+
+func TestReviewThreadResolved_ThreadlessOnlyThread(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, ReviewThreadCommentAdded{Repo: testRepo, IssueNumber: 1, Comment: gh.Comment{ID: "PRRC_w1", DatabaseID: 101}}, CommentsChanged)
+	applyExpect(t, s, ReviewThreadResolved{Repo: testRepo, IssueNumber: 1, ThreadID: "T1", At: time.Now(), CommentNodeIDs: []string{"PRRC_w1"}}, LinkedPRChanged|CommentsChanged)
+	if got := threadCommentIDs(t, s); len(got) != 0 {
+		t.Fatalf("remaining comments = %v", got)
+	}
+	// A zero DatabaseID never matches a listed zero/absent one.
+	applyExpect(t, s, ReviewThreadCommentAdded{Repo: testRepo, IssueNumber: 1, Comment: gh.Comment{ID: "PRRC_z"}}, CommentsChanged)
+	if _, ch, _ := s.Apply(ReviewThreadResolved{Repo: testRepo, IssueNumber: 1, ThreadID: "T9", At: time.Now(), CommentDatabaseIDs: []int{0}}); len(ch) != 0 {
+		t.Fatalf("zero database ID matched")
+	}
+}
+
+func TestReviewThreadResolved_StaleDeliveryStillOrdered(t *testing.T) {
+	s := seedWithWebhookThreadComments(t)
+	at := time.Now()
+	s.Apply(ReviewThreadUnresolved{Repo: testRepo, IssueNumber: 1, ThreadID: "T1", At: at})
+	m := resolveT1()
+	m.At = at.Add(-time.Minute)
+	if _, ch, _ := s.Apply(m); len(ch) != 0 {
+		t.Fatalf("stale resolve applied")
+	}
+}
+
+func TestReviewThreadResolved_IdentityMatchSeam(t *testing.T) {
+	s := seedWithWebhookThreadComments(t)
+	s.SetThreadResolveByIdentityDisabledForTest(true)
+	applyExpect(t, s, resolveT1(), LinkedPRChanged|CommentsChanged)
+	// Only the thread-ID-tagged comment went.
+	if got := threadCommentIDs(t, s); len(got) != 4 {
+		t.Fatalf("remaining comments = %v, want 4 (thread-less ones kept)", got)
+	}
+}

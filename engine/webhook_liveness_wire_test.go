@@ -40,7 +40,7 @@ func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedu
 	}
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
-	cleanup := eng.setUpIngestion(context.Background(), cache)
+	cleanup := startIngestion(t, eng, cache)
 	return eng, directFromEngine(t, eng), cleanup
 }
 
