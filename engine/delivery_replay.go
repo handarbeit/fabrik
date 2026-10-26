@@ -106,6 +106,40 @@ type deliveryReplayer struct {
 	requested     map[string]*replayRequest // guid -> requests made in this process
 	lastBound     time.Time                 // lookback bound of the last full pass; follow-up passes reuse it
 	followPending bool                      // a follow-up pass is already scheduled
+
+	// wg counts the replayer's goroutines (Run, the follow-up sleeper and the
+	// start-grace sleeper) so a test can wait for all of them to exit
+	// (waitStopped). Lifecycle bookkeeping only: it changes no scheduling.
+	wg sync.WaitGroup
+}
+
+// goTracked runs f in a goroutine counted by wg. Every Add happens either before
+// the caller returns or from inside a tracked goroutine (armFollowUp runs in
+// Run), so the counter is never raised from zero while a waiter is waiting.
+func (r *deliveryReplayer) goTracked(f func()) {
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		f()
+	}()
+}
+
+// waitStopped reports whether every goroutine the replayer started has exited
+// within d. A replayer that never started reports true at once.
+func (r *deliveryReplayer) waitStopped(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 // realReplayWait sleeps for d, returning false if ctx ends first.
@@ -184,7 +218,7 @@ func (r *deliveryReplayer) armFollowUp(ctx context.Context) {
 	}
 	r.followPending = true
 	r.mu.Unlock()
-	go func() {
+	r.goTracked(func() {
 		ok := r.wait(ctx, replayFollowUpDelay)
 		r.mu.Lock()
 		r.followPending = false
@@ -196,7 +230,7 @@ func (r *deliveryReplayer) armFollowUp(ctx context.Context) {
 		case r.followTrigger <- struct{}{}:
 		default:
 		}
-	}()
+	})
 }
 
 func (r *deliveryReplayer) log(format string, args ...any) {
@@ -503,6 +537,9 @@ func (e *Engine) newDeliveryReplayer(tr replayStatusSink, tag string) *deliveryR
 	if e.replayWaitOverride != nil {
 		r.wait = e.replayWaitOverride
 	}
+	if e.replayBuilt != nil {
+		e.replayBuilt(r)
+	}
 	return r
 }
 
@@ -521,14 +558,14 @@ func (e *Engine) startDeliveryReplayAfter(ctx context.Context, r *deliveryReplay
 	if r == nil {
 		return
 	}
-	go r.Run(ctx)
+	r.goTracked(func() { r.Run(ctx) })
 	if grace <= 0 {
 		r.Trigger()
 		return
 	}
-	go func() {
+	r.goTracked(func() {
 		if r.wait(ctx, grace) {
 			r.Trigger()
 		}
-	}()
+	})
 }

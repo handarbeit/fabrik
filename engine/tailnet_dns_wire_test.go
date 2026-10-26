@@ -147,7 +147,7 @@ func startTailscaleDNSEngine(t *testing.T, res funnelDNSResolver, probeWait func
 	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
-	return eng, eng.setUpIngestion(context.Background(), cache), logs
+	return eng, startIngestion(t, eng, cache), logs
 }
 
 // gatedWait blocks every probe sleep until release() and counts them.

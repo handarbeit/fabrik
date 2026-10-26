@@ -172,26 +172,48 @@ func (g *Gate) propagateToBeds() {
 	}
 }
 
-// bedEnv is what a multi-bed leg's `go test` invocations must see to aim the
-// live harness at its own bed (D2): the bed directory, its repo pair and its
-// board. On a single-bed run the legs inherit the gate's environment unchanged
-// (nil) — unless the one bed was named by E2E_BEDS rather than FABRIK_TEST_DIR,
-// when the harness must be told which directory that is.
-func (g *Gate) bedEnv() []string {
-	if g.bed == nil {
-		if g.Getenv("E2E_BEDS") != "" {
-			return []string{"FABRIK_TEST_DIR=" + g.Cfg.TestBed}
-		}
-		return nil
+// envBedSpec resolves the one bed of a single-bed run that was named by
+// E2E_BEDS (#2440, ADR 2440) through resolveBedSpec — the same .env >
+// environment > default precedence a multi-bed element gets (D1), so a bed
+// resolves identically alone or in a list. It reports false for a multi-bed view
+// (which already carries its spec in g.bed) and for a single bed named by
+// FABRIK_TEST_DIR alone, which keeps the gate's environment unchanged. A
+// whitespace-only E2E_BEDS counts as unset, as parseBeds reads it. It never
+// sets g.bed: that would change output prefixes, log and archive names and the
+// identity lookup.
+func (g *Gate) envBedSpec() (BedSpec, bool) {
+	if g.bed != nil || strings.TrimSpace(g.Getenv("E2E_BEDS")) == "" {
+		return BedSpec{}, false
 	}
-	rc := g.bed.Reset
+	return g.resolveBedSpec("", g.Cfg.TestBed), true
+}
+
+// bedEnvFor is the environment that aims the live harness at spec's bed: its
+// directory, repo pair and board.
+func bedEnvFor(spec BedSpec) []string {
+	rc := spec.Reset
 	return []string{
-		"FABRIK_TEST_DIR=" + g.bed.Dir,
+		"FABRIK_TEST_DIR=" + spec.Dir,
 		"FABRIK_TEST_REPO_ALPHA=" + rc.Alpha,
 		"FABRIK_TEST_REPO_BETA=" + rc.Beta,
 		"FABRIK_TEST_PROJECT_OWNER=" + rc.ProjectOwner,
 		"FABRIK_TEST_PROJECT_NUMBER=" + rc.ProjectNumber,
 	}
+}
+
+// bedEnv is what a leg's `go test` invocations must see to aim the live harness
+// at its own bed (D2): the bed directory, its repo pair and its board. That holds
+// for a multi-bed view and for a single bed named by E2E_BEDS (#2440). A single
+// bed named by FABRIK_TEST_DIR alone inherits the gate's environment unchanged
+// (nil).
+func (g *Gate) bedEnv() []string {
+	if g.bed != nil {
+		return bedEnvFor(*g.bed)
+	}
+	if spec, ok := g.envBedSpec(); ok {
+		return bedEnvFor(spec)
+	}
+	return nil
 }
 
 // stopIdleEngine stops a bed's engine while the bed has no leg running — while it
