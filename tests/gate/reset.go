@@ -25,11 +25,15 @@ type ResetConfig struct {
 }
 
 // resetConfig is the bed's repo pair and board: a per-bed view's own resolved
-// values (#1976, D1), or — on a single-bed run — the gate's environment and the
-// defaults, as reset.sh read them.
+// values (#1976, D1), the resolved values of a single bed named by E2E_BEDS
+// (#2440), or — for a bed named by FABRIK_TEST_DIR alone — the gate's
+// environment and the defaults, as reset.sh read them.
 func (g *Gate) resetConfig() ResetConfig {
 	if g.bed != nil {
 		return g.bed.Reset
+	}
+	if spec, ok := g.envBedSpec(); ok {
+		return spec.Reset
 	}
 	return ResetConfig{
 		Alpha:         orDefault(g.Getenv("FABRIK_TEST_REPO_ALPHA"), defaultRepoAlpha),

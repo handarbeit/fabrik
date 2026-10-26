@@ -14,6 +14,8 @@ And the runner assumed one bed everywhere: the lock, the bed log, the archive's 
 
 > **Amended by ADR 2263.** §2's identity sets and §4's "a shared harness login serializes" no longer hold for harness-only sharing: a cell now holds its engine identity exclusively and the harness token's user as a shared, budget-floored identity. The atomic acquisition, assignment, failure and ledger rules below are unchanged.
 
+> **Amended by ADR 2440.** "A single bed is unchanged" now means a single bed named by `FABRIK_TEST_DIR`; a single bed named by `E2E_BEDS` resolves its repo pair and board (D1) and receives them (D2) like a multi-bed element.
+
 ## Decision
 
 ### 1. A bed is a view of the gate

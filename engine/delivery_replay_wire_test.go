@@ -51,8 +51,14 @@ func startDirectEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI) (*
 	if api != nil {
 		eng.SetReplayAPIForTest(api)
 	}
+	// No real timers: the follow-up delay (3 min) would otherwise fire in a later
+	// test of the package. It blocks until the replayer's context ends.
+	eng.SetReplayWaitForTest(func(ctx context.Context, d time.Duration) bool {
+		<-ctx.Done()
+		return false
+	})
 	cache, _ := eng.UseBoardCacheForTest()
-	cleanup := eng.setUpIngestion(context.Background(), cache)
+	cleanup := startIngestion(t, eng, cache)
 	return eng, cleanup
 }
 
