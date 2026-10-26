@@ -153,6 +153,11 @@ type routeLiveness struct {
 	// sink always ends on the last verdict the controller recorded: decide runs
 	// from the HTTP handler (Arrival) and from the controller goroutine.
 	decideMu sync.Mutex
+	// panelMu serialises syncPanel end to end (compute, flag flip and the
+	// Report/Resolve call): decide's panel sync runs from the HTTP handler and the
+	// controller goroutine, and a Report that lands after a later Resolve would
+	// leave the entry raised on a reachable route. Lock order: panelMu, then mu.
+	panelMu sync.Mutex
 
 	mu          sync.Mutex
 	state       string // localapi.RouteReachable / RouteUnreachable / RouteUnknown
@@ -554,6 +559,8 @@ func (r *routeLiveness) decide(state, reason string) {
 // syncPanel raises the warnings-panel entry once an unreachable verdict has been
 // held for livenessSustained and clears it whenever the verdict is not unreachable.
 func (r *routeLiveness) syncPanel() {
+	r.panelMu.Lock()
+	defer r.panelMu.Unlock()
 	now := r.cfg.Now()
 	r.mu.Lock()
 	state, reason, since, on := r.state, r.reason, r.unreachAt, r.panelOn
@@ -845,6 +852,12 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 	}
 	p.n++
 	p.at = now
+	if !retryDue {
+		// A fresh check opens a new episode, with its own one early retry: a
+		// spent retry from an earlier inconclusive episode (log lag, say) must not
+		// slow detection of a break hours later.
+		r.retryUsed = false
+	}
 	r.retryAt = time.Time{}
 	r.noEligibleLogged = false
 	r.mu.Unlock()

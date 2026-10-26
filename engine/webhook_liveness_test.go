@@ -751,6 +751,74 @@ func TestLiveness_ConcurrentVerdictsLeaveTheSinkInStep(t *testing.T) {
 	}
 }
 
+// The panel entry is reported and resolved from decide's panel sync, which runs
+// from the HTTP handler and the controller goroutine. A Report that is still
+// in flight when a later verdict resolves must not land after the Resolve and
+// leave the entry raised on a reachable route.
+func TestLiveness_PanelReportNeverOutlivesAResolve(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	var evMu sync.Mutex
+	var events []string
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.r.cfg.Report = func(warnings.Condition) {
+		once.Do(func() { close(entered) })
+		<-release
+		evMu.Lock()
+		events = append(events, "report")
+		evMu.Unlock()
+	}
+	h.r.cfg.Resolve = func(string) {
+		evMu.Lock()
+		events = append(events, "resolve")
+		evMu.Unlock()
+	}
+	h.r.mu.Lock()
+	h.r.state, h.r.reason = localapi.RouteUnreachable, "failed to connect to host"
+	h.r.unreachAt = h.clock().Add(-livenessSustained - time.Minute)
+	h.r.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); h.r.syncPanel() }() // raises the entry; Report blocks
+	<-entered
+	h.r.mu.Lock() // the route recovers while the Report is in flight
+	h.r.state, h.r.reason, h.r.unreachAt = localapi.RouteReachable, "", time.Time{}
+	h.r.mu.Unlock()
+	go func() { defer wg.Done(); h.r.syncPanel() }() // resolves it
+	time.Sleep(50 * time.Millisecond)                // let the resolve run if nothing orders it
+	close(release)
+	wg.Wait()
+	evMu.Lock()
+	defer evMu.Unlock()
+	if len(events) != 2 || events[len(events)-1] != "resolve" {
+		t.Fatalf("panel events = %v, want the resolve last", events)
+	}
+}
+
+// One early retry per inconclusive episode: a retry spent in an earlier episode
+// (a probe that timed out on log lag, say) must not leave a later check, hours
+// on, without its early retry.
+func TestLiveness_EarlyRetryIsRearmedForANewProbeEpisode(t *testing.T) {
+	h := newLivenessHarness(t, 0)
+	h.api.add(h.att(7, "g-probe", 200, "OK", 3*time.Hour, false)) // undecided: too old
+	h.ledger.at["g-probe"] = h.clock().Add(-3 * time.Hour)
+	h.r.mu.Lock()
+	h.r.retryUsed = true // spent by an earlier episode
+	h.r.mu.Unlock()
+	h.r.evaluate(context.Background(), true) // a fresh check; the probe times out
+	h.r.mu.Lock()
+	armed := !h.r.retryAt.IsZero()
+	h.r.mu.Unlock()
+	if len(h.api.requests()) != 1 {
+		t.Fatalf("requests = %v", h.api.requests())
+	}
+	if !armed {
+		t.Fatal("the new episode got no early retry: a stale retryUsed suppressed it")
+	}
+}
+
 // An unreachable verdict the log no longer supports (the deciding failures have
 // left the failure window) must not wait out the 24 h backstop when nothing else
 // decides: with no probe possible the passive read is undecided, and the value
