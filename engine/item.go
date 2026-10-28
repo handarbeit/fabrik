@@ -1927,6 +1927,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		TurnLimited: turnLimited,
 		Usage:       usage,
 		Duration:    time.Since(p.workerStartedAt),
+		// Same precedence buildClaudeArgs applied for --model (ADR-1411).
+		RequestedModel: requestedModelFor(item.Labels, stage.Model),
 	})
 	// Display-only Last activity / Last run (#2049): one write per real stage
 	// run, from the same values just recorded. The Done-cleanup record above is
@@ -2798,22 +2800,33 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 // If multiple model labels exist, it uses the first and logs a warning.
 // Returns "" if no model label is found.
 func (e *Engine) extractModelOverride(issueNumber int, labels []string) string {
-	const prefix = "model:"
-	var found string
-	for _, label := range labels {
-		if strings.HasPrefix(label, prefix) {
-			name := strings.TrimPrefix(label, prefix)
-			if name == "" {
-				continue
-			}
-			if found == "" {
-				found = name
-			} else {
-				e.logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
-			}
-		}
+	found, ignored := modelOverrideFromLabels(labels)
+	for _, name := range ignored {
+		e.logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
 	}
 	return found
+}
+
+// modelOverrideFromLabels is the pure, non-logging core of extractModelOverride:
+// it returns the first "model:<name>" label's name and the names of any later
+// model labels it ignored.
+func modelOverrideFromLabels(labels []string) (found string, ignored []string) {
+	const prefix = "model:"
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(label, prefix)
+		if name == "" {
+			continue
+		}
+		if found == "" {
+			found = name
+		} else {
+			ignored = append(ignored, name)
+		}
+	}
+	return found, ignored
 }
 
 // effortLevelRank lists effort levels from lowest to highest priority.

@@ -1238,3 +1238,89 @@ func TestProcessComments_MixedNoticeAndLegitReviewThreadComments_FiltersOnlyNoti
 		t.Errorf("expected the legitimate comment to survive, got %q", seenComments[0].ID)
 	}
 }
+
+// TestProcessComments_RecordsRequestedAndServedModel verifies the comment path records
+// the effective requested model (model: label over stage config) and passes the served
+// model and token counts through to the item state unchanged (#1411).
+func TestProcessComments_RecordsRequestedAndServedModel(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "ok\n", false, TokenUsage{
+				InputTokens: 1, OutputTokens: 2, CacheCreationTokens: 3, CacheReadTokens: 4,
+				ServedModel: "claude-opus-5-5",
+			}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Model: "sonnet", Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 12, Body: "spec", Labels: []string{"model:opus"}}
+	userComments := []gh.Comment{{ID: "C_1", DatabaseID: 111, Author: "testuser", Body: "tweak"}}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+	snap, err := eng.store.Get("owner/repo", 12)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	st := snap.State()
+	if st.LastInvocationRequestedModel != "opus" {
+		t.Errorf("LastInvocationRequestedModel = %q, want opus (label over stage sonnet)", st.LastInvocationRequestedModel)
+	}
+	if st.LastTokenUsage.ServedModel != "claude-opus-5-5" {
+		t.Errorf("ServedModel = %q, want claude-opus-5-5", st.LastTokenUsage.ServedModel)
+	}
+	if st.LastTokenUsage.CacheReadTokens != 4 || st.LastTokenUsage.CacheCreationTokens != 3 {
+		t.Errorf("token usage not recorded: %+v", st.LastTokenUsage)
+	}
+}
+
+// TestProcessItem_RecordsRequestedAndServedModel drives the stage-dispatch path
+// (runInvocationWithExtension → finalizeStageOutcome) and checks that a model: label
+// overrides the stage config in the recorded requested model, and that the served
+// model and token counts survive the stage path's usage accumulation (#1411).
+func TestProcessItem_RecordsRequestedAndServedModel(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "done\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{
+				InputTokens: 5, OutputTokens: 6, CacheCreationTokens: 7, CacheReadTokens: 8,
+				ServedModel: "claude-opus-5-5", TurnsUsed: 2,
+			}, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 310, Title: "model label", Status: "Research", ItemID: "PVTI_310", Labels: []string{"model:opus"}}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	snap, err := eng.store.Get("owner/repo", 310)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	st := snap.State()
+	if st.LastInvocationRequestedModel != "opus" {
+		t.Errorf("LastInvocationRequestedModel = %q, want opus", st.LastInvocationRequestedModel)
+	}
+	if st.LastTokenUsage.ServedModel != "claude-opus-5-5" {
+		t.Errorf("ServedModel = %q, want claude-opus-5-5 (dropped by accumulation?)", st.LastTokenUsage.ServedModel)
+	}
+	if st.LastTokenUsage.InputTokens != 5 || st.LastTokenUsage.CacheReadTokens != 8 {
+		t.Errorf("token usage = %+v", st.LastTokenUsage)
+	}
+}

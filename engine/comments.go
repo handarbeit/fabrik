@@ -576,6 +576,8 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		Usage:       usage,
 		IsComment:   true,
 		Duration:    time.Since(startedAt),
+		// Same precedence buildClaudeArgs applied for --model (ADR-1411).
+		RequestedModel: effectiveRequestedModel(modelOverride, stage.Model),
 	})
 	// Display-only Last activity / Last run (#2049), from the values just recorded.
 	e.noteJobFinished(item, time.Now(), runOutcome{

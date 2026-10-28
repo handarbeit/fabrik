@@ -28,8 +28,16 @@ type HistoryEntry struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
-	Outcome        string // merge-train episode outcome (#2050); empty for ordinary jobs and old entries
-	Detail         string // merge-train outcome detail; empty for ordinary jobs and old entries
+	// Token counts for the invocation; zero for entries written before they were recorded.
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	// ServedModel is the resolved concrete model id(s) that served the invocation
+	// (comma-joined when several); empty means unknown. StageModel is the requested model.
+	ServedModel string
+	Outcome     string // merge-train episode outcome (#2050); empty for ordinary jobs and old entries
+	Detail      string // merge-train outcome detail; empty for ordinary jobs and old entries
 }
 
 // activeJob tracks an in-flight worker.

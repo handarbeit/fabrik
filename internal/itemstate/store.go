@@ -1055,6 +1055,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastInvocationIsComment = v.IsComment
 		item.LastInvocationDuration = v.Duration
 		item.LastTokenUsage = v.Usage
+		item.LastInvocationRequestedModel = v.RequestedModel
 		return InvocationChanged
 
 	case DeepFetchFailed:

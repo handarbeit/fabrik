@@ -6681,7 +6681,7 @@ Two parallel lifecycle mechanisms track active work in Fabrik. They exist at dif
 |-------|---------|-------|
 | `JobStartedEvent{...}` | **Past all early-return guards**, at the "committed to real work" point | `engine/item.go` (after lock acquired + `WorkerExited` deferred); `engine/comments.go` (at function entry, after log line) |
 | `JobCompletedEvent{Skipped:true}` (cleanup guard, unconditional) | Deferred immediately after `JobStartedEvent`; fires on every function return including success | Same two sites — `HistoryPaneComponent` filters these out; only `InvocationObserver`'s `Skipped:false` event reaches history |
-| `JobCompletedEvent{Skipped:false}` (authoritative success path) | By `InvocationObserver` when `InvocationRecorded` is applied to the store | `engine/observers.go` |
+| `JobCompletedEvent{Skipped:false}` (authoritative success path) | By `InvocationObserver` when `InvocationRecorded` is applied to the store | `engine/observers.go` Carries the four token counts, the effective requested model in `StageModel` (`InvocationRecorded.RequestedModel`: `model:<name>` label over stage config, recorded at the write site; falls back to the stage YAML value when none was recorded) and `ServedModel` (`TokenUsage.ServedModel`: sorted, comma-joined `modelUsage` keys; empty = unknown). ADR 1411. |
 
 **Purpose:** Drive the TUI active pane. "In Progress (N)" reflects items where Claude is running, not items whose goroutines have merely launched.
 

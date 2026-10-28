@@ -369,3 +369,64 @@ func TestExtractLastSubstantialAssistantTurn_NonePresent(t *testing.T) {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
+
+func TestTokenUsageFromResponse_ServedModel(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"single resolved id", `{"result":"ok","session_id":"s","modelUsage":{"claude-opus-5-5":{"inputTokens":1}}}`, "claude-opus-5-5"},
+		{"multi model sorted and joined", `{"result":"ok","session_id":"s","modelUsage":{"claude-sonnet-4-6":{"inputTokens":1},"claude-haiku-3":{"inputTokens":1}}}`, "claude-haiku-3,claude-sonnet-4-6"},
+		{"no modelUsage is unknown", `{"result":"ok","session_id":"s","usage":{"input_tokens":3,"output_tokens":4}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, ok := parseClaudeJSON([]byte(tc.json))
+			if !ok {
+				t.Fatal("parse failed")
+			}
+			if got := tokenUsageFromResponse(resp).ServedModel; got != tc.want {
+				t.Errorf("ServedModel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddTokenUsage_MergesServedModel(t *testing.T) {
+	cases := []struct{ a, b, want string }{
+		{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"},
+		{"", "claude-opus-5-5", "claude-opus-5-5"},
+		{"claude-opus-5-5", "", "claude-opus-5-5"},
+		{"claude-opus-5-5", "claude-haiku-5-5", "claude-haiku-5-5,claude-opus-5-5"},
+		{"claude-haiku-5-5,claude-opus-5-5", "claude-opus-5-5", "claude-haiku-5-5,claude-opus-5-5"},
+	}
+	for _, tc := range cases {
+		got := addTokenUsage(TokenUsage{ServedModel: tc.a}, TokenUsage{ServedModel: tc.b}).ServedModel
+		if got != tc.want {
+			t.Errorf("merge(%q,%q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestEffectiveRequestedModel(t *testing.T) {
+	if got := effectiveRequestedModel("opus", "sonnet"); got != "opus" {
+		t.Errorf("override should win, got %q", got)
+	}
+	if got := effectiveRequestedModel("", "sonnet"); got != "sonnet" {
+		t.Errorf("stage model expected, got %q", got)
+	}
+	if got := effectiveRequestedModel("", ""); got != "" {
+		t.Errorf("empty expected, got %q", got)
+	}
+	if got := requestedModelFor([]string{"bug", "model:opus", "model:haiku"}, "sonnet"); got != "opus" {
+		t.Errorf("first model label should win, got %q", got)
+	}
+	if got := requestedModelFor([]string{"bug"}, "sonnet"); got != "sonnet" {
+		t.Errorf("no label -> stage model, got %q", got)
+	}
+	found, ignored := modelOverrideFromLabels([]string{"model:opus", "model:haiku", "model:"})
+	if found != "opus" || len(ignored) != 1 || ignored[0] != "haiku" {
+		t.Errorf("modelOverrideFromLabels = %q, %v", found, ignored)
+	}
+}

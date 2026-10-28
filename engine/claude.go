@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -657,7 +658,47 @@ func addTokenUsage(a, b TokenUsage) TokenUsage {
 		CacheReadTokens:     a.CacheReadTokens + b.CacheReadTokens,
 		CostUSD:             a.CostUSD + b.CostUSD,
 		TurnsUsed:           a.TurnsUsed + b.TurnsUsed,
+		ServedModel:         mergeServedModels(a.ServedModel, b.ServedModel),
 	}
+}
+
+// mergeServedModels returns the sorted union of two comma-separated served-model
+// sets. Empty (unknown) sets contribute nothing. See ADR-1411.
+func mergeServedModels(a, b string) string {
+	if a == b || b == "" {
+		return a
+	}
+	if a == "" {
+		return b
+	}
+	set := map[string]struct{}{}
+	for _, part := range strings.Split(a+","+b, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			set[part] = struct{}{}
+		}
+	}
+	return joinSortedModels(set)
+}
+
+// joinSortedModels renders a model-id set as a sorted, comma-joined string.
+func joinSortedModels(set map[string]struct{}) string {
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
+}
+
+// effectiveRequestedModel returns the model requested for an invocation, as
+// written: the model:<name> label override when set, otherwise the stage's
+// configured model. This is the same precedence buildClaudeArgs applies when
+// choosing --model. Empty means no --model flag is passed.
+func effectiveRequestedModel(override, stageModel string) string {
+	if override != "" {
+		return override
+	}
+	return stageModel
 }
 
 // saveDebugLog writes Claude's output for a stage invocation to
@@ -2776,7 +2817,11 @@ func tryParseResultMessage(raw []byte) (claudeResponse, bool) {
 // Falls back to the per-request Usage field when ModelUsage is absent.
 func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
 	usage := TokenUsage{CostUSD: resp.CostUSD, TurnsUsed: resp.NumTurns}
-	for _, m := range resp.ModelUsage {
+	served := map[string]struct{}{}
+	for id, m := range resp.ModelUsage {
+		if id = strings.TrimSpace(id); id != "" {
+			served[id] = struct{}{}
+		}
 		usage.InputTokens += m.InputTokens
 		usage.OutputTokens += m.OutputTokens
 		usage.CacheCreationTokens += m.CacheCreationTokens
@@ -2787,6 +2832,9 @@ func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
 		usage.InputTokens = resp.Usage.InputTokens
 		usage.OutputTokens = resp.Usage.OutputTokens
 	}
+	// Served model: the resolved id(s) the CLI reports; unknown stays empty and
+	// is never defaulted to the requested model.
+	usage.ServedModel = joinSortedModels(served)
 	return usage
 }
 
@@ -3060,4 +3108,12 @@ func writeResumeFailureCount(issueNumber int, sessFilePath string, count int) {
 // this mirrors).
 func resetResumeFailureCount(sessFilePath string) {
 	os.Remove(resumeFailureCountPath(sessFilePath))
+}
+
+// requestedModelFor resolves the effective requested model from an item's labels
+// without logging (used where the logging extractModelOverride result is not in
+// scope).
+func requestedModelFor(labels []string, stageModel string) string {
+	override, _ := modelOverrideFromLabels(labels)
+	return effectiveRequestedModel(override, stageModel)
 }

@@ -304,6 +304,57 @@ func TestInvocationObserver_FiresJobCompletedEventOnInvocationChanged(t *testing
 	}
 }
 
+func TestInvocationObserver_RecordsTokensRequestedAndServedModel(t *testing.T) {
+	var emitted []tui.Event
+	obs := &InvocationObserver{
+		Stages: []*stages.Stage{{Name: "Plan", Model: "sonnet"}},
+		Emit:   func(e tui.Event) { emitted = append(emitted, e) },
+	}
+	store := newTestStore()
+	defer store.Subscribe(obs)()
+	store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 6, NewStatus: "Plan"})
+
+	record := func(requested, served string) tui.JobCompletedEvent {
+		emitted = nil
+		store.Apply(itemstate.InvocationRecorded{
+			Repo: "owner/repo", Number: 6, Completed: true,
+			RequestedModel: requested,
+			Usage: itemstate.TokenUsage{
+				InputTokens: 1, OutputTokens: 2, CacheCreationTokens: 3, CacheReadTokens: 4,
+				ServedModel: served,
+			},
+		})
+		if len(emitted) == 0 {
+			t.Fatal("no event emitted")
+		}
+		return emitted[len(emitted)-1].(tui.JobCompletedEvent)
+	}
+
+	// model:opus label on a sonnet stage; alias resolved to a concrete id.
+	ev := record("opus", "claude-opus-5-5")
+	if ev.StageModel != "opus" {
+		t.Errorf("StageModel = %q, want opus (effective requested, not stage YAML)", ev.StageModel)
+	}
+	if ev.ServedModel != "claude-opus-5-5" {
+		t.Errorf("ServedModel = %q, want claude-opus-5-5", ev.ServedModel)
+	}
+	if ev.InputTokens != 1 || ev.OutputTokens != 2 || ev.CacheCreationTokens != 3 || ev.CacheReadTokens != 4 {
+		t.Errorf("token fields = %+v", ev)
+	}
+
+	// Unknown served model stays empty and does not echo the requested value.
+	ev = record("opus", "")
+	if ev.ServedModel != "" {
+		t.Errorf("ServedModel = %q, want empty (unknown)", ev.ServedModel)
+	}
+
+	// No requested model recorded: fall back to the stage YAML value.
+	ev = record("", "")
+	if ev.StageModel != "sonnet" {
+		t.Errorf("StageModel fallback = %q, want sonnet", ev.StageModel)
+	}
+}
+
 func TestInvocationObserver_SkipsStatusChanged(t *testing.T) {
 	var emitted []tui.Event
 	obs := &InvocationObserver{

@@ -4231,6 +4231,14 @@ Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade rest
 
 Job history is saved to `.fabrik/history.json` (project-local, alongside `.fabrik/config.yaml`) and restored on restart.
 
+Each entry records the invocation's usage and the model it ran on, so cost and model attribution can be reconstructed from the file alone:
+
+- `InputTokens`, `OutputTokens`, `CacheCreationTokens`, `CacheReadTokens` — the same four counts Fabrik writes to `fabrik.log` for that invocation. On a resumed session the Claude CLI reports session-cumulative figures (as it does for `CostUSD` and `TurnsUsed`), so summing these across several entries of one session double-counts.
+- `StageModel` — the **requested** model, as written: the issue's `model:<name>` label if present (see §6, Labels Reference), otherwise the stage's configured `model`. An alias such as `opus` stays an alias; a full model id stays a full id.
+- `ServedModel` — the **served** model: the concrete id the Claude response reports (for example `claude-opus-5-5` when the request was `opus`). If a session used several models (for instance a subagent on a smaller model) the ids are sorted and comma-joined. Empty means unknown — it is never filled in from the requested model. Compare `ServedModel` across runs with an unchanged `StageModel` to see an alias move to a newer model, or a gateway rewrite the model.
+
+Entries written by older versions have none of the new fields; they load unchanged and read as zero / empty.
+
 ---
 
 ## 9. Observability
