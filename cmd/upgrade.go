@@ -14,6 +14,7 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/lockprobe"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
@@ -30,6 +31,26 @@ const (
 // upgradeGitHubClient is the GitHub client used by runUpgrade. It can be
 // replaced in tests to avoid real network calls.
 var upgradeGitHubClient selfupgrade.ReleaseFetcher
+
+// upgradeLockProbe reports whether a live daemon holds the instance lock of a
+// Fabrik directory (#2458). A variable so tests can neutralise the check.
+var upgradeLockProbe = lockprobe.Probe
+
+// refuseIfDaemonHoldsDir refuses an on-disk change while a live process holds
+// the current directory's instance lock: the daemon reads the stage files and
+// plugin the upgrade rewrites. The probe is read-only and fails open.
+func refuseIfDaemonHoldsDir() error {
+	res := upgradeLockProbe(".")
+	if !res.Held {
+		return nil
+	}
+	holder := "pid unknown"
+	if res.PID > 0 {
+		holder = fmt.Sprintf("pid %d", res.PID)
+	}
+	return fmt.Errorf("fabrik upgrade: refusing to change .fabrik/ while a Fabrik daemon holds this directory (%s).\n"+
+		"  Stop the daemon, then run 'fabrik upgrade' again.", holder)
+}
 
 // upgradeReconcilePrompt is the text printed by --reconcile or the TUI [1] option.
 const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
@@ -67,7 +88,9 @@ func runUpgrade(args []string) error {
 		fmt.Fprintf(fset.Output(), "The run also migrates the workflow configuration: stage files' skill references\n")
 		fmt.Fprintf(fset.Output(), "become fully qualified (<plugin>:<skill>), and a .fabrik/plugin with local edits is\n")
 		fmt.Fprintf(fset.Output(), "moved to .fabrik/plugins/local-workflows and a clean base plugin restored. Nothing\n")
-		fmt.Fprintf(fset.Output(), "is committed; review and commit the result yourself.\n")
+		fmt.Fprintf(fset.Output(), "is committed; review and commit the result yourself.\n\n")
+		fmt.Fprintf(fset.Output(), "Changes to .fabrik/ are refused while a Fabrik daemon holds this directory; stop\n")
+		fmt.Fprintf(fset.Output(), "it first (--no-migrate and --reconcile are exempt).\n")
 		fmt.Fprintf(fset.Output(), "\nFlags:\n")
 		fmt.Fprintf(fset.Output(), "  --force      Overwrite local plugin customizations (destructive)\n")
 		fmt.Fprintf(fset.Output(), "  --reconcile  Print a Claude Code reconciliation prompt and exit\n")
@@ -103,6 +126,15 @@ func runUpgrade(args []string) error {
 			},
 		}); err != nil {
 			return fmt.Errorf("release upgrade: %w", err)
+		}
+	}
+
+	// Everything below changes .fabrik/ on disk. --no-migrate alone is exempt: the
+	// daemon runs it as a child while holding the lock (engine/upgrade.go). --force
+	// overwrites .fabrik/plugin, so it is checked even with --no-migrate (#2458).
+	if force || !noMigrate {
+		if err := refuseIfDaemonHoldsDir(); err != nil {
+			return err
 		}
 	}
 
