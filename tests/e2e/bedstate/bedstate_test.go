@@ -23,8 +23,8 @@ func seed(t *testing.T, bed string, files map[string]string) {
 func TestClearTrainCapsRemovesOnlyTheTrainCapsFile(t *testing.T) {
 	bed := t.TempDir()
 	seed(t, bed, map[string]string{
-		TrainCapsFile:               `{"version":1,"trials":{"o/r":[1,2,3]}}`,
-		UsageLimitFile:              `{"version":1,"until":"2026-10-29T00:00:00Z"}`,
+		TrainCapsFile:              `{"version":1,"trials":{"o/r":[1,2,3]}}`,
+		UsageLimitFile:             `{"version":1,"until":"2026-10-29T00:00:00Z"}`,
 		TrainCapsFile + ".corrupt": "quarantined",
 	})
 	removed, err := ClearTrainCaps(bed)
@@ -35,7 +35,7 @@ func TestClearTrainCapsRemovesOnlyTheTrainCapsFile(t *testing.T) {
 		t.Errorf("train-caps file still present: %v", err)
 	}
 	for name, want := range map[string]string{
-		UsageLimitFile:              `{"version":1,"until":"2026-10-29T00:00:00Z"}`,
+		UsageLimitFile:             `{"version":1,"until":"2026-10-29T00:00:00Z"}`,
 		TrainCapsFile + ".corrupt": "quarantined",
 	} {
 		got, err := os.ReadFile(filepath.Join(DecisionsDir(bed), name))
