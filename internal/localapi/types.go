@@ -646,6 +646,12 @@ type WorkerSlots struct {
 	// known zero when merge_train is off.
 	TrainInUse Known[int] `json:"train_in_use"`
 	TrainMax   Known[int] `json:"train_max"`
+	// FixInUse / FixMax describe the reserved fix-round slots (#2490, ADR 2490),
+	// usable only by review, CI-fix and rebase rounds. They sit on top of
+	// MaxConcurrent and are not counted in InUse. Both are a known zero when
+	// fix_round_slots is 0.
+	FixInUse Known[int] `json:"fix_in_use"`
+	FixMax   Known[int] `json:"fix_max"`
 }
 
 // TrainPartition is one (repo, base) merge-train partition.

@@ -641,6 +641,10 @@ type WorkerHandle struct {
 	// stage's, a comment review's, or an extended one); 0 = unknown or unlimited.
 	// It is set when an invocation starts, so it is known before the first turn.
 	TurnsMax int
+	// ReservedSlot is true when the running worker holds the reserved fix-round
+	// slot (#2490) rather than a general (max_concurrent) one; health counts it in
+	// fix_in_use, never in_use.
+	ReservedSlot bool
 }
 
 // Worker kinds (#2121). An empty Kind on a stage dispatch's handle means

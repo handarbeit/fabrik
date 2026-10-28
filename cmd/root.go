@@ -75,6 +75,7 @@ type Config struct {
 	MaxBisectValidations       int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
 	MaxTrainRebaseCycles       int    // 0 means use default (3)
 	MaxTrainAutoRepairAttempts int    // per member per base SHA; default 1; 0 disables red-singleton auto-repair (#2045)
+	FixRoundSlots              int    // reserved worker slots for review/CI-fix/rebase rounds, on top of MaxConcurrent; 0 disables (#2490)
 	MaxStageDispatches         int    // per item, per stage episode; default 25; 0 disables the dispatch bound (#2395)
 	MaxTrainTrialsPerWindow    int    // 0 means use default (20)
 	TrainTrialWindowMinutes    int    // 0 means use default (60)
@@ -215,6 +216,7 @@ func Execute() error {
 	flag.IntVar(&cfg.RetryBackoffSeconds, "retry-backoff", defaultRetryBackoffSeconds, "Seconds to wait before re-dispatching a stage after an incomplete attempt. Independent of --poll, which governs GitHub API cadence (#1831). Minimum 1. Also FABRIK_RETRY_BACKOFF / retry_backoff.")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.FixRoundSlots, "fix-round-slots", 0, "Reserved worker slots, on top of --max-concurrent, usable only by review, CI-fix and rebase rounds (0 = disabled, the default; also FABRIK_FIX_ROUND_SLOTS; #2490)")
 	flag.IntVar(&cfg.MaxStageDispatches, "max-stage-dispatches", defaultMaxStageDispatches, "Maximum number of times one stage of one item is dispatched in a single episode (every dispatch counts, whatever its outcome) before the item is paused for a human (0 = disable the bound; default 25; also FABRIK_MAX_STAGE_DISPATCHES; #2395)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
 	flag.IntVar(&cfg.MaxResumeFailures, "max-resume-failures", 0, "Maximum number of consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting — independent of max-retries, since a failed resume attempt is not charged against it (0 = use default of 2; also FABRIK_MAX_RESUME_FAILURES; #1414)")
@@ -643,6 +645,24 @@ func Execute() error {
 			cfg.MaxStageDispatches = *pc.MaxStageDispatches
 		}
 	}
+	if explicitFlags["fix-round-slots"] {
+		if cfg.FixRoundSlots < 0 {
+			return fmt.Errorf("--fix-round-slots=%d is invalid (must be a non-negative integer; 0 disables)", cfg.FixRoundSlots)
+		}
+	} else {
+		if v := os.Getenv("FABRIK_FIX_ROUND_SLOTS"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return fmt.Errorf("FABRIK_FIX_ROUND_SLOTS=%q is invalid (must be a non-negative integer; 0 disables)", v)
+			}
+			cfg.FixRoundSlots = n
+		} else if pc.FixRoundSlots != nil {
+			if *pc.FixRoundSlots < 0 {
+				return fmt.Errorf("config.yaml fix_round_slots=%d is invalid (must be a non-negative integer; 0 disables)", *pc.FixRoundSlots)
+			}
+			cfg.FixRoundSlots = *pc.FixRoundSlots
+		}
+	}
 	if !explicitFlags["max-train-trials-per-window"] {
 		if v := os.Getenv("FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1035,11 +1055,17 @@ func Execute() error {
 		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
+		workers := fmt.Sprintf("%d", cfg.MaxConcurrent)
 		if cfg.MergeTrain == "on" {
-			fmt.Printf("  workers: %d (+1 reserved merge-train slot)\n", cfg.MaxConcurrent)
-		} else {
-			fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+			workers += " (+1 reserved merge-train slot"
+			if cfg.FixRoundSlots > 0 {
+				workers += fmt.Sprintf(", +%d reserved fix-round slot(s)", cfg.FixRoundSlots)
+			}
+			workers += ")"
+		} else if cfg.FixRoundSlots > 0 {
+			workers += fmt.Sprintf(" (+%d reserved fix-round slot(s))", cfg.FixRoundSlots)
 		}
+		fmt.Printf("  workers: %s\n", workers)
 		if cfg.MaxRetries == 0 {
 			fmt.Printf("  max-retries: unlimited\n")
 		} else {
@@ -1100,6 +1126,7 @@ func Execute() error {
 		MaxConcurrent:              cfg.MaxConcurrent,
 		MaxRetries:                 cfg.MaxRetries,
 		MaxSliceRetries:            maxSliceRetries(cfg.MaxSliceRetries),
+		FixRoundSlots:              cfg.FixRoundSlots,
 		MaxStageDispatches:         cfg.MaxStageDispatches, // 0 = bound disabled; default 25 applied by the flag (#2395)
 		MaxResumeFailures:          maxResumeFailures(cfg.MaxResumeFailures),
 		MaxToolsDeniedRetries:      maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),
