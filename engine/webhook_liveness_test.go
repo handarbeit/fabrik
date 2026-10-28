@@ -146,7 +146,7 @@ func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
 		API:    h.api,
 		Ledger: h.ledger,
 		Sink:   h.sink,
-		HookURL: func() (string, error) {
+		HookURL: func(context.Context) (string, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.hookCalls++
@@ -170,6 +170,8 @@ func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
 		// The daemon has been up a while: failures from the last hour count.
 		h.r.started = h.now.Add(-time.Hour)
 	}
+	// Suite-wide leak guard (#2480): a refresh a test leaves in flight is waited for.
+	t.Cleanup(h.r.Stop)
 	return h
 }
 
