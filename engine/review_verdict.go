@@ -8,6 +8,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // This file builds the per-reviewer verdicts (#2127 R5) and the web URLs the
@@ -67,7 +68,13 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 	standings := map[string]reviewerStanding{}
 	if !e.reviewStandingOff.Load() {
 		var declared []string
-		if d := e.effectiveExpectedReviewers(gh.ProjectItem{Number: st.Number, Labels: st.Labels}, e.stageByName(st.Status)); d != nil {
+		// A status with no configured stage (parking column, unknown) declares no
+		// bots; a per-issue expected-reviewers label still applies.
+		stage := e.stageByName(st.Status)
+		if stage == nil {
+			stage = &stages.Stage{}
+		}
+		if d := e.effectiveExpectedReviewers(gh.ProjectItem{Number: st.Number, Labels: st.Labels}, stage); d != nil {
 			declared = *d
 		}
 		for _, s := range reviewerStandings(standingInput(lpr), head, declared) {

@@ -82,6 +82,7 @@ func gateCleared(t *testing.T, env *Env, num int) bool {
 }
 
 func TestReviewAuthorityHead_DeclaredBotCleanReReviewClearsTheGate(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		disabled bool
@@ -120,6 +121,7 @@ func TestReviewAuthorityHead_UndeclaredReviewerStillBlocks(t *testing.T) {
 }
 
 func TestReviewAuthorityHead_VerdictOnOldCommitAwaitsReReview(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		disabled bool

@@ -400,3 +400,22 @@ func latestPerAuthorForTest(history []gh.PRReview) []gh.PRReview {
 	}
 	return out
 }
+
+// An item in a column with no configured stage (a parking column) has no declared
+// bots; the reviewer view must still build, not dereference a nil stage.
+func TestReviewerView_ItemInUnconfiguredColumnDeclaresNoBots(t *testing.T) {
+	e := apiEngine(t, 0)
+	history := []gh.PRReview{rv(1, "pruefer[bot]", "CHANGES_REQUESTED", commitA, 0), rv(2, "pruefer[bot]", "COMMENTED", commitB, 5)}
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_P", Number: 1, Repo: "owner/repo", Title: "t", Status: "NoSuchColumn",
+		LinkedPRNumber: 34, LinkedPRHeadSHA: commitB, LinkedPRReviews: history[1:],
+	}})
+	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, LinkedPRNum: 34, SHA: commitB})
+	e.store.Apply(itemstate.PRStandingReviewsRead{Repo: "owner/repo", Number: 1, PRNumber: 34, Reviews: standingEvidence(history)})
+	snap, _ := e.store.Peek("owner/repo", 1)
+	st := snap.State()
+	vs := e.reviewerVerdicts(&st)
+	if len(vs) != 1 || !vs[0].CleanPass.Valid || vs[0].CleanPass.V {
+		t.Fatalf("verdicts = %+v, want one reviewer that is not a clean pass (undeclared, awaiting nothing but not superseded)", vs)
+	}
+}
