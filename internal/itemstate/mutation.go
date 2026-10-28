@@ -1251,6 +1251,9 @@ type InvocationRecorded struct {
 	// error — see claudeTurnLimitError in engine/claude.go and ADR-1178.
 	TurnLimited bool
 	Usage       TokenUsage
+	// RequestedModel is the effective requested model (label override > stage
+	// config, as written); empty when no --model flag was passed. See ADR-1411.
+	RequestedModel string
 	// IsComment is true when the invocation processed a user comment rather than
 	// running a stage. Stored in ItemState.LastInvocationIsComment so that the
 	// InvocationObserver can forward the correct flag to the TUI.

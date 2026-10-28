@@ -276,6 +276,12 @@ type ItemState struct {
 	// history, rendered distinctly from a genuine error. See ADR-1178.
 	LastInvocationTurnLimited bool
 
+	// LastInvocationRequestedModel is the effective requested model of the most
+	// recent Claude invocation, as written: the model:<name> label override when
+	// present, otherwise the stage's configured model (an alias stays an alias).
+	// Empty when no --model flag was passed. See ADR-1411.
+	LastInvocationRequestedModel string
+
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage
@@ -695,6 +701,11 @@ type TokenUsage struct {
 	CostUSD             float64
 	TurnsUsed           int
 	MaxTurns            int
+	// ServedModel is the concrete model id(s) the CLI reported serving the
+	// invocation (the sorted, comma-joined ModelUsage keys). Empty means
+	// unknown — it is never defaulted to the requested model. A string (not a
+	// slice) keeps TokenUsage comparable. See ADR-1411.
+	ServedModel string
 }
 
 // IssueRef names an issue by repository ("owner/repo") and number.

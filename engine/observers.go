@@ -103,9 +103,13 @@ func (o *InvocationObserver) OnChange(change itemstate.Change, snap itemstate.Sn
 		return
 	}
 	st := snap.State()
-	model := ""
-	if s := stages.FindStage(o.Stages, st.Status); s != nil {
-		model = s.Model
+	// The requested model recorded at the invocation (label override > stage
+	// config); fall back to the stage YAML value when none was recorded.
+	model := st.LastInvocationRequestedModel
+	if model == "" {
+		if s := stages.FindStage(o.Stages, st.Status); s != nil {
+			model = s.Model
+		}
 	}
 	o.Emit(tui.JobCompletedEvent{
 		IssueNumber:    st.Number,
@@ -123,6 +127,12 @@ func (o *InvocationObserver) OnChange(change itemstate.Change, snap itemstate.Sn
 		TurnsUsed:      st.LastTokenUsage.TurnsUsed,
 		MaxTurns:       st.LastTokenUsage.MaxTurns,
 		CostUSD:        st.LastTokenUsage.CostUSD,
+
+		InputTokens:         st.LastTokenUsage.InputTokens,
+		OutputTokens:        st.LastTokenUsage.OutputTokens,
+		CacheCreationTokens: st.LastTokenUsage.CacheCreationTokens,
+		CacheReadTokens:     st.LastTokenUsage.CacheReadTokens,
+		ServedModel:         st.LastTokenUsage.ServedModel,
 	})
 }
 

@@ -61,7 +61,7 @@ type JobCompletedEvent struct {
 	Repo           string // "owner/repo" — empty for single-repo projects
 	Title          string
 	StageName      string
-	StageModel     string // model configured for the stage (e.g. "sonnet")
+	StageModel     string // effective requested model: model:<name> label override > stage config, as written (e.g. "sonnet")
 	IsComment      bool   // true when processing a user comment, not a stage run
 	Success        bool   // no error from processItem
 	TurnLimited    bool   // invocation exited due to turn-budget exhaustion (CLI subtype error_max_turns), not a genuine fault
@@ -72,9 +72,17 @@ type JobCompletedEvent struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
-	Skipped        bool   // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
-	Outcome        string // merge-train episode outcome (e.g. "landed"); empty for ordinary jobs
-	Detail         string // merge-train outcome detail (members, PR, ejections); empty for ordinary jobs
+	// Token counts as logged by formatStatsLogLine (session-cumulative on a resumed session).
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	// ServedModel is the resolved concrete model id(s) the CLI reported serving the
+	// invocation (comma-joined when several); empty = unknown. Distinct from StageModel.
+	ServedModel string
+	Skipped     bool   // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
+	Outcome     string // merge-train episode outcome (e.g. "landed"); empty for ordinary jobs
+	Detail      string // merge-train outcome detail (members, PR, ejections); empty for ordinary jobs
 }
 
 func (JobCompletedEvent) tuiEvent() {}

@@ -1607,15 +1607,22 @@ func TestApplyWorkerExited(t *testing.T) {
 
 func TestApplyInvocationRecorded(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	usage := TokenUsage{InputTokens: 100, OutputTokens: 200, TurnsUsed: 5, MaxTurns: 50}
+	usage := TokenUsage{InputTokens: 100, OutputTokens: 200, TurnsUsed: 5, MaxTurns: 50, ServedModel: "claude-opus-5-5"}
 	applyExpect(t, s, InvocationRecorded{
-		Repo:      testRepo,
-		Number:    1,
-		Completed: true,
-		Blocked:   false,
-		Usage:     usage,
+		Repo:           testRepo,
+		Number:         1,
+		Completed:      true,
+		Blocked:        false,
+		Usage:          usage,
+		RequestedModel: "opus",
 	}, InvocationChanged)
 	st := getItem(t, s, testRepo, 1)
+	if st.LastInvocationRequestedModel != "opus" {
+		t.Errorf("LastInvocationRequestedModel = %q; want opus", st.LastInvocationRequestedModel)
+	}
+	if st.LastTokenUsage.ServedModel != "claude-opus-5-5" {
+		t.Errorf("LastTokenUsage.ServedModel = %q", st.LastTokenUsage.ServedModel)
+	}
 	if !st.LastInvocationCompleted {
 		t.Error("LastInvocationCompleted not set")
 	}
