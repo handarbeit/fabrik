@@ -221,3 +221,47 @@ func TestRouteLiveness_ArrivalsRacingStop(t *testing.T) {
 		}
 	}
 }
+
+// The stop function startRouteLiveness returns waits for an in-flight arrival
+// refresh (cancelling it first) and is safe to call twice.
+func TestStartRouteLiveness_StopWaitsForArrivalRefresh(t *testing.T) {
+	isolateWarnings(t)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	hook := newBlockingHook(livenessHookURL, true)
+	var armed atomic.Bool
+	h := newLivenessHarness(t, 0)
+	idle := make(chan struct{})
+	var idleOnce sync.Once
+	h.r.cfg.Wait = func(ctx context.Context, _ time.Duration) bool {
+		idleOnce.Do(func() { close(idle) })
+		<-ctx.Done()
+		return false
+	}
+	h.r.cfg.HookURL = func(ctx context.Context) (string, error) {
+		if !armed.Load() {
+			return livenessHookURL, nil
+		}
+		return hook.read(ctx)
+	}
+	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
+	stop := eng.startRouteLiveness(context.Background(), h.r)
+	t.Cleanup(hook.release)
+	waitClosed(t, idle, "the start-up evaluation to finish")
+
+	armed.Store(true)
+	h.r.Arrival("real")
+	waitClosed(t, hook.entered, "the refresh to reach the hook-config read")
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while the arrival refresh was still running")
+	case <-time.After(300 * time.Millisecond):
+	}
+	hook.release()
+	waitClosed(t, stopped, "stop to return")
+	if h.refreshInFlight() {
+		t.Fatal("the refresh goroutine outlived stop")
+	}
+	stop()
+}
