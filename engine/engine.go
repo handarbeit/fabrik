@@ -414,6 +414,7 @@ type Engine struct {
 	sessionRootForTest                    atomic.Pointer[string]                    // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
+	closedPausedCleanupOff                atomic.Bool                               // test seam: SetClosedPausedCleanupDisabledForTest (#2459)
 	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)
 	validateReworkRestoreGuardOff         atomic.Bool                               // test seam: SetValidateReworkRestoreGuardDisabledForTest (#2378)

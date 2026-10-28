@@ -5782,7 +5782,7 @@ Each active stage column has the same set of reachable sub-states:
 |-----------|---------------|-------------|
 | **Pending Cleanup** | (none) | Worktree exists; engine will remove it |
 | **Complete** | `stage:Done:complete` | Worktree removed; terminal state |
-| **Paused** | `fabrik:paused` | Manually paused; cleanup skipped |
+| **Paused** | `fabrik:paused` | Manually paused; cleanup skipped while the issue is **open** (its worktree may hold unfinished work). A **closed** non-PR item is cleaned up anyway (#2459, ADR 2459): `processItem` takes it straight to `handleCleanupStage` ahead of the pause/awaiting-input gates, which remove `fabrik:paused` and `fabrik:awaiting-input` first (no comment, one log line) and only then apply `stage:Done:complete` |
 | **Awaiting Landing Verification** | `fabrik:awaiting-landing-verification` (+ `fabrik:credited-pr:<N>` for a merge-train landing) | Just reached Done via a merge-attributable path; the post-Done backstop is confirming the credited PR actually merged. See §6.19. |
 
 #### Queued (Holding Stage — `merge_train: on` only)
@@ -6674,7 +6674,7 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Done, Pending Cleanup | Poll tick | Worktree exists, not paused, not already complete | Done, Complete | `stage:Done:complete` | `fabrik:extend-turns` (if present) | Worktree removed; no lock/Claude/comment processing |
+| Done, Pending Cleanup | Poll tick | Worktree exists, not already complete, and not paused — unless the issue is closed (non-PR), which is cleaned up even when paused (#2459) | Done, Complete | `stage:Done:complete` | `fabrik:extend-turns` (if present); `fabrik:paused` + `fabrik:awaiting-input` (closed item only, before the complete label) | Worktree removed; no lock/Claude/comment processing |
 | Done, Complete | Poll tick | Already complete | Done, Complete (no-op) | | | Skipped by both `itemMayNeedWork` and `processItem` |
 
 #### Review Reinvoke

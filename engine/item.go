@@ -214,6 +214,9 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// item is stranded, un-labelled and un-archivable, forever (#1224). PR items
 	// are excluded — handleCleanupStage's worktree removal already special-cases
 	// !item.IsPR, and PR-item admission is a separate, deferred concern.
+	//
+	// No pause check here by design: itemNeedsWork vetoes an open paused item but
+	// admits a closed non-PR one (#2459), so the two agree for closed items.
 	if stage.CleanupWorktree {
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		if hasLabel(item.Labels, completeLabel) {
@@ -308,7 +311,10 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
-		if hasLabel(item.Labels, "fabrik:paused") {
+		// An open paused item's worktree may hold unfinished work, so it is
+		// skipped; a closed non-PR item has nothing left to protect (#2459,
+		// ADR 2459). itemMayNeedWork has no pause check and so already agrees.
+		if hasLabel(item.Labels, "fabrik:paused") && !e.closedCleanupItem(item, stage) {
 			return false, 0
 		}
 		if hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
@@ -539,6 +545,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "skip", "is being edited\n")
 			return nil
 		}
+	}
+
+	// Closed non-PR item at a cleanup stage (#2459, ADR 2459): clean it up
+	// before any of the pause/awaiting-input resume gates below. Those gates
+	// would skip it ("is paused") or, on a human comment, run Claude on a closed
+	// item via processComments (ADR 1387). A closed item is terminal, so neither
+	// resumeAuthorised (ADR 1813) nor checkDependencies applies. Placed after the
+	// lock and editing checks so an item owned by someone else is still skipped.
+	if e.closedCleanupItem(item, stage) {
+		e.handleCleanupStage(item, stage, repoStr)
+		return nil
 	}
 
 	// Mirror of itemNeedsWork's closed-item guard (R1, ADR-1387): the two
@@ -1021,6 +1038,20 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 		if label == completeLabel {
 			return
 		}
+	}
+
+	// A closed item's pause pair is cleared first (#2459): the completion label
+	// is the only stop on re-admission, so applying it before a failed removal
+	// would strand the pause labels for good. On failure, back off and retry the
+	// whole cleanup next poll.
+	if e.closedCleanupItem(item, stage) && !e.clearPauseOnClosedCleanup(item) {
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   repoStr,
+			Number: item.Number,
+			Reason: "periodic-re-eval",
+			Until:  e.now().Add(e.githubRecheckInterval()),
+		})
+		return
 	}
 
 	// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
