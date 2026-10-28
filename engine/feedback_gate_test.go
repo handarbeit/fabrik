@@ -77,17 +77,76 @@ func TestFeedbackGate_AddressedReviewBodyDoesNotHold(t *testing.T) {
 	}
 }
 
-// R5: a failed live read fails closed and records the re-evaluation cooldown.
+// R5 / #2498: a failed live read fails closed and records the short
+// feedback-read-failed cooldown (not feedback-pending).
 func TestFeedbackGate_LiveReadFailureHolds(t *testing.T) {
 	client := landingClient()
 	client.fetchItemDetailsFn = func(*gh.ProjectItem) error { return errors.New("rate limited") }
 	eng := testEngineForMerge(t, client)
+	now := time.Now()
+	eng.SetClock(stubClock{t: now})
 	if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
 		t.Fatal("a failed live re-read must hold")
 	}
 	snap, _ := eng.store.Get("owner/repo", 1)
-	if snap.CooldownAt("feedback-pending").IsZero() {
-		t.Error("expected a feedback-pending cooldown on hold")
+	if !snap.CooldownAt("feedback-pending").IsZero() {
+		t.Error("a failed read must not record feedback-pending")
+	}
+	if got, want := snap.CooldownAt(feedbackReadFailedReason), now.Add(eng.mergeGateRecheckInterval()); !got.Equal(want) {
+		t.Errorf("feedback-read-failed cooldown = %v, want %v", got, want)
+	}
+}
+
+// #2498 neutralisation seam: disabled, a failed read records the long cooldown.
+func TestFeedbackGate_LiveReadFailureSeamRestoresLongCooldown(t *testing.T) {
+	client := landingClient()
+	client.fetchItemDetailsFn = func(*gh.ProjectItem) error { return errors.New("502") }
+	eng := testEngineForMerge(t, client)
+	eng.SetFeedbackReadFailShortCooldownDisabledForTest(true)
+	now := time.Now()
+	eng.SetClock(stubClock{t: now})
+	if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
+		t.Fatal("a failed live re-read must hold")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if got, want := snap.CooldownAt("feedback-pending"), now.Add(eng.githubRecheckInterval()); !got.Equal(want) {
+		t.Errorf("feedback-pending cooldown = %v, want %v", got, want)
+	}
+	if !snap.CooldownAt(feedbackReadFailedReason).IsZero() {
+		t.Error("seam on: no feedback-read-failed entry expected")
+	}
+}
+
+// #2498: a hold on real pending feedback keeps feedback-pending at
+// githubRecheckInterval and records no short entry.
+func TestFeedbackGate_RealFeedbackKeepsLongCooldown(t *testing.T) {
+	eng := testEngineForMerge(t, landingClient())
+	now := time.Now()
+	eng.SetClock(stubClock{t: now})
+	item := feedbackItem(func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{bodyOnlyReview} })
+	if !eng.feedbackGateBlocks(item, true, "advance") {
+		t.Fatal("an unaddressed review body must hold")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if got, want := snap.CooldownAt("feedback-pending"), now.Add(eng.githubRecheckInterval()); !got.Equal(want) {
+		t.Errorf("feedback-pending cooldown = %v, want %v", got, want)
+	}
+	if !snap.CooldownAt(feedbackReadFailedReason).IsZero() {
+		t.Error("real feedback must not record feedback-read-failed")
+	}
+}
+
+// #2498: the new reason is registered as short (idle poll cap) and as a gate
+// cooldown (not "waiting for dispatch").
+func TestFeedbackReadFailedReasonIsRegistered(t *testing.T) {
+	if !shortAdmissionCooldownReasons[feedbackReadFailedReason] {
+		t.Error("feedback-read-failed must be a short admission cooldown reason")
+	}
+	if !gateCooldowns[feedbackReadFailedReason] {
+		t.Error("feedback-read-failed must be a gate cooldown")
+	}
+	if shortAdmissionCooldownReasons["feedback-pending"] {
+		t.Error("feedback-pending must stay long")
 	}
 }
 

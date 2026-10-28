@@ -24,8 +24,7 @@ import (
 //
 //   - githubRecheckInterval: how often to re-read from GitHub an item we will
 //     not be notified about (a dependency closing, a silent bot reviewer, a
-//     terminal item's periodic re-eval), and how long to back off after a
-//     failed read. This one genuinely is about API cost, so it scales with
+//     terminal item's periodic re-eval). This one genuinely is about API cost, so it scales with
 //     poll — which operators raise precisely to protect a shared rate limit.
 //
 // Before #1831, raising poll from 30 to 180 to protect the GraphQL budget
@@ -46,8 +45,7 @@ func (e *Engine) stageRetryBackoff() time.Duration {
 }
 
 // githubRecheckInterval returns the cadence for re-reading an item from GitHub
-// when nothing will notify us of a change, and the back-off after a failed
-// read. Deliberately coupled to PollSeconds — see the file comment.
+// when nothing will notify us of a change (the API-cost knob). Deliberately coupled to PollSeconds — see the file comment.
 func (e *Engine) githubRecheckInterval() time.Duration {
 	return time.Duration(e.cfg.PollSeconds*10) * time.Second
 }
@@ -85,6 +83,9 @@ var shortAdmissionCooldownReasons = map[string]bool{
 	// lockWriteRetryReason (#2393): a refused dispatch must be retried on the
 	// next poll, not after an idle back-off.
 	"lock-write-failed": true,
+	// feedbackReadFailedReason (#2498): a feedback-gate hold caused only by a
+	// failed live read is retried on the next poll.
+	feedbackReadFailedReason: true,
 }
 
 // minDueWakeInterval floors the FR-003 cap, matching the retry_backoff minimum.

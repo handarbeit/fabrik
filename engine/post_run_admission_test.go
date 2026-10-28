@@ -151,6 +151,10 @@ func TestEarliestShortCooldown(t *testing.T) {
 	if got := eng.earliestShortCooldown(start); !got.Equal(start.Add(20 * time.Second)) {
 		t.Fatalf("earliest = %v, want start+20s", got)
 	}
+	rec(1, feedbackReadFailedReason, 7*time.Second) // #2498: short reason counts
+	if got := eng.earliestShortCooldown(start); !got.Equal(start.Add(7 * time.Second)) {
+		t.Fatalf("earliest with feedback-read-failed = %v, want start+7s", got)
+	}
 }
 
 // SC-002 (#2232): with idle backoff active, the next poll lands at a due

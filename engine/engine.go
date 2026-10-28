@@ -397,6 +397,7 @@ type Engine struct {
 	liveFreshOverride         atomic.Int64           // test seam: SetLiveFreshForTest, nanoseconds (#2350)
 	live                      liveReadState          // engine-clock stamps of the last live read of a fact (#2350)
 	pauseGuardOff             atomic.Bool            // test seam: SetPauseGuardDisabledForTest (#2341)
+	feedbackReadFailShortOff  atomic.Bool            // test seam: SetFeedbackReadFailShortCooldownDisabledForTest (#2498)
 	pauseGuardUnreadOK        atomic.Bool            // test seam: SetPauseGuardUnreadFailOpenForTest (#2341)
 	completionMergedCheckOff  atomic.Bool            // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
 	mergeInFlightGuardOff     atomic.Bool            // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
