@@ -1494,6 +1494,31 @@ review cycle. Scenarios that need a real review use engine-created pipeline PRs,
 stay unlabelled. The label only takes effect once the bed's Pruefer runs a build that
 honours it, or has `excluded_labels: [pruefer:ignore]` in its config.
 
+**A review of a seeded merge-train member splits its batch — the test is INCONCLUSIVE, not FAIL (#2481, ADR 2481).**
+`pruefer:ignore` is best-effort: the 0.0.90 gate saw the dev Pruefer post a `COMMENTED` review on a
+`TestMergeTrainColdCacheBaseMember` member PR while the bed was down. The engine counts a review body as
+unprocessed feedback, so `queued-review-settle` ejected the member and the other landed alone through the
+singleton fast path — the A1 wait only knew the batch landing line and timed out into a FAIL. The harness
+cannot prevent this (the `review-ids-addressed` marker needs the review's id and the engine's own identity;
+waiting for the reviewer depends on its timing), so the live merge-train tests that seed several members use
+`waitForLandingOrSplit` (`mergetrain_helpers.go`), a first-in-time classifier over the bed log built on the
+untagged `tests/e2e/trainlog` package (unit-tested in plain `go test ./...`). A singleton landing for the
+test's own train key (own-partition scenarios only) or a `queued-review-settle` line naming one of its
+members ends the test INCONCLUSIVE at once; no landing line and no split within the budget stays a FAIL.
+A batch landing line seen first always wins. The real prevention is operational: make the dev Pruefer honour
+`pruefer:ignore` (build, or `excluded_labels`).
+
+Exposure of the merge-train live tests that seed members straight into Queued (#2481 R3):
+
+| Test | Verdict |
+|---|---|
+| `TestMergeTrainColdCacheBaseMember` | Exposed (bed is down for the whole seed window). `waitForLandingOrSplit` before the member waits; members re-paused on failure. |
+| `TestMergeTrainHappyPathLanding`, `TestMergeTrainTwoBasesConcurrent`, `TestMergeTrainRestartSafety` | Exposed (an ejected member never lands). `waitForLandingOrSplit` on the shared partition (eject-only split). |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | Already guarded: A2 reports an eject as INCONCLUSIVE (now via `trainlog.MemberEjected`). |
+| `TestMergeTrainBisect…`, `TestMergeTrainRunawayGuardPausesBatch` | Not changed: members are queued paused, so `queued-review-settle` does not see them until the single release; exposure is one poll, and the composition assertions are the subject. |
+| `TestMergeTrainRedSingletonReroutesOffQueued`, `TestMergeTrainSingletonFastPath…` | Not changed: single member prepared with its own CI green and queued only when ready; no batch to split, exposure is one poll. |
+| `TestCommentQueuedEject…` | Unchanged: ejection is its subject. |
+
 Every scenario that drives a PR through the organic Review gate depends on
 some external actor actually submitting a review. As of #1396, the bed's
 reviewer topology is:
@@ -2586,7 +2611,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — default-base-train class (#1977): the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — exclusive class (#1977): restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
-| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a leg whose bed has a webhook transport (a `E2E_EVENT_SOURCE=tailscale` App leg, see "Webhook delivery"). Posts no comments. **Not parallel** — exclusive class (#1977): stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
+| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a leg whose bed has a webhook transport (a `E2E_EVENT_SOURCE=tailscale` App leg, see "Webhook delivery"). Posts no comments. A bot review that ejects a member, or a singleton landing, ends it INCONCLUSIVE promptly (#2481). **Not parallel** — exclusive class (#1977): stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — exclusive class (#1977): induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — default-base-train class (#1977): shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
