@@ -33,11 +33,12 @@ The merge train already solved the same shape of problem with its own reserved s
 
 Research input already on the issue (the maintainers' analysis of the #2453 data and of our own fleet's engine logs):
 
-- Fix-round waits are small in absolute terms: about 3.6 h over 24 occurrences, split evenly between Review and Validate. Most measured slot starvation is new stage work waiting to start, which a fix-round reservation does not touch.
-- The costly case, the review-wait timeout firing during a slot wait, is a separate clock problem that #2467 addresses. Once that ships, the reservation buys minutes, not avoided pauses.
-- In our own fleet only one of five instances ever filled its slots (all busy 3% of the time). Of its 62 fix rounds, at most 2.9 h of queueing is possible in total. The real wait cannot be measured today because the engine logs nothing when a fix round takes its slot.
-- Headroom is large (23–34% of slot-hours used in the report's fleet), so more slots is the other remedy.
-- The recommendation recorded there: ship the setting with default `0` (today's behaviour), and change the default only if later fleet logs show fix rounds queueing behind full slots. The reporting in FR-006 and FR-007 is what makes that observable.
+- Fix-round waits are small in absolute terms: about 3.6 h over 24 occurrences, split evenly between Review and Validate (1.8 h each). Stage runs waiting for a slot account for 26.9 h in the same data (Specify 15.3 h), and a further 33.2 h of mostly-slot waits before Oct 22 is estimated from unlogged idle time (Specify 21.9 h). Most measured slot starvation is therefore new stage work waiting to start, which a fix-round reservation does not touch.
+- Fix-round waits are logged only from Oct 22 (about 4.5 of 25 days). Scaled up generously, the total is under about 20 h across the month, spread over about 200 issues.
+- The costly case, the review-wait timeout firing during a slot wait (chronicle 12-minute wait), is a separate clock problem that #2467 addresses. Once that ships, the reservation buys minutes, not avoided pauses.
+- In our own fleet only one of five instances (`max_concurrent` 5) ever filled its slots, with all busy 8.9 h of 329 h (3%). Of its 62 fix rounds, 18 started during or just after a full-slot window, and their queueing is at most 2.9 h in total (12 under 4 min, 6 at 21–27 min). This is an upper bound: the engine logs nothing when a fix round takes its slot, so the real wait cannot be measured today.
+- Headroom is large (406 worker-hours over 25 days is about 16 per day, against 48–72 slot-hours per day at `max_concurrent` 2–3, so 23–34% used), so more slots is the other remedy.
+- The recommendation recorded there: ship the setting with default `0` (today's behaviour), and change the default only if fleet logs show fix rounds queueing behind full slots after #2467 has shipped. The reporting in FR-006, FR-007 and FR-008 is what makes that observable.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -122,7 +123,7 @@ An operator or maintainer deciding whether to turn the reservation on, or to cha
 - **FR-005**: A negative or non-integer reserved count is refused at startup with an error naming the setting.
 - **FR-006**: `fabrik_health.workers` reports reserved fix-round slot use and the configured maximum as separate fields, distinct from ordinary `in_use`/`max_concurrent` and from the merge train's `train_in_use`/`train_max`.
 - **FR-007**: The TUI worker-slot display reports reserved fix-round use separately, in the same way it reports the merge train's slot.
-- **FR-008**: When a fix round takes its slot, the engine logs one line stating the item, the round kind, which kind of slot was taken (reserved or ordinary) and the elapsed time since dispatch.
+- **FR-008**: When a fix round takes its slot, the engine logs one line stating the item, the round kind, which kind of slot was taken (reserved or ordinary) and the elapsed time from the round's dispatch to the moment it holds the slot.
 - **FR-009**: With the reserved count at `0`, the engine's behaviour is identical to the behaviour before this change, including total concurrency never exceeding `max_concurrent` for item work.
 - **FR-010**: The merge train's reserved slot and its acquisition behaviour are unchanged.
 - **FR-011**: The decision to ship the default at `0`, with the supporting fleet-log and report data, is recorded in the ADR for this issue.
@@ -147,7 +148,7 @@ An operator or maintainer deciding whether to turn the reservation on, or to cha
 
 ## Assumptions
 
-- The default is `0` (disabled), following the maintainers' recommendation on this issue. It may be revisited later using the data FR-006 to FR-008 make available, as a separate change.
+- The default is `0` (disabled), following the maintainers' recommendation on this issue. It may be revisited later, as a separate change, using the data FR-006 to FR-008 make available and only once #2467 has shipped.
 - The setting is a plain non-negative count; no upper bound is enforced beyond what the operator chooses.
 - "Used only by" means the three fix-round kinds named in the issue; comment-review passes, including those on review feedback, are not fix rounds for this purpose.
 - The reservation is a separate pool from the merge train's reserved slot; neither borrows from the other.
