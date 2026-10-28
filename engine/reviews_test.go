@@ -87,7 +87,8 @@ func TestReviewGateAuthorityVerdict(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			satisfied, reason := reviewGateAuthorityVerdict(tt.reviewDecision, tt.reviews)
+			// No head, no commits: the R5 fail-closed shape, i.e. the pre-#2465 rule.
+			satisfied, reason := reviewGateAuthorityVerdict(tt.reviewDecision, reviewerStandings(tt.reviews, "", nil))
 			if satisfied != tt.wantSatisfied {
 				t.Errorf("reviewGateAuthorityVerdict(%q, %v) satisfied = %v, want %v (reason: %q)",
 					tt.reviewDecision, tt.reviews, satisfied, tt.wantSatisfied, reason)
@@ -2465,6 +2466,7 @@ func TestPauseForReviewTimeout_Authoritative_ReviewerRespondedButNotPending_NoFa
 		// and is no longer outstanding.
 		LinkedPRReviews: []gh.PRReview{{Author: "bob", State: "CHANGES_REQUESTED"}},
 	}
+	mirrorLiveReviews(client, item) // the authoritative fallback reads the review history live (#2465)
 	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"}
 
 	eng.pauseForReviewTimeout(board, item, stage)
@@ -2537,17 +2539,13 @@ func TestPauseForReviewTimeout_Authoritative_NonDefaultBase_ReviewFetchFails_NoF
 	if strings.Contains(body, "wait_for_reviews: false") {
 		t.Errorf("pause comment should not offer the no-reviewer remedies when review state could not be determined, got:\n%s", body)
 	}
-	// Deliberate fallthrough: hasReviews is forced true defensively here (the
-	// fetch failed, so review state is unknown-but-possibly-present), but
-	// authorityLine is "" because the separate, successful reviewDecision
-	// fetch was evaluated against that same stale, empty review list and
-	// came back satisfied. The pendingLine=="" && hasReviews branch requires
-	// authorityLine != "" precisely so it never asserts a submitted review
-	// this ambiguous state can't actually confirm — it falls through to the
-	// standard message instead, an existing imprecision this change doesn't
-	// widen (#1268 review thread, follow-up finding).
-	if !strings.Contains(body, "outstanding reviewers") {
-		t.Errorf("expected the standard fallback wording when review state is ambiguous, got:\n%s", body)
+	// hasReviews is forced true defensively here (the fetch failed, so review
+	// state is unknown-but-possibly-present). Since #2465 the authoritative
+	// fallback reads the review history through the same failing read, so it
+	// blocks conservatively and the authority line says so — the comment names
+	// the unreadable state instead of implying a clean one.
+	if !strings.Contains(body, "unreadable") {
+		t.Errorf("expected the authority line to say the review history was unreadable, got:\n%s", body)
 	}
 }
 

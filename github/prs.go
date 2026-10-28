@@ -84,6 +84,44 @@ func ParseClosingIssues(body string) []int {
 // first-seen or not — rather than being treated as a verdict by omission.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
+	history, err := c.FetchPRReviewHistory(owner, repo, prNumber)
+	if err != nil || history == nil {
+		return nil, err
+	}
+	latestByAuthor := make(map[string]PRReview, len(history))
+	order := make([]string, 0, len(history))
+	for _, review := range history {
+		stored, seen := latestByAuthor[review.Author]
+		if !seen {
+			order = append(order, review.Author)
+		} else if review.State == "COMMENTED" && isFormalReviewVerdict(stored.State) {
+			// A comment-only follow-up does not overwrite the author's
+			// existing formal verdict.
+			continue
+		}
+		latestByAuthor[review.Author] = review
+	}
+	out := make([]PRReview, 0, len(order))
+	for _, author := range order {
+		out = append(out, latestByAuthor[author])
+	}
+	return out, nil
+}
+
+// FetchPRReviewHistory returns every eligible submission on a pull request, in
+// GitHub's chronological response order, uncollapsed (#2465). Eligible means
+// COMMENTED and the three formal verdicts (APPROVED, CHANGES_REQUESTED,
+// DISMISSED); PENDING (visible only to the token that created it, possibly an
+// incomplete submission) and any other state never appear. A DISMISSED entry is
+// kept so that it still ends the verdict it dismissed.
+//
+// This is the read the authoritative review gate's no-branch-protection fallback
+// decides on: FetchPRReviews' sticky collapse drops a COMMENTED that follows a
+// formal verdict, which is exactly the evidence a declared bot's clean re-review
+// of the head consists of. FetchPRReviews itself is the collapse of this list,
+// byte-for-byte unchanged, so Pruefer and the feedback paths are unaffected.
+// Paginated (#1539). Returns nil, nil on 404.
+func (c *Client) FetchPRReviewHistory(owner, repo string, prNumber int) ([]PRReview, error) {
 	type rawReview struct {
 		ID     int    `json:"id"`
 		NodeID string `json:"node_id"`
@@ -95,10 +133,10 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		CommitID    string `json:"commit_id"`
 		SubmittedAt string `json:"submitted_at"`
 	}
-	// Paginated (#1539): the collapse below keeps the LAST eligible review per
-	// author, so reading only page one silently pins every author's verdict to
-	// whatever they last said within the first restPageSize reviews. On a
-	// long-lived PR that is an arbitrarily stale verdict — it drove a 315-review
+	// Paginated (#1539): the collapse in FetchPRReviews keeps the LAST eligible
+	// review per author, so reading only page one silently pins every author's
+	// verdict to whatever they last said within the first restPageSize reviews. On
+	// a long-lived PR that is an arbitrarily stale verdict — it drove a 315-review
 	// re-review loop in Pruefer and reaches the authoritative landing gate.
 	raw, err := paginateREST[rawReview](c, fmt.Sprintf("PR #%d reviews", prNumber), func(page int) string {
 		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
@@ -110,8 +148,7 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		}
 		return nil, fmt.Errorf("fetching PR #%d reviews: %w", prNumber, err)
 	}
-	latestByAuthor := make(map[string]PRReview, len(raw))
-	order := make([]string, 0, len(raw))
+	out := make([]PRReview, 0, len(raw))
 	for _, r := range raw {
 		if r.User == nil || r.User.Login == "" {
 			continue
@@ -121,14 +158,6 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 			// formal verdicts) never establishes or overwrites a collapsed
 			// entry — a private/incomplete submission must not pin an
 			// author's review, first-seen or not.
-			continue
-		}
-		stored, seen := latestByAuthor[r.User.Login]
-		if !seen {
-			order = append(order, r.User.Login)
-		} else if r.State == "COMMENTED" && isFormalReviewVerdict(stored.State) {
-			// A comment-only follow-up does not overwrite the author's
-			// existing formal verdict.
 			continue
 		}
 		review := PRReview{
@@ -142,11 +171,7 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		if t, err := parseTime(r.SubmittedAt); err == nil {
 			review.SubmittedAt = t
 		}
-		latestByAuthor[r.User.Login] = review
-	}
-	out := make([]PRReview, 0, len(order))
-	for _, author := range order {
-		out = append(out, latestByAuthor[author])
+		out = append(out, review)
 	}
 	return out, nil
 }

@@ -29,6 +29,7 @@ type ReadClient interface {
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	FetchPRReviewDecision(owner, repo string, prNumber int) (string, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
@@ -102,6 +103,10 @@ func (a *GitHubAdapter) FetchPRClosingIssues(owner, repo string, prNumber int) (
 
 func (a *GitHubAdapter) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	return a.client.FetchPRReviews(owner, repo, prNumber)
+}
+
+func (a *GitHubAdapter) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return a.client.FetchPRReviewHistory(owner, repo, prNumber)
 }
 
 func (a *GitHubAdapter) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
@@ -1303,6 +1308,12 @@ func (c *CacheImpl) FetchPRClosingIssues(owner, repo string, prNumber int) ([]in
 // actively open.
 func (c *CacheImpl) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	return c.fallback.FetchPRReviews(owner, repo, prNumber)
+}
+
+// FetchPRReviewHistory always delegates to GitHub, no caching — same rationale as
+// FetchPRReviews (#2465).
+func (c *CacheImpl) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return c.fallback.FetchPRReviewHistory(owner, repo, prNumber)
 }
 
 // FetchPRReviewRequests always delegates to GitHub, no caching — same rationale as

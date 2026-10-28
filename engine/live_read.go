@@ -206,6 +206,33 @@ func (e *Engine) liveReviews(owner, repo string, issueNumber, prNumber int) ([]g
 	return reviews, requests, nil
 }
 
+// liveReviewHistory reads the PR's uncollapsed review history and its current head
+// commit, for the authoritative gate's head-aware verdict (#2465). A failed history
+// read returns an error (the caller blocks). The head is "" when it cannot be read
+// or is empty: reviewerStandings then keeps today's blocking behaviour for any
+// change request (R5) instead of this read failing the whole gate. The per-reviewer
+// standing evidence is applied to the Store (when it holds the item) for the
+// reviewer view; the gate decides on the returned history, never on the Store.
+func (e *Engine) liveReviewHistory(owner, repo string, issueNumber, prNumber int) ([]gh.PRReview, string, error) {
+	history, err := e.readClient.FetchPRReviewHistory(owner, repo, prNumber)
+	if err != nil {
+		return nil, "", err
+	}
+	// live-read-audited: head of the PR the history above was read for; decided on directly by the gate, never cached
+	details, derr := e.client.FetchPRDetails(owner, repo, prNumber)
+	head := ""
+	if derr != nil {
+		e.logf(issueNumber, "warn", "liveReviewHistory: FetchPRDetails(#%d) failed, head unknown: %v\n", prNumber, derr)
+	} else if details != nil {
+		head = details.HeadSHA
+	}
+	repoKey := owner + "/" + repo
+	if issueNumber > 0 && !e.liveApplyOff.Load() && e.storeLinkedPRMatches(repoKey, issueNumber, prNumber) {
+		e.applyLive(itemstate.PRStandingReviewsRead{Repo: repoKey, Number: issueNumber, PRNumber: prNumber, Reviews: standingEvidence(history)})
+	}
+	return history, head, nil
+}
+
 // liveReviewsFresh reports whether the item's reviews were read live within
 // liveFreshFor, so a per-poll caller can skip repeating the read.
 func (e *Engine) liveReviewsFresh(repoKey string, issueNumber int) bool {
