@@ -311,7 +311,7 @@ func (e *Engine) Run() error {
 		waitGitHubAppRefreshLoops = e.ghAppAuth.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
 			prefix := fmt.Sprintf("installation %d: ", installationID)
 			return func(format string, args ...any) {
-				e.logf(0, "github-app", prefix+format, args...)
+				e.logf(0, "github-app", prefix+format+"\n", args...)
 			}
 		})
 	}
