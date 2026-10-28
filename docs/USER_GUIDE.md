@@ -2933,8 +2933,8 @@ review_authority: authoritative
 
 In `authoritative` mode, the gate additionally requires:
 
-- **No outstanding `CHANGES_REQUESTED` review** — from any reviewer, human or bot.
-- **Required approvals satisfied** — preferring GitHub's own computed review-decision verdict when your repo's branch protection defines a review requirement (this already accounts for CODEOWNERS and required-approval counts), and otherwise falling back to Fabrik's own check that no submitted review is currently `CHANGES_REQUESTED` — so `authoritative` mode is meaningful even on a repo with no branch protection configured.
+- **No outstanding `CHANGES_REQUESTED` review** — from any reviewer, human or bot. Each reviewer is judged at the PR's **current head commit**: a verdict (`CHANGES_REQUESTED` or `APPROVED`) given on an older commit no longer counts for the head, and Fabrik keeps waiting with a reason that says the reviewer is *awaiting re-review* (not "requested changes"). A reviewer you declared under `expected_reviewers` (a self-submitting review bot such as Pruefer, which has no approve mode) can clear its own earlier change request by reviewing the head cleanly — a `COMMENTED` or `APPROVED` review of the head supersedes it. For any other reviewer a `COMMENTED` review never withdraws a change request, as on GitHub.
+- **Required approvals satisfied** — preferring GitHub's own computed review-decision verdict when your repo's branch protection defines a review requirement (this already accounts for CODEOWNERS and required-approval counts), and otherwise falling back to Fabrik's own head-aware check that no reviewer's change request stands on the current head and none is awaiting a re-review — so `authoritative` mode is meaningful even on a repo with no branch protection configured.
 
 This applies at **both** decision points: the stage-advance gate (the mechanism described above) and the landing/auto-merge gate at Validate completion — a `CHANGES_REQUESTED` review blocks auto-merge under `yolo`, not just stage advancement.
 
