@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
+	"github.com/handarbeit/fabrik/tests/e2e/trainlog"
 )
 
 // Merge-train e2e helpers (ADR-059). These build member PRs directly via the
@@ -923,6 +924,41 @@ func waitForLogMatchInconclusive(t *testing.T, env *Env, offset int64, timeout t
 	return waitForLogMatchOr(t, env, offset, timeout, what, match, func(msg string) { Inconclusive(t, "%s", msg) })
 }
 
+// waitForLandingOrSplit waits for a "landing complete" line and classifies the
+// seeded batch first-in-time through trainlog.Decide (#2481, ADR 2481). A bot
+// review body on a seeded member makes queued-review-settle eject it, so the batch
+// splits (the rest lands alone through the singleton fast path, or the ejected
+// member never lands). That is intended engine behaviour, so it ends the test
+// INCONCLUSIVE immediately — a precondition guard (#1973), never a FAIL, and never
+// a long wait followed by a per-member landing timeout. No landing line and no
+// eject within timeout stays a t.Fatalf: a genuine failure to land.
+//
+// singletonSplits is true for a scenario on its own throwaway partition, where any
+// singleton landing for trainKey proves the members did not batch; false on a
+// shared partition (an empty trainKey matches any), where only an eject of one of
+// members is a split. It returns the deciding landing line.
+func waitForLandingOrSplit(t *testing.T, env *Env, offset int64, timeout time.Duration, trainKey string, members []int, singletonSplits bool) string {
+	t.Helper()
+	opts := trainlog.Opts{TrainKey: trainKey, Members: members, SingletonSplits: singletonSplits}
+	deadline := time.Now().Add(timeout)
+	for {
+		switch outcome, line := trainlog.Decide(logLinesSince(t, env, offset), opts); outcome {
+		case trainlog.Landed:
+			return line
+		case trainlog.NotBatched:
+			Inconclusive(t, "the seeded members %v did not batch together — a bot review body on a member makes the engine "+
+				"eject it (queued-review-settle) and the rest land alone, which is environmental, not an engine regression; "+
+				"deciding line: %s", members, strings.TrimSpace(line))
+			return "" // unreachable: Inconclusive ends the test
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for a \"landing complete\" line for %q (no split of members %v seen either; scanned from offset %d)",
+				timeout, trainKey, members, offset)
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
 func waitForLogMatchOr(t *testing.T, env *Env, offset int64, timeout time.Duration, what string, match func(line string) bool, onTimeout func(msg string)) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -947,6 +983,11 @@ func waitForLogMatchOr(t *testing.T, env *Env, offset int64, timeout time.Durati
 //	engine/merge_train.go "opened draft CI PR #%d for %s/%s (%d survivor(s))"
 //	engine/merge_train.go "merged integration PR #%d for %s"          (%s = owner/repo)
 //	engine/merge_train.go "landing complete for %s (integration PR #%d, %d members)"   (%s = trainKey)
+//	engine/merge_train.go "landing complete for %s (singleton fast path, PR #%d, 1 member)"   (%s = trainKey)
+//
+// parseLandingComplete matches only the batch form on purpose (its pin test
+// asserts the singleton line is rejected); the singleton form and the
+// queued-review-settle eject lines are matched by tests/e2e/trainlog (#2481).
 //
 // The strings have no compile-time link to the engine, so a wording change there
 // makes these return ok=false and the scenario fails loudly on "line not found"

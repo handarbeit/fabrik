@@ -100,6 +100,19 @@ import (
 //     absent. Pre-#1772 with #1773 intact the line appears and the members stay
 //     Queued until a later warm poll re-forms them.
 //
+// # Split batch (#2481, ADR 2481)
+//
+// The bed's Pruefer watches the bed repos, and the bed is down while the members
+// are seeded, so a COMMENTED review body can land on a member PR. The engine counts
+// it as unprocessed feedback (queued-review-settle) and ejects that member; the
+// other then lands alone through the singleton fast path. That is intended engine
+// behaviour, and the harness cannot prevent it (a review-ids-addressed marker needs
+// the review's id and the engine's own identity; waiting for the reviewer depends
+// on its timing). waitForLandingOrSplit therefore ends the test INCONCLUSIVE as
+// soon as a singleton landing for this train key, or an eject line for a member,
+// is logged — never a FAIL after the full A1 budget. The members are re-paused on
+// failure so an inconclusive run leaves no un-paused Queued member behind.
+//
 // # Auth legs
 //
 // The scenario posts NO comments. Members and their PRs are filed as FABRIK_TOKEN's
@@ -160,6 +173,9 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	} {
 		iss, pr := QueueMemberOnBase(t, env, repo, branch, m.marker, m.path, m.content)
 		members = append(members, iss)
+		// An INCONCLUSIVE or failed run must not leave an un-paused Queued member on
+		// the throwaway base for the next run's pre-flight (#2481).
+		repauseOnFailure(t, env, repo, iss)
 		memberPaths[iss] = uniqueMemberPath(m.path, iss)
 		memberPRs[iss] = pr
 	}
@@ -212,9 +228,14 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	t.Logf("cold evidence: every member was excluded as unhydrated after the restart")
 
 	// A1: the batch forms on the declared base's partition and lands.
-	waitForLogMatch(t, env, logStart, 35*time.Minute,
-		fmt.Sprintf("\"landing complete for %s\"", trainKey),
-		func(l string) bool { _, _, ok := parseLandingComplete(l, trainKey); return ok })
+	//
+	// A bot review body on a seeded member (the bed's Pruefer watches these repos
+	// while the bed is down) makes queued-review-settle eject that member; the other
+	// then lands alone through the singleton fast path, and the ejected one never
+	// lands. waitForLandingOrSplit classifies either as INCONCLUSIVE at once (#2481)
+	// — before the per-member landing waits below, which an ejected member would
+	// strand for 15 minutes into a FAIL. Only "no landing line, no split" times out.
+	waitForLandingOrSplit(t, env, logStart, 35*time.Minute, trainKey, members, true)
 	for _, n := range members {
 		WaitForMemberLanded(t, env, repo, n, 15*time.Minute)
 		waitForPRClosed(t, env, repo, memberPRs[n], 10*time.Minute)
