@@ -265,6 +265,11 @@ type AttentionInfo struct {
 	// rebase-conflict-after-landing); absent when the engine does not know
 	// (#2121).
 	Cause string `json:"cause,omitempty"`
+	// PauseCause is the engine's recorded reason for a pause, from the item's
+	// fabrik:pause:<cause> label (question, review-timeout, ci-timeout,
+	// cycle-limit, daemon-stop, breaker, failed, other); absent for a
+	// human-applied pause or one from before the label existed (#2487).
+	PauseCause string `json:"pause_cause,omitempty"`
 	// CIFailing names the failing checks of the red CI verdict this item
 	// carries; present only when attention surfaced one (#2122).
 	CIFailing []string `json:"ci_failing,omitempty"`

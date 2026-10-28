@@ -185,6 +185,10 @@ func (e *Engine) pauseEventFor(st *itemstate.ItemState, key string, res attentio
 	if res.Cause != "" {
 		ev.Meta["cause"] = res.Cause
 	}
+	// Why the engine paused, from the item's fabrik:pause:<cause> label (#2487).
+	if res.PauseCause != "" {
+		ev.Meta["pause_cause"] = res.PauseCause
+	}
 	// A pause-family event that waits on a human says how to act, in the words
 	// of the engine's own pause comment (R-options-1/2): never a generic resume
 	// method that contradicts it.
