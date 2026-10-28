@@ -69,6 +69,10 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 	if token == "" {
 		return exitErr(1, "FABRIK_TOKEN missing from %s/.env", bed)
 	}
+	// Local state, so before any GitHub call (#2482).
+	if err := g.resetTrainCaps(); err != nil {
+		return err
+	}
 	gh := func(args ...string) (string, Result) {
 		so, _, res := output(ctx, g.Exec, Cmd{Name: "gh", Args: args, Env: withEnv(g.Env, "GH_TOKEN="+token), Session: true, Grace: g.Cfg.KillGrace})
 		return so, res

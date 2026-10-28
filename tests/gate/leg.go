@@ -416,6 +416,11 @@ func (g *Gate) pollOverridden(cell Cell) bool {
 // tests after an exclusive phase (#1977). A non-zero exit is an *ExitError.
 func (g *Gate) restartBed(ctx context.Context, cell Cell, legEnv []string) error {
 	mode := cell.Train
+	// The persisted train caps (#2349) must not carry from the previous leg (#2482).
+	// They are removed while the engine is stopped, before the harness restarts it.
+	if err := g.clearBedTrainCaps(); err != nil {
+		return err
+	}
 	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, cell.Label())
 	res := g.Exec.Run(ctx, Cmd{
 		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
