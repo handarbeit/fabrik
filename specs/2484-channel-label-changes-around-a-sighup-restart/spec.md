@@ -109,6 +109,7 @@ An operator, or an overseer session, has a channel subscription for label events
 - Labels added about 2 s apart across the restart boundary, as in the live test, so several arrive by different paths (live apply, replay, reconcile).
 - A change both announced live by the old process and also visible to the new process's downtime diff (must not be announced twice; this is #2450's guarantee and must not regress).
 - A label removed rather than added around the restart.
+- A restart with no workers in flight (as on bed A), where the exec follows the signal by about 1 s: the pre-exec drain must still complete before the exec.
 
 ## Requirements *(mandatory)*
 
@@ -142,6 +143,7 @@ An operator, or an overseer session, has a channel subscription for label events
 ## Assumptions
 
 - The defect is in the engine's restart or channel path (final flush, held-queue persistence, pre-exec intake drain, downtime-delta delivery or stream re-attach), not only in the test; the investigation (FR-001) confirms or refutes this, and FR-007 covers the test-only outcome.
+- Both remaining failure shapes (zero announcements, and one announcement attributed `actor=unknown`) share one cause: the pre-SIGHUP delivery for label 2 is not applied or not announced by the old process before the exec. The investigation therefore starts with the pre-exec intake drain on the SIGHUP path, then checks the remaining candidates in FR-001.
 - A sim test can reproduce the loss by driving a real restart with a real-socket subscriber; if it cannot reproduce a facet, an engine-package test or bed instrumentation is acceptable provided the acceptance test still fails with the fix neutralised.
 - "Exactly once" is measured at an attached subscriber across the restart, counting events of every origin.
 - A subscriber that is not attached receives its held events on the next attach, as today.
@@ -158,4 +160,4 @@ An operator, or an overseer session, has a channel subscription for label events
 - #2450 / ADR 2450: announce-once across a SIGHUP restart (final flush, live-delta folding).
 - #2427: live webhook coverage tests.
 - `docs/state-machine.md` §7.14 "Restart delivery"; `tests/e2e/webhook_recovery_test.go` (`TestWebhookRestartUnderLoad`).
-- Prior discussion on this issue (2026-10-26): a run on bed B showed the same root cause with a different outcome (announced once, attributed `actor=unknown`).
+- Prior discussion on this issue (2026-10-26): a run on bed B (engine `d6866128`) announced each label once but attributed label 2 as `actor="unknown"` ("the pre-exec drain did not apply it"), the same root cause as the zero-announcement shape on bed A; the suggested starting point is the pre-exec intake drain on the SIGHUP path.
