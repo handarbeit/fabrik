@@ -443,6 +443,10 @@ type pauseOpts struct {
 	// requires "no change to when labels/comments/pauses happen," so pauseIssue
 	// must reproduce each call site's original ordering rather than pick one.
 	labelFirst bool
+	// cause is why the engine is pausing (#2487, ADR 2487): written as a
+	// fabrik:pause:<cause> label right after fabrik:paused (and awaiting-input).
+	// Required; TestEveryPauseSiteDeclaresACause fails a literal without one.
+	cause pauseCause
 }
 
 // pauseIssue posts the given comment and applies fabrik:paused (plus,
@@ -466,6 +470,7 @@ func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts)
 		if opts.awaitingInput {
 			e.applyLabelAdd(item, "fabrik:awaiting-input", opts.labelEcho)
 		}
+		e.applyPauseCause(item, opts.cause, opts.labelEcho)
 		if opts.removeAutoMerge {
 			e.applyLabelRemove(item, "fabrik:auto-merge-enabled", opts.labelEcho)
 		}
@@ -477,6 +482,7 @@ func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts)
 	if opts.awaitingInput {
 		e.applyLabelAdd(item, "fabrik:awaiting-input", opts.labelEcho)
 	}
+	e.applyPauseCause(item, opts.cause, opts.labelEcho)
 	if opts.removeAutoMerge {
 		e.applyLabelRemove(item, "fabrik:auto-merge-enabled", opts.labelEcho)
 	}
@@ -525,9 +531,13 @@ func hasPauseComment(item gh.ProjectItem, fragments ...string) bool {
 // without spamming a duplicate comment. applyLabelAdd's underlying
 // AddLabelToIssue call is idempotent, so this is safe to call even in the
 // (should-be-rare) case the labels are still present.
-func (e *Engine) reapplyPauseLabels(item gh.ProjectItem) {
+//
+// cause (#2487) is re-applied with the labels: the earlier episode's cause label
+// may have been cleared on resume, or the re-pause may have a different cause.
+func (e *Engine) reapplyPauseLabels(item gh.ProjectItem, cause pauseCause) {
 	e.applyLabelAdd(item, "fabrik:paused", false)
 	e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+	e.applyPauseCause(item, cause, false)
 }
 
 // pauseIssueMuEntry is one entry in Engine.pauseIssueMu: the per-issue mutex
@@ -607,7 +617,7 @@ func (e *Engine) releasePauseIssueMutex(item gh.ProjectItem, entry *pauseIssueMu
 // labelFirst is set so labels land before the comment, matching
 // handleStopRequest's pre-existing ordering (Pattern C in pauseOpts' doc
 // comment) — this refactor changes who writes the labels/comment, not when.
-func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, comment string) {
+func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, cause pauseCause, comment string) {
 	entry := e.acquirePauseIssueMutex(item)
 	entry.mu.Lock()
 	defer func() {
@@ -621,7 +631,7 @@ func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, comment string) {
 	}
 
 	if alreadyPaused {
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, cause)
 		return
 	}
 	e.pauseIssue(item, comment, pauseOpts{
@@ -630,5 +640,6 @@ func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, comment string) {
 		labelEcho:     true,
 		commentEcho:   true,
 		labelFirst:    true,
+		cause:         cause,
 	})
 }

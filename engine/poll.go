@@ -792,7 +792,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 // They are all applied transiently during pipeline execution and have no meaning
 // once an issue is closed; leaving them behind causes confusion and may trigger
 // unintended catch-up-loop evaluations on reopened issues.
-var transientLifecycleLabels = []string{
+var transientLifecycleLabels = append([]string{
 	"fabrik:awaiting-review",
 	"fabrik:awaiting-ci",
 	"fabrik:auto-merge-enabled",
@@ -807,7 +807,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:tools-denied",
 	"fabrik:toolchain-stale",
 	"fabrik:validate-rerun",
-}
+}, pauseCauseLabels()...) // a cause label never outlives its pause (#2487)
 
 // gateSettleOwnedTransientLabels are the subset of transientLifecycleLabels
 // that settleClosedValidateAdvance / runValidatePRTerminalAdvance clear
@@ -1780,6 +1780,7 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// even if the setting is later turned off, mirroring
 	// settleMergeTrainMemberCloses immediately above.
 	e.settleRunawayGuardAlertScan(board)
+	e.settlePauseCauseScan(board) // stale fabrik:pause:<cause> labels (#2487)
 
 	// Non-default-base explicit close settle scan (ADR-1097): retries the outstanding
 	// closeIssueIfNonDefaultBase CloseIssue call for any item carrying

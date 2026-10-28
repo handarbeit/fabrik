@@ -195,7 +195,7 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.\n\n%s",
 		stageName, pauseCauseDaemonStopMarker,
 	)
-	e.pauseInterruptedIssue(item, comment)
+	e.pauseInterruptedIssue(item, pauseCauseDaemonStop, comment)
 }
 
 // drainAndExit is the single shared drain tail (#1393/ADR-1393) replacing the

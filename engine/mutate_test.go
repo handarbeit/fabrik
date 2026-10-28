@@ -311,6 +311,8 @@ func TestPauseIssue_PatternA(t *testing.T) {
 		reactRocket:   true,
 		labelEcho:     false,
 		commentEcho:   false,
+
+		cause: pauseCauseOther,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)
@@ -356,6 +358,8 @@ func TestPauseIssue_PatternB(t *testing.T) {
 		labelEcho:     true,
 		commentEcho:   true,
 		labelFirst:    true,
+
+		cause: pauseCauseOther,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)
@@ -366,7 +370,7 @@ func TestPauseIssue_PatternB(t *testing.T) {
 		t.Errorf("Pattern B must not add fabrik:awaiting-input, got %v", labels)
 	}
 
-	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+	if want := []string{"label:fabrik:paused", "label:fabrik:pause:other", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] {
 		t.Errorf("Pattern B must add fabrik:paused before posting the comment, got order %v", order)
 	}
 	labelEchoed := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
@@ -405,6 +409,8 @@ func TestPauseIssue_PatternC(t *testing.T) {
 		labelEcho:     true,
 		commentEcho:   false,
 		labelFirst:    true,
+
+		cause: pauseCauseOther,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)
@@ -418,7 +424,7 @@ func TestPauseIssue_PatternC(t *testing.T) {
 		t.Errorf("Pattern C must not rocket-react, got %d calls", len(client.addCommentReactionCalls))
 	}
 
-	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+	if want := []string{"label:fabrik:paused", "label:fabrik:pause:other", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] {
 		t.Errorf("Pattern C must add fabrik:paused before posting the comment, got order %v", order)
 	}
 	labelEchoed := eng.echo.has(echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused"))
@@ -452,9 +458,11 @@ func TestPauseIssue_PatternA_CommentBeforeLabel(t *testing.T) {
 	eng.pauseIssue(item, "paused message", pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+
+		cause: pauseCauseOther,
 	})
 
-	if want := []string{"comment", "label:fabrik:paused", "label:fabrik:awaiting-input"}; len(order) != len(want) {
+	if want := []string{"comment", "label:fabrik:paused", "label:fabrik:awaiting-input", "label:fabrik:pause:other"}; len(order) != len(want) {
 		t.Fatalf("Pattern A order mismatch, got %v want %v", order, want)
 	} else {
 		for i := range want {
@@ -480,6 +488,8 @@ func TestPauseIssue_RemoveAutoMerge(t *testing.T) {
 		awaitingInput:   true,
 		reactRocket:     true,
 		removeAutoMerge: true,
+
+		cause: pauseCauseOther,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)

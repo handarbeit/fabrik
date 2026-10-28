@@ -184,7 +184,7 @@ func (e *Engine) escalateRunawayAlertFailure(item gh.ProjectItem) {
 
 	// fabrik:paused is unconditional and idempotent, mirroring fireRunawayGuard's own
 	// "pause never depends on the comment succeeding" contract.
-	e.addLabel(item, "fabrik:paused")
+	e.applyPauseLabels(item, pauseCauseBreaker, false)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik merge-train — runaway guard alert delivery failed**\n\n"+

@@ -417,7 +417,15 @@ type labelInfo struct {
 // listed here (stage:*, model:*, effort:* ...) carry no attention meaning.
 var labelTable = map[string]labelInfo{
 	"fabrik:paused":                        {"the engine paused this item; a human comment created after the pause resumes it", false},
-	"fabrik:awaiting-input":                {"the engine asked a question and is waiting for a human reply", false},
+	"fabrik:awaiting-input":                {"the engine paused this item and a human comment resumes it; the fabrik:pause:<cause> label says why (a question, a timeout, a limit, ...)", false},
+	"fabrik:pause:question":                {"pause cause: a question was put to a human (a blocked-on-input worker, an ungrantable denial, a spawn servability question)", false},
+	"fabrik:pause:review-timeout":          {"pause cause: the review gate timed out waiting for reviewers", false},
+	"fabrik:pause:ci-timeout":              {"pause cause: the CI gate, its backstop or the merge-state wait timed out", false},
+	"fabrik:pause:cycle-limit":             {"pause cause: a bounded loop (review, CI-fix, rebase, enqueue, slice, tools-denied or stage dispatch) reached its limit", false},
+	"fabrik:pause:daemon-stop":             {"pause cause: the daemon was stopped cleanly while this item was running", false},
+	"fabrik:pause:breaker":                 {"pause cause: a comment circuit breaker or the merge-train runaway guard fired", false},
+	"fabrik:pause:failed":                  {"pause cause: a stage failed or a settle scan exhausted its retries", false},
+	"fabrik:pause:other":                   {"pause cause: any other engine pause; the pause comment says what", false},
 	"fabrik:awaiting-review":               {"waiting for PR reviewers (or the review timeout / bot re-prompt)", true},
 	"fabrik:awaiting-ci":                   {"waiting for CI on the linked PR (stage completion is deferred until it is green)", true},
 	"fabrik:awaiting-done":                 {"stage reported no work needed; the engine is retrying the move to Done and the issue close", true},
@@ -457,6 +465,7 @@ var labelPrefixes = []struct {
 	prefix  string
 	meaning string
 }{
+	{"fabrik:pause:", "pause cause: why the engine paused this item (the label is written with fabrik:paused and removed with it)"},
 	{"fabrik:reworking:", "the engine is reworking this stage after a comment or review (a rework worker runs, or a killed one left the label behind)"},
 	{"fabrik:locked:", "the engine holds this item's dispatch lock for a worker (a leftover after a kill until the retry runs)"},
 	{"fabrik:credited-pr:", "the merge-train landing credited this PR for the Done transition; the engine verifies it merged"},
