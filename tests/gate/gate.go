@@ -119,6 +119,11 @@ type Gate struct {
 	simExtraArgs   []string
 	simReaperOpsFn func() *simReaperOps
 
+	// trainCapsClearDisabledForTest neutralises the leg switch's and reset's
+	// train-caps clean (#2482, FR-010), for the non-vacuity test. Per-instance,
+	// copied to per-bed views by newBedGate.
+	trainCapsClearDisabledForTest bool
+
 	// leftInconclusive is every "leg: test" still INCONCLUSIVE after its leg's
 	// retries (#1973): uncovered, not failed. run() turns a non-empty set into
 	// ExitCoverageIncomplete so an uncovered leg never reads as success.

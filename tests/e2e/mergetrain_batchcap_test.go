@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/trainlog"
 )
 
 // TestMergeTrainQueuedDeeperThanBatchCap is the live-e2e proof of ADR-1833's
@@ -251,13 +253,8 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	// stability, so name the environmental cause rather than blaming selection.
 	for _, l := range lines[:mergeIdx] {
 		for _, n := range nums {
-			// The engine's queued-review-settle wording (engine/queued_review_settle.go):
-			// "N unprocessed review finding(s) (threads or review bodies) on Queued
-			// member #M — …" since #1953 counted review bodies; the older
-			// "review-thread finding(s) on Queued member #M" is kept for older beds.
-			if strings.Contains(l, fmt.Sprintf("review finding(s) (threads or review bodies) on Queued member #%d ", n)) ||
-				strings.Contains(l, fmt.Sprintf("review-thread finding(s) on Queued member #%d ", n)) ||
-				strings.Contains(l, fmt.Sprintf("unprocessed human comment(s) on Queued member #%d ", n)) {
+			// The engine's queued-review-settle wordings are matched by trainlog.MemberEjected.
+			if trainlog.MemberEjected(l, n) {
 				// A precondition guard (#1973): fires before any A2 assertion, caused by
 				// the bed's reviewer rather than the engine under test. A1 has passed to
 				// get here; the retry re-runs the whole test and re-proves it.

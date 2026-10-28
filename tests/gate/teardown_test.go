@@ -144,6 +144,9 @@ func TestTeardownNeverStopsAnEngineItDidNotStart(t *testing.T) {
 	rf := newRunFake()
 	rf.suiteRC = 1
 	g, _ := newRunGate(t, rf, "E2E_SKIP_PREGATE=1", "E2E_SKIP_PREP=1", "E2E_TRAIN_MODE=off")
+	// The leg switch's train-caps clean (#2482) stops a live engine, as the
+	// harness's own switch does; this test is about the exit teardown only.
+	g.trainCapsClearDisabledForTest = true
 	fakeProcsOf(t, g).launch(t, g.Cfg.TestBed, 777, "tok-old", "sigint")
 	if code := g.Run(context.Background(), nil); code != 1 {
 		t.Fatalf("exit %d", code)

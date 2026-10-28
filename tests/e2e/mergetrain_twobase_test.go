@@ -79,7 +79,13 @@ func TestMergeTrainTwoBasesConcurrent(t *testing.T) {
 
 	// Both trains must independently reach "landing complete" — proves two separate
 	// worker runs, not one train that batched everything against a single base.
-	WaitForLogLine(t, env, "landing complete", logStart, 30*time.Minute)
+	// A bot review on a member ejects it (queued-review-settle), which would strand
+	// the member waits below; waitForLandingOrSplit reports that as INCONCLUSIVE (#2481).
+	var memberNums []int
+	for _, m := range append(append([]member(nil), mainMembers...), maintMembers...) {
+		memberNums = append(memberNums, m.issue)
+	}
+	waitForLandingOrSplit(t, env, logStart, 30*time.Minute, "", memberNums, false)
 	t.Logf("at least one train landed a batch — waiting for both partitions' members individually")
 
 	for _, m := range mainMembers {

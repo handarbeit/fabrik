@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedstate"
 )
 
 // TestSwitchTrainMode restarts the shared test bed with FABRIK_MERGE_TRAIN
@@ -56,6 +58,15 @@ func TestSwitchTrainMode(t *testing.T) {
 
 	t.Logf("switching test bed to FABRIK_MERGE_TRAIN=%s", mode)
 	StopFabrikTestBed(t, env)
+
+	// The previous leg's persisted train caps (#2349) must not reach this leg
+	// (#2482). The gate clears them before invoking this test; clearing again in
+	// the stopped window covers a direct run, and is a no-op after the gate's.
+	if removed, err := bedstate.ClearTrainCaps(env.FabrikTestDir); err != nil {
+		t.Fatalf("clearing the persisted train caps: %v", err)
+	} else if removed {
+		t.Logf("cleared the persisted train caps in %s", env.FabrikTestDir)
+	}
 
 	envFile := filepath.Join(env.FabrikTestDir, ".env")
 	if err := writeEnvFileValue(envFile, "FABRIK_MERGE_TRAIN", mode); err != nil {
