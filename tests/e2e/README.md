@@ -2972,3 +2972,14 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
 - **GitHub rate-limit pressure.** Shared with `~/dev/fabrik/` (the dev
   instance) under the `@arbeithand` token. Stop the dev instance if running
   the full suite.
+
+## Persisted train caps (#2482, ADR-2482)
+
+The engine persists the merge-train caps across a restart (ADR 2349), so state a test
+leaves behind outlives the bed restart that ends a gate leg. The gate clears the
+bed's `train-caps.json` at every leg switch (`tests/gate/train_caps.go`), and
+`TestSwitchTrainMode` clears it again in its stopped window.
+`TestMergeTrainRunawayGuardPausesBatch` additionally restarts the bed in a
+`t.Cleanup` with the file removed (`tests/e2e/bedstate`), so the tripped trial window
+is gone from the engine's memory and disk when the test ends. `usage-limit.json` is
+never removed.
