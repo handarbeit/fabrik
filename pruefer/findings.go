@@ -61,6 +61,13 @@ type SummaryParseInfo struct {
 	// false — the fallback path discards nothing; it uses the full
 	// positional text as the summary, exactly as before this change.
 	DiscardedBytes int
+	// FindingsParsed is true iff the findings fence was present and its content
+	// unmarshaled into a JSON array (an empty "[]" included). A missing fence,
+	// invalid JSON, a non-array value and a "null" fence all leave it false: the
+	// review's findings are then unknown, not zero, and the findings marker says
+	// so (ADR 2488). Every return path of parseReviewFindings that does not
+	// prove an array leaves the zero value, so a forgotten path fails safe.
+	FindingsParsed bool
 }
 
 // splitSummaryMarkers looks for a well-formed PRUEFER_SUMMARY_BEGIN/END pair
@@ -135,11 +142,15 @@ func parseReviewFindings(text string) (summary string, findings []ReviewFinding,
 		return strings.TrimSpace(text), nil, SummaryParseInfo{}
 	}
 
+	// json.Unmarshal leaves parsed nil for a "null" fence, so a non-nil slice is
+	// the proof the model actually enumerated its findings.
+	findingsParsed := parsed != nil
 	if delimitedInfo.MarkersFound {
+		delimitedInfo.FindingsParsed = findingsParsed
 		return delimited, parsed, delimitedInfo
 	}
 	summary = strings.TrimSpace(text[:loc[0]])
-	return summary, parsed, SummaryParseInfo{}
+	return summary, parsed, SummaryParseInfo{FindingsParsed: findingsParsed}
 }
 
 // dedupeFindings collapses findings that share the same (Path, Line) into a
