@@ -240,3 +240,17 @@ func TestWorkerSlotsEvent_TitleSegment(t *testing.T) {
 		t.Errorf("train off suffix = %q", got)
 	}
 }
+
+func TestWorkerSlotsEvent_FixRoundSegment(t *testing.T) {
+	a := newTrainActive()
+	c, _ := a.Update(WorkerSlotsEvent{InUse: 5, Max: 5, TrainInUse: 1, TrainMax: 1, FixInUse: 1, FixMax: 2})
+	a = c.(ActivePaneComponent)
+	if got := a.slotsSuffix(); got != " · slots 5/5 + train 1/1 + fix 1/2" {
+		t.Errorf("suffix = %q", got)
+	}
+	c, _ = a.Update(WorkerSlotsEvent{InUse: 2, Max: 5, FixMax: 1})
+	a = c.(ActivePaneComponent)
+	if got := a.slotsSuffix(); got != " · slots 2/5 + fix 0/1" {
+		t.Errorf("fix only suffix = %q", got)
+	}
+}
