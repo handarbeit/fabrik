@@ -619,3 +619,62 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 		t.Errorf("round-trip total cost = %.2f, want %.2f", loadedTotal, wantTotal)
 	}
 }
+
+// TestHistory_TokensAndModelsRoundTrip verifies a JobCompletedEvent carrying token
+// counts and requested/served models reaches the HistoryEntry and survives disk (#1411).
+func TestHistory_TokensAndModelsRoundTrip(t *testing.T) {
+	redirectHistory(t)
+	h := NewHistoryPaneComponent("")
+	comp, _ := h.Update(JobCompletedEvent{
+		IssueNumber:         7,
+		StageName:           "Implement",
+		StageModel:          "opus",
+		ServedModel:         "claude-opus-5-5",
+		InputTokens:         11,
+		OutputTokens:        22,
+		CacheCreationTokens: 33,
+		CacheReadTokens:     44,
+		CompletedAt:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	h = comp.(HistoryPaneComponent)
+	if len(h.history) != 1 {
+		t.Fatalf("history len = %d, want 1", len(h.history))
+	}
+	loaded := LoadHistory()
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d entries, want 1", len(loaded))
+	}
+	e := loaded[0]
+	if e.InputTokens != 11 || e.OutputTokens != 22 || e.CacheCreationTokens != 33 || e.CacheReadTokens != 44 {
+		t.Errorf("token fields not round-tripped: %+v", e)
+	}
+	if e.StageModel != "opus" || e.ServedModel != "claude-opus-5-5" {
+		t.Errorf("models = %q / %q, want opus / claude-opus-5-5 (requested and served distinct)", e.StageModel, e.ServedModel)
+	}
+}
+
+// TestLoadHistory_PreChangeFileDecodes verifies a history.json written before the
+// token/served-model fields existed loads with every entry intact and the new
+// fields zero (#1411). A decode error would drop the whole file.
+func TestLoadHistory_PreChangeFileDecodes(t *testing.T) {
+	redirectHistory(t)
+	old := `[{"IssueNumber":1,"Repo":"o/r","Title":"t","StageName":"Plan","StageModel":"sonnet","IsComment":false,"Success":true,"TurnLimited":false,"Completed":true,"BlockedOnInput":false,"Duration":1000,"CompletedAt":"2026-01-01T00:00:00Z","TurnsUsed":5,"MaxTurns":50,"CostUSD":1.5},
+{"IssueNumber":2,"StageName":"Implement","StageModel":"opus","CostUSD":2.5}]`
+	if err := os.WriteFile(HistoryPathOverride, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadHistory()
+	if len(got) != 2 {
+		t.Fatalf("loaded %d entries, want 2", len(got))
+	}
+	for i, e := range got {
+		if e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheCreationTokens != 0 || e.CacheReadTokens != 0 || e.ServedModel != "" {
+			t.Errorf("entry %d: new fields not zero: %+v", i, e)
+		}
+	}
+	for _, e := range got {
+		if e.IssueNumber == 1 && (e.StageModel != "sonnet" || e.CostUSD != 1.5 || e.TurnsUsed != 5) {
+			t.Errorf("existing fields lost: %+v", e)
+		}
+	}
+}
