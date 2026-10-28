@@ -994,6 +994,9 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 		invokeOpts.NoResume = false
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
+		if claudeProcessStarted(err) {
+			e.noteClaudeStarted(*item)
+		}
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {

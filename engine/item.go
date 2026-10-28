@@ -476,6 +476,12 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 		}
 	}
 
+	// A stage that failed to start owns a consecutive-failure hold (#2499); it is
+	// not LastAttemptAt-based because the stage never ran.
+	if remaining := e.startFailureRetryIn(item); remaining > 0 {
+		return false, remaining
+	}
+
 	return true, 0
 }
 
@@ -739,6 +745,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 		e.logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
 		e.removeFailedLabel(owner, repo, item.Number, stage.Name)
+	}
+
+	// Start-failure hold (#2499): the stage never ran, so LastAttemptAt is unset;
+	// the hold keeps a persistent failure from re-dispatching at poll rate through
+	// any admission route.
+	if remaining := e.startFailureRetryIn(item); remaining > 0 {
+		e.logf(item.Number, "wait", "stage %q failed to start recently — holding %v before retrying\n", stage.Name, remaining.Round(time.Second))
+		return nil
 	}
 
 	// Per-episode dispatch bound (#2395): before the lock is taken, so a stage is
@@ -1348,6 +1362,9 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		invOutput, completed, invUsage, err = e.claude.Invoke(ctx, stage, item, nil, resume, workDir, opts)
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
+		if claudeProcessStarted(err) {
+			e.noteClaudeStarted(item)
+		}
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
@@ -1456,8 +1473,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		}
 	}
 	// Record attempt time only if Claude actually ran.
-	// Known start failures (binary not found, command not found, etc.) should
-	// not apply the cooldown so the item is retried on the next poll.
+	// Known start failures (binary not found, command not found, etc.) do not
+	// stamp StageAttempted; their retry owns its own admission cooldown and
+	// consecutive-failure hold instead (start_failure.go, #2499).
 	//
 	// Hoisted above the cancellation early-out below (R8/#1393): a
 	// shutdown-triggered cancellation needs claudeRan to decide whether to
@@ -1467,18 +1485,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	claudeRan := err == nil
 	if err != nil {
 		// Default to "Claude ran" for errors, and only treat specific
-		// start-failure types as "did not run".
-		claudeRan = true
-
-		var startErr *exec.Error
-		if errors.As(err, &startErr) {
-			claudeRan = false
-		} else {
-			var pathErr *os.PathError
-			if errors.As(err, &pathErr) || errors.Is(err, exec.ErrNotFound) {
-				claudeRan = false
-			}
-		}
+		// start-failure types as "did not run" (isClaudeStartFailure).
+		claudeRan = !isClaudeStartFailure(err)
 	}
 
 	if err != nil {
@@ -2076,8 +2084,16 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		} else if claudeRan {
 			e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		} else {
-			// No StageAttempted was recorded, so no backoff applies.
-			e.logf(item.Number, "wait", "stage %q did not start — will retry on the next poll\n", stage.Name)
+			// No StageAttempted was recorded, so the stage backoff does not apply;
+			// the retry's own delay grows with consecutive start failures and is
+			// the one value the log, the channel event and the recorded cooldown
+			// share (#2499).
+			cooldown = e.recordStartFailure(item, err)
+			if cooldown == 0 {
+				e.logf(item.Number, "wait", "stage %q did not start — will retry on the next poll\n", stage.Name)
+			} else {
+				e.logf(item.Number, "wait", "stage %q did not start — will retry after %v (consecutive start failure)\n", stage.Name, cooldown)
+			}
 		}
 		// Escalation is decided before stall-hint arming (see below) so arming can be
 		// skipped on the attempt that triggers it.
@@ -2211,25 +2227,25 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		} else {
 			// The retry will happen: tell the channel deriver why and when it is due
 			// (#2170), so a retry that then waits for a slot can be reported.
-			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied), e.now().Add(cooldown))
+			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied, !claudeRan), e.now().Add(cooldown))
 			// The same value as the log line above (FR-004): record the instant the
 			// retry falls due, so its expiry admits the item rather than leaving it
 			// to the periodic re-evaluation (FR-001, #2232). Only when the backoff
-			// actually applies, i.e. StageAttempted was stamped (claudeRan).
-			if claudeRan {
-				e.recordPostRunRetryCooldown(item, cooldown)
-			}
+			// actually applies; a start failure's delay is its own (#2499, 0 = due).
+			e.recordPostRunRetryCooldown(item, cooldown)
 		}
 	}
 }
 
 // retryCause names why a stage run ended without completing, for the
 // retry-starved event (#2170). It only labels the outcome; no decision reads it.
-func retryCause(err error, turnLimited, resumeFailed, toolsDenied bool) string {
+func retryCause(err error, turnLimited, resumeFailed, toolsDenied, startFailed bool) string {
 	var killed *claudeKilledError
 	switch {
 	case errors.As(err, &killed):
 		return killed.Cause
+	case startFailed:
+		return "start-failure"
 	case turnLimited:
 		return "max-turns"
 	case resumeFailed:
