@@ -62,7 +62,13 @@ func TestMergeTrainHappyPathLanding(t *testing.T) {
 	// Proof the internal train landed a batch: the engine logs "landing complete …
 	// (integration PR #N, M members)" after merging the single integration PR and
 	// advancing members. Read from logStart so only THIS run's landing matches.
-	WaitForLogLine(t, env, "landing complete", logStart, 30*time.Minute)
+	// A bot review on a member ejects it (queued-review-settle), which would strand
+	// the member waits below; waitForLandingOrSplit reports that as INCONCLUSIVE (#2481).
+	var memberNums []int
+	for _, m := range members {
+		memberNums = append(memberNums, m.issue)
+	}
+	waitForLandingOrSplit(t, env, logStart, 30*time.Minute, "", memberNums, false)
 	t.Logf("train landed a batch")
 
 	// Every member advances Queued → Done, its member PR is closed, and its ISSUE is

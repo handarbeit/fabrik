@@ -42,7 +42,8 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 	logStart1 := LogOffset(t, env)
 	b1a, b1aPR := QueueMember(t, env, env.RepoAlpha, base, "r1a", "e2e/train/restart/r1a.txt", "restart batch1 a\n")
 	b1b, b1bPR := QueueMember(t, env, env.RepoAlpha, base, "r1b", "e2e/train/restart/r1b.txt", "restart batch1 b\n")
-	WaitForLogLine(t, env, "landing complete", logStart1, 30*time.Minute)
+	// A bot review on a member ejects it (queued-review-settle); report that as INCONCLUSIVE (#2481).
+	waitForLandingOrSplit(t, env, logStart1, 30*time.Minute, "", []int{b1a, b1b}, false)
 	for _, m := range [][2]int{{b1a, b1aPR}, {b1b, b1bPR}} {
 		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
@@ -61,7 +62,7 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 	logStart2 := LogOffset(t, env)
 	b2a, b2aPR := QueueMember(t, env, env.RepoAlpha, base, "r2a", "e2e/train/restart/r2a.txt", "restart batch2 a\n")
 	b2b, b2bPR := QueueMember(t, env, env.RepoAlpha, base, "r2b", "e2e/train/restart/r2b.txt", "restart batch2 b\n")
-	WaitForLogLine(t, env, "landing complete", logStart2, 30*time.Minute)
+	waitForLandingOrSplit(t, env, logStart2, 30*time.Minute, "", []int{b2a, b2b}, false)
 	for _, m := range [][2]int{{b2a, b2aPR}, {b2b, b2bPR}} {
 		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
