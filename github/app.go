@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -177,6 +178,11 @@ func appDo(method, baseURL, path, jwt string, result interface{}) (http.Header, 
 
 // appDoBody is appDo with an optional JSON request body (nil = none).
 func appDoBody(method, baseURL, path, jwt string, reqBody interface{}, result interface{}) (http.Header, error) {
+	return appDoBodyCtx(context.Background(), method, baseURL, path, jwt, reqBody, result)
+}
+
+// appDoBodyCtx is appDoBody bound to ctx: cancelling ctx aborts the request.
+func appDoBodyCtx(ctx context.Context, method, baseURL, path, jwt string, reqBody interface{}, result interface{}) (http.Header, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -188,7 +194,7 @@ func appDoBody(method, baseURL, path, jwt string, reqBody interface{}, result in
 		}
 		bodyReader = strings.NewReader(string(b))
 	}
-	req, err := http.NewRequest(method, baseURL+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -549,8 +555,15 @@ type AppHookConfig struct {
 // FetchAppHookConfig reads the App's webhook configuration with the App's JWT
 // (#2143). baseURL "" is production, as for the other App-JWT fetchers.
 func FetchAppHookConfig(baseURL, jwt string) (AppHookConfig, error) {
+	return FetchAppHookConfigContext(context.Background(), baseURL, jwt)
+}
+
+// FetchAppHookConfigContext is FetchAppHookConfig bound to ctx: cancelling ctx
+// aborts the request, so a controller stopping does not wait out the client
+// timeout (#2480).
+func FetchAppHookConfigContext(ctx context.Context, baseURL, jwt string) (AppHookConfig, error) {
 	var cfg AppHookConfig
-	if err := appRequest("GET", baseURL, "/app/hook/config", jwt, &cfg); err != nil {
+	if _, err := appDoBodyCtx(ctx, "GET", baseURL, "/app/hook/config", jwt, nil, &cfg); err != nil {
 		return AppHookConfig{}, err
 	}
 	return cfg, nil
