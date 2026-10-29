@@ -518,6 +518,11 @@ type Engine struct {
 	decisionWrite         decisionPersist
 	usageLimitFileAtStart bool
 	usageLimitSeedChecked atomic.Bool
+
+	// Startup resume of daemon clean-stop pauses (#2486, ADR 2486): the scan's
+	// captured candidates and attempt counts, and its per-Engine neutralisation seam.
+	cleanStopResume    cleanStopResumeState
+	cleanStopResumeOff atomic.Bool
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See
