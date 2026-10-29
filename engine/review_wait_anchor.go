@@ -153,13 +153,15 @@ func (e *Engine) headRestartsWait(owner, repo string, item gh.ProjectItem, prNum
 // PR head arrived after fabrik:bot-reprompted was applied (R4/FR-006): it
 // removes only that label, so Phase 2 does not fire on the old clock and Phase 1
 // re-fires a full window after the new head. fabrik:awaiting-review stays; its
-// anchor is the head's arrival. Reports whether the cycle was reset.
+// anchor is the head's arrival. The head is read live (a poll-start snapshot can
+// predate the push); the per-SHA cache makes that one PR read per poll while the
+// ladder is engaged. Reports whether the cycle was reset.
 func (e *Engine) resetLadderOnNewHead(owner, repo string, item gh.ProjectItem, prNumber int) bool {
 	repromptedAt, err := e.labelAppliedAt(item, owner, repo, botRepromptedLabel)
 	if err != nil || repromptedAt.IsZero() {
 		return false
 	}
-	headAt, ok := e.headArrivalTime(owner, repo, item, prNumber, false)
+	headAt, ok := e.headArrivalTime(owner, repo, item, prNumber, true)
 	if !ok || !headAt.After(repromptedAt) {
 		return false
 	}

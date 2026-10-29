@@ -829,6 +829,10 @@ mutate "a refused auto-assigned SeedPR still burns nextNumber" \
   'seed.go::s{\t\tnum = r\.nextNumber\n}{\t\tnum = r.allocNumber()\n}'
 
 echo
+mutate "an unseeded commit reads as arrived now instead of not found" \
+  'TestFetchCommitTime_SeededPerSHAAndUnknownIsNotFound' \
+  'ci.go::s{\tif !ok \{\n\t\treturn time\.Time\{\}, fmt\.Errorf\("simgh: commit %s: %w", sha, gh\.ErrNotFound\)\n\t\}}{\tif !ok {\n\t\treturn s.now(), nil\n\t}}'
+
 status=0
 if [ ${#FAILED_TO_CATCH[@]} -ne 0 ]; then
   echo "Mutations NOT caught by the suite:"
