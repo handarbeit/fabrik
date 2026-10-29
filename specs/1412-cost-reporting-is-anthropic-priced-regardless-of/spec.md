@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-1412`
 **Created**: 2026-10-28
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "Cost reporting is Anthropic-priced regardless of the model actually served. Fabrik's reported cost is Claude Code's Anthropic-priced figure, passed through verbatim regardless of which provider or model actually served the request. On a gateway-routed setup the number is wrong by a large factor in the discouraging direction."
 
 ## Background
@@ -42,25 +42,26 @@ An operator runs Fabrik against a cheap model through a gateway such as OpenRout
 
 ### User Story 2 - Unknown cost is never shown as a number (Priority: P1)
 
-An operator on a gateway has configured no rate card. Fabrik cannot know what the invocation cost. It says so, instead of showing the Anthropic figure or $0.00.
+An operator on a gateway has configured no rate card. Fabrik cannot know what the invocation cost. It says so, instead of showing the Anthropic figure or $0.00. The token counts are still shown, so the operator can compute a cost themselves.
 
 **Why this priority**: Showing a wrong or zero number is the original defect in a different form. A missing cost must be distinguishable from a genuine $0.00.
 
-**Independent Test**: Run an invocation served by a non-Anthropic model with no rate card and no provider-reported cost. Check that history, the TUI and the local API all show "unknown", not a number and not $0.00.
+**Independent Test**: Run an invocation served by a non-Anthropic model with no rate card and no provider-reported cost. Check that history, the TUI and the local API all show "unknown", not a number and not $0.00, and that the token counts remain visible.
 
 **Acceptance Scenarios**:
 
 1. **Given** no provider cost, no applicable rate card entry and a served model that is not an Anthropic model, **When** the invocation completes, **Then** the cost is recorded as unknown.
 2. **Given** an unknown-cost entry and an entry that genuinely cost $0.00, **When** both are rendered, **Then** the two are visibly different.
 3. **Given** unknown-cost entries in the history, **When** a cost total is shown, **Then** it excludes them and indicates that it is partial.
+4. **Given** an unknown-cost entry, **When** it is rendered, **Then** its token counts are still shown.
 
 ---
 
 ### User Story 3 - Provider-reported cost wins when available (Priority: P2)
 
-The provider or gateway reports its own cost for a request. Fabrik records that value as the cost, because it is the closest thing to the actual bill.
+The provider or gateway reports its own cost for a request in data the CLI already returns. Fabrik records that value as the cost, because it is the closest thing to the actual bill.
 
-**Why this priority**: It is the most accurate source, but it depends on what the CLI/gateway already hands Fabrik. It is not required for the rate-card fix to deliver value.
+**Why this priority**: It is the most accurate source, but it depends on what the CLI/gateway already hands Fabrik. It is not required for the rate-card fix to deliver value. Actively looking up a per-request cost from a gateway is split out as #2518 (blocked by this issue) and will populate this source.
 
 **Independent Test**: Feed Fabrik a result that carries a provider-reported cost, with a rate card also configured. Check that the recorded cost is the provider value and the basis says so.
 
@@ -68,16 +69,17 @@ The provider or gateway reports its own cost for a request. Fabrik records that 
 
 1. **Given** a provider-reported cost and a configured rate card, **When** the invocation completes, **Then** the provider value is used, not the rate card or `total_cost_usd`.
 2. **Given** the provider also reports a request identifier, **When** the entry is recorded, **Then** the identifier is stored with it.
+3. **Given** a result that carries no provider-reported cost, **When** the invocation completes, **Then** this source does not apply and cost falls through to the next source.
 
 ---
 
-### User Story 4 - Direct-Anthropic users see no change (Priority: P1)
+### User Story 4 - Direct-Anthropic, Bedrock and Vertex users see no change (Priority: P1)
 
-An operator on direct Anthropic access, with no new configuration, upgrades. Their cost figures stay exactly as before.
+An operator on direct Anthropic access, or on Anthropic models served through Bedrock or Vertex, with no new configuration, upgrades. Their cost figures stay exactly as before.
 
 **Why this priority**: Silently repricing existing setups would break trust in a long-standing number.
 
-**Independent Test**: Run an invocation served by an Anthropic model with no rate card. Check that the displayed cost equals the CLI's `total_cost_usd` and that the basis shows it is the CLI-reported figure.
+**Independent Test**: Run an invocation served by an Anthropic model (a direct id, a Bedrock-style id and a Vertex-style id) with no rate card. Check that the displayed cost equals the CLI's `total_cost_usd` and that the basis shows it is the CLI-reported figure.
 
 **Acceptance Scenarios**:
 
@@ -109,25 +111,29 @@ An operator mistypes a rate-card field or leaves out a rate. Fabrik tells them a
 - Rates change or are removed after a run: history entries keep the value and basis recorded at the time and are never repriced retroactively.
 - The CLI reports `total_cost_usd` of 0 or omits it for a non-Anthropic model: the upstream figure is still recorded as reported (zero or absent) and is not used for display.
 - The alias resolves to a different served model after a release: the rate card is matched on the served id, so an unlisted new id yields unknown instead of using the old model's rates.
+- The served id is an Anthropic model written in a Bedrock or Vertex form (for example `anthropic.claude-…`, `us.anthropic.claude-…` or `claude-…@<date>`): it counts as an Anthropic model, so the CLI figure is shown for it and the invocation does not drop to unknown.
+- A served id that cannot be recognised as an Anthropic model in any supported form is never guessed to be one; with no other source, its cost is unknown.
 - Cost totals or the `Last run` style summaries that sum cost across entries: unknown entries are excluded from the sum and the total is marked partial.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: For each invocation Fabrik MUST determine the displayed cost from the first applicable source, in this order: (1) a provider-reported cost; (2) a configured rate card applied to the persisted token counts; (3) the upstream CLI `total_cost_usd`, but only when the served model is an Anthropic model; (4) otherwise unknown.
+- **FR-001**: For each invocation Fabrik MUST determine the displayed cost from the first applicable source, in this order: (1) a provider-reported cost; (2) a configured rate card applied to the persisted token counts; (3) the upstream CLI `total_cost_usd`, but only when the served model is an Anthropic model (as identified by FR-014); (4) otherwise unknown. Unknown is the last resort and MUST never be replaced by a guessed number.
 - **FR-002**: Each entry MUST record the basis of its displayed cost, one of: provider-reported, rate card, CLI-reported, no provider request, or unknown. The basis MUST be visible wherever cost is shown, so a reader is never handed a differently-derived number unannounced.
 - **FR-003**: The upstream CLI `total_cost_usd` MUST always be recorded separately on the entry (when the CLI reports one), whichever source supplies the displayed cost, and MUST NOT be overwritten.
 - **FR-004**: Unknown cost MUST be represented distinctly from $0.00 in persisted history, the TUI history and detail views, and the local API. It MUST NOT be serialised as zero.
 - **FR-005**: Fabrik MUST accept a rate card in `.fabrik/config.yaml` mapping a model id to four rates: input, output, cache-creation and cache-read, each in dollars per million tokens. All four rates MUST be given explicitly for each entry, and an explicit 0 is allowed.
 - **FR-006**: The rate card MUST be matched on the served model id, not the requested model. For an invocation served by several models, each model's own token counts MUST be priced at that model's own rates and summed. If any served model has no entry, the rate-card source does not apply to that invocation (FR-001 then continues to the next source).
-- **FR-007**: Where the CLI result or gateway response already carries a provider-reported cost, Fabrik MUST record it and prefer it over the rate card and the upstream figure, and MUST record a request identifier when one is present. Fabrik MUST NOT add per-provider billing-API clients for this.
+- **FR-007**: Where the CLI result or gateway response already carries a provider-reported cost, Fabrik MUST record it and prefer it over the rate card and the upstream figure, and MUST record a request identifier when one is present. Fabrik MUST NOT add per-provider billing-API clients or any active per-request lookup for this. The provider-reported source, its basis and its request-identifier field MUST exist in the record even when no cost field is available to populate them, in which case the source never applies.
 - **FR-008**: With no new configuration, an invocation served by an Anthropic model MUST display the same cost as before this change.
 - **FR-009**: The rate-card key MUST be a recognised `config.yaml` setting that is read from `config.yaml`. An unrecognised key nested inside the rate card MUST produce a named warning in the operator-warnings panel and MUST NOT be silently ignored. A rate card with a missing, negative or non-numeric rate, or an empty model id, MUST be rejected at startup with a message naming the model and field.
 - **FR-010**: Any displayed total or aggregate of cost MUST exclude unknown entries and MUST indicate that it is partial when any were excluded.
 - **FR-011**: A `history.json` written before this change MUST load without error and without dropping entries. Its entries keep their stored cost and carry no recorded basis, and are not repriced.
 - **FR-012**: Cost already recorded in history MUST NOT be recomputed when the rate card changes. Each entry's value and basis are fixed when the invocation completes.
-- **FR-013**: The user guide MUST document: the precedence in FR-001; the rate-card format and units; that rates are user-maintained and Fabrik ships no pricing table; that rates go stale as vendor pricing changes; the meaning of each basis label; and the tolerance within which a rate-card figure is expected to reconcile with provider billing (SC-002).
+- **FR-013**: The user guide MUST document: the precedence in FR-001; the rate-card format and units; that rates are user-maintained and Fabrik ships no pricing table; that rates go stale as vendor pricing changes; the meaning of each basis label; which served-model id forms count as Anthropic models (FR-014); and the tolerance within which a rate-card figure is expected to reconcile with provider billing (SC-002).
+- **FR-014**: A served model MUST be identified as an Anthropic model when its id is a direct Anthropic id (beginning with `claude-`) or a Bedrock or Vertex form of one, including ids carrying an `anthropic.` provider prefix (for example `anthropic.claude-…`), a regional prefix before it (for example `us.anthropic.claude-…`), or a trailing `@<date>` version suffix (for example `claude-…@<date>`). An id matching none of these forms MUST NOT be treated as an Anthropic model.
+- **FR-015**: When an entry's cost is unknown, its persisted and displayed token counts MUST still be shown (in history, the TUI and the local API) so the operator can derive a cost themselves.
 
 ### Key Entities *(if applicable)*
 
@@ -142,20 +148,20 @@ An operator mistypes a rate-card field or leaves out a rate. Fabrik tells them a
 
 - **SC-001**: With a rate card configured, 100% of invocations whose served models are all listed show a cost equal to their persisted token counts multiplied by the configured rates, independent of `total_cost_usd`.
 - **SC-002**: On a gateway-routed run with accurate rates, the summed rate-card cost reconciles with the provider's billed total within a documented tolerance. The target is 5%, to be confirmed against a recorded real run. This replaces the 26× overstatement measured in the report.
-- **SC-003**: An operator can tell unknown cost from $0.00 at a glance in the TUI, `history.json` and the local API, with no entry of unknown cost rendered as a number.
-- **SC-004**: With no configuration change, 100% of invocations served by Anthropic models show a cost identical to the pre-change value.
+- **SC-003**: An operator can tell unknown cost from $0.00 at a glance in the TUI, `history.json` and the local API, with no entry of unknown cost rendered as a number and its token counts still visible.
+- **SC-004**: With no configuration change, 100% of invocations served by Anthropic models, whether by a direct, Bedrock or Vertex id, show a cost identical to the pre-change value.
 - **SC-005**: Every cost shown carries its basis, and the CLI-reported figure is retrievable for every new entry.
 - **SC-006**: A mistyped or incomplete rate card is reported at startup in every case tested, never silently ignored.
 - **SC-007**: A history file written before this change loads in full with all entries intact.
 
 ## Assumptions
 
-- "Anthropic model" for the purpose of FR-001 step (3) means a served model id beginning with `claude-`. A gateway serving a `claude-*` id is therefore treated like direct Anthropic access; the CLI figure is the best available estimate and is labelled CLI-reported. (See Open Question 1.)
 - The rate card is YAML-only under `.fabrik/config.yaml`. A structured table does not fit a flag or environment variable, and `config.yaml` is the place the existing top-level unknown-key warning already covers. No CLI flag or environment variable is added.
 - Rates are dollars per million tokens, matching how vendors publish prices.
 - Every rate-card entry gives all four rates, because defaulting a missing cache rate would imply an accuracy Fabrik cannot guarantee.
 - A rate card applies only when all served models are listed. This prevents a silently partial, understated figure.
-- The only cost sources Fabrik reads are fields the CLI result or stream already carries. If no provider-reported cost is present in that data, that source never applies. (See Open Question 2.)
+- A gateway serving an Anthropic model id is treated like direct Anthropic access: the CLI figure is the best available estimate and is labelled CLI-reported.
+- The only cost sources Fabrik reads are fields the CLI result or stream already carries. If no provider-reported cost is present in that data, that source never applies; Research decides whether such a field exists today. Obtaining one from a gateway by an active per-request lookup is tracked separately as #2518.
 - #1411's served-model value and per-model token counts are the inputs. Whether per-model token breakdowns must be persisted additionally, to price multi-model sessions, is a Research question, not decided here.
 - Rate cards are user data. Fabrik ships no default rates and makes no claim that they are current.
 - Pricing is computed once, when the invocation completes, and stored. It is not recomputed at display time.
@@ -164,6 +170,7 @@ An operator mistypes a rate-card field or leaves out a rate. Fabrik tells them a
 
 - Persisting token counts and the served model (done in #1411).
 - Per-provider billing-API integrations or any new provider client.
+- The active per-request cost lookup from a gateway, tracked as #2518 (blocked by this issue), which will populate the provider-reported source defined here.
 - A shipped, maintained pricing table or automatic rate updates.
 - Retroactively repricing existing history entries.
 - Warning about unrecognised keys at the top level of `config.yaml`, which already exists. Making CLI/env-only keys such as `archive_after` work from `config.yaml` is a separate matter.
@@ -174,4 +181,5 @@ An operator mistypes a rate-card field or leaves out a rate. Fabrik tells them a
 
 - Community report #1385 and discussion #1386, with the full measurement (24 h, six workers, 355 runs / 7,143 turns, $1,481.63 reported against $57.00 billed, about $0.0080 per turn).
 - #1411 / PR #2501 / ADR 1411: token counts and requested-vs-served model recorded per invocation.
+- #2518: the active per-request cost lookup from a gateway, split out of this issue.
 - `config/unknown_keys.go`: the existing top-level unrecognised-key warning.
