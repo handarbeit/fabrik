@@ -44,6 +44,11 @@ type reviewerStanding struct {
 	VerdictState  string
 	VerdictCommit string
 	Head          string
+	// VerdictID/VerdictBody are the latest formal verdict's review database ID and
+	// body (zero/"" when there is no verdict). The declined-finding decision pause
+	// (#2466) names and quotes the review through them.
+	VerdictID   int
+	VerdictBody string
 }
 
 // blocks reports whether the standing holds the authoritative gate.
@@ -141,6 +146,7 @@ func reviewerStandings(history []gh.PRReview, head string, declared []string) []
 			continue
 		}
 		s.VerdictState, s.VerdictCommit = f.State, f.CommitID
+		s.VerdictID, s.VerdictBody = f.DatabaseID, f.Body
 		cleanComment := head != "" && c != nil && c.CommitID == head && isDeclaredReviewer(declared, g.author)
 		switch {
 		case head == "" || f.CommitID == "":

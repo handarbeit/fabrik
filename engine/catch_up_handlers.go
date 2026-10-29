@@ -339,6 +339,13 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// so a genuine "nobody has ever reviewed" block — which can only have
 	// cycleCount == 0 — is structurally unaffected (R4).
 	if blocked || timedOut {
+		// A declared bot's at-head CHANGES_REQUESTED that Review already answered
+		// without a commit cannot be re-reviewed: surface the decision now, ahead of
+		// both the cycle-limit and the timeout diagnoses (#2466, ADR 2466).
+		if findings, head := e.declinedAtHeadFindings(pctx.item, pctx.stage); len(findings) > 0 {
+			e.pauseForDeclinedReviewFinding(pctx.item, pctx.stage, head, findings)
+			return true
+		}
 		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 		if snap, err := e.store.Get(repoStr, pctx.item.Number); err == nil {
 			cycleCount := max(snap.ReviewCycles(pctx.stage.Name), snap.ReviewBlockedCycles(pctx.stage.Name))
