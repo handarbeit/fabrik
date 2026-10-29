@@ -24,7 +24,7 @@ The same history was read three ways: the gate (sticky formal verdict, `CommitID
 - A stale `APPROVED` newly holds the gate in the no-branch-protection fallback until the reviewer re-reviews or the review-wait timeout runs. This is the spec's R1 and is visible in the reason text.
 - Authoritative mode with an empty `reviewDecision` pays one extra REST history read and one PR read when the gate would otherwise clear.
 - `fabrik_status` can lag a *webhook-only* dismissal of an undeclared reviewer's earlier request, and before the gate's first live read cannot see one at all (the Store keeps one review per author). This is a display staleness; the gate does not read the Store's evidence.
-- Not addressed (siblings): a `CHANGES_REQUESTED` on the current head that nothing supersedes (the declined-finding deadlock), the review-wait clock, advisory mode, and Pruefer's own behaviour.
+- Not addressed (siblings): a `CHANGES_REQUESTED` on the current head that nothing supersedes (the declined-finding deadlock — addressed by ADR 2466), the review-wait clock, advisory mode, and Pruefer's own behaviour.
 
 ## Verification
 
