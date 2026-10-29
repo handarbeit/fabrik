@@ -596,13 +596,16 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	findings = dedupeFindings(findings)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
-	body := appendCoverage(buildReviewBody(summary, demoted), cov)
+	fallback := ""
 	if result.FallbackFrom != "" {
-		body = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason) + "\n\n" + body
+		fallback = fallbackNotice(result.FallbackFrom, baseSHA, result.FallbackReason)
 	}
-	if notice := readOnlyNotice(grant, result.PluginsStripped, result.PluginsSkipped, result.PluginsPartial); notice != "" {
-		body = notice + "\n\n" + body
-	}
+	// #2488: the counts are what this review submits (inline comments and demoted
+	// findings after de-duplication), never the model's claim; an unparseable
+	// findings block makes them unknown rather than zero.
+	body := assembleReviewBody(summary, demoted, cov,
+		findingsCounts{Parsed: parseInfo.FindingsParsed, Inline: len(comments), Body: len(demoted)},
+		fallback, readOnlyNotice(grant, result.PluginsStripped, result.PluginsSkipped, result.PluginsPartial))
 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}

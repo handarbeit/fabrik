@@ -408,7 +408,7 @@ func TestReviewPR_CoverageComplete(t *testing.T) {
 		t.Fatalf("outcome = %+v", outcome)
 	}
 	call := client.submitCalls[0]
-	if call.body != "All read.\n\nPRUEFER_COVERAGE: complete" {
+	if call.body != "All read.\n\nPRUEFER_COVERAGE: complete\n\n<!-- pruefer:findings inline=unknown body=unknown coverage=complete -->" {
 		t.Errorf("body = %q", call.body)
 	}
 	if call.event != gh.ReviewEventComment {
@@ -494,7 +494,7 @@ func TestReviewPR_ExcludedPathsDoNotForcePartial(t *testing.T) {
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"data/corpus.jsonl"}}
 	ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
-	if body := client.submitCalls[0].body; !strings.HasSuffix(body, "PRUEFER_COVERAGE: complete") {
+	if body := client.submitCalls[0].body; !strings.Contains(body, "PRUEFER_COVERAGE: complete\n") || strings.Contains(body, "PRUEFER_COVERAGE: partial") {
 		t.Errorf("an operator-excluded path must not make the review partial:\n%s", body)
 	}
 }
@@ -509,7 +509,7 @@ func TestReviewPR_CoverageBlockNeverLeaksIntoBody(t *testing.T) {
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	body := client.submitCalls[0].body
-	if body != "Summary.\n\nPRUEFER_COVERAGE: complete" || strings.Contains(body, "opened") {
+	if body != "Summary.\n\nPRUEFER_COVERAGE: complete\n\n<!-- pruefer:findings inline=0 body=0 coverage=complete -->" || strings.Contains(body, "opened") {
 		t.Errorf("body = %q", body)
 	}
 }

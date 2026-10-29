@@ -192,6 +192,11 @@ type pullRequestReviewPayload struct {
 	} `json:"review"`
 	PullRequest struct {
 		Number int `json:"number"`
+		// Head.Ref is the PR head branch, read only to recognise a merge-train
+		// PR (#2483).
+		Head struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -217,6 +222,11 @@ type pullRequestReviewCommentPayload struct {
 	} `json:"comment"`
 	PullRequest struct {
 		Number int `json:"number"`
+		// Head.Ref is the PR head branch, read only to recognise a merge-train
+		// PR (#2483).
+		Head struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -231,10 +241,39 @@ type checkRunPayload struct {
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		HeadSHA    string `json:"head_sha"`
+		// CheckSuite.HeadBranch and PullRequests[].Head.Ref name the head branch,
+		// read only to recognise a merge-train PR (#2483). Either may be absent
+		// (PullRequests is empty for fork PRs); the multi-closing-issue refusal in
+		// resolvePRLinkage is the payload-independent backstop.
+		CheckSuite struct {
+			HeadBranch string `json:"head_branch"`
+		} `json:"check_suite"`
+		PullRequests []struct {
+			Number int `json:"number"`
+			Head   struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		} `json:"pull_requests"`
 	} `json:"check_run"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+// checkRunTrainBranch returns the head branch a check_run delivery names — the
+// check suite's, else the first associated PR's — and that PR's number (0 when
+// only the suite names it). It returns a train branch in preference to any other
+// so a SHA shared by several PRs is still recognised.
+func checkRunTrainBranch(p *checkRunPayload) (int, string) {
+	for _, pr := range p.CheckRun.PullRequests {
+		if isTrainBranch(pr.Head.Ref) {
+			return pr.Number, pr.Head.Ref
+		}
+	}
+	if isTrainBranch(p.CheckRun.CheckSuite.HeadBranch) {
+		return 0, p.CheckRun.CheckSuite.HeadBranch
+	}
+	return 0, ""
 }
 
 // singleSelectTo is the object form of changes.field_value.to for a
@@ -686,6 +725,13 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte, receivedAt time.Time) 
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
 
+	// A merge-train trial/integration PR belongs to no single member (#2483).
+	// Checked before the prToKey lookup so an already-poisoned index is not
+	// written through either.
+	if c.skipTrainPR("pull_request", prNum, p.PullRequest.Head.Ref) {
+		return
+	}
+
 	switch p.Action {
 	case "opened", "closed", "synchronize", "reopened":
 		// SHA-tracking path — handled after this switch.
@@ -917,6 +963,9 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte, receivedAt time.
 	}
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
+	if c.skipTrainPR("pull_request_review", prNum, p.PullRequest.Head.Ref) {
+		return
+	}
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -1017,6 +1066,9 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte, receivedA
 	var p pullRequestReviewCommentPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		c.logFn("[cache] applyPullRequestReviewCommentDelta: unmarshal payload: %v\n", err)
+		return
+	}
+	if c.skipTrainPR("pull_request_review_comment", p.PullRequest.Number, p.PullRequest.Head.Ref) {
 		return
 	}
 	switch p.Action {
@@ -1136,6 +1188,13 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		return
 	}
 	repo := p.Repository.FullName
+
+	// A check run on a merge-train trial/integration PR must not be buffered or
+	// healed onto a member (#2483). The head branch comes from the payload; when
+	// it is absent the multi-closing-issue refusal in resolvePRLinkage applies.
+	if prNum, ref := checkRunTrainBranch(&p); ref != "" && c.skipTrainPR("check_run", prNum, ref) {
+		return
+	}
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {

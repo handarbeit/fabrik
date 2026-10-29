@@ -32,8 +32,8 @@ func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL fu
 		API:    api,
 		Ledger: e.intake,
 		Sink:   tr,
-		HookURL: func() (string, error) {
-			cfg, err := fetchAppHookConfigFn(e)
+		HookURL: func(ctx context.Context) (string, error) {
+			cfg, err := fetchAppHookConfigFn(ctx, e)
 			if err != nil {
 				return "", err
 			}
@@ -52,8 +52,10 @@ func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL fu
 }
 
 // startRouteLiveness runs rl in the background until ctx ends or the returned
-// stop function is called; stop waits for the goroutine to exit, so a transport
-// shutting down never leaves it reading engine state. nil rl is a no-op (stop is
+// stop function is called; stop waits for the goroutine to exit and for any
+// in-flight arrival hook refresh (cancelling it first; none starts afterwards),
+// so a transport shutting down never leaves either reading engine state or
+// writing the warnings panel (#2480). nil rl is a no-op (stop is
 // still callable). A stale panel entry from a previous run is cleared first: the
 // in-memory verdict starts unknown, and unknown raises nothing.
 func (e *Engine) startRouteLiveness(ctx context.Context, rl *routeLiveness) (stop func()) {
@@ -70,5 +72,6 @@ func (e *Engine) startRouteLiveness(ctx context.Context, rl *routeLiveness) (sto
 	return func() {
 		cancel()
 		<-done
+		rl.Stop()
 	}
 }

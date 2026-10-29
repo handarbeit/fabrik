@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -822,6 +823,35 @@ func TestFetchAppHookDeliveries_PaginatesByLinkCursor(t *testing.T) {
 		if a != "Bearer test-jwt" {
 			t.Errorf("Authorization = %q", a)
 		}
+	}
+}
+
+// Cancelling the context aborts a blocked read promptly (#2480).
+func TestFetchAppHookConfigContext_CancelAbortsBlockedRead(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := FetchAppHookConfigContext(ctx, srv.URL, "jwt")
+		errc <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("expected an error from the cancelled read")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled read did not return")
 	}
 }
 

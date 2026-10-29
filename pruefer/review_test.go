@@ -365,7 +365,7 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	}
 	call := client.submitCalls[0]
 	// No diff text in this fixture, so nothing is staged and coverage is partial (#2190).
-	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit.\n\nPRUEFER_COVERAGE: partial — no staged diff" {
+	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit.\n\nPRUEFER_COVERAGE: partial — no staged diff\n\n<!-- pruefer:findings inline=unknown body=unknown coverage=partial -->" {
 		t.Errorf("submitCall = %+v", call)
 	}
 	if call.event != gh.ReviewEventComment {
@@ -1510,7 +1510,7 @@ func TestReviewPR_FindingsMappedToChangedLines_PostsInlineComments(t *testing.T)
 	if call.comments[0].Path != "engine/claude.go" || call.comments[0].Line != 954 {
 		t.Errorf("comment = %+v, want Path=engine/claude.go Line=954", call.comments[0])
 	}
-	if call.body != "Reviewed the change. Looks solid.\n\nPRUEFER_COVERAGE: complete" {
+	if call.body != "Reviewed the change. Looks solid.\n\nPRUEFER_COVERAGE: complete\n\n<!-- pruefer:findings inline=1 body=0 coverage=complete -->" {
 		t.Errorf("body = %q, want the prose summary only (no demoted-findings section) plus the coverage line", call.body)
 	}
 }
