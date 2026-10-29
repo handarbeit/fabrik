@@ -33,9 +33,9 @@ func feedbackKey(c gh.Comment) string {
 // the gate already applied, so an ID the gate holds on passes them on the
 // dispatcher's side too, and re-running them would cost another comment read per
 // hold (durablyAddressedReviewIDs).
-func dispatcherVisibleIDs(item gh.ProjectItem) []gh.Comment {
+func (e *Engine) dispatcherVisibleIDs(item gh.ProjectItem) []gh.Comment {
 	var out []gh.Comment
-	for _, c := range reviewBodyCandidates(item.LinkedPRReviews, func(string) bool { return false }) {
+	for _, c := range reviewBodyCandidates(item.LinkedPRReviews, func(string) bool { return false }, e.cleanReviewSkipper(item.Status, item.Number, item.Labels)) {
 		out = append(out, gh.Comment{ID: c.id})
 	}
 	return append(out, item.LinkedPRReviewThreadComments...)
@@ -83,7 +83,7 @@ func (e *Engine) dispatcherGap(orig gh.ProjectItem, pf pendingFeedback) (gap []g
 	if reviewDataRidesMissingLink(view) {
 		return nil, false
 	}
-	return feedbackGap(held, dispatcherVisibleIDs(view)), false
+	return feedbackGap(held, e.dispatcherVisibleIDs(view)), false
 }
 
 // repairDispatcherBlindness handles a gate hold on feedback the dispatcher does

@@ -394,6 +394,7 @@ type Engine struct {
 	cachelessWriteThroughOff  atomic.Bool            // test seam: SetCachelessWriteThroughDisabledForTest (#2350)
 	dispatchRereadOff         atomic.Bool            // test seam: SetDispatchRereadDisabledForTest (#2350)
 	reviewStandingOff         atomic.Bool            // test seam: SetReviewStandingDisabledForTest (#2465)
+	cleanReviewSkipOff        atomic.Bool            // test seam: SetCleanReviewSkipDisabledForTest (#2489)
 	liveOverlayOff            atomic.Bool            // test seam: SetLiveOverlayDisabledForTest (#2350)
 	liveApplyOff              atomic.Bool            // test seam: SetLiveReadApplyDisabledForTest (#2350)
 	depLiveReadOff            atomic.Bool            // test seam: SetDependencyLiveReadDisabledForTest (#2350)

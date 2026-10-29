@@ -89,7 +89,8 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 	// What the feedback gate would hold on, per author (the same cores as
 	// cachedPendingFeedbackOf, kept per reviewer).
 	gateThreads := dropOutdatedThreadComments(filterReviewThreadComments(lpr.ThreadComments, processed))
-	gateBodies := reviewBodyCandidates(lpr.Reviews, processed)
+	skipClean := e.cleanReviewSkipper(st.Status, st.Number, st.Labels)
+	gateBodies := reviewBodyCandidates(lpr.Reviews, processed, skipClean)
 
 	for _, author := range order {
 		rev := latest[author]
@@ -133,7 +134,7 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 		// durably addressed; whether the engine already processed a thread does not
 		// matter here, only whether it is still open.
 		bodies := 0
-		if cands := reviewBodyCandidates([]gh.PRReview{rev}, notProcessed); len(cands) > 0 {
+		if cands := reviewBodyCandidates([]gh.PRReview{rev}, notProcessed, skipClean); len(cands) > 0 {
 			if durable == nil {
 				durable = e.cachedAddressedReviewIDs(st)
 			}
