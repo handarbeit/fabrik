@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends ADR 2450 (the final flush gains a stop gate), ADR 2259 (the restart tail's intake grace and apply), ADR 2351 (what a closing intake applies) and ADR 2169 (a readiness observable). Builds on ADR 2427.
+Accepted. Amends ADR 2450 (the final flush gains a stop gate), ADR 2259 (the restart tail's intake grace and apply), ADR 2351 (what a closing intake applies) and ADR 2169 (a readiness observable). Builds on ADR 2427-a (the health counters the live test reads).
 
 ## Context
 
