@@ -453,6 +453,18 @@ type HealthResult struct {
 	// (#2393, ADR 2393): GitHub calls keep failing on transport errors, so the
 	// daemon starts no new model work until one succeeds.
 	ForgeHold *ForgeHoldHealth `json:"forge_hold,omitempty"`
+	// Channel is the channel push's readiness (#2484, ADR 2484); omitted when the
+	// daemon runs without a channel hub.
+	Channel *ChannelHealth `json:"channel,omitempty"`
+}
+
+// ChannelHealth describes the channel push (#2484). Ready is false while a freshly
+// started daemon is warming: downtime deltas are held back until the board is
+// populated and the restart catch-up has been queued to every subscriber (ADR
+// 2169), which can take over a minute after a restart. A client that needs every
+// restart delta waits for it to turn true.
+type ChannelHealth struct {
+	Ready bool `json:"ready"`
 }
 
 // ForgeHoldHealth describes the forge-unreachable hold.

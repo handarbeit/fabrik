@@ -24,7 +24,15 @@ func (e *Engine) EnableDeliveryIntakeForTest(dir string) {
 		cache.SetMatchEchoFn(e.echo.MatchEcho)
 		cache.SetMatchEchoReportedFn(e.echo.MatchEchoReported)
 		cache.SetMatchEchoViaFn(e.echo.MatchEchoVia)
-		applyAt = cache.ApplyDeltaAt
+		// The same method production uses; the Layer 1 round trip is stood in for
+		// by SetIntakeLayer1DelayForTest (#2484).
+		applyAt = func(eventType string, payload []byte, receivedAt time.Time) {
+			e.applyDelivery(cache, eventType, payload, receivedAt, func() {
+				if d := time.Duration(e.chanTest.layer1Delay.Load()); d > 0 {
+					time.Sleep(d)
+				}
+			})
+		}
 	}
 	path := ""
 	if dir != "" {
@@ -46,3 +54,32 @@ func (e *Engine) DrainDeliveriesForTest() { e.intake.Drain() }
 // CloseDeliveryIntakeForTest stops the intake and flushes the ledger, as a
 // shutdown or the pre-exec flush does.
 func (e *Engine) CloseDeliveryIntakeForTest() { e.intake.Close(5 * time.Second) }
+
+// SetIntakeLayer1DelayForTest makes every intake apply spend d where production
+// makes the Layer 1 status refresh's GitHub round trip (#2484), unless the
+// intake is closing. Call it before submitting deliveries.
+func (e *Engine) SetIntakeLayer1DelayForTest(d time.Duration) {
+	e.chanTest.layer1Delay.Store(int64(d))
+}
+
+// SetIntakeCloseGraceForTest overrides the grace the SIGHUP restart tail gives
+// the intake (intakeSighupGrace), so a test can shorten it to make a slow drain
+// outlast it (#2484). Zero keeps the production value.
+func (e *Engine) SetIntakeCloseGraceForTest(d time.Duration) {
+	e.chanTest.sighupGrace.Store(int64(d))
+}
+
+// SetSighupDrainSlackDisabledForTest neutralises #2484's drain fix on this
+// engine: a closing intake runs the Layer 1 refresh again. The SIGHUP tail's
+// grace is whatever SetIntakeCloseGraceForTest set, so a test models the old
+// 5 s grace with a value of its own. It is how the twin test shows it is not
+// vacuous.
+func (e *Engine) SetSighupDrainSlackDisabledForTest() (restore func()) {
+	e.chanTest.drainSlackOff.Store(true)
+	return func() { e.chanTest.drainSlackOff.Store(false) }
+}
+
+// IntakeCountsForTest returns the intake's accepted, applied and dropped totals.
+func (e *Engine) IntakeCountsForTest() (accepted, applied, dropped int64) {
+	return e.intake.Counts()
+}

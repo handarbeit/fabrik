@@ -48,6 +48,12 @@ var (
 	intakeConcurrency = 8
 	// intakeCloseGrace is how long Close waits for in-flight applies.
 	intakeCloseGrace = 5 * time.Second
+	// intakeSighupGrace is how long the SIGHUP restart tail waits for queued and
+	// in-flight deliveries (#2484, ADR 2484). Longer than intakeCloseGrace: the
+	// restart is operator-initiated, the poll loop has already stopped, and a
+	// delivery the intake accepted before the signal that the exec cuts off is a
+	// label change the subscriber never hears about from this process.
+	intakeSighupGrace = 15 * time.Second
 	// intakeQuiesceGrace is how long a self-upgrade exec waits for queued and
 	// in-flight deliveries before it flushes the ledger and execs anyway.
 	intakeQuiesceGrace = 10 * time.Second
@@ -263,6 +269,30 @@ func (in *intake) run(d delivery) {
 		return
 	}
 	in.stats.noteApplied(d.EventType)
+}
+
+// Closing reports whether the intake was closed (Close), which every caller
+// follows with an exec or an exit. It is deliberately false while quiesced: the
+// self-upgrade Quiesce is reversible (Resume when the exec fails), so a process
+// that may keep running must not skip work on its behalf. The apply function
+// reads it to skip work a process that is going away does not need, such as the
+// Layer 1 status refresh (#2484). Nil-safe.
+func (in *intake) Closing() bool {
+	if in == nil {
+		return false
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.closed
+}
+
+// Counts returns the accepted, applied and dropped delivery counts since process
+// start, for the restart tail's log line (#2484). Nil-safe.
+func (in *intake) Counts() (accepted, applied, dropped int64) {
+	if in == nil {
+		return 0, 0, 0
+	}
+	return in.stats.counts()
 }
 
 // Drain blocks until every queued delivery has been applied (tests, shutdown).

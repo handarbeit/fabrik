@@ -153,6 +153,28 @@ func mustReadIntake(t *testing.T, env *Env) intakeCounters {
 	return c
 }
 
+// awaitChannelReady waits until fabrik_health reports the channel push ready
+// (#2484): a freshly started daemon holds its downtime deltas until the board is
+// populated and the restart catch-up has been queued to every subscriber, which
+// takes over a minute after a restart on a real bed, so a fixed wait either gives
+// up too early or sits idle. It returns whether the daemon reported ready within
+// timeout, and whether it reports a channel block at all (false: a daemon without
+// the field, or without a channel hub).
+func awaitChannelReady(env *Env, timeout time.Duration) (ready, reported bool) {
+	ready = awaitCond(timeout, func() bool {
+		h, err := bedHealth(env)
+		if err != nil {
+			return false // the daemon is mid-restart; keep asking
+		}
+		if h.Channel == nil {
+			return false
+		}
+		reported = true
+		return h.Channel.Ready
+	})
+	return ready, reported
+}
+
 // awaitApplied waits until the daemon has applied more than base[eventType]
 // deliveries of that type since base was read, and returns the new count.
 func awaitApplied(env *Env, base intakeCounters, eventType string, timeout time.Duration) (int64, bool) {
