@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -257,5 +259,90 @@ func TestReviewWaitAnchor_LadderNonVacuity(t *testing.T) {
 	f.eng.SetReviewWaitHeadAnchorDisabledForTest(true)
 	if _, timedOut, _, _ := f.eng.checkReviewGate(f.board, f.item, f.stage); !timedOut {
 		t.Fatal("with the anchor neutralised Phase 2 fires on the old clock; the ladder test would otherwise prove nothing")
+	}
+}
+
+// R3 / FR-005 (#2467): with the head anchor restarting the wait on every push,
+// the review-wait timeout can no longer end a loop in which every round pushes
+// a new head. MaxReviewCycles still does — through ReviewBlockedCycles, which is
+// charged while the gate is blocked and never refunded for a no-op.
+func TestReviewWaitAnchor_PushLoopStillEndsAtMaxReviewCycles(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{
+		fetchPRReviewDecisionFn: func(owner, repo string, prNumber int) (string, error) {
+			return "CHANGES_REQUESTED", nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "Addressed it.", false, TokenUsage{}, nil
+		},
+	}
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: boolPtr(true), ReviewAuthority: "authoritative"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, stgs)
+	eng.cfg.MaxReviewCycles = 3
+	eng.cfg.ReviewWaitTimeout = 15 * time.Minute
+	now := time.Now()
+	eng.SetClock(stubClock{t: now})
+	// The label is far older than the window, so without the anchor every round
+	// would be a timeout; every round's head is a fresh push.
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return now.Add(-3 * time.Hour), nil
+	}
+	client.fetchCommitTimeFn = func(owner, repo, sha string) (time.Time, error) {
+		return now.Add(-20 * time.Second), nil
+	}
+	if _, err := eng.worktreesFor("owner/repo").EnsureWorktree(33, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	baseItem := gh.ProjectItem{
+		Number:          33,
+		Repo:            "owner/repo",
+		Labels:          []string{"stage:Implement:complete", "fabrik:awaiting-review"},
+		LinkedPRNumber:  102,
+		LinkedPRHeadSHA: "head-1",
+	}
+	round := func(id int) bool {
+		item := baseItem
+		item.LinkedPRReviews = []gh.PRReview{{Author: "alice", State: "CHANGES_REQUESTED", Body: fmt.Sprintf("finding %d", id), DatabaseID: id}}
+		remirrorLiveReviews(client, item)
+		advanced := make(map[string]bool)
+		pctx := &phase1Ctx{ctx: context.Background(), board: board, item: item, stage: stgs[0], hasComplete: true, advancedItems: advanced}
+		if !eng.handleReviewGate(pctx) {
+			t.Fatalf("round %d: handleReviewGate did not claim the item", id)
+		}
+		eng.wg.Wait()
+		return advanced["owner/repo#33"]
+	}
+
+	for i := 0; i < eng.cfg.MaxReviewCycles; i++ {
+		if !round(4000 + i) {
+			t.Fatalf("round %d: expected a reinvoke dispatch", i+1)
+		}
+	}
+	for _, name := range anchorRemovedLabels(client) {
+		if name == "fabrik:awaiting-review" {
+			t.Fatal("the review-wait timeout fired during the push loop; the anchor should have restarted the wait each round")
+		}
+	}
+	if round(4999) {
+		t.Fatal("expected no further reinvoke once MaxReviewCycles was reached")
+	}
+	paused := false
+	client.mu.Lock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			paused = true
+		}
+	}
+	client.mu.Unlock()
+	if !paused {
+		t.Error("expected fabrik:paused via pauseForReviewCycleLimit at MaxReviewCycles")
 	}
 }
