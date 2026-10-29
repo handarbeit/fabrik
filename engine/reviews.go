@@ -445,6 +445,7 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 		e.pauseIssue(item, msg, pauseOpts{
 			labelEcho:  true,
 			labelFirst: true,
+			cause:      pauseCauseOther,
 		})
 		return true, 0
 	}
@@ -466,6 +467,7 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		labelEcho:  true,
 		labelFirst: true,
+		cause:      pauseCauseOther,
 	})
 	return true, 0
 }
@@ -1969,6 +1971,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseReviewTimeout,
 	})
 	e.emitReviewTimeout(item, stage) // observation only (#1968)
 }
@@ -2094,7 +2097,7 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasPauseComment(item, reviewCyclePauseFragment(stage)) {
 		e.logf(item.Number, "review-cycles", "review-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCycleLimit)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
@@ -2118,6 +2121,7 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true

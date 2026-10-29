@@ -344,6 +344,7 @@ func (e *Engine) pauseForDispatchLimit(item gh.ProjectItem, stage *stages.Stage,
 	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 }
 

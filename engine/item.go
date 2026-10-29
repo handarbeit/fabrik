@@ -1713,7 +1713,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
 			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\n%sRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr, workNote)
 			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.addPausedLabelToItem(owner, repo, item)
+			e.addPausedLabelToItem(owner, repo, item, pauseCauseFailed)
 			releaseLock()
 			return
 		} else if prBlock != nil {
@@ -2379,6 +2379,7 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 		labelEcho:   true,
 		commentEcho: true,
 		labelFirst:  true,
+		cause:       pauseCauseFailed,
 	})
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
@@ -2411,6 +2412,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, c
 		labelEcho:   true,
 		commentEcho: true,
 		labelFirst:  true,
+		cause:       pauseCauseFailed,
 	})
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
@@ -2457,6 +2459,7 @@ func (e *Engine) pauseForSliceLimit(item gh.ProjectItem, stage *stages.Stage, sl
 	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -2556,6 +2559,7 @@ func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Sta
 	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -2574,6 +2578,9 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	e.removeLabel(item, failedLabel)
+	// fabrik:paused is already gone on every path that reaches here, so the
+	// cause label that lived with it goes too (#2487).
+	e.clearPauseCause(item)
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
@@ -2625,6 +2632,7 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 		"fabrik:awaiting-ci",
 		"fabrik:auto-merge-enabled",
 	}
+	blockingLabels = append(blockingLabels, e.currentPauseCauseLabels(item)...) // lives with fabrik:paused (#2487)
 	hasError := false
 	for _, lbl := range blockingLabels {
 		res := e.reserveLabelRemoval(item, lbl, "")
@@ -2787,8 +2795,7 @@ func buildAwaitingInputComment(users []string, stageName, summary string) string
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output string) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
-	e.addLabel(item, "fabrik:paused")
-	e.addLabel(item, "fabrik:awaiting-input")
+	e.applyPauseLabels(item, pauseCauseQuestion, true)
 	e.setStatusLine(item, statusLinePaused("waiting for your input")) // display-only (#2048)
 
 	// Post a dedicated @mention notification comment so GitHub delivers a mobile
@@ -2817,6 +2824,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	if err := e.removeLabelChecked(item, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not remove awaiting-input label (orphan rule will clear it): %v\n", err)
 	}
+	e.clearPauseCause(item) // the cause label lives and dies with fabrik:paused (#2487)
 
 	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
 	// and reset retry/pause state that may have accumulated before the block.
@@ -3421,7 +3429,7 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 	// Add fabrik:paused so itemNeedsWork skips this issue until the user
 	// removes it. Without fabrik:paused the clearFailedStage path in
 	// processItem would auto-clear the failed label on the next poll cycle.
-	e.addLabel(item, "fabrik:paused")
+	e.applyPauseLabels(item, pauseCauseFailed, false)
 	e.setStatusLine(item, statusLinePaused("worktree boundary violation")) // display-only (#2048)
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
@@ -3657,5 +3665,5 @@ func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 		"🏭 **Fabrik — %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
 		stoppedBy, req.StageName,
 	)
-	e.pauseInterruptedIssue(item, comment)
+	e.pauseInterruptedIssue(item, pauseCauseOther, comment)
 }

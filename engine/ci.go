@@ -799,7 +799,7 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 func (e *Engine) pauseForCITimeoutNoted(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, extra string) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
 		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCITimeout)
 		return false
 	}
 	e.logf(item.Number, "ci-timeout", "CI wait timeout elapsed — pausing for human intervention\n")
@@ -813,6 +813,7 @@ func (e *Engine) pauseForCITimeoutNoted(board *gh.ProjectBoard, item gh.ProjectI
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCITimeout,
 	})
 	e.emitCITimeout(item, stage) // observation only (#1968)
 	return true
@@ -890,7 +891,7 @@ func (e *Engine) pauseForCIBackstop(board *gh.ProjectBoard, item gh.ProjectItem,
 			"Fabrik has paused this issue. Open the PR to see what is holding it (mergeability, required checks, check suites), then comment or remove the `fabrik:paused` label to resume.",
 		stage.Name, what, total, state, e.suiteTimeoutNote(item),
 	)
-	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true})
+	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true, cause: pauseCauseCITimeout})
 	e.emitCITimeout(item, stage) // observation only (#1968)
 	return true
 }
@@ -942,7 +943,7 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasCIGatePauseComment(item, stage) {
 		e.logf(item.Number, "ci-cycles", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCycleLimit)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
@@ -965,6 +966,7 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true
@@ -999,6 +1001,7 @@ func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseOther,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
 	e.removeAwaitingReviewLabel(owner, repo, item)
@@ -1028,6 +1031,7 @@ func (e *Engine) pauseForRequiredNeverRunningCheck(_ *gh.ProjectBoard, item gh.P
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseOther,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
 }
@@ -1057,6 +1061,7 @@ func (e *Engine) pauseForCIStartupFailure(_ *gh.ProjectBoard, item gh.ProjectIte
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseOther,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
 	// A resume starts with a fresh retrigger budget (see resetStartupState).

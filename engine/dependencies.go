@@ -293,7 +293,7 @@ func (e *Engine) checkDependenciesMode(board *gh.ProjectBoard, item gh.ProjectIt
 		if detectCycle(e.store, itemRepo, item.Number, openDeps, 4) {
 			e.logf(item.Number, "warn", "cycle detected in blockedBy graph — pausing issue\n")
 			cycleMsg := fmt.Sprintf("🏭 **Fabrik — cycle detected**\n\nIssue #%d has a cyclic `blockedBy` dependency: it is waiting for issues that are themselves (transitively) waiting for this issue. Fabrik cannot make progress. Remove the cycle manually and then remove `fabrik:paused` to continue.", item.Number)
-			e.pauseIssue(item, cycleMsg, pauseOpts{})
+			e.pauseIssue(item, cycleMsg, pauseOpts{cause: pauseCauseOther})
 			// checkDependencies's own bool return IS the Phase 1 claim signal (no
 			// translation layer in handleDependencies) — return true so the item
 			// is claimed and Phase 2 does not advance it in this same pass. See ADR-1223.

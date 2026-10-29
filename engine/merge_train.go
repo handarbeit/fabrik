@@ -3515,7 +3515,7 @@ func (e *Engine) pauseRedSingleton(projectID, owner, repo string, m trainMember,
 	}
 
 	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
-	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+	e.pauseMergeTrainMember(owner, repo, m.item.Number, pauseCauseFailed)
 	e.setStatusLine(m.item, statusLinePaused("own validation failing"))
 	e.emitTrainEvent(owner, repo, m.item.Number, channelevents.MergeTrainFailed, "red-singleton",
 		"its own combined Validate is failing, independent of the other batch members", diag, nil) // observation only (#1968)
@@ -3647,7 +3647,7 @@ func (e *Engine) ejectMemberAtHead(owner, repo string, memberItem gh.ProjectItem
 		if _, err := e.client.AddComment(owner, repo, memberItem.Number, pauseMsg); err != nil {
 			e.logf(memberItem.Number, "merge-train", "warn: could not post pause comment: %v\n", err)
 		}
-		e.pauseMergeTrainMember(owner, repo, memberItem.Number)
+		e.pauseMergeTrainMember(owner, repo, memberItem.Number, pauseCauseCycleLimit)
 		e.setStatusLine(memberItem, statusLinePaused(fmt.Sprintf("ejected %d times", count)))
 	} else if stayInQueue {
 		// Left the batch but stays Queued for a later train.
@@ -3677,7 +3677,7 @@ func (e *Engine) ejectMemberAtHead(owner, repo string, memberItem gh.ProjectItem
 // excluding this cap-reached path); ejectRedSingleton's call (#1545) pauses only after
 // rerouting the member off Queued, so its pause lands on a reachable, non-HoldingStage
 // column instead.
-func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
+func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int, cause pauseCause) {
 	pausedRes := e.echo.Reserve("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:paused")
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, "fabrik:paused"); err != nil {
 		pausedRes.Cancel()
@@ -3696,6 +3696,13 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int) {
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
 		}
 	}
+	// The member's snapshot is not at hand here, so read its labels live: a cause label
+	// the Store has not seen (stale or absent) must still be replaced, never doubled.
+	item := gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}
+	if labels, err := e.liveLabels(owner, repo, issueNumber); err == nil {
+		item.Labels = labels
+	}
+	e.applyPauseCause(item, cause, true)
 }
 
 // resetEjectionCount zeroes the per-member ejection counter after a successful landing
@@ -4291,8 +4298,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBas
 		// already carries fabrik:paused (see settleRunawayGuardAlertScan's doc
 		// comment) — a crash between the two label writes must not leave the
 		// marker applied to a member that was never actually paused (#1533 review).
-		e.addLabel(item, "fabrik:paused")
-		e.addLabel(item, "fabrik:awaiting-input")
+		e.applyPauseLabels(item, pauseCauseBreaker, true)
 		e.setStatusLine(item, statusLinePaused("merge-train runaway guard"))
 		e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "runaway-guard",
 			fmt.Sprintf("%d trial(s) with zero successful lands within %s", count, window), nil, map[string]string{"trials": strconv.Itoa(count)}) // observation only (#1968)
@@ -4594,7 +4600,7 @@ func (e *Engine) escalateStrandedTrainMember(projectID, owner, repo string, item
 	}
 
 	e.logf(item.Number, "merge-train", "#%d rerouted off Queued to %s and paused after a landing failure: %s\n", item.Number, targetName, reason)
-	e.pauseMergeTrainMember(owner, repo, item.Number)
+	e.pauseMergeTrainMember(owner, repo, item.Number, pauseCauseOther)
 	e.setStatusLine(item, statusLinePaused("landing failed"))
 	e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "landing-failed", reason, nil, nil) // observation only (#1968)
 }

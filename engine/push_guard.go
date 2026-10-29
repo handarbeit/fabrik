@@ -103,12 +103,13 @@ func (e *Engine) zeroAheadCheck(item gh.ProjectItem, wm *WorktreeManager, pause 
 	}
 	e.logf(item.Number, "push-guard", "REFUSING to push %s: 0 commits ahead of origin/%s while PR #%d is open — remote branch left untouched, pausing\n", branch, baseBranch, pr.Number)
 	if hasPauseComment(item, zeroAheadPauseFragment) {
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseOther)
 		return true
 	}
 	e.pauseIssue(item, buildZeroAheadPauseComment(branch, baseBranch, pr.Number), pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseOther,
 	})
 	return true
 }

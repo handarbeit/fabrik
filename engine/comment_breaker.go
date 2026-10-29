@@ -144,6 +144,7 @@ func (e *Engine) tripCommentBreaker(item gh.ProjectItem, count int, window time.
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseBreaker,
 	})
 
 	e.emitStructural(tui.CommentBreakerTrippedEvent{

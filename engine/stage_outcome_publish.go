@@ -197,7 +197,7 @@ func (e *Engine) noteOutcomeFailure(item gh.ProjectItem, rec *stageOutcomeRecord
 			"Fabrik has paused this issue. Fix the cause (for example a missing permission), then comment or remove the `fabrik:paused` label to resume. "+
 			"The recorded result is discarded, so the stage runs again on resume.",
 		rec.Stage, rec.Stage, rec.Attempts, err)
-	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true})
+	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true, cause: pauseCauseFailed})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: rec.Stage})
 	e.dropStageOutcome(rec.key(), rec.Number, fmt.Sprintf("publication failed %d times — item paused", rec.Attempts))
 }

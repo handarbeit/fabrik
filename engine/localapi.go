@@ -298,6 +298,8 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 		},
 		Progress: localapi.ProgressInfo{At: localapi.KnownTime(res.ProgressAt)},
 		Cause:    res.Cause,
+
+		PauseCause: res.PauseCause,
 	}
 	info.CIFailing = res.CIFailing
 	if !res.ProgressAt.IsZero() {

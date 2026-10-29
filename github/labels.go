@@ -31,8 +31,18 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:unrestricted", "Claude runs with --dangerously-skip-permissions for this issue", "d73a4a"},
 	{"fabrik:landing-verification-failed", "Post-Done check found the credited PR was not merged; issue reopened and moved off Done", "d73a4a"},
 
+	// --- pause cause labels (red, #2487): why the engine paused; written with fabrik:paused, removed with it ---
+	{"fabrik:pause:question", "Paused: a question was put to a human; comment to answer", "d73a4a"},
+	{"fabrik:pause:review-timeout", "Paused: the review gate timed out", "d73a4a"},
+	{"fabrik:pause:ci-timeout", "Paused: the CI gate or merge-state wait timed out", "d73a4a"},
+	{"fabrik:pause:cycle-limit", "Paused: a review/CI-fix/rebase/enqueue/slice/dispatch limit was reached", "d73a4a"},
+	{"fabrik:pause:daemon-stop", "Paused: the daemon was stopped cleanly while this ran", "d73a4a"},
+	{"fabrik:pause:breaker", "Paused: a comment circuit breaker or the merge-train runaway guard fired", "d73a4a"},
+	{"fabrik:pause:failed", "Paused: a stage failed or the engine's retries were exhausted", "d73a4a"},
+	{"fabrik:pause:other", "Paused: any other engine pause; see the pause comment", "d73a4a"},
+
 	// --- waiting labels (yellow) ---
-	{"fabrik:awaiting-input", "Stage blocked on FABRIK_BLOCKED_ON_INPUT; comment to unblock", "e4e669"},
+	{"fabrik:awaiting-input", "Engine pause marker (paired with fabrik:paused); the fabrik:pause:* label says why", "e4e669"},
 	{"fabrik:awaiting-review", "Validate complete; waiting for requested PR reviewers", "e4e669"},
 	{"fabrik:awaiting-ci", "CI gate active; waiting for CI checks to pass (checks may be running or have failed)", "e4e669"},
 	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},

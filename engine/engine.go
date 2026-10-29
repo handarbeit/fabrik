@@ -419,6 +419,7 @@ type Engine struct {
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	closedPausedCleanupOff                atomic.Bool                               // test seam: SetClosedPausedCleanupDisabledForTest (#2459)
+	pauseCauseSettleOff                   atomic.Bool                               // test seam: SetPauseCauseSettleDisabledForTest (#2487)
 	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)
 	validateReworkRestoreGuardOff         atomic.Bool                               // test seam: SetValidateReworkRestoreGuardDisabledForTest (#2378)
@@ -1430,6 +1431,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 			e.pauseIssue(item, msg, pauseOpts{
 				awaitingInput: true,
 				reactRocket:   true,
+				cause:         pauseCauseOther,
 			})
 			// Append a history entry so the TUI records the failure.
 			hist := tui.LoadHistory()
@@ -1562,6 +1564,7 @@ func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem 
 		targetOwner, targetRepo, cloneErr)
 	e.pauseIssue(parentItem, msg, pauseOpts{
 		awaitingInput: true,
+		cause:         pauseCauseOther,
 	})
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
 }
