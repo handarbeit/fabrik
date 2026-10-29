@@ -3,6 +3,7 @@ package simclaude
 import (
 	"context"
 	"fmt"
+	"os/exec"
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
@@ -60,6 +61,17 @@ func APIErrorExit() Script {
 	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
 		usage := engine.TokenUsage{TurnsUsed: 1, CostUSD: 0}
 		return "", false, usage, &claudeerr.APIErrorExit{TerminalReason: "api_error", NumTurns: 1, CostUSD: 0}
+	}
+}
+
+// StartFailure returns a Script mirroring a Claude process that cannot be
+// launched (#2499): the *exec.Error the OS-level start returns when the binary
+// is not on PATH, with no output and zero usage. finalizeStageOutcome
+// classifies it as "Claude did not run" (isClaudeStartFailure): no
+// StageAttempted, no max_retries charge, no stage:<name>:failed.
+func StartFailure() Script {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		return "", false, engine.TokenUsage{}, fmt.Errorf("starting claude: %w", &exec.Error{Name: "claude", Err: exec.ErrNotFound})
 	}
 }
 
