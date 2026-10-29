@@ -3696,7 +3696,13 @@ func (e *Engine) pauseMergeTrainMember(owner, repo string, issueNumber int, caus
 			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:awaiting-input")
 		}
 	}
-	e.applyPauseCause(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, cause, true)
+	// The member's snapshot is not at hand here, so read its labels live: a cause label
+	// the Store has not seen (stale or absent) must still be replaced, never doubled.
+	item := gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}
+	if labels, err := e.liveLabels(owner, repo, issueNumber); err == nil {
+		item.Labels = labels
+	}
+	e.applyPauseCause(item, cause, true)
 }
 
 // resetEjectionCount zeroes the per-member ejection counter after a successful landing

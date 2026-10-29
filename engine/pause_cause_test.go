@@ -79,6 +79,28 @@ func TestPauseInterruptedIssue_KeepsAnExistingCauseOnAnAlreadyPausedItem(t *test
 	}
 }
 
+// A merge-train member is paused from owner/repo/number alone: the cause label it
+// already carries on GitHub must be replaced even when the Store has never seen it.
+func TestPauseMergeTrainMember_ReplacesACauseTheStoreHasNotSeen(t *testing.T) {
+	var removed []string
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(_, _ string, _ int) ([]string, error) {
+			return []string{"fabrik:paused", "fabrik:awaiting-input", pauseCauseQuestion.label()}, nil
+		},
+		removeLabelFromIssueFn: func(_, _ string, _ int, label string) error {
+			removed = append(removed, label)
+			return nil
+		},
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	eng.pauseMergeTrainMember("owner", "repo", 7, pauseCauseCycleLimit)
+
+	if len(removed) != 1 || removed[0] != pauseCauseQuestion.label() {
+		t.Errorf("removed labels = %v, want [%s]", removed, pauseCauseQuestion.label())
+	}
+}
+
 func TestPauseIssue_UnsetCauseFallsBackToOther(t *testing.T) {
 	eng, cache := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.pauseIssue(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "🏭 **Fabrik — x**\n\nmsg", pauseOpts{awaitingInput: true, labelEcho: true})
