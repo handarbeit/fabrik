@@ -1209,6 +1209,8 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		switch {
 		case it.Worker != nil && it.Worker.Queued:
 			queued++
+		case it.Worker != nil && it.Worker.ReservedSlot:
+			// A fix round on the reserved fix-round slot (#2490) is fix_in_use, never in_use.
 		case it.Worker != nil:
 			inUse++
 		case it.ConflictResolution != nil && it.ConflictResolution.Queued:
@@ -1230,6 +1232,9 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	trainInUse, trainMax := b.e.trainSlotUsage()
 	res.Workers.TrainInUse = localapi.Some(trainInUse)
 	res.Workers.TrainMax = localapi.Some(trainMax)
+	fixInUse, fixMax := b.e.fixRoundSlotUsage()
+	res.Workers.FixInUse = localapi.Some(fixInUse)
+	res.Workers.FixMax = localapi.Some(fixMax)
 
 	res.MergeTrain = b.partitions(now, h)
 	if h.Draining {

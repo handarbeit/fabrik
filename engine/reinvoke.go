@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -259,9 +261,14 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			cancelReinvoke()
 		}()
 
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
+		releaseSlot, reserved, err := e.acquireFixRoundSlot(ctx)
+		switch {
+		case err == nil:
+		case errors.Is(err, errDrainingNotAttempted):
+			// #2259: queued but not started — abandon; the new process re-dispatches.
+			e.logf(item.Number, opts.tag, "SIGHUP drain: abandoning queued re-invocation\n")
+			return
+		default:
 			// Stopped while queued: no pass ran, so refund the pre-dispatch charge
 			// (#2349). Repeated stop/resume must not exhaust the cycle cap.
 			if opts.cycle.refund != nil {
@@ -271,12 +278,8 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			}
 			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired — refunded %s cycle counter\n", opts.cycle.label)
 			return
-		case <-e.drainGateCh():
-			// #2259: queued but not started — abandon; the new process re-dispatches.
-			e.logf(item.Number, opts.tag, "SIGHUP drain: abandoning queued re-invocation\n")
-			return
 		}
-		defer func() { <-e.sem }()
+		defer releaseSlot()
 		if e.isDraining() {
 			// The drain began between the slot being taken and this check.
 			e.logf(item.Number, opts.tag, "SIGHUP drain: abandoning queued re-invocation\n")
@@ -290,7 +293,15 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		// reinvoke deliberately claims no store Lock: Lock mirrors the
 		// fabrik:locked label, which a reinvoke never applies (its cross-instance
 		// marker is fabrik:editing), so there is nothing to release (#2179, ADR 2179).
-		e.store.Apply(itemstate.WorkerSlotAcquired{Repo: itemRepo, Number: item.Number, At: e.now()})
+		slotAt := e.now()
+		e.store.Apply(itemstate.WorkerSlotAcquired{Repo: itemRepo, Number: item.Number, At: slotAt, Reserved: reserved})
+		// FR-008 (#2490): one line per fix round, zero waits included, so the share
+		// that queued behind full slots can be counted from logs.
+		slotKind := "ordinary"
+		if reserved {
+			slotKind = "reserved"
+		}
+		e.logf(item.Number, opts.tag, "slot acquired: %s took %s slot after %s queued\n", opts.kind, slotKind, slotAt.Sub(queuedAt).Round(time.Millisecond))
 
 		if err := e.ensureRepoReady(ctx, item); err != nil {
 			if errors.Is(err, ErrSkipItem) {
@@ -404,4 +415,47 @@ func (e *Engine) didNotRunPauseNote(repoStr string, number int, stageName string
 		return fmt.Sprintf("Note: %d re-invocation(s) for this stage never ran (Claude API error or usage limit) "+
 			"and were not counted toward this limit.", n), false
 	}
+}
+
+// acquireFixRoundSlot takes the worker slot a review, CI-fix or rebase reinvoke runs
+// under (#2490, ADR 2490), in the merge train's order (acquireTrainSlotIn): a free
+// reserved fix-round slot first, then a free general (max_concurrent) slot, else wait
+// on either. e.fixSem is nil when fix_round_slots is 0; a nil channel is never ready
+// in a select, so that case is exactly the single-pool behaviour. Only this function
+// touches e.fixSem for acquisition, and it is called only by dispatchReinvoke, so a
+// stage run or comment-review pass can never take the reserved slot. One slot is taken
+// from one pool and release returns that same pool's, so the no-deadlock argument of
+// ADR 2115 carries over. reserved reports which pool was used. A cancelled wait
+// returns an error wrapping ctx.Err(); a SIGHUP drain returns errDrainingNotAttempted.
+// release is idempotent.
+func (e *Engine) acquireFixRoundSlot(ctx context.Context) (release func(), reserved bool, err error) {
+	fix := e.fixSem
+	if e.fixReservationOff.Load() {
+		fix = nil
+	}
+	var held chan struct{}
+	select {
+	case fix <- struct{}{}:
+		held = fix
+	default:
+		select {
+		case e.sem <- struct{}{}:
+			held = e.sem
+		default:
+		}
+	}
+	if held == nil {
+		select {
+		case fix <- struct{}{}:
+			held = fix
+		case e.sem <- struct{}{}:
+			held = e.sem
+		case <-ctx.Done():
+			return nil, false, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
+		case <-e.drainGateCh():
+			return nil, false, errDrainingNotAttempted // #2259
+		}
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-held }) }, held == fix && fix != nil, nil
 }

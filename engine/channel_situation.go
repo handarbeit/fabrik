@@ -218,6 +218,9 @@ func renderSituation(v localapi.SituationView, now time.Time, trigger string) ch
 	if h.Workers.TrainMax.Valid && h.Workers.TrainMax.V > 0 {
 		fmt.Fprintf(&b, " (+train %s/%s)", knownText(h.Workers.TrainInUse), knownText(h.Workers.TrainMax))
 	}
+	if h.Workers.FixMax.Valid && h.Workers.FixMax.V > 0 {
+		fmt.Fprintf(&b, " (+fix %s/%s)", knownText(h.Workers.FixInUse), knownText(h.Workers.FixMax))
+	}
 	fmt.Fprintf(&b, "; %d train member(s) queued", h.TrainQueued)
 	if h.Claude.UsageLimited {
 		b.WriteString("; Claude usage limit hit")
@@ -390,9 +393,14 @@ func situationFingerprint(v localapi.SituationView) string {
 	}
 
 	h := v.Health
-	w("health", knownText(h.Poll.Overdue), h.Poll.OverdueCause, h.Poll.BackoffReason,
+	healthFields := []string{knownText(h.Poll.Overdue), h.Poll.OverdueCause, h.Poll.BackoffReason,
 		strconv.Itoa(h.Workers.InUse), knownText(h.Workers.MaxConcurrent), knownText(h.Workers.TrainInUse), knownText(h.Workers.TrainMax),
-		strconv.FormatBool(h.Claude.UsageLimited), strconv.Itoa(h.TrainQueued))
+		strconv.FormatBool(h.Claude.UsageLimited), strconv.Itoa(h.TrainQueued)}
+	if h.Workers.FixMax.Valid && h.Workers.FixMax.V > 0 {
+		// Only when the reservation exists (#2490), so a fingerprint with it off is unchanged.
+		healthFields = append(healthFields, knownText(h.Workers.FixInUse), knownText(h.Workers.FixMax))
+	}
+	w(append([]string{"health"}, healthFields...)...)
 
 	w("section", "anomalies", strconv.Itoa(v.Anomalies.Omitted))
 	as := append([]localapi.SituationAnomaly(nil), v.Anomalies.Entries...)

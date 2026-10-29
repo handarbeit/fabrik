@@ -69,6 +69,7 @@ type Config struct {
 	MaxBatchSize               int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations       int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
 	MaxTrainRebaseCycles       int                 // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
+	FixRoundSlots              int                 // Reserved worker slots, on top of MaxConcurrent, usable only by review/CI-fix/rebase reinvokes (0 = disabled; #2490, ADR 2490)
 	MaxStageDispatches         int                 // Max dispatches of one stage of one item per episode before pausing (0 = disabled; cmd applies the default of 25; #2395, ADR 2395)
 	MaxTrainAutoRepairAttempts int                 // Red-singleton auto-repair attempts per member per base SHA (0 = disabled, pause as before; cmd applies the default of 1; #2045, ADR-2045)
 	MaxTrainTrialsPerWindow    int                 // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
@@ -362,6 +363,8 @@ type Engine struct {
 	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
 	trainSem             chan struct{}        // reserved merge-train worker slot (#2115, ADR 2115); nil when merge_train is off (and on NewWithDeps engines unless EnableTrainReservedSlotForTest); touched only by acquireTrainSlotEp
+	fixSem               chan struct{}        // reserved fix-round worker slots (#2490, ADR 2490); nil when fix_round_slots is 0 (and on NewWithDeps engines unless EnableFixRoundSlotsForTest); touched only by acquireFixRoundSlot and the usage helpers
+	fixReservationOff    atomic.Bool          // TEST-ONLY (#2490): acquireFixRoundSlot ignores fixSem
 	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
 	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
@@ -815,6 +818,7 @@ func New(cfg Config) (*Engine, error) {
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
 		trainSem:                  newTrainSlot(cfg),
+		fixSem:                    newFixRoundSlot(cfg.FixRoundSlots),
 		mergeTrainEjectionCounts:  make(map[string]int),
 		mergeTrainEjectionHeads:   make(map[string]string),
 		mergeTrainCIDeferred:      make(map[string]string),
@@ -1611,6 +1615,40 @@ func (e *Engine) HoldGeneralWorkerSlotsForTest() (release func()) {
 			}
 		})
 	}
+}
+
+// newFixRoundSlot builds the reserved fix-round slot channel (#2490, ADR 2490), or
+// nil when n <= 0 so "0 changes nothing" holds structurally.
+func newFixRoundSlot(n int) chan struct{} {
+	if n <= 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+// EnableFixRoundSlotsForTest creates n reserved fix-round slots on an engine built
+// by NewWithDeps, which leaves them nil so the existing slot tests keep observing a
+// single pool. Test seam only (#2490).
+func (e *Engine) EnableFixRoundSlotsForTest(n int) {
+	e.fixSem = newFixRoundSlot(n)
+}
+
+// SetFixRoundReservationDisabledForTest makes fix rounds ignore the reserved slot, as
+// if it did not exist (the SC-005 neutralisation seam, #2490). Per-Engine.
+func (e *Engine) SetFixRoundReservationDisabledForTest(disabled bool) {
+	e.fixReservationOff.Store(disabled)
+}
+
+// fixRoundSlotUsage reports the reserved fix-round slots' occupancy: slots in use
+// and capacity (0, 0 when none exist). Exact and safe to call concurrently.
+func (e *Engine) fixRoundSlotUsage() (inUse, capacity int) {
+	return len(e.fixSem), cap(e.fixSem)
+}
+
+// FixRoundSlotUsageForTest reports reserved fix-round slot occupancy.
+// Test seam only (#2490).
+func (e *Engine) FixRoundSlotUsageForTest() (inUse, capacity int) {
+	return e.fixRoundSlotUsage()
 }
 
 // WorkerSlotUsageForTest reports general-pool and reserved-train-slot occupancy.

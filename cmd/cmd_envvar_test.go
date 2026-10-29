@@ -1315,3 +1315,74 @@ func TestExecute_ReplayFailedDeliveries(t *testing.T) {
 		})
 	}
 }
+
+// ---- Reserved fix-round worker slots (#2490) ----
+
+// fixRoundSlotsRun mirrors stageDispatchesRun for fix_round_slots.
+func fixRoundSlotsRun(t *testing.T, yaml string, env map[string]string, extra ...string) (int, error) {
+	t.Helper()
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	if yaml != "" {
+		os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+		os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+	}
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_FIX_ROUND_SLOTS", "")
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, extra...)
+	var captured Config
+	var called bool
+	testResolvedConfigHook = func(cfg Config) { captured, called = cfg, true }
+	defer func() { testResolvedConfigHook = nil }()
+	if err := Execute(); err != nil {
+		return 0, err
+	}
+	if !called {
+		t.Fatal("testResolvedConfigHook was not invoked")
+	}
+	return captured.FixRoundSlots, nil
+}
+
+func TestExecute_FixRoundSlots(t *testing.T) {
+	const envName = "FABRIK_FIX_ROUND_SLOTS"
+	cases := []struct {
+		name    string
+		yaml    string
+		env     map[string]string
+		extra   []string
+		want    int
+		wantErr bool
+	}{
+		{"default is 0", "", nil, nil, 0, false},
+		{"config only", "fix_round_slots: 2\n", nil, nil, 2, false},
+		{"env beats config", "fix_round_slots: 2\n", map[string]string{envName: "1"}, nil, 1, false},
+		{"env 0 disables over config", "fix_round_slots: 2\n", map[string]string{envName: "0"}, nil, 0, false},
+		{"flag beats env and config", "fix_round_slots: 2\n", map[string]string{envName: "1"}, []string{"--fix-round-slots", "3"}, 3, false},
+		{"flag 0 disables over env", "", map[string]string{envName: "1"}, []string{"--fix-round-slots", "0"}, 0, false},
+		{"config negative refused", "fix_round_slots: -1\n", nil, nil, 0, true},
+		{"env negative refused", "", map[string]string{envName: "-2"}, nil, 0, true},
+		{"env non-integer refused", "", map[string]string{envName: "abc"}, nil, 0, true},
+		{"flag negative refused", "", nil, []string{"--fix-round-slots", "-3"}, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := fixRoundSlotsRun(t, c.yaml, c.env, c.extra...)
+			if c.wantErr {
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), "fix") {
+					t.Fatalf("want a refusal naming the setting, got err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("FixRoundSlots = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
