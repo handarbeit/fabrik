@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/bedstate"
 )
 
 // TestMergeTrainRunawayGuardPausesBatch is the e2e proof of ADR-059 D8: when
@@ -47,6 +49,10 @@ import (
 // every shared test has finished, so nothing shared inherits the poisoned RepoBeta
 // state (this replaces the gate's former TrainIsolatedRE cell).
 //
+// Cleanup (#2482): the test restarts the bed at the end with the persisted
+// train-caps file removed, so neither the engine's memory nor the disk holds the
+// tripped trial window afterwards (see the t.Cleanup below).
+//
 // Wall-clock: ~10–20 min (~6 trials × 2 required checks ≈ 12 Actions runs).
 // Cost: low (no Claude invocations).
 func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
@@ -54,6 +60,24 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 	AssertFabrikRunning(t, env)
 	requireTrainBed(t, env)
 	assertTrainPoisonGuardRequired(t, env, env.RepoBeta)
+
+	// Leave no trial window behind (#2482, ADR-2482). Since #2349 the engine
+	// persists the guard's trial window, and the 4 paused members never land, so
+	// nothing resets the engine's in-memory window either: the only harness-side
+	// way to clear both is to stop the bed, remove the train-caps file while it is
+	// down, and start it again. Registered after the prerequisite checks, so a
+	// skipped test does not restart the bed; it runs on pass or fail, and leaves
+	// the bed running with its .env, auth and mode unchanged.
+	t.Cleanup(func() {
+		StopFabrikTestBed(t, env)
+		removed, err := bedstate.ClearTrainCaps(env.FabrikTestDir)
+		if err != nil {
+			t.Errorf("clearing the persisted train caps: %v", err)
+		} else if removed {
+			t.Logf("cleared the persisted train caps (runaway guard trial window) in %s", env.FabrikTestDir)
+		}
+		StartFabrikTestBed(t, env)
+	})
 
 	const base = "main"
 	logStart := LogOffset(t, env)

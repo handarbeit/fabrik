@@ -414,6 +414,7 @@ type Engine struct {
 	sessionRootForTest                    atomic.Pointer[string]                    // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
+	closedPausedCleanupOff                atomic.Bool                               // test seam: SetClosedPausedCleanupDisabledForTest (#2459)
 	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)
 	validateReworkRestoreGuardOff         atomic.Bool                               // test seam: SetValidateReworkRestoreGuardDisabledForTest (#2378)
@@ -456,6 +457,7 @@ type Engine struct {
 	baseBranchWarnedSet                   sync.Map                                  // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	ciGateCoverageWarnedSet               sync.Map                                  // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
 	hookCheckLog                          hookCheckLogState                         // throttle of the R7 webhook-config "could not read" log line (#2143); in memory
+	startFailures                         startFailureState                         // stage start failures (#2499): per-item consecutive-failure holds and the daemon-wide claude_start warning state; in memory by design — a restart begins again from the first failure
 	unknownMergeClocks                    unknownMergeClocks                        // per item+PR-head continuous unknown-merge-state clocks (#2302); in memory by design — a restart starts them again
 	ciJudgedHeads                         sync.Map                                  // key: "owner/repo#N" -> ciJudgedHead; the PR head the stage CI gate cleared this poll (#2342). Consumed by attemptMergeOnValidate. In memory by design.
 	ciBackstopLiveEvaluated               sync.Map                                  // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.

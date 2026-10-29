@@ -117,7 +117,7 @@ type routeLivenessConfig struct {
 	Ledger livenessLedger
 	Sink   routeSink
 	// HookURL reads the hook's current URL (GET /app/hook/config).
-	HookURL func() (string, error)
+	HookURL func(ctx context.Context) (string, error)
 	// OwnURL is the URL this receiver is served at, "" when not known (the direct
 	// transport's public name belongs to an external proxy).
 	OwnURL func() string
@@ -189,6 +189,17 @@ type routeLiveness struct {
 	// does not match the cached URL triggers.
 	refreshing         bool
 	lastArrivalRefresh time.Time
+	// lifeCtx / lifeCancel / wg / stopped are the controller's own lifecycle (#2480):
+	// the arrival refresh runs on lifeCtx and is counted in wg, and Stop sets stopped
+	// (under mu, the same lock the refresh takes before wg.Add, so an Add can never
+	// race a Wait), cancels lifeCtx and waits. A controller that never ran Run is
+	// "running, not cancelled".
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	wg         sync.WaitGroup
+	stopped    bool
+	// refreshTrackingOff neutralises the tracking for the non-vacuity test.
+	refreshTrackingOff bool
 	// noEligibleLogged keeps the "no delivery eligible" line to once per stretch
 	// without a probe.
 	noEligibleLogged bool
@@ -216,12 +227,15 @@ func newRouteLiveness(cfg routeLivenessConfig) *routeLiveness {
 	if cfg.OwnURL == nil {
 		cfg.OwnURL = func() string { return "" }
 	}
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	r := &routeLiveness{
-		cfg:     cfg,
-		started: cfg.Now(),
-		trigger: make(chan struct{}, 1),
-		state:   localapi.RouteUnknown,
-		perGUID: make(map[string]*guidProbe),
+		cfg:        cfg,
+		started:    cfg.Now(),
+		trigger:    make(chan struct{}, 1),
+		state:      localapi.RouteUnknown,
+		perGUID:    make(map[string]*guidProbe),
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
 	}
 	if cfg.Sink != nil {
 		cfg.Sink.SetRouteLiveness(localapi.RouteLiveness{Liveness: localapi.RouteUnknown})
@@ -233,6 +247,21 @@ func (r *routeLiveness) log(format string, args ...any) {
 	if r.cfg.Logf != nil {
 		r.cfg.Logf(format, args...)
 	}
+}
+
+// Stop ends the controller's own work: no further arrival refresh starts, an
+// in-flight one is cancelled, and Stop returns only once it has exited (#2480).
+// It does not stop Run (its context does). nil-safe and idempotent; it must not
+// be called from the refresh goroutine or from decide's callbacks.
+func (r *routeLiveness) Stop() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
+	r.lifeCancel()
+	r.wg.Wait()
 }
 
 // Trigger requests an evaluation (a transport reconnect). Never blocks; nil-safe.
@@ -334,20 +363,36 @@ func (r *routeLiveness) noteRealArrival() {
 // arrival is covered by the next arrival or the passive read.
 func (r *routeLiveness) refreshHookForArrival(at time.Time) {
 	r.mu.Lock()
-	if r.refreshing || (!r.lastArrivalRefresh.IsZero() && at.Sub(r.lastArrivalRefresh) < livenessArrivalRefreshGap) {
+	if r.stopped || r.refreshing || (!r.lastArrivalRefresh.IsZero() && at.Sub(r.lastArrivalRefresh) < livenessArrivalRefreshGap) {
 		r.mu.Unlock()
 		return
 	}
 	r.refreshing = true
 	r.lastArrivalRefresh = at
+	ctx := r.lifeCtx
+	if r.refreshTrackingOff {
+		ctx = context.Background()
+	} else {
+		// Under mu with the stopped check: Stop sets stopped under the same lock
+		// before it waits, so this Add never races the Wait.
+		r.wg.Add(1)
+	}
+	tracked := !r.refreshTrackingOff
 	r.mu.Unlock()
 	go func() {
 		defer func() {
 			r.mu.Lock()
 			r.refreshing = false
 			r.mu.Unlock()
+			if tracked {
+				r.wg.Done()
+			}
 		}()
-		hookURL, err := r.hookURL()
+		hookURL, err := r.hookURL(ctx)
+		if ctx.Err() != nil {
+			// Stopped: no log, no verdict, however the read ended.
+			return
+		}
 		if err != nil {
 			r.logOnce("could not read the App's webhook configuration (%v) — route liveness unchanged", err)
 			return
@@ -608,8 +653,11 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 		return
 	}
 
-	hookURL, err := r.hookURL()
+	hookURL, err := r.hookURL(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		// A failed config read waits out the passive interval like a successful
 		// one (and defers a due retry by it), so a persistent 403/404/rate limit is
 		// one request per interval, not one per tick.
@@ -713,11 +761,11 @@ func (r *routeLiveness) classifyLog(lr logRead, hookURL string, now time.Time) p
 	return classifyAttempts(lr.attempts, now, floor, verify)
 }
 
-func (r *routeLiveness) hookURL() (string, error) {
+func (r *routeLiveness) hookURL(ctx context.Context) (string, error) {
 	if r.cfg.HookURL == nil {
 		return "", errors.New("no hook URL source")
 	}
-	return r.cfg.HookURL()
+	return r.cfg.HookURL(ctx)
 }
 
 // logOnce logs a read failure once per distinct message.

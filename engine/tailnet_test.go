@@ -111,7 +111,9 @@ func startTailscaleEngine(t *testing.T) (*Engine, func(), *syncLog) {
 	eng.SetLogSinkForTest(func(_ int, tag, msg string) { logs.add("[%s] %s", tag, msg) })
 	// No GitHub App in the test engine: R7 and coverage must not reach for one.
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) {
+		return gh.AppHookConfig{}, errors.New("no app")
+	}
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := eng.setUpIngestion(context.Background(), cache)
@@ -612,7 +614,9 @@ func TestTailscale_NodeLogLinesEndWithNewline(t *testing.T) {
 	var raw []string
 	eng.SetLogSinkForTest(func(_ int, _, msg string) { mu.Lock(); raw = append(raw, msg); mu.Unlock() })
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) {
+		return gh.AppHookConfig{}, errors.New("no app")
+	}
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := eng.setUpIngestion(context.Background(), cache)

@@ -44,7 +44,9 @@ func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDelivery
 		eng.SetReplayAPIForTest(api)
 	}
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return gh.AppHookConfig{}, errors.New("no app") }
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) {
+		return gh.AppHookConfig{}, errors.New("no app")
+	}
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 	cache, _ := eng.UseBoardCacheForTest()
 	cleanup := startIngestion(t, eng, cache)

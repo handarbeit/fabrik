@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 func stubHookConfig(t *testing.T, cfg gh.AppHookConfig, err error) {
 	t.Helper()
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { return cfg, err }
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) { return cfg, err }
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })
 }
 
@@ -86,7 +87,10 @@ func TestCheckAppWebhookConfig_UnreadableIsSkipped(t *testing.T) {
 	// An unknown node URL skips without reading at all.
 	called := false
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) { called = true; return gh.AppHookConfig{}, nil }
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) {
+		called = true
+		return gh.AppHookConfig{}, nil
+	}
 	defer func() { fetchAppHookConfigFn = orig }()
 	eng.checkAppWebhookConfig("tailscale", "")
 	if called {

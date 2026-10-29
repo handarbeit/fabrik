@@ -403,3 +403,31 @@ func TestDedupeFindings_DistinctAnchors_Unchanged(t *testing.T) {
 		t.Fatalf("dedupeFindings = %+v, want 3 entries (no true collisions)", got)
 	}
 }
+
+func TestParseReviewFindings_FindingsParsed(t *testing.T) {
+	const summary = "PRUEFER_SUMMARY_BEGIN\nok\nPRUEFER_SUMMARY_END\n"
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"empty array", "ok\n```json\n[]\n```", true},
+		{"populated array", "ok\n```json\n[{\"path\":\"a.go\",\"line\":1,\"body\":\"b\"}]\n```", true},
+		{"null", "ok\n```json\nnull\n```", false},
+		{"missing fence", "ok", false},
+		{"invalid json", "ok\n```json\n[{\n```", false},
+		{"object fence", "ok\n```json\n{\"path\":\"a.go\"}\n```", false},
+		{"markers empty array", summary + "```json\n[]\n```", true},
+		{"markers null", summary + "```json\nnull\n```", false},
+		{"markers missing fence", summary, false},
+		{"markers invalid json", summary + "```json\nnope\n```", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, info := parseReviewFindings(tc.text)
+			if info.FindingsParsed != tc.want {
+				t.Errorf("FindingsParsed = %t, want %t", info.FindingsParsed, tc.want)
+			}
+		})
+	}
+}

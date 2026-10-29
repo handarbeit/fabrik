@@ -42,7 +42,7 @@ func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedu
 		eng.faults, _ = parseTestFaults(FaultNoDedupe)
 	}
 	orig := fetchAppHookConfigFn
-	fetchAppHookConfigFn = func(*Engine) (gh.AppHookConfig, error) {
+	fetchAppHookConfigFn = func(context.Context, *Engine) (gh.AppHookConfig, error) {
 		return gh.AppHookConfig{URL: livenessHookURL, ContentType: "json"}, nil
 	}
 	t.Cleanup(func() { fetchAppHookConfigFn = orig })

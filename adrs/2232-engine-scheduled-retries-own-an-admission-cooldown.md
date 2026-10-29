@@ -55,7 +55,7 @@ retry the engine itself scheduled, so it waits for the periodic interval.
 | Exit | Decision |
 |---|---|
 | Incomplete branch of `finalizeStageOutcome` (wall-time / inactivity kill, turn-cap slice, resume failure, tools-denied, error) | Record, when `claudeRan` (the only case `StageAttempted` is stamped) |
-| Start failure (`claudeRan == false`) | No cooldown; no backoff applies, the retry is the next poll; log says so |
+| Start failure (`claudeRan == false`) | ~~No cooldown~~ — amended by ADR 2499: records its own `retry-backoff` (first failure already due, then growing per consecutive start failure) and holds the item in both dispatch gates |
 | `handleAPIErrorExit` | Record `now + backoff` |
 | `handleUsageLimitExit` | Record until the later of `now + backoff` and the account-wide hold, so an expiry during the hold is not admitted only to be refused |
 | PR creation failed below `MaxRetries` | Record `now + backoff` (`StageAttempted` was stamped) |
