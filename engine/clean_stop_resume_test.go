@@ -121,7 +121,7 @@ func csClient(h *csHarness, ev cleanStopEvidence) *mockGitHubClient {
 	}
 }
 
-func itemKey(n int, s string) string { return strings.Join([]string{string(rune('0' + n%10)), s}, ":") }
+func itemKey(n int, s string) string { return fmt.Sprintf("%d:%s", n, s) }
 
 func csBoard(nums ...int) *gh.ProjectBoard {
 	b := &gh.ProjectBoard{}
