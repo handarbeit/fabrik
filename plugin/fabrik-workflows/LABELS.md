@@ -26,11 +26,19 @@ Labels that stop processing entirely.
   issue — an implicit resume. Cleanup stages ignore comments entirely while
   paused. A Validate-stage item whose PR was merged externally can still
   advance regardless of this label.
-- **`fabrik:awaiting-input`** — Companion to `fabrik:paused` marking the
-  specific "blocked on user input" variant (as opposed to a retry-exhaustion
-  or timeout pause). Cleared the same way as `fabrik:paused`, plus
-  automatically on the next stage completion (removes any orphaned label
-  left over from a manual `fabrik:paused` removal).
+- **`fabrik:awaiting-input`** — Companion to `fabrik:paused` that the engine
+  applies to its pauses, whether a worker asked a question
+  (`FABRIK_BLOCKED_ON_INPUT`) or the engine stopped on a timeout, a limit or
+  a breaker — read `fabrik:pause:<cause>` below to tell which. Cleared the
+  same way as `fabrik:paused`, plus automatically on the next stage
+  completion (removes any orphaned label left over from a manual
+  `fabrik:paused` removal).
+- **`fabrik:pause:<cause>`** — Written by the engine right after
+  `fabrik:paused` and removed with it; says why the item is paused. Exactly
+  one of `question` (a question was put to a human), `review-timeout`,
+  `ci-timeout`, `cycle-limit`, `daemon-stop`, `breaker`, `failed` or `other`.
+  Informational only: it never changes how a pause is resumed, and a pause a
+  human applied by hand carries none. Do not apply or remove it by hand.
 - **`fabrik:blocked`** — Set when the issue has open `blockedBy`
   dependencies (via GitHub's Issue Dependencies feature). For a parent that
   just spawned sub-issues (see `fabrik:children-spawned` below), the new
