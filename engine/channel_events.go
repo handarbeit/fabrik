@@ -141,6 +141,15 @@ type channelEvents struct {
 	// for the cause of a re-settle (also under dmu).
 	autonomy map[string]autonomyActor
 
+	// stopMu/stopped make "recorded in the ledger" imply "queued before the final
+	// flush" (#2484, ADR 2484). onChange holds the read side for its whole run;
+	// closeChannelEvents takes the write side to set stopped, so it waits for every
+	// observer notification in flight and refuses every later one. unsub alone does
+	// not: Store.notify iterates a captured observer list, so a notification already
+	// under way still calls onChange after the unsubscribe.
+	stopMu  sync.RWMutex
+	stopped bool
+
 	wake  chan struct{}
 	stop  chan struct{}
 	wg    sync.WaitGroup
@@ -236,6 +245,11 @@ func (e *Engine) closeChannelEvents() {
 	if ce.unsub != nil {
 		ce.unsub()
 	}
+	// A change refused from here on is not in the ledger either, so the next
+	// process announces it as a downtime delta instead of it being lost (#2484).
+	ce.stopMu.Lock()
+	ce.stopped = true
+	ce.stopMu.Unlock()
 	close(ce.stop)
 	ce.wg.Wait()
 	ce.spillWarm()
@@ -369,6 +383,13 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if st.IsPR {
 		return
 	}
+	if !ce.e.chanTest.stopGateOff.Load() {
+		ce.stopMu.RLock()
+		defer ce.stopMu.RUnlock()
+		if ce.stopped {
+			return
+		}
+	}
 	key := issueRef(c.Repo, c.Number)
 	if c.Fields&itemstate.WorkerLifecycleChanged != 0 && st.Worker != nil {
 		ce.noteWorkerEntered(key)
@@ -399,6 +420,9 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		skipLabels = ce.noteLiveLabelDeltas(key, c.LabelDeltas, dtLabels)
 	}
 	ce.observeLedger(key, &st)
+	if h := ce.e.chanTest.afterLedger.Load(); h != nil {
+		(*h)() // TEST-ONLY (#2484): park between the ledger record and the queue append
+	}
 	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
 	diverged := len(evs) // events from here on are built from the suspect change
 	rebaseApplied := false
@@ -505,7 +529,11 @@ func (ce *channelEvents) run() {
 			// drain must reach the hub before the process goes: the new process
 			// diffs against the ledger and would otherwise find nothing (#2450).
 			if !ce.e.chanTest.finalFlushOff.Load() {
-				ce.safely("final flush", ce.flushQueue)
+				ce.safely("final flush", func() {
+					if n := ce.flushQueue(); n > 0 {
+						ce.e.logf(0, "channel", "final flush: published %d queued event(s)\n", n)
+					}
+				})
 			}
 			return
 		case <-ce.wake:
@@ -554,19 +582,22 @@ func (ce *channelEvents) nextDue() time.Duration {
 // not start new work. Events held for an item with an unpublished downtime delta
 // stay held (holdWarm) and reach the hub through spillWarm. Safe from any
 // goroutine; ordered against drain by pubMu (#2450).
-func (ce *channelEvents) flushQueue() {
+func (ce *channelEvents) flushQueue() int {
 	ce.pubMu.Lock()
 	defer ce.pubMu.Unlock()
 	ce.mu.Lock()
 	q := ce.queue
 	ce.queue = nil
 	ce.mu.Unlock()
+	published := 0
 	for _, ev := range q {
 		if ce.holdWarm(ev) {
 			continue
 		}
 		ce.hub.Publish(finishEvent(ev))
+		published++
 	}
+	return published
 }
 
 // drain publishes queued events in order, then evaluates every item whose
