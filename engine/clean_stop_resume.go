@@ -228,6 +228,10 @@ func (e *Engine) evaluateCleanStopCandidate(cand *cleanStopCandidate) (done bool
 		e.logf(item.Number, "warn", "clean-stop resume: could not remove fabrik:awaiting-input (the orphan scan will): %v\n", err)
 	}
 	e.clearPauseCause(item)
+	// Removing a label wakes nothing and records no admission: ask the next poll to
+	// consider the item, so the stage is redispatched without waiting for the
+	// periodic re-evaluation.
+	e.requeueDeferredDispatch([]string{issueKey(item, e.defaultRepo())})
 	e.logf(item.Number, "resume", "resumed after restart: pause was set by a daemon clean stop (#2486)\n")
 	e.postItemComment(item, fmt.Sprintf("🏭 **Fabrik — resumed after restart**\n\n%s", cleanStopResumeDetail), false) // literal header: TestAddCommentCompliance; pinned to cleanStopResumeBody by a test
 	return true
