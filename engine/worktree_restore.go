@@ -25,6 +25,9 @@ import (
 //     (a pushed rebase must not be un-done — that would manufacture the divergence);
 //   - post carries no local-only patch relative to pre (patch-id comparison with the
 //     base's history excluded), no merge commit, so nothing but the rebase is discarded.
+//     When the patch-ids differ only because the rebase shifted a commit's diff context,
+//     the same holds if replaying pre's net change onto post's base gives post's tree
+//     (replayEquivalent, #2517, ADR 2517).
 func (wm *WorktreeManager) RestoreUnpushedRebase(issueNumber int, baseBranch, preRebaseSHA, postRebaseSHA string) (bool, string) {
 	if wm.restoreRebaseDisabled.Load() {
 		return false, "restore disabled"
@@ -75,8 +78,18 @@ func (wm *WorktreeManager) RestoreUnpushedRebase(issueNumber int, baseBranch, pr
 	if err != nil {
 		return false, "patch-id comparison failed: " + patches
 	}
+	rule := rulePatchID
 	if n, convErr := strconv.Atoi(patches); convErr != nil || n != 0 {
-		return false, "the branch carries a commit that was not on the pre-rebase head"
+		// A clean rebase that only shifted a commit's diff context changes its patch-id
+		// (#2517): fall back to comparing content. A conflict-edited rebase or an extra
+		// commit changes the tree and still declines.
+		if wm.restoreContentCheckDisabled.Load() {
+			return false, "the branch carries a commit that was not on the pre-rebase head"
+		}
+		if ok, _ := replayEquivalent(wtDir, postRebaseSHA, preRebaseSHA, baseRef); !ok {
+			return false, "the branch carries a commit that was not on the pre-rebase head"
+		}
+		rule = ruleReplayEquivalent
 	}
 	merges, err := gitOutputIn(wtDir, "rev-list", "--merges", "--count", postRebaseSHA, "^"+preRebaseSHA, "^"+baseRef)
 	if err != nil {
@@ -88,6 +101,9 @@ func (wm *WorktreeManager) RestoreUnpushedRebase(issueNumber int, baseBranch, pr
 
 	if out, err := gitOutputIn(wtDir, "reset", "--hard", preRebaseSHA); err != nil {
 		return false, fmt.Sprintf("reset failed: %s", out)
+	}
+	if rule != rulePatchID {
+		wm.logf(issueNumber, "worktree", "restore matched rule %s\n", rule)
 	}
 	return true, ""
 }

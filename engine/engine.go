@@ -420,6 +420,8 @@ type Engine struct {
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)
 	validateReworkRestoreGuardOff         atomic.Bool                               // test seam: SetValidateReworkRestoreGuardDisabledForTest (#2378)
 	restoreRebaseDisabledForTest          bool                                      // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	restoreContentCheckDisabledForTest    bool                                      // test seam: SetCommentRebaseRestoreContentCheckDisabledForTest (#2517); guarded by mu, applied to managers registered later too
+	replayEquivalenceDisabledForTest      bool                                      // test seam: SetReplayEquivalenceDisabledForTest (#2517); guarded by mu, applied to managers registered later too
 	branchSyncDisabledForTest             bool                                      // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
 	bareLeasePushForTest                  bool                                      // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too
 	pureRebaseDisabledForTest             bool                                      // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
@@ -1003,6 +1005,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
+	wm.restoreContentCheckDisabled.Store(e.restoreContentCheckDisabledForTest)
+	wm.replayEquivalenceDisabled.Store(e.replayEquivalenceDisabledForTest)
 	wm.bareLeasePush.Store(e.bareLeasePushForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 }
@@ -1192,6 +1196,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
+	wm.restoreContentCheckDisabled.Store(e.restoreContentCheckDisabledForTest)
+	wm.replayEquivalenceDisabled.Store(e.replayEquivalenceDisabledForTest)
 	wm.bareLeasePush.Store(e.bareLeasePushForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm

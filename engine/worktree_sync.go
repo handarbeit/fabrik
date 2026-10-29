@@ -179,37 +179,41 @@ const (
 // (a pure unpushed rebase satisfies both subsumption tests, so reset is tested first):
 // equal, strictly behind, local-subsumed, remote-subsumed, diverged. doubt is non-empty
 // (and the relation meaningless) when a git error prevented an answer. Called with wm.mu held.
-func (wm *WorktreeManager) classifyBranch(wtDir, remoteRef, baseBranch string) (rel branchRelation, doubt string) {
+func (wm *WorktreeManager) classifyBranch(wtDir, remoteRef, baseBranch string) (rel branchRelation, rule, doubt string) {
 	local, err := gitRevParse(wtDir, "HEAD")
 	if err != nil {
-		return 0, fmt.Sprintf("resolving local HEAD: %v", err)
+		return 0, "", fmt.Sprintf("resolving local HEAD: %v", err)
 	}
 	remote, err := gitRevParse(wtDir, remoteRef)
 	if err != nil {
-		return 0, fmt.Sprintf("resolving %s: %v", remoteRef, err)
+		return 0, "", fmt.Sprintf("resolving %s: %v", remoteRef, err)
 	}
 	if local == remote {
-		return relEqual, ""
+		return relEqual, "", ""
 	}
 	if isAncestor(wtDir, local, remote) {
-		return relLocalBehind, ""
+		return relLocalBehind, "", ""
 	}
 	baseRef := "refs/remotes/origin/" + baseBranch
 	localNothing, why := holdsNothingBeyond(wtDir, "HEAD", remoteRef, baseRef)
 	if strings.Contains(why, "failed") {
-		return 0, why
+		return 0, "", why
 	}
 	if localNothing {
-		return relLocalSubsumed, ""
+		return relLocalSubsumed, rulePatchID, ""
+	}
+	// Patch-ids differ when a clean rebase only shifted a commit's diff context (#2517).
+	if eq, _ := wm.subsumedByReplay(wtDir, "HEAD", remoteRef, baseRef); eq {
+		return relLocalSubsumed, ruleReplayEquivalent, ""
 	}
 	remoteNothing, why := holdsNothingBeyond(wtDir, remoteRef, "HEAD", baseRef)
 	if strings.Contains(why, "failed") {
-		return 0, why
+		return 0, "", why
 	}
 	if remoteNothing {
-		return relRemoteSubsumed, ""
+		return relRemoteSubsumed, "", ""
 	}
-	return relDiverged, ""
+	return relDiverged, "", ""
 }
 
 // syncIssueBranch is R1-R3: called by EnsureWorktree under wm.mu for an existing worktree
@@ -256,7 +260,7 @@ func (wm *WorktreeManager) syncIssueBranch(wtDir, baseBranch string, issueNumber
 	if err != nil {
 		return skip(fmt.Sprintf("resolving %s: %v", tracking, err))
 	}
-	rel, doubt := wm.classifyBranch(wtDir, tracking, baseBranch)
+	rel, rule, doubt := wm.classifyBranch(wtDir, tracking, baseBranch)
 	if doubt != "" {
 		return skip(doubt)
 	}
@@ -275,7 +279,7 @@ func (wm *WorktreeManager) syncIssueBranch(wtDir, baseBranch string, issueNumber
 		if out, err := gitOutputIn(wtDir, "reset", "--hard", fetched); err != nil {
 			return skip(fmt.Sprintf("resetting to %s: %s", fetched, out))
 		}
-		wm.logf(issueNumber, "worktree", "local %s holds nothing origin lacks — reset %s to the remote head %s\n", branch, shortSHA(local), shortSHA(fetched))
+		wm.logf(issueNumber, "worktree", "local %s holds nothing origin lacks (rule %s) — reset %s to the remote head %s\n", branch, rule, shortSHA(local), shortSHA(fetched))
 		wm.setReconciled(issueNumber, fetched)
 		return SyncReport{Outcome: SyncReset}, nil
 	case relRemoteSubsumed:
@@ -374,7 +378,7 @@ func (wm *WorktreeManager) verifyForPush(wtDir, branch, baseBranch string, issue
 	if err != nil {
 		return "", false, fmt.Errorf("%w: resolving %s: %v", ErrPushUnverified, tracking, err)
 	}
-	rel, doubt := wm.classifyBranch(wtDir, tracking, baseBranch)
+	rel, rule, doubt := wm.classifyBranch(wtDir, tracking, baseBranch)
 	if doubt != "" {
 		return "", false, fmt.Errorf("%w: %s", ErrPushUnverified, doubt)
 	}
@@ -383,7 +387,7 @@ func (wm *WorktreeManager) verifyForPush(wtDir, branch, baseBranch string, issue
 		wm.setReconciled(issueNumber, fetched)
 		return "", true, nil
 	case relLocalBehind, relLocalSubsumed:
-		wm.logf(issueNumber, "worktree", "nothing to publish: local %s holds nothing origin lacks (local %s, remote %s) — push skipped\n", branch, shortSHA(local), shortSHA(fetched))
+		wm.logf(issueNumber, "worktree", "nothing to publish: local %s holds nothing origin lacks (rule %s; local %s, remote %s) — push skipped\n", branch, rule, shortSHA(local), shortSHA(fetched))
 		return "", true, nil
 	case relRemoteSubsumed:
 		return fetched, false, nil
