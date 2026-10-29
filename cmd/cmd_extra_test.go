@@ -180,6 +180,9 @@ func (m *testGitHubUpgradeClient) FetchPRClosingIssues(owner, repo string, prNum
 func (m *testGitHubUpgradeClient) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return nil, nil
+}
 func (m *testGitHubUpgradeClient) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 	return nil, nil
 }

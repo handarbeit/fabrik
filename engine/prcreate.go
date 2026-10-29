@@ -131,7 +131,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 				"Remove `fabrik:paused` after correcting the skill output to retry.",
 			block.TargetRepo, owner, repo,
 		)
-		e.addPausedLabelToItem(owner, repo, item)
+		e.addPausedLabelToItem(owner, repo, item, pauseCauseOther)
 		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 		return 0, fmt.Errorf("cross-repo PR creation not supported (target: %s)", block.TargetRepo)
 	}
@@ -184,7 +184,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 				"Remove `fabrik:paused` to retry.",
 			item.Number, maxAttempts, lastErr,
 		)
-		e.addPausedLabelToItem(owner, repo, item)
+		e.addPausedLabelToItem(owner, repo, item, pauseCauseFailed)
 		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 		return 0, fmt.Errorf("creating PR via FABRIK_PR_CREATE: %w", lastErr)
 	}
@@ -418,5 +418,6 @@ func (e *Engine) pauseForBrokenLinkage(item gh.ProjectItem, prNumber int, closin
 	e.pauseIssue(item, msg, pauseOpts{
 		labelEcho:  true,
 		labelFirst: true,
+		cause:      pauseCauseOther,
 	})
 }

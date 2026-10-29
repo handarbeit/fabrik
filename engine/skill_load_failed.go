@@ -65,7 +65,7 @@ func (e *Engine) handleSkillLoadFailed(item gh.ProjectItem, stage *stages.Stage,
 			"Fabrik has paused this issue. Once resolved, remove the `fabrik:paused` and `fabrik:awaiting-input` labels to resume. See docs/USER_GUIDE.md.",
 		stage.Name, key, sle.Skill, called, plugins, skillLoadDetailOrNone(sle.Detail),
 	)
-	e.pauseIssue(item, comment, pauseOpts{awaitingInput: true})
+	e.pauseIssue(item, comment, pauseOpts{awaitingInput: true, cause: pauseCauseOther})
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})

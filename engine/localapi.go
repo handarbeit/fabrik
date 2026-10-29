@@ -298,6 +298,8 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 		},
 		Progress: localapi.ProgressInfo{At: localapi.KnownTime(res.ProgressAt)},
 		Cause:    res.Cause,
+
+		PauseCause: res.PauseCause,
 	}
 	info.CIFailing = res.CIFailing
 	if !res.ProgressAt.IsZero() {
@@ -1209,6 +1211,8 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		switch {
 		case it.Worker != nil && it.Worker.Queued:
 			queued++
+		case it.Worker != nil && it.Worker.ReservedSlot:
+			// A fix round on the reserved fix-round slot (#2490) is fix_in_use, never in_use.
 		case it.Worker != nil:
 			inUse++
 		case it.ConflictResolution != nil && it.ConflictResolution.Queued:
@@ -1230,6 +1234,9 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	trainInUse, trainMax := b.e.trainSlotUsage()
 	res.Workers.TrainInUse = localapi.Some(trainInUse)
 	res.Workers.TrainMax = localapi.Some(trainMax)
+	fixInUse, fixMax := b.e.fixRoundSlotUsage()
+	res.Workers.FixInUse = localapi.Some(fixInUse)
+	res.Workers.FixMax = localapi.Some(fixMax)
 
 	res.MergeTrain = b.partitions(now, h)
 	if h.Draining {
@@ -1239,6 +1246,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	}
 	if h.ForgeHeld {
 		res.ForgeHold = &localapi.ForgeHoldHealth{Since: localapi.KnownTime(h.ForgeSince), Failures: h.ForgeFailures, LastError: h.ForgeLastError}
+	}
+	// The consumer's own flag, no read of GitHub or the Store (#2484).
+	if ce := b.e.channelEvents(); ce != nil {
+		res.Channel = &localapi.ChannelHealth{Ready: ce.ready.Load()}
 	}
 	return res, nil
 }

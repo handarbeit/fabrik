@@ -199,3 +199,32 @@ func (e *Engine) SetChannelConsumerParkedForTest(parked bool) {
 		ce.signal()
 	}
 }
+
+// SetChannelStopGateDisabledForTest lets the channel observer record a change in
+// the restart ledger and queue its event after the consumer has stopped (the
+// pre-#2484 behaviour), and returns the restore function. A change that lands in
+// that window is recorded but never published, so the next process finds no
+// difference to announce. It is how the twin test shows it is not vacuous.
+func (e *Engine) SetChannelStopGateDisabledForTest() (restore func()) {
+	e.chanTest.stopGateOff.Store(true)
+	return func() { e.chanTest.stopGateOff.Store(false) }
+}
+
+// ChannelReadyForTest reports the channel consumer's readiness flag (the value
+// fabrik_health.channel.ready serves); false with no hub.
+func (e *Engine) ChannelReadyForTest() bool {
+	ce := e.channelEvents()
+	return ce != nil && ce.ready.Load()
+}
+
+// SetChannelAfterLedgerHookForTest installs fn to run inside the channel observer
+// between the restart-ledger record of a change and the append of its events to
+// the queue (#2484), the window a late apply can fall into while the consumer
+// stops. nil removes it. A test blocks in fn to hold one change there.
+func (e *Engine) SetChannelAfterLedgerHookForTest(fn func()) {
+	if fn == nil {
+		e.chanTest.afterLedger.Store(nil)
+		return
+	}
+	e.chanTest.afterLedger.Store(&fn)
+}

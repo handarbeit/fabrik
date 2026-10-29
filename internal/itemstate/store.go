@@ -947,6 +947,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		item.Worker.Queued = false
 		item.Worker.QueuedSince = time.Time{}
+		item.Worker.ReservedSlot = v.Reserved
 		item.Worker.StartedAt = v.At
 		item.Worker.LastSignAt = v.At
 		return WorkerChanged
@@ -1260,6 +1261,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case PRReviewsRead:
 		return s.applyPRReviewsRead(item, v)
+
+	case PRStandingReviewsRead:
+		if item.LinkedPR == nil && v.PRNumber == 0 {
+			return 0
+		}
+		ensureLinkedPR(item, v.PRNumber)
+		if reflect.DeepEqual(item.LinkedPR.StandingReviews, v.Reviews) {
+			return 0
+		}
+		item.LinkedPR.StandingReviews = copyPRReviews(v.Reviews)
+		return 0
 
 	case LinkedPRStateObserved:
 		// A single-PR read is a direct, consistent GET, not a lagging listing: it is

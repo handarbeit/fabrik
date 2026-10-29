@@ -195,6 +195,8 @@ func TestRebaseCycleLimit(t *testing.T) {
 
 	WaitForIssueLabel(t, env, num, "fabrik:paused", 80)
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 20)
+	// The pause states its cause on the issue (#2487), with awaiting-input unchanged.
+	WaitForIssueLabel(t, env, num, "fabrik:pause:cycle-limit", 20)
 
 	item := projectItem(t, env, num)
 	if item.IsClosed {

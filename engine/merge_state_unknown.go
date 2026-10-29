@@ -142,7 +142,7 @@ func (e *Engine) pauseForUnknownMergeState(board *gh.ProjectBoard, item gh.Proje
 	frag := unknownMergeFragment(settle.PR.Number, clock.head)
 	if hasPauseComment(item, frag) {
 		e.logf(item.Number, "merge-gate", "unknown-merge-state pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCITimeout)
 		return false
 	}
 	msg := fmt.Sprintf(
@@ -154,7 +154,7 @@ func (e *Engine) pauseForUnknownMergeState(board *gh.ProjectBoard, item gh.Proje
 		frag, elapsed.Round(time.Second), clock.value, stage.Name,
 		e.checkRunStateNote(item, clock.head), pauseCauseUnknownMergeStateMarker,
 	)
-	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true})
+	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true, cause: pauseCauseCITimeout})
 	return true
 }
 

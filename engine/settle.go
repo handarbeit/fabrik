@@ -63,7 +63,7 @@ func (e *Engine) clearSettleMarker(item gh.ProjectItem, owner, repo, markerLabel
 // the three settle scans; each passes its own marker label, retryStage
 // constant, and comment-posting closure.
 func (e *Engine) escalateSettle(item gh.ProjectItem, markerLabel, retryStage string, postComment func(gh.ProjectItem)) {
-	e.addLabel(item, "fabrik:paused")
+	e.applyPauseLabels(item, pauseCauseFailed, false)
 	e.setStatusLine(item, statusLinePaused("retries exhausted")) // display-only (#2048)
 	e.applyLabelRemove(item, markerLabel, true)
 	postComment(item)

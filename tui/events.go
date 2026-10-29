@@ -112,6 +112,7 @@ func (TrainRowEvent) tuiEvent() {}
 type WorkerSlotsEvent struct {
 	InUse, Max           int
 	TrainInUse, TrainMax int
+	FixInUse, FixMax     int // reserved fix-round slots (#2490); FixMax is 0 when fix_round_slots is 0
 	Draining             bool
 	DrainLeft            int
 }

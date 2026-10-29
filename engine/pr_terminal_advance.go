@@ -259,6 +259,7 @@ func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.Proje
 			}
 		}
 	}
+	e.clearPauseCause(item) // lives with fabrik:paused (#2487)
 
 	aerr := e.recordAdvanceOutcome(board, item, stage)
 	if aerr != nil {

@@ -231,7 +231,14 @@ func mergeReviews(cur []gh.PRReview, incoming ...gh.PRReview) []gh.PRReview {
 }
 
 // latestReviewPerAuthor keeps one review per author: the one with the greatest
-// (SubmittedAt, DatabaseID).
+// (SubmittedAt, DatabaseID), whatever its state.
+//
+// This is the Store's display/feedback collapse and deliberately is not a
+// verdict: it cannot say whether an author's change request still stands, because
+// a later COMMENTED replaces it here. The head-aware verdict (ADR 2465) is
+// engine.reviewerStandings; it is fed this list plus LinkedPRState.StandingReviews
+// (the latest formal verdict and a later COMMENTED per author, from a live full
+// history), so the reviewer view and the authoritative gate share one definition.
 func latestReviewPerAuthor(in []gh.PRReview) []gh.PRReview {
 	if len(in) == 0 {
 		return nil
