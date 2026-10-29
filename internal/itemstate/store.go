@@ -1262,6 +1262,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case PRReviewsRead:
 		return s.applyPRReviewsRead(item, v)
 
+	case PRStandingReviewsRead:
+		if item.LinkedPR == nil && v.PRNumber == 0 {
+			return 0
+		}
+		ensureLinkedPR(item, v.PRNumber)
+		if reflect.DeepEqual(item.LinkedPR.StandingReviews, v.Reviews) {
+			return 0
+		}
+		item.LinkedPR.StandingReviews = copyPRReviews(v.Reviews)
+		return 0
+
 	case LinkedPRStateObserved:
 		// A single-PR read is a direct, consistent GET, not a lagging listing: it is
 		// judged by its own start, so a webhook or PR update recorded in the previous

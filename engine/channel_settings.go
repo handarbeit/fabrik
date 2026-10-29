@@ -40,6 +40,18 @@ type channelTestSettings struct {
 	finalFlushOff     atomic.Bool
 	liveLabelDedupOff atomic.Bool
 	consumerParked    atomic.Bool
+
+	// #2484: drainSlackOff makes a closing intake run the Layer 1 refresh again;
+	// stopGateOff lets onChange record and queue after the consumer has stopped;
+	// layer1Delay stands in for the Layer 1 round trip in the sim's intake;
+	// sighupGrace overrides intakeSighupGrace (nanoseconds, 0 = production).
+	drainSlackOff atomic.Bool
+	stopGateOff   atomic.Bool
+	layer1Delay   atomic.Int64
+	sighupGrace   atomic.Int64
+	// afterLedger, when set, is called by onChange between the restart-ledger
+	// record and the queue append, so a test can hold a change in that window.
+	afterLedger atomic.Pointer[func()]
 }
 
 // Production defaults. Nothing mutates them. The debounce and the ticker are
@@ -105,6 +117,10 @@ func (e *Engine) CopyChannelTestSettingsFrom(old *Engine) {
 	s.reviewReinvokeOff.Store(o.reviewReinvokeOff.Load())
 	s.finalFlushOff.Store(o.finalFlushOff.Load())
 	s.liveLabelDedupOff.Store(o.liveLabelDedupOff.Load())
+	s.drainSlackOff.Store(o.drainSlackOff.Load())
+	s.stopGateOff.Store(o.stopGateOff.Load())
+	s.layer1Delay.Store(o.layer1Delay.Load())
+	s.sighupGrace.Store(o.sighupGrace.Load())
 }
 
 // idle reports whether the consumer has nothing left to do: no queued events,

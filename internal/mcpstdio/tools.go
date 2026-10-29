@@ -145,7 +145,8 @@ func toolDefs() []map[string]any {
 				"poll liveness (poll.in_progress and current_started_at, last_completed_at, the step an in-progress poll is in, next_due_at with backing_off, and the overdue verdict: true when a poll has run longer than 2 x interval_seconds or none started within 2 x interval of next_due_at, so a stalled engine is distinguishable from a stalled item), " +
 				"the account-wide Claude usage-limit hold, GraphQL backoff (as_of says when a poll last refreshed it; it does not age on its own), worker slots in use (plus the reserved merge-train slot, train_in_use/train_max, when merge_train is on; and the reserved fix-round slots, fix_in_use/fix_max, when fix_round_slots is set), " +
 				"and per (repo, base) merge-train partition members with oldest_queued_since, the run phase, and an idle_reason when members are queued and no run is active. " +
-				"While the daemon drains for a SIGHUP restart a draining object (since, workers_remaining) is present and the poll overdue verdict is unknown, not overdue.",
+				"While the daemon drains for a SIGHUP restart a draining object (since, workers_remaining) is present and the poll overdue verdict is unknown, not overdue. " +
+				"channel.ready is false while a freshly started daemon is warming (restart deltas are held until the board is populated), then true.",
 			"inputSchema": obj(map[string]any{}),
 			"annotations": readOnly,
 		},

@@ -29,6 +29,7 @@ type ReadClient interface {
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	FetchPRReviewDecision(owner, repo string, prNumber int) (string, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
@@ -102,6 +103,10 @@ func (a *GitHubAdapter) FetchPRClosingIssues(owner, repo string, prNumber int) (
 
 func (a *GitHubAdapter) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	return a.client.FetchPRReviews(owner, repo, prNumber)
+}
+
+func (a *GitHubAdapter) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return a.client.FetchPRReviewHistory(owner, repo, prNumber)
 }
 
 func (a *GitHubAdapter) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
@@ -322,6 +327,11 @@ type CacheImpl struct {
 	// projects_v2_item project and field filters (#2345): when set,
 	// applyProjectsV2ItemDelta applies every event as it did before the filters.
 	projectFieldFilterDisabledForTest atomic.Bool
+
+	// prHealGuardDisabledForTest is the neutralisation seam for the webhook PR
+	// auto-heal guards (#2483): the merge-train head-branch skip and the
+	// multi-closing-issue refusal. When set, the heal behaves as it did before.
+	prHealGuardDisabledForTest atomic.Bool
 
 	// textEditSuppressionDisabledForTest is the neutralisation seam for the
 	// display-field echo suppression (#2048): when set, applyProjectsV2ItemDelta
@@ -645,13 +655,46 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 	}
 
 	// Store has nil fallback — Get returns ErrNotFound on miss without calling GitHub.
+	var cached []int
 	for _, issNum := range issues {
-		k := itemKey(fullRepo, issNum)
 		if _, storeErr := c.store.Get(fullRepo, issNum); storeErr == nil {
-			return k, issNum, true, true, nil
+			cached = append(cached, issNum)
 		}
 	}
-	return "", 0, false, false, nil
+	if len(cached) == 0 {
+		return "", 0, false, false, nil
+	}
+	// A PR that closes several cached issues belongs to none of them in
+	// particular (a merge-train integration PR names every member): attaching it
+	// to the first-named one is arbitrary and rewrites that item's linked PR
+	// (#2483, ADR 2483). Refuse; the PR stays unlinked.
+	if len(cached) > 1 && !c.prHealGuardDisabledForTest.Load() {
+		c.logFn("[cache] auto-heal: PR #%d closes %d cached issues %v — not attaching it to any one of them\n", prNumber, len(cached), cached)
+		return "", 0, false, false, nil
+	}
+	return itemKey(fullRepo, cached[0]), cached[0], true, true, nil
+}
+
+// TrainBranchPrefix is the head-branch prefix of every merge-train trial,
+// integration and singleton landing PR. It mirrors engine.trainBranchPrefix
+// (boardcache cannot import engine; a pin test in engine keeps them equal).
+const TrainBranchPrefix = "fabrik/merge-train/"
+
+// isTrainBranch reports whether a PR head branch belongs to a merge-train PR.
+func isTrainBranch(ref string) bool {
+	return strings.HasPrefix(ref, TrainBranchPrefix)
+}
+
+// skipTrainPR reports whether a delivery for a PR on headRef must be dropped
+// because it is a merge-train PR, which belongs to no single member (#2483, ADR
+// 2483). Nothing reads the train PR's facts from the Store: the train works from
+// live reads and its own persisted run record.
+func (c *CacheImpl) skipTrainPR(event string, prNumber int, headRef string) bool {
+	if c.prHealGuardDisabledForTest.Load() || !isTrainBranch(headRef) {
+		return false
+	}
+	c.logFn("[cache] %s: PR #%d is a merge-train PR (%s) — ignoring\n", event, prNumber, headRef)
+	return true
 }
 
 // Pause stops delta application (called on WebhookStreamUnhealthy transition).
@@ -1305,6 +1348,12 @@ func (c *CacheImpl) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRRev
 	return c.fallback.FetchPRReviews(owner, repo, prNumber)
 }
 
+// FetchPRReviewHistory always delegates to GitHub, no caching — same rationale as
+// FetchPRReviews (#2465).
+func (c *CacheImpl) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return c.fallback.FetchPRReviewHistory(owner, repo, prNumber)
+}
+
 // FetchPRReviewRequests always delegates to GitHub, no caching — same rationale as
 // FetchPRReviews.
 func (c *CacheImpl) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
@@ -1576,6 +1625,13 @@ func (c *CacheImpl) StatusFieldID() string {
 // filters can be shown to fail when they are neutralised.
 func (c *CacheImpl) SetProjectFieldFilterDisabledForTest(disabled bool) {
 	c.projectFieldFilterDisabledForTest.Store(disabled)
+}
+
+// SetPRHealGuardDisabledForTest turns the webhook PR auto-heal guards off
+// (#2483). Test-only: it exists so the tests pinning the guards can be shown to
+// fail when they are neutralised.
+func (c *CacheImpl) SetPRHealGuardDisabledForTest(disabled bool) {
+	c.prHealGuardDisabledForTest.Store(disabled)
 }
 
 // SetTextEditSuppressionDisabledForTest turns the display-field echo

@@ -76,6 +76,20 @@ type PRReviewsRead struct {
 func (PRReviewsRead) isMutation()       {}
 func (m PRReviewsRead) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// PRStandingReviewsRead replaces LinkedPRState.StandingReviews with the
+// per-reviewer standing evidence derived from a live full review history
+// (FetchPRReviewHistory) by the authoritative gate (#2465). It is a display
+// input only: it is not ordered, wakes nothing and records no observed time.
+type PRStandingReviewsRead struct {
+	Repo     string
+	Number   int // issue number
+	PRNumber int
+	Reviews  []gh.PRReview
+}
+
+func (PRStandingReviewsRead) isMutation()       {}
+func (m PRStandingReviewsRead) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LinkedPRStateObserved sets only LinkedPR.State and Merged from a live PR read
 // (FetchPRMerged) by a gate (#2350). Unlike PRDetailsUpdated it never touches
 // Title or Draft. At is the request start: the read is judged by it as is (a

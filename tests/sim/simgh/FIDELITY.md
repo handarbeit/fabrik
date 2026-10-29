@@ -644,6 +644,19 @@ definition. Two reads of one model must not report two verdicts — and
 `FetchPRReviewDecision` has always reduced correctly, so a raw list here would
 have put the package in contradiction with itself.
 
+### `FetchPRReviewHistory` returns the raw eligible history — **Modelled**
+
+`github.Client.FetchPRReviewHistory` (#2465) is the uncollapsed REST list: every
+submission except `PENDING`, `DISMISSED` kept, in submission order. The model returns
+the same filter over the same `pr.reviews` that `FetchPRReviews` collapses, so the two
+cannot describe different PRs. The authoritative gate's no-branch-protection fallback
+decides on this read (a declared bot's `COMMENTED` after a `CHANGES_REQUESTED` is only
+visible here). `FetchPRReviews` and `FetchPRReviewDecision` deliberately stay on the
+sticky collapse — the latter models GitHub's own `reviewDecision`, which a non-empty
+value must keep deciding (R4). A seeded review's `CommitID` is whatever the scenario
+sets; the PR head is the real git head of the seeded branch (`FetchPRDetails`), so
+`SeedCommit` onto the branch is how a scenario "pushes".
+
 ### Review requests and self-submitting bots — **Modelled**
 
 `FetchPRReviewRequests` returns only reviewers actually requested. The model

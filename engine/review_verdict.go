@@ -8,6 +8,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // This file builds the per-reviewer verdicts (#2127 R5) and the web URLs the
@@ -59,6 +60,27 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 		latest[r.Author] = r
 	}
 	sort.Strings(order)
+
+	// Each reviewer's standing at the head, through the one definition the
+	// authoritative gate shares (#2465, R3): the Store's latest review per author
+	// plus its standing evidence (the latest formal verdict and a later COMMENTED
+	// from the gate's last live full-history read).
+	standings := map[string]reviewerStanding{}
+	if !e.reviewStandingOff.Load() {
+		var declared []string
+		// A status with no configured stage (parking column, unknown) declares no
+		// bots; a per-issue expected-reviewers label still applies.
+		stage := e.stageByName(st.Status)
+		if stage == nil {
+			stage = &stages.Stage{}
+		}
+		if d := e.effectiveExpectedReviewers(gh.ProjectItem{Number: st.Number, Labels: st.Labels}, stage); d != nil {
+			declared = *d
+		}
+		for _, s := range reviewerStandings(standingInput(lpr), head, declared) {
+			standings[reviewerKey(s.Author)] = s
+		}
+	}
 
 	notProcessed := func(string) bool { return false }
 	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
@@ -122,10 +144,14 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 		out2 := threads + bodies
 		v.Outstanding = localapi.Some(out2)
 
+		standing, hasStanding := standings[reviewerKey(author)]
 		switch {
-		case rev.State == "CHANGES_REQUESTED":
-			// A review that requests changes is not a pass, whatever the threads
+		case hasStanding && standing.blocks():
+			// A standing change request, or a verdict on a commit that is no longer
+			// the head (awaiting re-review), is not a pass, whatever the threads
 			// say: resolving its threads does not withdraw it.
+			v.CleanPass = localapi.Some(false)
+		case rev.State == "CHANGES_REQUESTED" && !hasStanding:
 			v.CleanPass = localapi.Some(false)
 		case v.AtHead.Valid && !v.AtHead.V:
 			v.CleanPass = localapi.Some(false) // a pass on an older head is never clean
@@ -150,6 +176,25 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 			}
 		}
 		out = append(out, v)
+	}
+	return out
+}
+
+// standingInput is the review history the reviewer view judges: the Store's
+// latest review per author plus its standing evidence, without duplicates.
+func standingInput(lpr *itemstate.LinkedPRState) []gh.PRReview {
+	out := make([]gh.PRReview, 0, len(lpr.Reviews)+len(lpr.StandingReviews))
+	seen := map[int]bool{}
+	for _, list := range [][]gh.PRReview{lpr.StandingReviews, lpr.Reviews} {
+		for _, r := range list {
+			if r.DatabaseID != 0 {
+				if seen[r.DatabaseID] {
+					continue
+				}
+				seen[r.DatabaseID] = true
+			}
+			out = append(out, r)
+		}
 	}
 	return out
 }

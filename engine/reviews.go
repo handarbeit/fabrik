@@ -303,7 +303,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		} else if reviewDecision, err := e.readClient.FetchPRReviewDecision(owner, repo, prNumber); err != nil {
 			e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewDecision failed: %v\n", err)
 			authorityReason = "review verdict unreadable (fetch failed), blocking conservatively"
-		} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); satisfied {
+		} else if satisfied, reason := e.authorityVerdict(owner, repo, item.Number, prNumber, reviewDecision, reviews, item, stage); satisfied {
 			e.removeAwaitingReviewLabel(owner, repo, item)
 			return false, false, false, reviews
 		} else {
@@ -709,13 +709,13 @@ func (e *Engine) effectiveExpectedReviewers(item gh.ProjectItem, stage *stages.S
 // authoritative: satisfied only on APPROVED. When reviewDecision is empty (no
 // branch-protection review requirement configured on this repo), authoritative
 // mode must not become a silent no-op — it falls back to Fabrik's own
-// computation: satisfied unless any non-DISMISSED review in reviews is in
-// CHANGES_REQUESTED state. Any other non-empty value (an undocumented future
+// computation: satisfied unless some reviewer's standing at the head holds the
+// gate (see reviewerStandings). Any other non-empty value (an undocumented future
 // GitHub enum addition, or a schema change) blocks conservatively instead of
 // silently falling through to the no-branch-protection fallback — GitHub did
 // report a real verdict here, just not one this function recognizes, so
 // treating it as "no requirement configured" could wrongly satisfy the gate.
-func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (satisfied bool, reason string) {
+func reviewGateAuthorityVerdict(reviewDecision string, standings []reviewerStanding) (satisfied bool, reason string) {
 	switch reviewDecision {
 	case "":
 		// No branch-protection review requirement configured — fall through to
@@ -740,16 +740,55 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 	}
 
 	// No branch-protection review requirement configured — fall back to
-	// Fabrik's own outstanding-reviewer + no-CHANGES_REQUESTED computation.
-	// DISMISSED reviews are excluded — a dismissed CHANGES_REQUESTED review is
-	// no longer an active verdict, mirroring reviewGateOutstanding's hasReviews
-	// computation.
+	// Fabrik's own per-reviewer computation (#2465, ADR 2465): each reviewer is
+	// judged at the head commit through reviewerStandings, the one definition
+	// reviewerVerdicts shares. A reviewer whose standing holds the gate blocks;
+	// the reason names a standing request or an awaited re-review.
+	if s, ok := firstBlockingStanding(standings); ok {
+		return false, s.reason()
+	}
+	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
+}
+
+// legacyAuthorityFallback is the pre-#2465 no-branch-protection rule: any
+// CHANGES_REQUESTED in the collapsed review list blocks, whatever commit it was
+// given on. Reachable only through SetReviewStandingDisabledForTest.
+func legacyAuthorityFallback(reviews []gh.PRReview) (bool, string) {
 	for _, r := range reviews {
 		if r.State == "CHANGES_REQUESTED" {
 			return false, fmt.Sprintf("no branch-protection review requirement; %s requested changes", r.Author)
 		}
 	}
 	return true, "no branch-protection review requirement; no outstanding CHANGES_REQUESTED review"
+}
+
+// SetReviewStandingDisabledForTest restores the pre-#2465 head-blind fallback on
+// this engine (the neutralisation seam the non-vacuity tests use).
+func (e *Engine) SetReviewStandingDisabledForTest(off bool) { e.reviewStandingOff.Store(off) }
+
+// authorityVerdict is the single entry point the authoritative gates consult
+// (checkReviewGate, reviewGateBlocksLanding, pauseForReviewTimeout). A non-empty
+// reviewDecision is decided exactly as before, with no history read (R4). With an
+// empty one it reads the uncollapsed history and the live head and judges each
+// reviewer through reviewerStandings; an unreadable history or unknown head blocks
+// (R5). reviews is the caller's collapsed list, used only by the legacy seam.
+func (e *Engine) authorityVerdict(owner, repo string, issueNumber, prNumber int, reviewDecision string, reviews []gh.PRReview, item gh.ProjectItem, stage *stages.Stage) (bool, string) {
+	if reviewDecision != "" {
+		return reviewGateAuthorityVerdict(reviewDecision, nil)
+	}
+	if e.reviewStandingOff.Load() {
+		return legacyAuthorityFallback(reviews)
+	}
+	history, head, err := e.liveReviewHistory(owner, repo, issueNumber, prNumber)
+	if err != nil {
+		e.logf(item.Number, "warn", "authorityVerdict: review history read failed: %v\n", err)
+		return false, "review history unreadable (fetch failed), blocking conservatively"
+	}
+	var declared []string
+	if d := e.effectiveExpectedReviewers(item, stage); d != nil {
+		declared = *d
+	}
+	return reviewGateAuthorityVerdict("", reviewerStandings(history, head, declared))
 }
 
 // reviewGateBlocksLanding is the landing-decision review gate (#1216). It reports
@@ -924,7 +963,7 @@ func (e *Engine) reviewGateHold(item gh.ProjectItem, stage *stages.Stage, owner,
 				e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewDecision failed: %v\n", decisionErr)
 				return blockedHold("holding landing decision on PR #%d — review verdict unreadable (fetch failed), blocking conservatively\n", prNumber)
 			}
-			if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+			if satisfied, reason := e.authorityVerdict(owner, repo, item.Number, prNumber, reviewDecision, reviews, item, stage); !satisfied {
 				return blockedHold("holding landing decision on PR #%d — authoritative gate still blocking: %s\n", prNumber, reason)
 			}
 		}
@@ -1797,7 +1836,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 							"read (%v); the gate is blocking conservatively until it can be.",
 						err,
 					)
-				} else if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
+				} else if satisfied, reason := e.authorityVerdict(owner, repo, item.Number, prNumber, reviewDecision, reviews, item, stage); !satisfied {
 					authorityLine = fmt.Sprintf(
 						"\n\nReview authority is `authoritative` for this stage — %s, "+
 							"and the gate will not clear until that is resolved.",

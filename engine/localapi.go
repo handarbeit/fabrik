@@ -1245,6 +1245,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	if h.ForgeHeld {
 		res.ForgeHold = &localapi.ForgeHoldHealth{Since: localapi.KnownTime(h.ForgeSince), Failures: h.ForgeFailures, LastError: h.ForgeLastError}
 	}
+	// The consumer's own flag, no read of GitHub or the Store (#2484).
+	if ce := b.e.channelEvents(); ce != nil {
+		res.Channel = &localapi.ChannelHealth{Ready: ce.ready.Load()}
+	}
 	return res, nil
 }
 

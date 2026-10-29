@@ -56,6 +56,16 @@ func (s *intakeStats) noteApplied(eventType string) {
 	s.mu.Unlock()
 }
 
+// counts returns the accepted, applied (all event types) and dropped totals.
+func (s *intakeStats) counts() (accepted, applied, dropped int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.applied {
+		applied += v
+	}
+	return s.accepted, applied, s.dropped
+}
+
 // snapshot copies the counters into the wire type.
 func (s *intakeStats) snapshot() *localapi.IntakeHealth {
 	s.mu.Lock()

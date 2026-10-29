@@ -30,6 +30,29 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 	return latestReviewsByAuthor(pr.reviews), nil
 }
 
+// FetchPRReviewHistory returns every eligible submission in submission order,
+// uncollapsed (#2465), reproducing github.Client.FetchPRReviewHistory: PENDING
+// never appears and DISMISSED does (it still ends the verdict it dismissed).
+// FetchPRReviews and FetchPRReviewDecision stay on the sticky collapse of the
+// same raw list — the latter models GitHub's own reviewDecision (R4).
+func (s *Sim) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, pr, err := s.prLocked(owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	s.drainReviews(pr)
+	out := make([]gh.PRReview, 0, len(pr.reviews))
+	for _, rev := range pr.reviews {
+		if rev.Author == "" || rev.State == "PENDING" {
+			continue
+		}
+		out = append(out, rev)
+	}
+	return out, nil
+}
+
 // latestReviewsByAuthor reduces a submission history to one entry per author,
 // reproducing github.Client.FetchPRReviews's rule exactly:
 //
