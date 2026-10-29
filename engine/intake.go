@@ -271,16 +271,19 @@ func (in *intake) run(d delivery) {
 	in.stats.noteApplied(d.EventType)
 }
 
-// Closing reports whether the intake has stopped accepting (Close or Quiesce).
-// The apply function reads it to skip work a process that is going away does not
-// need, such as the Layer 1 status refresh (#2484). Nil-safe.
+// Closing reports whether the intake was closed (Close), which every caller
+// follows with an exec or an exit. It is deliberately false while quiesced: the
+// self-upgrade Quiesce is reversible (Resume when the exec fails), so a process
+// that may keep running must not skip work on its behalf. The apply function
+// reads it to skip work a process that is going away does not need, such as the
+// Layer 1 status refresh (#2484). Nil-safe.
 func (in *intake) Closing() bool {
 	if in == nil {
 		return false
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	return in.closed || in.quiesced
+	return in.closed
 }
 
 // Counts returns the accepted, applied and dropped delivery counts since process

@@ -56,7 +56,8 @@ func TestHealthChannelReadiness(t *testing.T) {
 	})
 }
 
-// Closing is true once Close or Quiesce has begun, and nil-safe.
+// Closing is true only once Close has begun (never for the reversible Quiesce,
+// whose process may keep running and must keep its Layer 1 refresh), and nil-safe.
 func TestIntakeClosing(t *testing.T) {
 	var none *intake
 	if none.Closing() {
@@ -67,8 +68,8 @@ func TestIntakeClosing(t *testing.T) {
 		t.Fatal("a fresh intake is not closing")
 	}
 	in.Quiesce(10 * time.Millisecond)
-	if !in.Closing() {
-		t.Fatal("a quiesced intake is closing")
+	if in.Closing() {
+		t.Fatal("a quiesced intake is not closing: Resume may keep the process running")
 	}
 	in.Resume()
 	if in.Closing() {
