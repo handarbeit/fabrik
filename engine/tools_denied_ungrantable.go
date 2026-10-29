@@ -196,6 +196,7 @@ func (e *Engine) pauseForUngrantableDenial(item gh.ProjectItem, stage *stages.St
 	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseQuestion,
 	})
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())

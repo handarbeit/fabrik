@@ -39,12 +39,13 @@ func buildBranchDivergedComment(d *BranchDivergedError) string {
 func (e *Engine) pauseForBranchDivergence(item gh.ProjectItem, d *BranchDivergedError) {
 	e.logf(item.Number, "branch-sync", "REFUSING to continue on %s: local %s and remote %s diverged — both left untouched, pausing\n", d.Branch, d.LocalHead, d.RemoteHead)
 	if hasPauseComment(item, divergedPauseFragment) {
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseOther)
 		return
 	}
 	e.pauseIssue(item, buildBranchDivergedComment(d), pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseOther,
 	})
 }
 

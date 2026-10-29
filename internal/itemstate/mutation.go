@@ -1104,6 +1104,9 @@ type WorkerSlotAcquired struct {
 	Repo   string
 	Number int
 	At     time.Time
+	// Reserved is true when the slot taken is the reserved fix-round slot
+	// (#2490), not a general-pool slot.
+	Reserved bool
 }
 
 func (WorkerSlotAcquired) isMutation()       {}

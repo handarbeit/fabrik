@@ -39,6 +39,8 @@ var parallelExempt = map[string]string{
 	"forge_hold_test.go":             "redirects the process-global warnings.WarningsPathOverride to read the forge_unreachable panel entry back; parallel tests would write theirs into it (same constraint as display_field_warnings_test.go)",
 	"display_field_warnings_test.go": "redirects the process-global warnings.WarningsPathOverride to read the panel file back; parallel tests would write theirs into it (see github_app_auth_test.go for the same constraint)",
 
+	"channel_sighup_restart_socket_test.go": "binds the real local-API socket, and localapi.Server.Start serialises a process-wide umask of 0177 while it binds (internal/localapi); a parallel sibling creating its temp directories in that window gets them without the search bit and fails with permission denied (#2484)",
+
 	"github_app_auth_test.go:TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns": "points the process-global warnings.WarningsPathOverride at a temp file to read the panel back; every parallel sibling's first poll writes to that global (a -race-flagged data race), see the comment on the test",
 }
 

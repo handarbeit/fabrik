@@ -420,6 +420,7 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		e.pauseIssue(item, msg, pauseOpts{
 			awaitingInput:   true,
 			removeAutoMerge: true,
+			cause:           pauseCauseOther,
 		})
 		return
 	}
@@ -599,6 +600,7 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 		awaitingInput:   true,
 		reactRocket:     true,
 		removeAutoMerge: true,
+		cause:           pauseCauseOther,
 	})
 }
 
@@ -671,7 +673,7 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasPauseComment(item, rebaseCyclePauseFragment(stage)) {
 		e.logf(item.Number, "rebase-cycles", "rebase-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCycleLimit)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
@@ -696,6 +698,7 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true
@@ -869,7 +872,7 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasPauseComment(item, enqueueCyclePauseFragment(stage)) {
 		e.logf(item.Number, "enqueue-cycles", "enqueue-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCycleLimit)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
@@ -886,6 +889,7 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true
@@ -917,5 +921,6 @@ func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
 		awaitingInput:   true,
 		reactRocket:     true,
 		removeAutoMerge: true,
+		cause:           pauseCauseOther,
 	})
 }

@@ -337,6 +337,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
+	// A head that arrived after the re-prompt ends the ladder's cycle (#2467,
+	// R4): Phase 2 must not fire on the clock of a commit the bot was already
+	// asked about, and Phase 1 re-fires a full window after the new head.
+	if reprompted && allBots && e.resetLadderOnNewHead(owner, repo, item, prNumber) {
+		reprompted = false
+	}
+
 	// Phase 2 check: if a re-prompt was already sent and another full timeout
 	// window has elapsed without response, pause for human.
 	if reprompted && allBots {
@@ -348,7 +355,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Still waiting. Check the fabrik:awaiting-review timeout (Phase 1
 	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
 	// mixed/pure-human/no-PR-number pause).
-	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, declaredOutstanding, allBots, reprompted, authorityReason); done {
+	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, prNumber, outstanding, declaredOutstanding, allBots, reprompted, authorityReason); done {
 		return blocked, timedOut, false, reviews
 	}
 
@@ -445,6 +452,7 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 		e.pauseIssue(item, msg, pauseOpts{
 			labelEcho:  true,
 			labelFirst: true,
+			cause:      pauseCauseOther,
 		})
 		return true, 0
 	}
@@ -466,6 +474,7 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		labelEcho:  true,
 		labelFirst: true,
+		cause:      pauseCauseOther,
 	})
 	return true, 0
 }
@@ -1134,7 +1143,7 @@ func reviewTimeoutReason(outstanding, declaredOutstanding []string, authorityRea
 // "pending reviewers"/"declared reviewer(s) not yet responded"/"no reviewers
 // were requested" messages built by reviewTimeoutReason, which would
 // otherwise misleadingly suggest nobody has reviewed at all.
-func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding, declaredOutstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
+func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, prNumber int, outstanding, declaredOutstanding []string, allBots, reprompted bool, authorityReason string) (blocked, timedOut, done bool) {
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -1149,6 +1158,12 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 			return false, false, false
 		}
 		if appliedAt.IsZero() || time.Since(appliedAt) < timeout {
+			return false, false, false
+		}
+		// A head that arrived after the label restarts the wait (#2467): the
+		// reviewer is measured on silence about the commit they were asked to
+		// review, not on how long the fix loop has run.
+		if e.headRestartsWait(owner, repo, item, prNumber, appliedAt, timeout) {
 			return false, false, false
 		}
 		// 1× timeout elapsed.
@@ -1969,6 +1984,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseReviewTimeout,
 	})
 	e.emitReviewTimeout(item, stage) // observation only (#1968)
 }
@@ -2094,7 +2110,7 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	if hasPauseComment(item, reviewCyclePauseFragment(stage)) {
 		e.logf(item.Number, "review-cycles", "review-cycle pause comment already exists for this episode — reapplying pause without reposting\n")
-		e.reapplyPauseLabels(item)
+		e.reapplyPauseLabels(item, pauseCauseCycleLimit)
 		e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		return false
 	}
@@ -2118,6 +2134,7 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseCycleLimit,
 	})
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	return true

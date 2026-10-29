@@ -8,6 +8,16 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
+// feedbackReadFailedReason is the short admission cooldown a hold caused only by
+// a failed live read records (#2498, ADR 2498).
+const feedbackReadFailedReason = "feedback-read-failed"
+
+// SetFeedbackReadFailShortCooldownDisabledForTest restores the pre-#2498
+// behaviour: a failed-read hold records the long feedback-pending cooldown.
+func (e *Engine) SetFeedbackReadFailShortCooldownDisabledForTest(disabled bool) {
+	e.feedbackReadFailShortOff.Store(disabled)
+}
+
 // pendingFeedback is what the feedback gate found unprocessed on an item at the
 // moment of a decision (#1953 R2).
 type pendingFeedback struct {
@@ -95,9 +105,13 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 // view lacks, repairDispatcherBlindness invalidates the cache and forces the next
 // admission — bounded, and the gate keeps holding either way.
 //
-// On a hold it records a "feedback-pending" cooldown, mirroring handleReviewGate's
-// "review-blocked", so itemMayNeedWork's expiry path re-evaluates the item every
-// githubRecheckInterval even when nothing bumps updatedAt.
+// On a hold on real pending feedback it records a "feedback-pending" cooldown,
+// mirroring handleReviewGate's "review-blocked", so itemMayNeedWork's expiry path
+// re-evaluates the item every githubRecheckInterval even when nothing bumps
+// updatedAt. A hold caused only by a failed live read (#2498, ADR 2498) records
+// the short "feedback-read-failed" cooldown at mergeGateRecheckInterval instead,
+// so a transient failure is retried on the next poll; it is a short admission
+// cooldown, so the idle poll does not sleep past it.
 func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where string) bool {
 	pf := e.unprocessedFeedback(item, alreadyLive)
 	if pf.empty() && pf.Live {
@@ -113,11 +127,16 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, reason)
 		e.noteGateHold(item, gateFeedback, reason, pendingFeedbackIDs(pf))
 	}
+	reason, wait := "feedback-pending", e.githubRecheckInterval()
+	if pf.empty() && !e.feedbackReadFailShortOff.Load() {
+		// #2498: the state is unknown, not pending — retry on the next poll.
+		reason, wait = feedbackReadFailedReason, e.mergeGateRecheckInterval()
+	}
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 		Number: item.Number,
-		Reason: "feedback-pending",
-		Until:  e.now().Add(e.githubRecheckInterval()),
+		Reason: reason,
+		Until:  e.now().Add(wait),
 	})
 	if len(pf.DispatcherGap) > 0 {
 		e.repairDispatcherBlindness(item, pf.DispatcherGap)

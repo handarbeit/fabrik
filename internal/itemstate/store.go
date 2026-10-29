@@ -947,6 +947,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		item.Worker.Queued = false
 		item.Worker.QueuedSince = time.Time{}
+		item.Worker.ReservedSlot = v.Reserved
 		item.Worker.StartedAt = v.At
 		item.Worker.LastSignAt = v.At
 		return WorkerChanged

@@ -45,6 +45,10 @@ func (e *Engine) clearPauseOnClosedCleanup(item gh.ProjectItem) bool {
 			ok = false
 		}
 	}
+	if ok {
+		// The cause label lives and dies with fabrik:paused (#2487).
+		e.clearPauseCause(item)
+	}
 	if ok && carried {
 		e.logf(item.Number, "cleanup", "pause cleared because the issue is closed (#2459)\n")
 	}

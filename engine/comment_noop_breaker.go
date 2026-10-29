@@ -104,6 +104,7 @@ func (e *Engine) tripNoOpCommentCycleBreaker(item gh.ProjectItem, stage *stages.
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
+		cause:         pauseCauseBreaker,
 	})
 
 	e.emitStructural(tui.CommentBreakerTrippedEvent{

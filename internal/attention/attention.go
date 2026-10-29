@@ -391,6 +391,12 @@ type Result struct {
 	// Cause says why the item is in this state, from the fixed vocabulary (Cause*),
 	// when the engine knows; empty when it does not — never guessed (#2121).
 	Cause string
+	// PauseCause is the engine's recorded reason for a pause, read from the
+	// item's fabrik:pause:<cause> label (#2487): question, review-timeout,
+	// ci-timeout, cycle-limit, daemon-stop, breaker, failed or other. Empty for a
+	// non-paused item, a human-applied pause and a pause from before the label
+	// existed. It never decides resume.
+	PauseCause string
 	// ParkedDataMissing echoes Input.ParkedBlockersUnknown: the item is not
 	// Suspended as a parked blocker only because blocker data is missing, so a
 	// caller tracking a persisted episode must not read it as "decision made".
@@ -417,7 +423,15 @@ type labelInfo struct {
 // listed here (stage:*, model:*, effort:* ...) carry no attention meaning.
 var labelTable = map[string]labelInfo{
 	"fabrik:paused":                        {"the engine paused this item; a human comment created after the pause resumes it", false},
-	"fabrik:awaiting-input":                {"the engine asked a question and is waiting for a human reply", false},
+	"fabrik:awaiting-input":                {"the engine paused this item and a human comment resumes it; the fabrik:pause:<cause> label says why (a question, a timeout, a limit, ...)", false},
+	"fabrik:pause:question":                {"pause cause: a question was put to a human (a blocked-on-input worker, an ungrantable denial, a spawn servability question)", false},
+	"fabrik:pause:review-timeout":          {"pause cause: the review gate timed out waiting for reviewers", false},
+	"fabrik:pause:ci-timeout":              {"pause cause: the CI gate, its backstop or the merge-state wait timed out", false},
+	"fabrik:pause:cycle-limit":             {"pause cause: a bounded loop (review, CI-fix, rebase, enqueue, slice, tools-denied or stage dispatch) reached its limit", false},
+	"fabrik:pause:daemon-stop":             {"pause cause: the daemon was stopped cleanly while this item was running", false},
+	"fabrik:pause:breaker":                 {"pause cause: a comment circuit breaker or the merge-train runaway guard fired", false},
+	"fabrik:pause:failed":                  {"pause cause: a stage failed or a settle scan exhausted its retries", false},
+	"fabrik:pause:other":                   {"pause cause: any other engine pause; the pause comment says what", false},
 	"fabrik:awaiting-review":               {"waiting for PR reviewers (or the review timeout / bot re-prompt)", true},
 	"fabrik:awaiting-ci":                   {"waiting for CI on the linked PR (stage completion is deferred until it is green)", true},
 	"fabrik:awaiting-done":                 {"stage reported no work needed; the engine is retrying the move to Done and the issue close", true},
@@ -457,6 +471,7 @@ var labelPrefixes = []struct {
 	prefix  string
 	meaning string
 }{
+	{"fabrik:pause:", "pause cause: why the engine paused this item (the label is written with fabrik:paused and removed with it)"},
 	{"fabrik:reworking:", "the engine is reworking this stage after a comment or review (a rework worker runs, or a killed one left the label behind)"},
 	{"fabrik:locked:", "the engine holds this item's dispatch lock for a worker (a leftover after a kill until the retry runs)"},
 	{"fabrik:credited-pr:", "the merge-train landing credited this PR for the Done transition; the engine verifies it merged"},
@@ -473,6 +488,21 @@ func MeaningOf(label string) string {
 	for _, p := range labelPrefixes {
 		if strings.HasPrefix(label, p.prefix) {
 			return p.meaning
+		}
+	}
+	return ""
+}
+
+// PauseCauseLabelPrefix is the shared prefix of the pause-cause label family
+// (#2487); the engine owns the vocabulary, this package only reads it.
+const PauseCauseLabelPrefix = "fabrik:pause:"
+
+// PauseCauseOf returns the cause named by the first fabrik:pause:<cause> label in
+// labels, or "".
+func PauseCauseOf(labels []string) string {
+	for _, l := range labels {
+		if strings.HasPrefix(l, PauseCauseLabelPrefix) {
+			return strings.TrimPrefix(l, PauseCauseLabelPrefix)
 		}
 	}
 	return ""
@@ -574,7 +604,10 @@ func classify(in Input) Result {
 	if (paused && escalationSignal(in)) || failedLanding {
 		code, summary := escalationCode(in, failedLanding)
 		res.ResumeVia = resumeVia(in, true)
-		if paused && in.DaemonStop {
+		if paused {
+			res.PauseCause = PauseCauseOf(in.Labels)
+		}
+		if paused && (in.DaemonStop || res.PauseCause == "daemon-stop") {
 			res.Cause = CauseDaemonStop
 		}
 		if paused && in.UnknownMergeState {
@@ -594,8 +627,15 @@ func classify(in Input) Result {
 				summary = "the engine paused and is waiting on a human; " + resumeAdvice(in, false)
 			}
 		}
+		res.PauseCause = PauseCauseOf(in.Labels)
+		// fabrik:awaiting-input marks every engine pause (ADR 2487), so it only
+		// means "a question was asked" when the cause says question or is unknown.
+		// Any other recorded cause is reported as the plain pause it is.
+		if res.PauseCause != "" && res.PauseCause != "question" {
+			code, summary = "fabrik:paused", "paused ("+res.PauseCause+"); "+resumeAdvice(in, false)
+		}
 		res.ResumeVia = resumeVia(in, false)
-		if in.DaemonStop {
+		if in.DaemonStop || res.PauseCause == "daemon-stop" {
 			res.Cause = CauseDaemonStop
 		}
 		if in.UnknownMergeState {

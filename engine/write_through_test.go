@@ -340,7 +340,7 @@ func TestAddPausedLabelToItem_CacheKeyAndEcho(t *testing.T) {
 
 	item := gh.ProjectItem{Number: 1} // empty Repo — must fall back to the passed-in owner/repo
 
-	eng.addPausedLabelToItem("owner", "repo", item)
+	eng.addPausedLabelToItem("owner", "repo", item, pauseCauseOther)
 
 	labels, err := cache.FetchLabels("owner", "repo", 1)
 	if err != nil {

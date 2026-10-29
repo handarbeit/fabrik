@@ -391,6 +391,19 @@ required context can be posted through the classic Statuses API rather than as
 an Actions check run, and `FetchCombinedStatus` is Fabrik's only visibility into
 that case (ADR-933). Both feed the `mergeable_state` derivation.
 
+### Commit time — **Modelled, minimally** (#2467)
+
+`FetchCommitTime` answers the committer date the review-wait gate reads as the
+PR head's arrival. It is **scenario-seeded only** (`SeedCommitTime`, keyed by
+SHA, `repoState.commitTimes`): the sim does not derive a date from the git
+objects it creates, because a real commit's date is author-controlled and a
+rebase rewrites it, so any derivation would be a fiction. A SHA nobody seeded is
+a wrapped `gh.ErrNotFound`, the answer production gives for an unknown commit, so
+the gate's fall-back to the label time is exercised rather than a time being
+invented from the clock at read time. The date is **not** a push time (GitHub has
+no reliable per-commit one); scenarios that model "a push just happened" seed a
+recent date on the new head.
+
 ### Check suites — **Modelled, minimally** (#1822)
 
 `FetchCheckSuites` reads a third SHA-keyed collection, `repoState.checkSuites`,

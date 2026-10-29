@@ -28,7 +28,7 @@ max_concurrent: 5
 auto_upgrade: true
 # Re-enabled 2026-05-05 after the cache-coherency cluster landed (Phase 3-A through 3-H,
 # plus #537 single-Store unification). Verification per docs/cache-refactor/04-phase4-audit.md §6.
-webhooks: false  # App auth: gh webhook forward is user-token only; event_source: hookdeck is the App-mode path
+webhooks: false  # App auth: gh webhook forward is user-token only; App webhooks arrive via event_source below
 # Event-driven ingestion under App auth (#2143): GitHub App fabrik-dev-daemon's webhook
 # -> the daemon's own Tailscale Funnel node (https://fabrik-dev.<tailnet>.ts.net/webhook).
 # The secrets are named, not stored: FABRIK_TS_AUTHKEY (needed only until the node has

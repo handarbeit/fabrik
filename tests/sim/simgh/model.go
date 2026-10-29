@@ -94,6 +94,12 @@ type repoState struct {
 	// GitHub reports it while a job is unscheduled.
 	checkSuites map[string][]gh.CheckSuite
 
+	// commitTimes is the per-SHA committer date FetchCommitTime reports
+	// (#2467). Scenario-seeded only (SeedCommitTime): a SHA nobody seeded reads
+	// as not found, the "no GitHub-sourced time" case the engine must fall back
+	// from, rather than a time invented from the clock at read time.
+	commitTimes map[string]time.Time
+
 	// workflowRuns is the per-SHA Actions workflow-run list (#2052) — a fourth
 	// CI collection, kept separate because a run that failed before creating
 	// any job (startup_failure) exists here while checkRuns stays empty.

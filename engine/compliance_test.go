@@ -88,7 +88,7 @@ var bodyBearingCalls = map[string]int{
 	"pauseIssue":                1, // (item, comment string, opts pauseOpts)
 	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
 	"addCommentWithRetry":       4, // (owner, repo string, issueNumber, prNum int, body, what string)
-	"pauseInterruptedIssue":     1, // (item, comment string)
+	"pauseInterruptedIssue":     2, // (item, cause pauseCause, comment string)
 	"postStageIssueComment":     1, // (item, body string, rec, live) — a recorded stage comment (#2394)
 }
 

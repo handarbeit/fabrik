@@ -352,7 +352,7 @@ func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockEr
 	}
 	msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**\n\n%d block(s) could not be parsed:\n\n%s\n\nNo sub-issues were created — the whole declaration is held so dependency indexes stay consistent. Expected `TITLE: <title>` as the first non-empty line inside each block.\n\n%s%s",
 		len(errs), strings.Join(bullets, "\n"), workNote, guidance)
-	e.pauseIssue(item, msg, pauseOpts{labelEcho: true})
+	e.pauseIssue(item, msg, pauseOpts{labelEcho: true, cause: pauseCauseOther})
 	return fmt.Errorf("spawn: %d malformed FABRIK_SPAWN_CHILD block(s)", len(errs))
 }
 
@@ -782,6 +782,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			err, formatSpawnedList(nil))
 		e.pauseIssue(item, msg, pauseOpts{
 			labelEcho: true,
+			cause:     pauseCauseOther,
 		})
 		return nil, false, fmt.Errorf("spawn: %w", err)
 	}
@@ -806,6 +807,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				targetRepo, e.cfg.Owner, e.cfg.Repo, formatSpawnedList(nil), targetRepo)
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
+				cause:     pauseCauseQuestion,
 			})
 			return nil, false, fmt.Errorf("spawn: target %s not served by this instance (configured for %s/%s)", targetRepo, e.cfg.Owner, e.cfg.Repo)
 		}
@@ -878,6 +880,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				blockIndex, block.Repo, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
+				cause:     pauseCauseOther,
 			})
 			return spawned, false, fmt.Errorf("spawn: invalid repo %q in block %d", block.Repo, blockIndex)
 		}
@@ -897,6 +900,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 					block.Repo, childNumber, blockIndex, err, formatSpawnedList(spawned), spawnChildLabel(blockIndex, childNumber))
 				e.pauseIssue(item, msg, pauseOpts{
 					labelEcho: true,
+					cause:     pauseCauseOther,
 				})
 				return spawned, false, fmt.Errorf("spawn: resuming block %d (child %s#%d): %w", blockIndex, block.Repo, childNumber, err)
 			}
@@ -927,6 +931,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 					blockIndex, len(blocks), block.Repo, err, formatSpawnedList(spawned), spawnRetryInstruction)
 				e.pauseIssue(item, msg, pauseOpts{
 					labelEcho: true,
+					cause:     pauseCauseOther,
 				})
 				return spawned, false, fmt.Errorf("spawn: creating child %d: %w", blockIndex, err)
 			}
@@ -976,6 +981,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 					childOwner, childRepo, childNumber, err, formatSpawnedList(spawned), spawnRetryInstruction)
 				e.pauseIssue(item, msg, pauseOpts{
 					labelEcho: true,
+					cause:     pauseCauseOther,
 				})
 				return spawned, false, fmt.Errorf("spawn: adding child %s#%d to project: %w", block.Repo, childNumber, err)
 			}
@@ -993,6 +999,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 					childOwner, childRepo, childNumber, err, formatSpawnedList(spawned), spawnRetryInstruction)
 				e.pauseIssue(item, msg, pauseOpts{
 					labelEcho: true,
+					cause:     pauseCauseOther,
 				})
 				return spawned, false, fmt.Errorf("spawn: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
 			}
@@ -1035,6 +1042,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				block.Repo, childNumber, blockIndex, err, formatSpawnedList(spawned), spawnRetryInstruction)
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
+				cause:     pauseCauseOther,
 			})
 			return spawned, false, fmt.Errorf("spawn: inheriting base label for child %s#%d: %w", block.Repo, childNumber, err)
 		}
@@ -1082,6 +1090,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				i+1, block.DependsOn, err, formatSpawnedList(spawned), spawnRetryInstruction)
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
+				cause:     pauseCauseOther,
 			})
 			return spawned, false, fmt.Errorf("spawn: linking sibling dependency for block %d: %w", i+1, err)
 		}
@@ -1145,8 +1154,8 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 
 // addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through
 // and webhook echo registration.
-func (e *Engine) addPausedLabelToItem(owner, repo string, item gh.ProjectItem) {
-	e.addLabel(gh.ProjectItem{Number: item.Number, Repo: owner + "/" + repo}, "fabrik:paused")
+func (e *Engine) addPausedLabelToItem(owner, repo string, item gh.ProjectItem, cause pauseCause) {
+	e.applyPauseLabels(gh.ProjectItem{Number: item.Number, Repo: owner + "/" + repo}, cause, false)
 }
 
 // parseOwnerRepoStr splits "owner/repo" into owner and repo. Returns false if

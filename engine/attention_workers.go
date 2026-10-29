@@ -90,10 +90,11 @@ func pausedByMarker(st *itemstate.ItemState, marker string) bool {
 // gateCooldowns are the cooldowns that mean a gate, not the dispatcher, is what
 // the item waits on: an item carrying one is not "waiting for dispatch".
 var gateCooldowns = map[string]bool{
-	"feedback-pending": true,
-	"review-blocked":   true,
-	"merge-unsettled":  true,
-	"dep-blocked":      true,
+	"feedback-pending":       true,
+	feedbackReadFailedReason: true,
+	"review-blocked":         true,
+	"merge-unsettled":        true,
+	"dep-blocked":            true,
 }
 
 // dispatchable reports whether the engine would dispatch the item to a worker if

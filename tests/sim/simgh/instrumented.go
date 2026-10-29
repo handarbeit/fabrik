@@ -516,6 +516,11 @@ func (in *Instrumented) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSui
 		func() ([]gh.CheckSuite, error) { return in.sim.FetchCheckSuites(owner, repo, sha) })
 }
 
+func (in *Instrumented) FetchCommitTime(owner, repo, sha string) (time.Time, error) {
+	return do1(in, "FetchCommitTime", false, Args{Owner: owner, Repo: repo, SHA: sha},
+		func() (time.Time, error) { return in.sim.FetchCommitTime(owner, repo, sha) })
+}
+
 func (in *Instrumented) FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error) {
 	return do1(in, "FetchWorkflowRuns", false, Args{Owner: owner, Repo: repo, SHA: sha},
 		func() ([]gh.WorkflowRun, error) { return in.sim.FetchWorkflowRuns(owner, repo, sha) })

@@ -148,6 +148,7 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 		prs:               make(map[int]*prRecord),
 		checkRuns:         make(map[string][]gh.CheckRun),
 		checkSuites:       make(map[string][]gh.CheckSuite),
+		commitTimes:       make(map[string]time.Time),
 		workflowRuns:      make(map[string][]gh.WorkflowRun),
 		reopenScripts:     make(map[int][]ReopenStep),
 		readyScripts:      make(map[int][]ReadyForReviewStep),
