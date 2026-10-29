@@ -631,6 +631,12 @@ func (e *Engine) pauseInterruptedIssue(item gh.ProjectItem, cause pauseCause, co
 	}
 
 	if alreadyPaused {
+		// The pause is not ours to re-explain: no comment is posted, so an
+		// existing cause label (a question, a timeout, a breaker) still names
+		// why the item is paused and must not be replaced by this stop's cause.
+		if len(e.currentPauseCauseLabels(item)) > 0 {
+			return
+		}
 		e.reapplyPauseLabels(item, cause)
 		return
 	}

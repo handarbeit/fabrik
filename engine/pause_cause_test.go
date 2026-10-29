@@ -55,6 +55,30 @@ func TestReapplyPauseLabels_WritesTheCause(t *testing.T) {
 	}
 }
 
+// A stop on an item that is already paused must not replace the cause that says
+// why it is paused; with no cause label (a pre-upgrade pause) the stop's cause is
+// recorded.
+func TestPauseInterruptedIssue_KeepsAnExistingCauseOnAnAlreadyPausedItem(t *testing.T) {
+	eng, cache := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.pauseIssue(item, "🏭 **Fabrik — q**\n\nmsg", pauseOpts{awaitingInput: true, labelEcho: true, cause: pauseCauseQuestion})
+
+	eng.pauseInterruptedIssue(item, pauseCauseOther, "🏭 **Fabrik — stop**\n\nmsg")
+
+	labels, _ := cache.FetchLabels("owner", "repo", 1)
+	if got := causeLabelsOf(labels); len(got) != 1 || got[0] != pauseCauseQuestion.label() {
+		t.Errorf("cause labels = %v, want exactly [%s]", got, pauseCauseQuestion.label())
+	}
+
+	eng2, cache2 := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng2.applyLabelAdd(item, "fabrik:paused", true)
+	eng2.pauseInterruptedIssue(item, pauseCauseOther, "🏭 **Fabrik — stop**\n\nmsg")
+	labels2, _ := cache2.FetchLabels("owner", "repo", 1)
+	if got := causeLabelsOf(labels2); len(got) != 1 || got[0] != pauseCauseOther.label() {
+		t.Errorf("cause labels (no prior cause) = %v, want exactly [%s]", got, pauseCauseOther.label())
+	}
+}
+
 func TestPauseIssue_UnsetCauseFallsBackToOther(t *testing.T) {
 	eng, cache := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.pauseIssue(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "🏭 **Fabrik — x**\n\nmsg", pauseOpts{awaitingInput: true, labelEcho: true})
