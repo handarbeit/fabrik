@@ -153,26 +153,26 @@ func TestReviewWaitAnchor_ResolvesHeadLiveAndCachesPerSHA(t *testing.T) {
 }
 
 // A restart (fresh Engine, empty cache) reaches the same verdict: the anchor is
-// re-read from GitHub, not held in memory (R2, AC3).
+// re-read from GitHub, not held in memory (R2, AC3) — inside the window and past it.
 func TestReviewWaitAnchor_RestartKeepsTheAnchor(t *testing.T) {
-	f := newAnchorFixture(t, 17*time.Minute, 30*time.Second)
-	if _, timedOut, _, _ := f.eng.checkReviewGate(f.board, f.item, f.stage); timedOut {
-		t.Fatal("timed out before restart")
-	}
-	restarted := reviewTestEngine(t, f.client)
-	restarted.cfg.ReviewWaitTimeout = f.eng.cfg.ReviewWaitTimeout
-	restarted.SetClock(stubClock{t: f.now})
-	if _, timedOut, _, _ := restarted.checkReviewGate(f.board, f.item, f.stage); timedOut {
-		t.Fatal("restart must not shorten the wait")
-	}
-	// And at the same instant the timeout would have fired without a restart.
-	later := f.now.Add(15 * time.Minute)
-	f.eng.SetClock(stubClock{t: later})
-	restarted.SetClock(stubClock{t: later})
-	_, a, _, _ := f.eng.checkReviewGate(f.board, f.item, f.stage)
-	_, b, _, _ := restarted.checkReviewGate(f.board, f.item, f.stage)
-	if !a || !b {
-		t.Errorf("both engines must time out a full window after the push: before restart=%v after restart=%v", a, b)
+	for _, tc := range []struct {
+		name         string
+		headAge      time.Duration
+		wantTimedOut bool
+	}{
+		{"inside the window", 30 * time.Second, false},
+		{"past the window", 16 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAnchorFixture(t, 40*time.Minute, tc.headAge)
+			_, before, _, _ := f.eng.checkReviewGate(f.board, f.item, f.stage)
+			restarted := reviewTestEngine(t, f.client)
+			restarted.cfg.ReviewWaitTimeout = f.eng.cfg.ReviewWaitTimeout
+			_, after, _, _ := restarted.checkReviewGate(f.board, f.item, f.stage)
+			if before != tc.wantTimedOut || after != tc.wantTimedOut {
+				t.Errorf("timedOut before restart=%v after restart=%v, want %v for both", before, after, tc.wantTimedOut)
+			}
+		})
 	}
 }
 

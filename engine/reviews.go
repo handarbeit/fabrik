@@ -1078,7 +1078,7 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
-	if e.now().Sub(repromptedAt) < timeout {
+	if time.Since(repromptedAt) < timeout {
 		return false, false, false
 	}
 	e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
@@ -1157,7 +1157,7 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 			e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			return false, false, false
 		}
-		if appliedAt.IsZero() || e.now().Sub(appliedAt) < timeout {
+		if appliedAt.IsZero() || time.Since(appliedAt) < timeout {
 			return false, false, false
 		}
 		// A head that arrived after the label restarts the wait (#2467): the

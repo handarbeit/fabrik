@@ -9,6 +9,13 @@ import (
 
 // The review-wait anchor (#2467, ADR 2467).
 //
+// Every comparison here is against the host clock (time.Now), exactly like the
+// label-time comparisons it extends: both sides are GitHub-sourced instants
+// measured against one wall clock, and the sim drives this gate by seeding old
+// GitHub times rather than by advancing the engine clock (see
+// tests/sim/timeout_test.go), so an e.now() here would silently change what
+// every one of those scenarios measures.
+//
 // The review-wait timeout used to be measured from the first application of
 // fabrik:awaiting-review. That label stays on through every fix round, so a push
 // asking the reviewer for a fresh look never restarted the clock and the timeout
@@ -81,7 +88,7 @@ func (e *Engine) headArrivalTime(owner, repo string, item gh.ProjectItem, prNumb
 	if sha == "" {
 		return time.Time{}, false
 	}
-	now := e.now()
+	now := time.Now()
 	at, ok := e.commitTime(owner, repo, sha, item.Number, now)
 	if !ok {
 		return time.Time{}, false
@@ -139,7 +146,7 @@ func (e *Engine) headRestartsWait(owner, repo string, item gh.ProjectItem, prNum
 	if !ok || !headAt.After(labelAt) {
 		return false
 	}
-	return e.now().Sub(headAt) < timeout
+	return time.Since(headAt) < timeout
 }
 
 // resetLadderOnNewHead ends the bot re-prompt ladder's current cycle when the
