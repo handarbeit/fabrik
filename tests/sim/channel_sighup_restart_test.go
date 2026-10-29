@@ -30,6 +30,10 @@ type sighupOpts struct {
 	noLiveDedup  bool
 	intake       bool
 	detached     bool // the subscriber is not attached to the first daemon
+	// socket, when set, replaces the in-process sink: restart does not attach one,
+	// and starts the restarted daemon's local API on this path unless lateAPI.
+	socket  string
+	lateAPI bool // the test starts the second daemon's local API itself
 }
 
 type sighupWorld struct {
@@ -114,13 +118,20 @@ func (w *sighupWorld) restart(t *testing.T, o sighupOpts) {
 		t.Fatal("second hub did not start")
 	}
 	t.Cleanup(r.Engine.StopChannelEventsForTest)
+	w.r = r
+	if o.socket != "" {
+		if !o.lateAPI {
+			r.Engine.StartLocalAPIForTest(o.socket)
+			t.Cleanup(r.Engine.CloseLocalAPIForTest)
+		}
+		return
+	}
 	w.sink2 = &simSink{}
 	detach, err := r.Engine.ChannelStreamerForTest().Attach(localapi.AttachParams{Subscriber: "S"}, w.sink2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(detach)
-	w.r = r
 }
 
 // settleSecond polls the restarted daemon through its first listings.

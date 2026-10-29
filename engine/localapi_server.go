@@ -43,7 +43,12 @@ func localAPIUnavailableCondition(path string, err error) warnings.Condition {
 // Failure to bind is non-fatal, like the webhook manager: the API is a
 // convenience, never a reason for the daemon not to run.
 func (e *Engine) startLocalAPI() {
-	path := localapi.SocketPath(e.fabrikDir)
+	e.startLocalAPIAt(localapi.SocketPath(e.fabrikDir))
+}
+
+// startLocalAPIAt is startLocalAPI on an explicit socket path (the sim's seam,
+// which has no fabrik directory of its own).
+func (e *Engine) startLocalAPIAt(path string) {
 	srv := localapi.NewServer(path, e.LocalAPIBackend(), func(format string, args ...any) {
 		e.logf(0, "localapi", format, args...)
 	})
