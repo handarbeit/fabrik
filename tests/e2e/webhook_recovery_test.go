@@ -86,7 +86,6 @@ func TestWebhookReplayAcrossDowntime(t *testing.T) {
 func TestWebhookRestartUnderLoad(t *testing.T) {
 	env := LoadEnv(t)
 	webhookLegSetup(t, env)
-	t.Skip("a delivery accepted at the intake before the SIGHUP is not applied by the pre-exec drain (#2484)")
 	repo := env.RepoAlpha
 	ensureBedRunning(t, env)
 	issue, _ := fileInertItem(t, env, repo, "e2e webhook restart under load",
@@ -147,7 +146,31 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 			webhookEffectMissing(t, env, "after the restart the daemon does not hold %s on %s#%d: a delivery made around the restart was lost", l, repo, issue)
 		}
 	}
-	time.Sleep(20 * time.Second)
+	// The deltas for the labels that arrived while the daemon was down are held
+	// until it reports the channel ready (ADR 2169, #2484): wait for that signal, not
+	// for a fixed time, then for every label to be announced at least once. Only then
+	// is "exactly once" asserted, after a short settle for a straggling duplicate.
+	if ready, reported := awaitChannelReady(env, 6*time.Minute); !ready {
+		if !reported {
+			t.Fatalf("fabrik_health reports no channel block after the restart: the daemon has no channel hub or predates channel.ready (#2484)")
+		}
+		webhookEffectMissing(t, env, "the daemon did not report its channel ready within 6m of the restart, so the held deltas were never published")
+	}
+	if !awaitCond(3*time.Minute, func() bool {
+		for _, l := range labels {
+			if len(coll.allLabelEvents(channelevents.LabelApplied, repo, issue, l)) == 0 {
+				return false
+			}
+		}
+		return true
+	}) {
+		for _, l := range labels {
+			if len(coll.allLabelEvents(channelevents.LabelApplied, repo, issue, l)) == 0 {
+				t.Errorf("label %s was announced 0 times across the restart, want exactly 1 (the channel was ready and the subscriber attached)", l)
+			}
+		}
+	}
+	time.Sleep(15 * time.Second) // a duplicate follows the first copy at once; this is only a settle
 	for i, l := range labels {
 		evs := coll.allLabelEvents(channelevents.LabelApplied, repo, issue, l)
 		if len(evs) != 1 {
