@@ -84,9 +84,9 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 		return wtDir, nil
 	}
 	if !wm.pureRebaseDisabled.Load() {
-		pure, doubt := wm.localIsPureRebase(wtDir, branch, tracking, baseBranch)
+		pure, rule, doubt := wm.localIsPureRebase(wtDir, branch, tracking, baseBranch)
 		if pure {
-			wm.logf(issueNumber, "worktree", "catch-up: local branch is a pure rebase of the remote — resetting to the remote head (local %s, remote %s)\n", local, expectedHead)
+			wm.logf(issueNumber, "worktree", "catch-up: local branch is a pure rebase of the remote (rule %s) — resetting to the remote head (local %s, remote %s)\n", rule, local, expectedHead)
 			if out, err := gitOutputIn(wtDir, "reset", "--hard", expectedHead); err != nil {
 				return "", fmt.Errorf("resetting local %s to %s: %s: %w", branch, expectedHead, out, err)
 			}
@@ -109,15 +109,26 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 // show as `+`, so every rebase onto an advanced base would read as impure. Excluding the
 // base's history (`^baseRef`) removes them. Merge commits are invisible to patch-ids, so
 // they are counted separately. Called with wm.mu held.
-func (wm *WorktreeManager) localIsPureRebase(wtDir, branch, remoteRef, baseBranch string) (bool, string) {
+func (wm *WorktreeManager) localIsPureRebase(wtDir, branch, remoteRef, baseBranch string) (pure bool, rule, doubt string) {
 	baseRef := "refs/remotes/origin/" + baseBranch
 	fetch := exec.Command("git", "fetch", "origin", "--", "+refs/heads/"+baseBranch+":"+baseRef)
 	fetch.Dir = wm.baseDir
 	fetch.Env = nonInteractiveGitEnv()
 	if out, err := fetch.CombinedOutput(); err != nil {
-		return false, fmt.Sprintf("could not fetch base %s: %s", baseBranch, strings.TrimSpace(string(out)))
+		return false, "", fmt.Sprintf("could not fetch base %s: %s", baseBranch, strings.TrimSpace(string(out)))
 	}
-	return holdsNothingBeyond(wtDir, "HEAD", remoteRef, baseRef)
+	ok, why := holdsNothingBeyond(wtDir, "HEAD", remoteRef, baseRef)
+	if ok {
+		return true, rulePatchID, ""
+	}
+	if strings.Contains(why, "failed") {
+		return false, "", why
+	}
+	// Patch-ids differ when a rebase only shifted a commit's diff context (#2517).
+	if eq, _ := wm.subsumedByReplay(wtDir, "HEAD", remoteRef, baseRef); eq {
+		return true, ruleReplayEquivalent, ""
+	}
+	return false, "", why
 }
 
 // holdsNothingBeyond reports whether subject carries nothing other lacks (#2295, shared

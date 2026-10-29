@@ -274,6 +274,7 @@ func cloneRepoState(r *repoState) *repoState {
 		prs:               make(map[int]*prRecord, len(r.prs)),
 		checkRuns:         make(map[string][]gh.CheckRun, len(r.checkRuns)),
 		checkSuites:       make(map[string][]gh.CheckSuite, len(r.checkSuites)),
+		commitTimes:       make(map[string]time.Time, len(r.commitTimes)),
 		workflowRuns:      make(map[string][]gh.WorkflowRun, len(r.workflowRuns)),
 		reopenScripts:     make(map[int][]ReopenStep, len(r.reopenScripts)),
 		readyScripts:      make(map[int][]ReadyForReviewStep, len(r.readyScripts)),
@@ -300,6 +301,9 @@ func cloneRepoState(r *repoState) *repoState {
 	}
 	for k, v := range r.checkSuites {
 		out.checkSuites[k] = append([]gh.CheckSuite(nil), v...)
+	}
+	for k, v := range r.commitTimes {
+		out.commitTimes[k] = v
 	}
 	for k, v := range r.workflowRuns {
 		out.workflowRuns[k] = append([]gh.WorkflowRun(nil), v...)
@@ -613,6 +617,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"prs":               fieldCopied,
 		"checkRuns":         fieldCopied,
 		"checkSuites":       fieldCopied,
+		"commitTimes":       fieldCopied,
 		"workflowRuns":      fieldCopied,
 		"reopenScripts":     fieldCopied,
 		"readyScripts":      fieldCopied,
