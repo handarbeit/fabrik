@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
@@ -63,28 +64,44 @@ func daemonStopPause(st *itemstate.ItemState) bool {
 // — a different pause comment, a stage comment, no comment at all — is not
 // evidence, so a crash or a bare stale in-progress label never reads as a stop.
 func pausedByMarker(st *itemstate.ItemState, marker string) bool {
-	for i := len(st.Comments) - 1; i >= 0; i-- {
-		c := st.Comments[i]
+	c, ok := newestPauseMarkerComment(st.Comments, marker)
+	if !ok {
+		return false
+	}
+	// A later eligibility change the store watched (a resume followed by a
+	// bare re-pause that wrote no Fabrik comment) means this marker belongs
+	// to an earlier pause. A zero stamp is unknown and proves nothing.
+	if !st.EligibilityChangedAt.IsZero() && !c.CreatedAt.IsZero() &&
+		st.EligibilityChangedAt.After(c.CreatedAt.Add(daemonStopMarkerSlack)) {
+		return false
+	}
+	return true
+}
+
+// newestPauseMarkerComment is the one definition of "the newest engine pause
+// comment carries this cause marker" (#2486): it walks the comments newest to
+// oldest, skipping everything that is not a pause-bearing Fabrik comment, and
+// returns the comment when the first pause-bearing one carries the marker.
+// A remove-the-label / comment-to-resume comment or a stage comment ends the
+// walk with no match. Shared by the cache-only attention classifier
+// (pausedByMarker) and the startup clean-stop resume, which feeds it a live
+// comment read.
+func newestPauseMarkerComment(comments []gh.Comment, marker string) (gh.Comment, bool) {
+	for i := len(comments) - 1; i >= 0; i-- {
+		c := comments[i]
 		if c.FromPR != 0 || !strings.HasPrefix(c.Body, fabrikCommentPrefix) ||
 			strings.HasPrefix(c.Body, overseerAuditPrefix) {
 			continue
 		}
 		switch {
 		case strings.Contains(c.Body, marker):
-			// A later eligibility change the store watched (a resume followed by a
-			// bare re-pause that wrote no Fabrik comment) means this marker belongs
-			// to an earlier pause. A zero stamp is unknown and proves nothing.
-			if !st.EligibilityChangedAt.IsZero() && !c.CreatedAt.IsZero() &&
-				st.EligibilityChangedAt.After(c.CreatedAt.Add(daemonStopMarkerSlack)) {
-				return false
-			}
-			return true
+			return c, true
 		case removePausedRE.MatchString(c.Body), commentResumeRE.MatchString(c.Body),
 			strings.HasPrefix(c.Body, fabrikStageCommentPrefix):
-			return false
+			return gh.Comment{}, false
 		}
 	}
-	return false
+	return gh.Comment{}, false
 }
 
 // gateCooldowns are the cooldowns that mean a gate, not the dispatcher, is what
