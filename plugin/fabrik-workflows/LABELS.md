@@ -37,8 +37,11 @@ Labels that stop processing entirely.
   `fabrik:paused` and removed with it; says why the item is paused. Exactly
   one of `question` (a question was put to a human), `review-timeout`,
   `ci-timeout`, `cycle-limit`, `daemon-stop`, `breaker`, `failed` or `other`.
-  Informational only: it never changes how a pause is resumed, and a pause a
-  human applied by hand carries none. Do not apply or remove it by hand.
+  Informational only: it never changes how a pause is resumed by a human, and
+  a pause a human applied by hand carries none. The one engine use is
+  `daemon-stop`: the next daemon start resumes a pause its own clean stop set
+  (and only that), unless a human re-paused it since or
+  `resume_after_clean_stop` is off. Do not apply or remove it by hand.
 - **`fabrik:blocked`** — Set when the issue has open `blockedBy`
   dependencies (via GitHub's Issue Dependencies feature). For a parent that
   just spawned sub-issues (see `fabrik:children-spawned` below), the new

@@ -1038,7 +1038,8 @@ a **clean stop**, not a kill:
 1. **Stop admitting new work.** Fabrik stops dispatching new stage invocations immediately.
 2. **Pause every in-flight issue durably.** Every issue with a live worker gets `fabrik:paused` +
    `fabrik:awaiting-input` applied on GitHub, plus a one-time audit comment naming the stage that was
-   interrupted and instructing you to remove `fabrik:paused` to resume. `stage:<Name>:in_progress` is
+   interrupted and, if the next start does not resume it for you (see **Resuming** below), instructing
+   you to remove `fabrik:paused` to resume. `stage:<Name>:in_progress` is
    cleared at the same time — the board reflects "parked by a clean stop," not "still running."
 3. **Commit and push in-progress worktree changes.** Any uncommitted work in the worktree is
    committed (`chore: partial <Stage> stage progress (incomplete)`) and pushed to the remote branch —
@@ -1050,8 +1051,24 @@ a **clean stop**, not a kill:
    passes with work still outstanding, Fabrik logs a warning and exits anyway rather than hanging
    indefinitely.
 
-**Resuming** is exactly the same as resuming any other paused issue: remove `fabrik:paused` (and
-`fabrik:awaiting-input`, if you want to skip straight back into dispatch — it also self-clears on the
+**Resuming is automatic on the next start.** When you stop and start the daemon (a config change, an
+upgrade, a reboot), every issue the stop paused is resumed by the new process on its first poll: Fabrik
+removes `fabrik:paused`, `fabrik:awaiting-input` and `fabrik:pause:daemon-stop`, posts one short
+`🏭 **Fabrik — resumed after restart**` comment, and redispatches the stage as a continuation of the
+interrupted run (its Claude session resumes). You do not need to comment or touch a label. Before this
+the issue sat parked until someone noticed — the report that motivated it measured 17 issues losing 39
+hours that way in one month.
+
+The resume only ever lifts a pause the clean stop itself set, and it decides from GitHub alone: the
+newest Fabrik pause comment must carry the daemon-stop marker and no `fabrik:paused` /
+`fabrik:awaiting-input` label change may be later than that comment. If you pause the issue yourself
+after the stop (add the label again, or remove and re-add it) it stays paused; a pause of any other
+cause, a crash (no stop comment), a closed issue, and anything Fabrik cannot read all stay as they
+were. A plain comment on the issue neither blocks nor is needed for the resume. If you rely on "stopped
+means stay paused", turn it off with `resume_after_clean_stop: false` in `.fabrik/config.yaml`,
+`--resume-after-clean-stop=false` or `FABRIK_RESUME_AFTER_CLEAN_STOP=false` (flag over environment over
+YAML; default on). With it off, resume as for any other paused issue: remove `fabrik:paused` (and
+`fabrik:awaiting-input` if you want to skip straight back into dispatch — it also self-clears on the
 stage's next entry). The stage picks back up from the pushed partial-progress commit.
 
 **Force-quit** is still available as an escape hatch if the clean stop itself gets stuck: press
@@ -1265,6 +1282,9 @@ user: your-github-username
 # Ask GitHub to redeliver App webhook deliveries missed while the daemon was down
 # (event_source: direct or tailscale; default true). See "Direct App Webhook Receiver".
 # replay_failed_deliveries: true
+# Resume issues paused by a daemon clean stop (SIGINT/SIGTERM) on the next start
+# (default true; false keeps stop-means-stay-paused). See "Graceful Shutdown".
+# resume_after_clean_stop: true
 # event_source: tailscale embeds a Tailscale node (own tailnet machine + Funnel).
 # See "Embedded Tailscale Funnel Receiver".
 # event_source: tailscale
@@ -1561,6 +1581,7 @@ FABRIK_USER=my-personal-username
 | `--event-source` | Event ingestion transport: `poll` (default), `tailscale`, `direct` or `hookdeck`. `hookdeck`, `direct` and `tailscale` require GitHub App auth. `hookdeck` is deprecated in v0.0.90 and removed in v0.0.92. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `--hookdeck-api-key-env` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
 | `--hookdeck-webhook-secret-env` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `--resume-after-clean-stop` | On startup, resume issues whose current pause was set by a daemon clean stop (SIGINT/SIGTERM) and not superseded by a human pause or label change; see [Graceful Shutdown](#graceful-shutdown). Also `FABRIK_RESUME_AFTER_CLEAN_STOP` and `resume_after_clean_stop`. | `true` |
 | `--replay-failed-deliveries` | Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving (startup pass and, for `tailscale`, tailnet recovery; `event_source: direct` or `tailscale`, ignored otherwise). Also `FABRIK_REPLAY_FAILED_DELIVERIES` and `replay_failed_deliveries`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | `true` |
 | `--direct-listen` | host:port the direct App webhook transport listens on (plain HTTP; bind loopback). Required with `--event-source direct`. Also `FABRIK_DIRECT_LISTEN`. See [Direct App Webhook Receiver](#direct-app-webhook-receiver-event_source-direct). | — |
 | `--app-webhook-path` | URL path the direct transport serves. Also `FABRIK_APP_WEBHOOK_PATH`. | `/webhook` |
@@ -1657,6 +1678,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default), `tailscale`, `direct` or `hookdeck`. `hookdeck`, `direct` and `tailscale` require GitHub App auth. `hookdeck` is deprecated in v0.0.90 and removed in v0.0.92. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
 | `FABRIK_HOOKDECK_API_KEY_ENV` | `hookdeck_api_key_env` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the environment variable holding the Hookdeck API key (only used when `event_source: hookdeck`). | `HOOKDECK_API_KEY` |
 | `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck_webhook_secret_env` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: hookdeck`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
+| `FABRIK_RESUME_AFTER_CLEAN_STOP` | `resume_after_clean_stop` | Resume issues paused by a daemon clean stop on the next startup (default `true`; `false` keeps stop-means-stay-paused). | `true` |
 | `FABRIK_REPLAY_FAILED_DELIVERIES` | `replay_failed_deliveries` | Replay failed App webhook deliveries on startup (`event_source: direct` or `tailscale`; default `true`, ignored for other sources). | `true` |
 | `FABRIK_DIRECT_LISTEN` | `direct_listen` | host:port the direct App webhook transport listens on. Required when `event_source: direct`. | — |
 | `FABRIK_APP_WEBHOOK_PATH` | `app_webhook_path` | URL path the direct transport serves. | `/webhook` |

@@ -1582,6 +1582,10 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 		return s
 	}()
 
+	// Startup resume of daemon clean-stop pauses (#2486, ADR 2486): one-shot
+	// capture on the first populated board, then bounded evaluation per poll.
+	e.resumeCleanStopPauses(board)
+
 	e.setPollStep("selecting deep-fetch candidates")
 	deepFetchCandidates, deepFetched := e.selectDeepFetchCandidates(board, repoFilter, cycleSet, priorInQueue)
 

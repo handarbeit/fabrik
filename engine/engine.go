@@ -125,6 +125,10 @@ type Config struct {
 	// default (true); the zero value is off, so NewWithDeps engines never
 	// replay. Ignored for event sources other than direct/tailscale.
 	ReplayFailedDeliveries bool
+	// ResumeAfterCleanStop enables the startup resume of issues paused by a
+	// daemon clean stop (#2486, ADR 2486). cmd resolves the default (true); the
+	// zero value is off, so NewWithDeps engines never resume unless a test opts in.
+	ResumeAfterCleanStop bool
 	// TailscaleHostname / TailscaleAuthKeyEnv / TailscaleStateDir configure
 	// event_source: tailscale (#2143, ADR 2143): the embedded tsnet node's
 	// hostname (required), the *name* of the variable holding its tagged
@@ -517,6 +521,11 @@ type Engine struct {
 	decisionWrite         decisionPersist
 	usageLimitFileAtStart bool
 	usageLimitSeedChecked atomic.Bool
+
+	// Startup resume of daemon clean-stop pauses (#2486, ADR 2486): the scan's
+	// captured candidates and attempt counts, and its per-Engine neutralisation seam.
+	cleanStopResume    cleanStopResumeState
+	cleanStopResumeOff atomic.Bool
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See
