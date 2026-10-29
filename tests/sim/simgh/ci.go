@@ -1,7 +1,9 @@
 package simgh
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -48,6 +50,36 @@ func (s *Sim) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
 	out := make([]gh.CheckSuite, len(suites))
 	copy(out, suites)
 	return out, nil
+}
+
+// FetchCommitTime returns the committer date seeded for a commit (#2467). A SHA
+// with no seeded time is a wrapped gh.ErrNotFound, the same answer production
+// gives for an unknown commit, so the review-wait gate's label-time fallback is
+// exercised rather than a time being invented from the sim clock.
+func (s *Sim) FetchCommitTime(owner, repo, sha string) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return time.Time{}, err
+	}
+	t, ok := r.commitTimes[sha]
+	if !ok {
+		return time.Time{}, fmt.Errorf("simgh: commit %s: %w", sha, gh.ErrNotFound)
+	}
+	return t, nil
+}
+
+// SeedCommitTime records the committer date FetchCommitTime reports for a SHA.
+func (s *Sim) SeedCommitTime(ownerRepo, sha string, at time.Time) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.commitTimes[sha] = at
+	return s
 }
 
 // FetchCombinedStatus returns the classic commit statuses for a ref.

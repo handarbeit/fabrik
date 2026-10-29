@@ -80,6 +80,9 @@ type GitHubClient interface {
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
 	FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
+	// FetchCommitTime returns GitHub's committer date for a commit — the
+	// review-wait gate's head-arrival fact (#2467). A live read, never cached.
+	FetchCommitTime(owner, repo, sha string) (time.Time, error)
 	// FetchWorkflowRuns / RerunFailedJobs (#2052) need the `actions`
 	// permission (required at startup since #2105); a refusal at runtime
 	// (revocation: gh.ErrForbidden / gh.ErrNotFound) must be degraded to the
