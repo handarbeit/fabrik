@@ -1316,6 +1316,45 @@ func TestExecute_ReplayFailedDeliveries(t *testing.T) {
 	}
 }
 
+// #2486: resume_after_clean_stop resolves flag > env > config.yaml > default
+// (true).
+func TestExecute_ResumeAfterCleanStop(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		env  string
+		args []string
+		want bool
+	}{
+		{name: "default", want: true},
+		{name: "yaml false", yaml: "resume_after_clean_stop: false\n", want: false},
+		{name: "env false", env: "false", want: false},
+		{name: "env beats yaml", yaml: "resume_after_clean_stop: false\n", env: "true", want: true},
+		{name: "flag false", args: []string{"--resume-after-clean-stop=false"}, want: false},
+		{name: "flag beats env and yaml", yaml: "resume_after_clean_stop: false\n", env: "false", args: []string{"--resume-after-clean-stop=true"}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, stagesDir := setupValidStages(t)
+			chdirTest(t, dir)
+			if tc.yaml != "" {
+				os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+				os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(tc.yaml), 0644)
+			}
+			resetFlags()
+			t.Setenv("GITHUB_TOKEN", "tok")
+			if tc.env != "" {
+				t.Setenv("FABRIK_RESUME_AFTER_CLEAN_STOP", tc.env)
+			}
+			os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, tc.args...)
+			cfg := executeWithConfigHook(t)
+			if cfg.ResumeAfterCleanStop != tc.want {
+				t.Errorf("ResumeAfterCleanStop = %v, want %v", cfg.ResumeAfterCleanStop, tc.want)
+			}
+		})
+	}
+}
+
 // ---- Reserved fix-round worker slots (#2490) ----
 
 // fixRoundSlotsRun mirrors stageDispatchesRun for fix_round_slots.

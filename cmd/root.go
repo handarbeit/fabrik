@@ -137,6 +137,11 @@ type Config struct {
 	// --replay-failed-deliveries=false / FABRIK_REPLAY_FAILED_DELIVERIES=false /
 	// config.yaml's replay_failed_deliveries: false.
 	ReplayFailedDeliveries bool
+	// ResumeAfterCleanStop resumes issues paused by a daemon clean stop on the
+	// next startup (#2486). Default true; also --resume-after-clean-stop=false /
+	// FABRIK_RESUME_AFTER_CLEAN_STOP=false / config.yaml's
+	// resume_after_clean_stop: false.
+	ResumeAfterCleanStop bool
 }
 
 func Execute() error {
@@ -285,6 +290,7 @@ func Execute() error {
 	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
 	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
 	flag.Int64Var(&cfg.GitHubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID to authenticate as (also FABRIK_GITHUB_APP_INSTALLATION_ID)")
+	flag.BoolVar(&cfg.ResumeAfterCleanStop, "resume-after-clean-stop", true, "On startup, resume issues whose current pause was set by a daemon clean stop (SIGINT/SIGTERM) and not superseded by a human; also FABRIK_RESUME_AFTER_CLEAN_STOP and config.yaml resume_after_clean_stop; default true (#2486)")
 	flag.BoolVar(&cfg.ReplayFailedDeliveries, "replay-failed-deliveries", true, "Ask GitHub to redeliver App webhook deliveries that failed while the daemon was not receiving, on startup and reconnect (event_source: direct or tailscale; also FABRIK_REPLAY_FAILED_DELIVERIES and config.yaml replay_failed_deliveries; default true, ignored for other event sources; #2144)")
 	flag.BoolVar(&cfg.NoBrowser, "no-browser", true, "Suppress automatic browser-opening for GitHub App guided-install prompts under App auth (also FABRIK_NO_BROWSER; default true — this is a daemon, opening a browser is opt-in; use --no-browser=false to re-enable, mirroring Pruefer's own no_browser)")
 
@@ -418,6 +424,14 @@ func Execute() error {
 			cfg.ReplayFailedDeliveries = lv == "true" || lv == "1" || lv == "yes"
 		} else if pc.ReplayFailedDeliveries != nil {
 			cfg.ReplayFailedDeliveries = *pc.ReplayFailedDeliveries
+		}
+	}
+	if !explicitFlags["resume-after-clean-stop"] {
+		if v := os.Getenv("FABRIK_RESUME_AFTER_CLEAN_STOP"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.ResumeAfterCleanStop = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.ResumeAfterCleanStop != nil {
+			cfg.ResumeAfterCleanStop = *pc.ResumeAfterCleanStop
 		}
 	}
 	if cfg.PollSeconds == 30 {
@@ -1081,6 +1095,7 @@ func Execute() error {
 		fmt.Printf("  max-tools-denied-retries: %d\n", maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries))
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
+	fmt.Printf("  resume-after-clean-stop: %v\n", cfg.ResumeAfterCleanStop)
 
 	// If the process was re-exec'd after an auto-upgrade or a SIGHUP restart,
 	// conditionally refresh embedded plugin skills (three-way comparison: skip
@@ -1201,6 +1216,7 @@ func Execute() error {
 		GitHubAppInstallationID:    cfg.GitHubAppInstallationID,
 		NoBrowser:                  cfg.NoBrowser,
 		ReplayFailedDeliveries:     cfg.ReplayFailedDeliveries,
+		ResumeAfterCleanStop:       cfg.ResumeAfterCleanStop,
 		ReadyCh:                    testReadyCh,
 		TestFaults:                 os.Getenv(engine.TestFaultsEnv), // TEST-ONLY (#2427): env only, honoured only on a bed
 		PollControlFile:            os.Getenv(pollctl.EnvVar),       // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry

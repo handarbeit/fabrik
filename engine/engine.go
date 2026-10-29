@@ -125,6 +125,10 @@ type Config struct {
 	// default (true); the zero value is off, so NewWithDeps engines never
 	// replay. Ignored for event sources other than direct/tailscale.
 	ReplayFailedDeliveries bool
+	// ResumeAfterCleanStop enables the startup resume of issues paused by a
+	// daemon clean stop (#2486, ADR 2486). cmd resolves the default (true); the
+	// zero value is off, so NewWithDeps engines never resume unless a test opts in.
+	ResumeAfterCleanStop bool
 	// TailscaleHostname / TailscaleAuthKeyEnv / TailscaleStateDir configure
 	// event_source: tailscale (#2143, ADR 2143): the embedded tsnet node's
 	// hostname (required), the *name* of the variable holding its tagged

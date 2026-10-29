@@ -119,6 +119,10 @@ type ProjectConfig struct {
 	// zero value: nil means "unset, use the default". Ignored for event sources
 	// other than direct/tailscale.
 	ReplayFailedDeliveries *bool `yaml:"replay_failed_deliveries"`
+	// ResumeAfterCleanStop controls the startup resume of issues paused by a
+	// daemon clean stop (#2486, ADR 2486). *bool because the default (true) is
+	// the inverse of the zero value: nil means "unset, use the default".
+	ResumeAfterCleanStop *bool `yaml:"resume_after_clean_stop"`
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no
