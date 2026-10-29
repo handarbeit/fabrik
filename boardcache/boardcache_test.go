@@ -149,6 +149,10 @@ func (m *mockClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]i
 	return nil, nil
 }
 
+func (m *mockClient) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return nil, nil
+}
+
 func (m *mockClient) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	m.fetchPRReviewsCount++
 	if m.fetchPRReviewsFn != nil {

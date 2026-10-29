@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,10 @@ type sighupOpts struct {
 	noLiveDedup  bool
 	intake       bool
 	detached     bool // the subscriber is not attached to the first daemon
+	// socket, when set, replaces the in-process sink: restart does not attach one,
+	// and starts the restarted daemon's local API on this path unless lateAPI.
+	socket  string
+	lateAPI bool // the test starts the second daemon's local API itself
 }
 
 type sighupWorld struct {
@@ -113,13 +118,20 @@ func (w *sighupWorld) restart(t *testing.T, o sighupOpts) {
 		t.Fatal("second hub did not start")
 	}
 	t.Cleanup(r.Engine.StopChannelEventsForTest)
+	w.r = r
+	if o.socket != "" {
+		if !o.lateAPI {
+			r.Engine.StartLocalAPIForTest(o.socket)
+			t.Cleanup(r.Engine.CloseLocalAPIForTest)
+		}
+		return
+	}
 	w.sink2 = &simSink{}
 	detach, err := r.Engine.ChannelStreamerForTest().Attach(localapi.AttachParams{Subscriber: "S"}, w.sink2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(detach)
-	w.r = r
 }
 
 // settleSecond polls the restarted daemon through its first listings.
@@ -331,4 +343,141 @@ func TestChannelSighupRestartDetachedSubscriberGetsHeldOnce(t *testing.T) {
 	w.restart(t, o)
 	w.settleSecond(t)
 	w.wantOnce(t, label)
+}
+
+// actors returns the actor each announcement of label carried, across both daemons.
+func (w *sighupWorld) actors(typ channelevents.EventType, label string) []string {
+	var out []string
+	for _, s := range []*simSink{w.sink, w.sink2} {
+		if s == nil {
+			continue
+		}
+		for _, ev := range s.ofType(typ, w.num) {
+			if ev.Label == label {
+				out = append(out, ev.Meta["actor"])
+			}
+		}
+	}
+	return out
+}
+
+// Deliveries the intake accepted before the SIGHUP are all applied and announced
+// by the old process before the exec, even when each apply is slow (#2484, ADR
+// 2484). They queue one behind another on the same item; in production each apply
+// ends in a Layer 1 status refresh, a GitHub round trip. While the intake is
+// closing that refresh is skipped, so the queue fits inside the SIGHUP grace.
+// Without the fix the last delivery is still queued when the grace expires, is
+// dropped unapplied and the restarted daemon learns of it from its first listing
+// as an actor=unknown downtime delta.
+func TestChannelSighupRestartSlowIntakeDrainAppliesEveryAcceptedDelivery(t *testing.T) {
+	t.Parallel()
+	for _, neutralised := range []bool{true, false} {
+		neutralised := neutralised
+		name := "fixed"
+		if neutralised {
+			name = "without-drain-slack"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			o := sighupOpts{intake: true}
+			w := newSighupWorld(t, o)
+			labels := []string{"slow-drain-1", "slow-drain-2", "slow-drain-3"}
+			last := labels[len(labels)-1]
+			// The store applies a delivery at once and its Layer 1 stand-in takes 500
+			// ms, so the third starts after 1 s, past a 700 ms grace. The first is
+			// already in its Layer 1 call when the intake closes; the rest skip it.
+			w.env.Engine.SetIntakeLayer1DelayForTest(500 * time.Millisecond)
+			w.env.Engine.SetIntakeCloseGraceForTest(700 * time.Millisecond)
+			if neutralised {
+				w.env.Engine.SetSighupDrainSlackDisabledForTest()
+			}
+			for i, label := range labels {
+				w.addToWorld(t, label)
+				id := "D-slow-" + label
+				if !w.env.Engine.SubmitDeliveryForTest("webhook", id, "issues", labelDelivery(w.env, w.num, "labeled", label)) {
+					t.Fatalf("delivery %d was not queued", i+1)
+				}
+			}
+			w.restart(t, o)
+			w.settleSecond(t)
+			for _, label := range labels {
+				w.wantOnce(t, label)
+			}
+			got := w.actors(channelevents.LabelApplied, last)
+			if neutralised {
+				if len(got) != 1 || got[0] == "human" {
+					t.Fatalf("without the drain fix the last delivery was dropped and reaches the subscriber as a downtime delta; actors=%v%s%s",
+						got, describe(w.sink.all()), describeSink(w.sink2))
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != "human" {
+				t.Errorf("label %q attributed %v, want [human]: the pre-exec drain must apply it%s%s", last, got, describe(w.sink.all()), describeSink(w.sink2))
+			}
+		})
+	}
+}
+
+// A change observed while the consumer stops must not be recorded in the restart
+// ledger without being queued before the final flush (#2484, ADR 2484). The test
+// holds one observer notification between its ledger record and its queue append
+// while the restart tail stops the consumer and closes the ledger; the ledger then
+// says the label is known, the event is never published and the restarted daemon
+// finds nothing to announce. With the stop gate the restart waits for the change,
+// which the final flush publishes.
+func TestChannelSighupRestartChangeInFlightAtStopIsAnnouncedOnce(t *testing.T) {
+	t.Parallel()
+	for _, neutralised := range []bool{true, false} {
+		neutralised := neutralised
+		name := "fixed"
+		if neutralised {
+			name = "without-stop-gate"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			o := sighupOpts{}
+			w := newSighupWorld(t, o)
+			const label = "in-flight-at-stop"
+			if neutralised {
+				w.env.Engine.SetChannelStopGateDisabledForTest()
+			}
+			held := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			w.env.Engine.SetChannelAfterLedgerHookForTest(func() {
+				once.Do(func() {
+					close(held)
+					<-release
+				})
+			})
+			w.addToWorld(t, label)
+			applied := make(chan struct{})
+			go func() {
+				defer close(applied)
+				w.env.Engine.ApplyLabelWebhookForTest(w.env.OwnerRepo, w.num, label, true, "alice")
+			}()
+			<-held
+			stopped := make(chan struct{})
+			go func() {
+				defer close(stopped)
+				w.env.Engine.PerformSighupRestartForTest()
+			}()
+			// With the gate the restart tail waits for the held change; without it the
+			// tail runs on. Either way the change is released after a real-time pause,
+			// so it falls after the consumer's final flush when there is no gate.
+			waitRealTime(t, 300*time.Millisecond, "let the restart tail reach the channel stop while the change is held")
+			close(release)
+			<-applied
+			<-stopped
+			w.restart(t, o)
+			w.settleSecond(t)
+			if neutralised {
+				if got := w.count(channelevents.LabelApplied, label); got != 0 {
+					t.Fatalf("without the stop gate the label was announced %d time(s); the twin expects it lost (0)%s%s", got, describe(w.sink.all()), describeSink(w.sink2))
+				}
+				return
+			}
+			w.wantOnce(t, label)
+		})
+	}
 }

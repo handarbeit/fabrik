@@ -458,6 +458,18 @@ type HealthResult struct {
 	// (#2393, ADR 2393): GitHub calls keep failing on transport errors, so the
 	// daemon starts no new model work until one succeeds.
 	ForgeHold *ForgeHoldHealth `json:"forge_hold,omitempty"`
+	// Channel is the channel push's readiness (#2484, ADR 2484); omitted when the
+	// daemon runs without a channel hub.
+	Channel *ChannelHealth `json:"channel,omitempty"`
+}
+
+// ChannelHealth describes the channel push (#2484). Ready is false while a freshly
+// started daemon is warming: downtime deltas are held back until the board is
+// populated and the restart catch-up has been queued to every subscriber (ADR
+// 2169), which can take over a minute after a restart. A client that needs every
+// restart delta waits for it to turn true.
+type ChannelHealth struct {
+	Ready bool `json:"ready"`
 }
 
 // ForgeHoldHealth describes the forge-unreachable hold.
@@ -651,6 +663,12 @@ type WorkerSlots struct {
 	// known zero when merge_train is off.
 	TrainInUse Known[int] `json:"train_in_use"`
 	TrainMax   Known[int] `json:"train_max"`
+	// FixInUse / FixMax describe the reserved fix-round slots (#2490, ADR 2490),
+	// usable only by review, CI-fix and rebase rounds. They sit on top of
+	// MaxConcurrent and are not counted in InUse. Both are a known zero when
+	// fix_round_slots is 0.
+	FixInUse Known[int] `json:"fix_in_use"`
+	FixMax   Known[int] `json:"fix_max"`
 }
 
 // TrainPartition is one (repo, base) merge-train partition.

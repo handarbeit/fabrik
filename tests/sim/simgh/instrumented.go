@@ -479,6 +479,11 @@ func (in *Instrumented) FetchPRReviews(owner, repo string, prNumber int) ([]gh.P
 		func() ([]gh.PRReview, error) { return in.sim.FetchPRReviews(owner, repo, prNumber) })
 }
 
+func (in *Instrumented) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return do1(in, "FetchPRReviewHistory", false, Args{Owner: owner, Repo: repo, Number: prNumber},
+		func() ([]gh.PRReview, error) { return in.sim.FetchPRReviewHistory(owner, repo, prNumber) })
+}
+
 func (in *Instrumented) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
 	return do1(in, "FetchPRReviewRequests", false, Args{Owner: owner, Repo: repo, Number: prNumber},
 		func() ([]gh.ReviewRequest, error) { return in.sim.FetchPRReviewRequests(owner, repo, prNumber) })

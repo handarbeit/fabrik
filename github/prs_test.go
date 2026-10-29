@@ -1725,3 +1725,57 @@ func TestFetchCommit(t *testing.T) {
 		})
 	}
 }
+
+// FetchPRReviewHistory (#2465) returns every eligible submission uncollapsed: a
+// COMMENTED that follows a formal verdict is kept (it is the evidence a declared
+// bot's clean re-review of the head consists of), DISMISSED is kept, PENDING is
+// not, and the commit and time ride along. FetchPRReviews over the same response
+// still collapses to the sticky verdict.
+func TestFetchPRReviewHistory_KeepsEverythingEligible(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "bot[bot]"}, "state": "CHANGES_REQUESTED", "commit_id": "aaa", "submitted_at": "2026-10-28T12:00:00Z"},
+			{"id": 2, "user": map[string]string{"login": "bot[bot]"}, "state": "COMMENTED", "commit_id": "bbb", "submitted_at": "2026-10-28T12:05:00Z"},
+			{"id": 3, "user": map[string]string{"login": "bob"}, "state": "PENDING", "commit_id": "bbb"},
+			{"id": 4, "user": map[string]string{"login": "bob"}, "state": "DISMISSED", "commit_id": "aaa"},
+			{"id": 5, "user": nil, "state": "APPROVED"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	history, err := c.FetchPRReviewHistory("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewHistory: %v", err)
+	}
+	var ids []int
+	for _, r := range history {
+		ids = append(ids, r.DatabaseID)
+	}
+	if len(ids) != 3 || ids[0] != 1 || ids[1] != 2 || ids[2] != 4 {
+		t.Fatalf("history ids = %v, want [1 2 4] (PENDING and user-less dropped, nothing collapsed)", ids)
+	}
+	if history[1].CommitID != "bbb" || history[1].SubmittedAt.IsZero() {
+		t.Errorf("history[1] = %+v, want its commit and submission time", history[1])
+	}
+
+	collapsed, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	for _, r := range collapsed {
+		if r.Author == "bot[bot]" && r.State != "CHANGES_REQUESTED" {
+			t.Errorf("collapsed bot review = %s, want the sticky CHANGES_REQUESTED (FetchPRReviews is unchanged)", r.State)
+		}
+	}
+}
+
+func TestFetchPRReviewHistory_NotFoundIsNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	defer srv.Close()
+	got, err := NewClientWithBaseURL("token", srv.URL).FetchPRReviewHistory("owner", "repo", 42)
+	if err != nil || got != nil {
+		t.Errorf("got %v, %v; want nil, nil on 404", got, err)
+	}
+}

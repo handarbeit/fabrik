@@ -488,5 +488,8 @@ func (a ActivePaneComponent) slotsSuffix() string {
 	if a.slots.TrainMax > 0 {
 		out += fmt.Sprintf(" + train %d/%d", a.slots.TrainInUse, a.slots.TrainMax)
 	}
+	if a.slots.FixMax > 0 {
+		out += fmt.Sprintf(" + fix %d/%d", a.slots.FixInUse, a.slots.FixMax)
+	}
 	return out
 }

@@ -88,6 +88,9 @@ type GitHubClient interface {
 	RerunFailedJobs(owner, repo string, runID int64) error
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	// FetchPRReviewHistory returns every eligible review submission uncollapsed
+	// (#2465): the evidence the authoritative gate's head-aware verdict needs.
+	FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	FetchPRReviewDecision(owner, repo string, prNumber int) (string, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)

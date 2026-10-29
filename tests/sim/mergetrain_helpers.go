@@ -117,6 +117,11 @@ type mergeTrainEnvOptions struct {
 	// engine's parity oracle pin.
 	AsyncTrain bool
 
+	// BoardCache wires a real board cache into the engine (EnvOptions.BoardCache),
+	// so a scenario can drive webhook deltas through it against a live train
+	// (#2483). Exposes Env.BoardCache.
+	BoardCache bool
+
 	// StatusLineField / StatusLineFieldMissing: see EnvOptions (#2048).
 	StatusLineField        string
 	StatusLineFieldMissing bool
@@ -197,6 +202,7 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 		Stages:    stgs,
 		StartTime: opts.StartTime,
 
+		BoardCache:             opts.BoardCache,
 		StatusLineField:        opts.StatusLineField,
 		StatusLineFieldMissing: opts.StatusLineFieldMissing,
 		ConfigureCfg: func(cfg *engine.Config) {

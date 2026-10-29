@@ -12,6 +12,24 @@ import (
 	"github.com/handarbeit/fabrik/warnings"
 )
 
+// applyDelivery is the intake's apply function: the board cache's delta, then
+// layer1, the Layer 1 status refresh (a live GitHub round trip for an issues or
+// issue_comment delivery). Once the intake is closing, layer1 is skipped (#2484,
+// ADR 2484): the delta is already in the Store and the channel consumer's final
+// flush announces it, while the refresh is a freshness check the next process
+// repeats at its first listing. Running it made each delivery cost a network
+// round trip, serially per item, inside a grace that is only seconds long, so a
+// delivery queued behind a slow one was dropped unapplied by the SIGHUP exec.
+// The sim's intake seam calls this same method, so production and the sim cannot
+// differ in what a closing intake does.
+func (e *Engine) applyDelivery(cache *boardcache.CacheImpl, eventType string, payload []byte, receivedAt time.Time, layer1 func()) {
+	cache.ApplyDeltaAt(eventType, payload, receivedAt)
+	if e.intake.Closing() && !e.chanTest.drainSlackOff.Load() {
+		return
+	}
+	layer1()
+}
+
 // setUpIngestion starts every configured event-ingestion transport behind one
 // transport-neutral intake (#2351, ADR 2351) and returns the cleanup the caller
 // defers. The transports are independent: each configured one is started on its
@@ -42,8 +60,9 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 	var applyAt func(eventType string, payload []byte, receivedAt time.Time)
 	if cacheImpl != nil {
 		applyAt = func(eventType string, payload []byte, receivedAt time.Time) {
-			cacheImpl.ApplyDeltaAt(eventType, payload, receivedAt)
-			e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
+			e.applyDelivery(cacheImpl, eventType, payload, receivedAt, func() {
+				e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
+			})
 		}
 		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming
 		// webhooks — for every transport, once.
