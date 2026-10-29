@@ -1497,7 +1497,8 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 
-	candidates := reviewBodyCandidates(reviews, func(id string) bool { return !snap.CommentProcessed(id).IsZero() })
+	candidates := reviewBodyCandidates(reviews, func(id string) bool { return !snap.CommentProcessed(id).IsZero() },
+		e.cleanReviewSkipper(item.Status, item.Number, item.Labels))
 
 	out := make([]gh.Comment, 0, len(candidates))
 	if len(candidates) == 0 {
@@ -1550,7 +1551,13 @@ type reviewBodyCandidate struct {
 // It does not consult the durable #1555 marker — that needs a live fetch — which
 // the cache-only channel-event path (#1968) resolves from cached comments
 // instead.
-func reviewBodyCandidates(reviews []gh.PRReview, processed func(id string) bool) []reviewBodyCandidate {
+//
+// skip (nil = skip nothing) drops a review that is provably clean (#2489,
+// ADR 2489): a COMMENTED/APPROVED review by an effective expected reviewer whose
+// findings marker reads zero inline and zero body findings. It is pure, so every
+// poll and restart re-excludes the same review — the "addressed" state is
+// derived, not written. Every caller must pass the same Engine.cleanReviewSkipper.
+func reviewBodyCandidates(reviews []gh.PRReview, processed func(id string) bool, skip func(gh.PRReview) bool) []reviewBodyCandidate {
 	var candidates []reviewBodyCandidate
 	for _, r := range reviews {
 		if r.DatabaseID == 0 {
@@ -1564,6 +1571,9 @@ func reviewBodyCandidates(reviews []gh.PRReview, processed func(id string) bool)
 			continue
 		}
 		if r.Body == "" {
+			continue
+		}
+		if skip != nil && skip(r) {
 			continue
 		}
 		id := reviewBodyCommentID(r)

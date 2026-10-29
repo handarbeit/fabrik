@@ -23,6 +23,9 @@ type WorktreeManager struct {
 	pureRebaseDisabled    atomic.Bool // test seam: neutralises PrepareCatchUp's pure-rebase tolerance (#2150)
 	restoreRebaseDisabled atomic.Bool // test seam: neutralises RestoreUnpushedRebase (#2150)
 
+	restoreContentCheckDisabled atomic.Bool // test seam: neutralises the restore's content-based fallback (#2517)
+	replayEquivalenceDisabled   atomic.Bool // test seam: neutralises the sync/catch-up replay-equivalence fallback (#2517)
+
 	landedCheckDisabled atomic.Bool                                          // test seam: neutralises the landed-branch checks R1/R2 (#1917)
 	isAncestorFn        func(dir, ancestor, descendant string) (bool, error) // test seam: replaces gitIsAncestor (#1917)
 
