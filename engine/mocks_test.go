@@ -70,6 +70,7 @@ type mockGitHubClient struct {
 	lookupIssueProjectItemFn      func(projectID, repo string, issueNumber int) (string, string, error)
 	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRReviewsFn              func(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	fetchPRReviewHistoryFn        func(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	fetchPRReviewRequestsFn       func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	fetchPRReviewDecisionFn       func(owner, repo string, prNumber int) (string, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
@@ -884,6 +885,18 @@ func (m *mockGitHubClient) FetchPRReviews(owner, repo string, prNumber int) ([]g
 		return fn(owner, repo, prNumber)
 	}
 	return nil, nil
+}
+
+// FetchPRReviewHistory reports fetchPRReviewHistoryFn when a test set one, else
+// whatever FetchPRReviews reports: a collapsed list is a valid (short) history.
+func (m *mockGitHubClient) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	m.mu.Lock()
+	fn := m.fetchPRReviewHistoryFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return m.FetchPRReviews(owner, repo, prNumber)
 }
 
 func (m *mockGitHubClient) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {

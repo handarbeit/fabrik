@@ -10074,3 +10074,15 @@ func TestResolveConflictWithClaude_FallbackKillsUnboundedInvocation(t *testing.T
 		t.Errorf("shared holdingStg.MaxWallTime was mutated in place: got %v, want 0", holdingStg.MaxWallTime)
 	}
 }
+
+// TestTrainBranchPrefixMatchesBoardcache pins boardcache.TrainBranchPrefix (the
+// webhook heal's merge-train PR recogniser, #2483) to the engine's own prefix:
+// boardcache cannot import engine, so the two are separate constants.
+func TestTrainBranchPrefixMatchesBoardcache(t *testing.T) {
+	if boardcache.TrainBranchPrefix != trainBranchPrefix {
+		t.Fatalf("boardcache.TrainBranchPrefix = %q, engine trainBranchPrefix = %q", boardcache.TrainBranchPrefix, trainBranchPrefix)
+	}
+	if !isTrainPR(gh.PRDetails{HeadRefName: boardcache.TrainBranchPrefix + "trial-1"}) {
+		t.Error("isTrainPR must accept a branch under boardcache.TrainBranchPrefix")
+	}
+}

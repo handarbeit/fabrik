@@ -240,3 +240,50 @@ func TestLiveDeepFetch_EngineCommentWithOnlyDatabaseIDIsNotDuplicated(t *testing
 		t.Fatalf("comment held %d times, want once: %+v", n, snap.State().Comments)
 	}
 }
+
+// PRStandingReviewsRead (#2465) replaces the per-reviewer standing evidence,
+// keeps it apart from the one-per-author Reviews list, wakes nothing, and a
+// repeat is a no-op.
+func TestPRStandingReviewsRead_StoresEvidenceApartFromReviews(t *testing.T) {
+	s := liveReadStore(t)
+	now := time.Now()
+	s.Apply(PRReviewsRead{
+		Repo: orderRepo, Number: 1, PRNumber: orderPR,
+		Reviews:   []gh.PRReview{{Author: "bot", State: "COMMENTED", DatabaseID: 2, SubmittedAt: now}},
+		FetchedAt: now,
+	})
+	evidence := []gh.PRReview{
+		{Author: "bot", State: "CHANGES_REQUESTED", DatabaseID: 1, CommitID: "aaa"},
+		{Author: "bot", State: "COMMENTED", DatabaseID: 2, CommitID: "bbb"},
+	}
+	snap, changes, err := s.Apply(PRStandingReviewsRead{Repo: orderRepo, Number: 1, PRNumber: orderPR, Reviews: evidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range changes {
+		if c.Fields != 0 {
+			t.Errorf("a display-only evidence write must set no change flags, got %+v", c)
+		}
+	}
+	lpr := snap.LinkedPR()
+	if len(lpr.StandingReviews) != 2 || lpr.StandingReviews[0].State != "CHANGES_REQUESTED" {
+		t.Fatalf("standing reviews = %+v", lpr.StandingReviews)
+	}
+	if len(lpr.Reviews) != 1 || lpr.Reviews[0].State != "COMMENTED" {
+		t.Fatalf("Reviews must stay the one-per-author collapse, got %+v", lpr.Reviews)
+	}
+	// The snapshot is a copy.
+	lpr.StandingReviews[0].State = "tampered"
+	if again := s.mustPeekLinkedPR(t, orderRepo, 1); again.StandingReviews[0].State != "CHANGES_REQUESTED" {
+		t.Error("snapshot aliases the Store's evidence")
+	}
+}
+
+func (s *Store) mustPeekLinkedPR(t *testing.T, repo string, n int) *LinkedPRState {
+	t.Helper()
+	snap, ok := s.Peek(repo, n)
+	if !ok || snap.LinkedPR() == nil {
+		t.Fatal("no linked PR")
+	}
+	return snap.LinkedPR()
+}

@@ -80,6 +80,7 @@ func newSnapshot(s ItemState) Snapshot {
 	if s.LinkedPR != nil {
 		lpr := *s.LinkedPR
 		lpr.Reviews = copyPRReviews(s.LinkedPR.Reviews)
+		lpr.StandingReviews = copyPRReviews(s.LinkedPR.StandingReviews)
 		lpr.ReviewRequests = copyReviewRequests(s.LinkedPR.ReviewRequests)
 		lpr.ThreadComments = copyComments(s.LinkedPR.ThreadComments)
 		lpr.CheckRuns = copyCheckRuns(s.LinkedPR.CheckRuns)
@@ -164,6 +165,7 @@ func (s Snapshot) LinkedPR() *LinkedPRState {
 	}
 	lpr := *s.state.LinkedPR
 	lpr.Reviews = copyPRReviews(s.state.LinkedPR.Reviews)
+	lpr.StandingReviews = copyPRReviews(s.state.LinkedPR.StandingReviews)
 	lpr.ReviewRequests = copyReviewRequests(s.state.LinkedPR.ReviewRequests)
 	lpr.ThreadComments = copyComments(s.state.LinkedPR.ThreadComments)
 	lpr.CheckRuns = copyCheckRuns(s.state.LinkedPR.CheckRuns)
