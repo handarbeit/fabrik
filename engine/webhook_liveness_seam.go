@@ -14,6 +14,15 @@ func (e *Engine) SetLivenessWaitForTest(wait func(ctx context.Context, d time.Du
 	e.livenessWaitOverride = wait
 }
 
+// setRefreshTrackingDisabledForTest neutralises the arrival-refresh tracking
+// (#2480): the refresh goroutine is not counted by Stop and reads on an
+// uncancellable context, the pre-fix behaviour the non-vacuity test must catch.
+func (r *routeLiveness) setRefreshTrackingDisabledForTest(off bool) {
+	r.mu.Lock()
+	r.refreshTrackingOff = off
+	r.mu.Unlock()
+}
+
 // SetLivenessConstantsForTest shrinks the controller's fixed windows for a test
 // and returns a restore function. Zero values leave a constant unchanged.
 func SetLivenessConstantsForTest(fresh, failWindow, quiet, minProbe, retry, sustained, resultWait, resultPoll time.Duration) (restore func()) {

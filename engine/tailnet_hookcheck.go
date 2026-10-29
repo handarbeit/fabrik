@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,7 +14,7 @@ import (
 
 // fetchAppHookConfigFn is the test seam for the App webhook-config read: the
 // real call needs an App JWT and the live GitHub API.
-var fetchAppHookConfigFn = func(e *Engine) (gh.AppHookConfig, error) {
+var fetchAppHookConfigFn = func(ctx context.Context, e *Engine) (gh.AppHookConfig, error) {
 	keyPEM, err := os.ReadFile(e.cfg.GitHubAppPrivateKeyPath)
 	if err != nil {
 		return gh.AppHookConfig{}, fmt.Errorf("reading the App private key: %w", err)
@@ -26,7 +27,7 @@ var fetchAppHookConfigFn = func(e *Engine) (gh.AppHookConfig, error) {
 	if err != nil {
 		return gh.AppHookConfig{}, err
 	}
-	return gh.FetchAppHookConfig("", jwt)
+	return gh.FetchAppHookConfigContext(ctx, "", jwt)
 }
 
 // panel type of the R7 check. It owns its own type (each Reconcile sweep owns
@@ -90,7 +91,7 @@ func (e *Engine) checkAppWebhookConfig(tag, wantURL string) {
 	if wantURL == "" || e.faults.active(FaultNoHookConfigCheck) {
 		return
 	}
-	cfg, err := fetchAppHookConfigFn(e)
+	cfg, err := fetchAppHookConfigFn(context.Background(), e)
 	if err != nil {
 		if e.hookCheckLog.failed(err) {
 			e.logf(0, tag, "could not read the App's webhook configuration (%v) — skipping the webhook URL check (repeats of the same error are not logged)\n", err)
