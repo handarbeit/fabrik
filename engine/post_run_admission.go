@@ -92,7 +92,7 @@ func (e *Engine) cachedFeedbackArrivedSince(st *itemstate.ItemState, since time.
 				f.Threads++
 			}
 		}
-		if cands := reviewBodyCandidates(lpr.Reviews, processed); len(cands) > 0 {
+		if cands := reviewBodyCandidates(lpr.Reviews, processed, e.cleanReviewSkipper(st.Status, st.Number, st.Labels)); len(cands) > 0 {
 			durable := e.cachedAddressedReviewIDs(st)
 			for _, c := range cands {
 				if !durable[c.review.DatabaseID] && arrived(c.review.SubmittedAt) {

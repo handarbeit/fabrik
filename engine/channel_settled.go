@@ -158,7 +158,7 @@ func (e *Engine) cachedPendingFeedbackOf(st *itemstate.ItemState) cachedFeedback
 	f.Comments = len(filterNewComments(st.Comments, processed))
 	if lpr := st.LinkedPR; lpr != nil {
 		f.Threads = len(dropOutdatedThreadComments(filterReviewThreadComments(lpr.ThreadComments, processed)))
-		cands := reviewBodyCandidates(lpr.Reviews, processed)
+		cands := reviewBodyCandidates(lpr.Reviews, processed, e.cleanReviewSkipper(st.Status, st.Number, st.Labels))
 		if len(cands) > 0 {
 			durable := e.cachedAddressedReviewIDs(st)
 			for _, c := range cands {
