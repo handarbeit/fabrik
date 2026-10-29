@@ -367,7 +367,16 @@ type LinkedPRState struct {
 	MergeableState string // "clean", "unstable", "blocked", etc.
 	HeadSHA        string
 	Reviews        []gh.PRReview
-	ReviewRequests []gh.ReviewRequest
+	// StandingReviews holds, per reviewer, the reviews the head-aware verdict
+	// needs and Reviews (one per author) cannot carry: the latest formal verdict
+	// (APPROVED, CHANGES_REQUESTED, DISMISSED) and a COMMENTED submitted after it
+	// (#2465, ADR 2465). It is written only by a live full-history read
+	// (PRStandingReviewsRead) and read, with Reviews, by the reviewer view; the
+	// authoritative gate never reads it (it decides on a fresh history). Replaced
+	// wholesale on every such read, so it can lag a webhook-only dismissal until
+	// the next one — a display staleness, never a gate one.
+	StandingReviews []gh.PRReview
+	ReviewRequests  []gh.ReviewRequest
 	// ThreadComments holds unresolved review-thread comments.
 	ThreadComments      []gh.Comment
 	ResolvedThreadCount int
