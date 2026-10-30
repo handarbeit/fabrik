@@ -337,6 +337,12 @@ type Engine struct {
 	// landingValidateSHACheckOff disables the landing decision's Validate-SHA check
 	// (#2342); per-Engine test seam, zero value = production.
 	landingValidateSHACheckOff atomic.Bool
+	// completeLabelSkipOff restores the unconditional completion-label add of the
+	// CI gate clear (#2530); test seam SetCompleteLabelSkipDisabledForTest.
+	completeLabelSkipOff atomic.Bool
+	// periodicActivityNarrowingOff counts a periodic-re-evaluation-only admission as
+	// activity again (#2530); test seam SetPeriodicActivityNarrowingDisabledForTest.
+	periodicActivityNarrowingOff atomic.Bool
 	// validateSHARerun records the (item, live head) pairs for which the R3 re-run of
 	// Validate was already requested (#2343), so an unrecoverable SHA that persists
 	// cannot re-run Validate every cycle. In memory only: a restart allows one more.
