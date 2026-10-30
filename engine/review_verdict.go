@@ -70,7 +70,7 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 		var declared []string
 		// A status with no configured stage (parking column, unknown) declares no
 		// bots; a per-issue expected-reviewers label still applies.
-		stage := e.stageByName(st.Status)
+		stage := e.reviewContextStage(st.Status)
 		if stage == nil {
 			stage = &stages.Stage{}
 		}

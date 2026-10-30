@@ -82,14 +82,16 @@ func cleanFindingsMarker(body string) bool {
 // so the authoritative verdict can never block with no worker to clear it), its
 // author matches the stage's effective expected_reviewers through the gate's own
 // identity matcher, and its body carries a clean marker. It returns nil — skip
-// nothing — when nothing is declared or the test seam is on. Every reader of the
+// nothing — when nothing is declared or the test seam is on. The stage is
+// reviewContextStage(status): for a holding-stage (Queued) item the stage the
+// member was validated in, never the holding stage (#2525). Every reader of the
 // funnel must build it from the same (status, number, labels) so the gate, the
 // dispatcher view and the cache-only mirrors agree.
 func (e *Engine) cleanReviewSkipper(status string, number int, labels []string) func(gh.PRReview) bool {
 	if e.cleanReviewSkipOff.Load() {
 		return nil
 	}
-	stage := e.stageByName(status)
+	stage := e.reviewContextStage(status)
 	if stage == nil {
 		stage = &stages.Stage{}
 	}
@@ -112,6 +114,32 @@ func (e *Engine) cleanReviewSkipper(status string, number int, labels []string) 
 		}
 		return false
 	}
+}
+
+// reviewContextStage returns the stage whose expected_reviewers apply to an item
+// whose board Status is status (#2525, ADR 2525). For an ordinary stage that is
+// the stage itself. A holding stage (Queued) declares no reviewers, so a Queued
+// member is judged against the stage it was validated in: stageBeforeHolding,
+// the same stage the Queued review-finding ejection reroutes to (ADR 1208). It
+// returns nil — "declares nothing", so nothing is skipped — when the status has
+// no configured stage or the holding stage has no earlier stage. Config only: it
+// reads no GitHub state.
+func (e *Engine) reviewContextStage(status string) *stages.Stage {
+	st := e.stageByName(status)
+	if st == nil || e.holdingReviewCtxOff.Load() {
+		return st
+	}
+	if st.HoldingStage && !st.Unmanaged {
+		return stageBeforeHolding(e.cfg, st)
+	}
+	return st
+}
+
+// SetHoldingStageReviewContextDisabledForTest makes reviewContextStage resolve a
+// holding-stage item against the holding stage itself, as before #2525 (the
+// neutralisation seam for the sim twin's red run).
+func (e *Engine) SetHoldingStageReviewContextDisabledForTest(off bool) {
+	e.holdingReviewCtxOff.Store(off)
 }
 
 // SetCleanReviewSkipDisabledForTest turns the clean-review exclusion off on this
