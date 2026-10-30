@@ -68,6 +68,59 @@ func (e *Engine) postRunFeedbackAdmission(ctx context.Context, item gh.ProjectIt
 	e.logf(item.Number, "post-run", "feedback arrived during the run (%d comment(s), %d thread(s), %d review body(ies)) — admitting on next poll\n", f.Comments, f.Threads, f.Bodies)
 }
 
+// statusAtWorkerStart returns the Status the Store holds for item as a worker
+// starts, the baseline postRunAdvanceAdmission compares against. It reads the
+// Store rather than the poll-start item copy, which can be stale and would admit
+// falsely; the copy is only the fallback for an item the Store does not know.
+func (e *Engine) statusAtWorkerStart(item gh.ProjectItem) string {
+	if snap, ok := e.store.Peek(itemOwnerRepoString(item, e.defaultRepo()), item.Number); ok {
+		if st := snap.State(); st.Status != "" {
+			return st.Status
+		}
+	}
+	return item.Status
+}
+
+// postRunAdvanceAdmission admits an item on the next poll when its own worker
+// moved it to another column during the run (#2528, ADR 2528).
+//
+// The worker's Status write raises StatusChanged, which puts the item in the next
+// poll's cycleSet exactly once. If that poll runs while the worker is still
+// registered (it is still posting output; WorkerExited is deferred),
+// dispatchCandidates skips the item and the poll() defer stamps periodic-re-eval.
+// WorkerExited is excluded from cycleSetFlags (ADR 039), so nothing admits the
+// item again until that cooldown falls due. Setting e.mayNeedWork here, before the
+// WorkerExited wake, makes the poll that follows admit it through cycleSet and
+// bypass the new stage's cooldown.
+//
+// Only a changed Status admits: an early-return exit (dependency-blocked and the
+// like) leaves it alone and carries no information, so ADR 039 holds. Admission is
+// one-shot per run — an item that moved twice is admitted once. Cache-only, with
+// the same guards as postRunFeedbackAdmission.
+func (e *Engine) postRunAdvanceAdmission(ctx context.Context, item gh.ProjectItem, startStatus string) {
+	if e.postRunAdvanceOff.Load() || ctx.Err() != nil || startStatus == "" {
+		return
+	}
+	snap, ok := e.store.Peek(itemOwnerRepoString(item, e.defaultRepo()), item.Number)
+	if !ok {
+		return
+	}
+	st := snap.State()
+	if st.IsPR || st.IsClosed || st.Status == "" || st.Status == startStatus {
+		return
+	}
+	if hasLabel(st.Labels, "fabrik:paused") {
+		return
+	}
+	if s := stages.FindStage(e.cfg.Stages, st.Status); s != nil && s.CleanupWorktree {
+		return
+	}
+	e.mayNeedWorkMu.Lock()
+	e.mayNeedWork[issueKey(item, e.defaultRepo())] = true
+	e.mayNeedWorkMu.Unlock()
+	e.logf(item.Number, "post-run", "item moved %q → %q during the run — admitting on next poll\n", startStatus, st.Status)
+}
+
 // cachedFeedbackArrivedSince is cachedPendingFeedbackOf restricted to feedback
 // created at or after since: the same pending definitions (filterNewComments,
 // filterReviewThreadComments + dropOutdatedThreadComments, reviewBodyCandidates

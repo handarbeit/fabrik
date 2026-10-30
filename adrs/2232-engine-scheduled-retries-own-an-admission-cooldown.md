@@ -101,3 +101,10 @@ Seams: `SetTimeSliceBackoffDisabledForTest`, `SetDispatchOrderDisabledForTest`.
   `SetIntervalCapDisabledForTest`. Sim twins in `tests/sim/incomplete_retry_admission_test.go`; the cap is
   covered by `TestPollWithBackoff_IdleIntervalCappedToDueRetry`.
 - Documented in `docs/state-machine.md` §7.1, §7.8 and §9.9.2.
+
+## Amendment (ADR 2528)
+
+Item 2 kept long cooldowns out of the idle-interval cap. ADR 2528 caps on them too, at due plus one
+configured interval (`earliestLongCooldown`), because the periodic re-evaluation is the backstop for
+missed admissions and idle backoff must not push it out. The webhook-healthy idle interval is now
+about 10 × `poll` + `poll` while an in-pipeline item holds a cooldown.

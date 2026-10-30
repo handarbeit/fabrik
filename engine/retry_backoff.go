@@ -74,10 +74,11 @@ func (e *Engine) mergeGateRecheckInterval() time.Duration {
 // retry also records the instant it falls due.
 
 // shortAdmissionCooldownReasons are the engine-scheduled retries whose due time
-// the poll loop must not sleep past (FR-003). Long cooldowns (periodic-re-eval,
-// dep-blocked, review-blocked, feedback-pending, spawn-*) are deliberately
-// absent: capping on them would shrink the webhook-healthy idle interval to
-// 10 × PollSeconds.
+// the poll loop must not sleep past (FR-003): the interval is capped at their
+// exact due. Every other reason (periodic-re-eval, dep-blocked, review-blocked,
+// feedback-pending, spawn-*) is a long cooldown; since #2528 (ADR 2528) the
+// interval is also capped on those, but at due + one configured interval
+// (earliestLongCooldown), so staggered dues coalesce.
 var shortAdmissionCooldownReasons = map[string]bool{
 	"retry-backoff":   true,
 	"sentinel-live":   true,
@@ -157,6 +158,26 @@ func SetPostRunArrivalRestrictionDisabledForTest(disabled bool) (restore func())
 	return func() { postRunArrivalRestrictionDisabled.Store(prev) }
 }
 
+// SetPostRunAdvanceAdmissionDisabledForTest neutralises (or restores) the
+// column-change admission at worker exit on this engine (#2528).
+func (e *Engine) SetPostRunAdvanceAdmissionDisabledForTest(off bool) { e.postRunAdvanceOff.Store(off) }
+
+// SetLongCooldownCapDisabledForTest neutralises (or restores) the idle-interval
+// cap on long admission cooldowns on this engine (#2528).
+func (e *Engine) SetLongCooldownCapDisabledForTest(off bool) { e.longCooldownCapOff.Store(off) }
+
+// SetAfterAdvanceHookForTest registers a hook advanceToNextStage calls right
+// after a successful Status write, with the item and the new Status. It lets a
+// test run a poll while the item's own worker is still registered (#2528). Nil
+// clears it; production never sets it.
+func (e *Engine) SetAfterAdvanceHookForTest(fn func(item gh.ProjectItem, newStatus string)) {
+	if fn == nil {
+		e.afterAdvanceHook.Store(nil)
+		return
+	}
+	e.afterAdvanceHook.Store(&fn)
+}
+
 // SetIntervalCapDisabledForTest neutralises (or restores) FR-003.
 func SetIntervalCapDisabledForTest(disabled bool) (restore func()) {
 	prev := intervalCapDisabled.Swap(disabled)
@@ -230,6 +251,34 @@ func (e *Engine) earliestShortCooldown(now time.Time) time.Time {
 		}
 		for reason, t := range st.CooldownAt {
 			if !shortAdmissionCooldownReasons[reason] || !now.Before(t) {
+				continue
+			}
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
+		}
+	})
+	return earliest
+}
+
+// earliestLongCooldown returns the earliest unexpired long admission cooldown
+// (any reason that is neither short nor archive-eligible-at) across the store
+// (zero if none), with the same exclusions as earliestShortCooldown (#2528).
+// archive-eligible-at holds an absolute "eligible since" time, not a gate, and
+// would pin the cap. Admission consumes an expired entry and the poll() defer
+// re-stamps it a full githubRecheckInterval later, so counting only unexpired
+// entries cannot loop. In memory only.
+func (e *Engine) earliestLongCooldown(now time.Time) time.Time {
+	var earliest time.Time
+	e.store.Scan(func(st *itemstate.ItemState) {
+		if st.IsClosed {
+			return
+		}
+		if s := stages.FindStage(e.cfg.Stages, st.Status); s != nil && s.CleanupWorktree {
+			return
+		}
+		for reason, t := range st.CooldownAt {
+			if shortAdmissionCooldownReasons[reason] || reason == itemstate.ArchiveEligibleCooldown || !now.Before(t) {
 				continue
 			}
 			if earliest.IsZero() || t.Before(earliest) {

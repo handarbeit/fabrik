@@ -416,6 +416,11 @@ type Engine struct {
 	completionMergedCheckOff  atomic.Bool            // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
 	mergeInFlightGuardOff     atomic.Bool            // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
 	mergedPushGuardOff        atomic.Bool            // test seam: SetMergedPushGuardDisabledForTest (#2299)
+	// Test seams of #2528 (ADR 2528): the column-change admission at worker exit,
+	// the idle-interval cap on long cooldowns, and a hook run after a Status write.
+	postRunAdvanceOff  atomic.Bool
+	longCooldownCapOff atomic.Bool
+	afterAdvanceHook   atomic.Pointer[func(gh.ProjectItem, string)]
 	// stageOutcomes holds the recorded, not-yet-published stage outcomes (#2394); nil on
 	// NewWithDeps engines. stageOutcomeRecordOff is the SetStageOutcomeRecordDisabledForTest seam.
 	stageOutcomes                         *stageOutcomeStore

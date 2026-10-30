@@ -287,6 +287,7 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		}
 		// Runs first on exit, ahead of the WorkerExited wake (FR-001b, #2232).
 		defer e.postRunFeedbackAdmission(ctx, item, e.now())
+		defer e.postRunAdvanceAdmission(ctx, item, e.statusAtWorkerStart(item))
 
 		// The slot is held: the worker is running from here, and the PID<=0
 		// stale-worker detector measures from now rather than from dispatch. A
