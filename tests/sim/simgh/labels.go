@@ -21,7 +21,7 @@ func (s *Sim) FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 // AddLabelToIssue applies a label, stamping the application time from the
 // injected clock. Idempotent: re-adding an already-applied label leaves the
 // original applied-at intact, matching GitHub (which emits no new "labeled"
-// event for a label already present). Three engine mechanisms anchor timeouts
+// event for a label already present, though it does bump updated_at). Three engine mechanisms anchor timeouts
 // on that timestamp, so refreshing it here would silently reset their clocks.
 func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
 	s.mu.Lock()
@@ -34,10 +34,15 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	if err != nil {
 		return err
 	}
+	now := s.now()
 	if contains(iss.labels, labelName) {
+		// GitHub records no timeline event for re-adding a present label but
+		// still bumps the issue's updated_at (#2530, verified live). The
+		// applied-at and the label events stay untouched.
+		iss.updatedAt = now
+		s.stampIssueWriteLocked(owner, repo, issueNumber, now)
 		return nil
 	}
-	now := s.now()
 	iss.labels = append(iss.labels, labelName)
 	iss.labelAppliedAt[labelName] = now
 	iss.recordLabelEvent(LabelEventLabeled, labelName, now)

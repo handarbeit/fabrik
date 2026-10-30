@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -440,11 +439,17 @@ func (e *Engine) removeAwaitingCILabel(owner, repo string, item gh.ProjectItem) 
 // in-flight marker must not be dropped while CI is still being gated).
 func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.ProjectItem, stage *stages.Stage) {
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
-		return // preserve fabrik:awaiting-ci so the next poll retries
-	} else if c := e.localWriter(); c != nil {
-		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
+	// A waiting item that is already complete is re-evaluated by the periodic safety
+	// net. Re-adding a present label records no event but bumps the issue's
+	// updated_at, which showed up as light-reconcile drift (#2530, ADR 2530). Skip the
+	// add and its write-through (no write happened, so no engine-write record should
+	// shield a listing); the SHA record and the awaiting-ci removal below still run.
+	alreadyComplete := hasLabel(item.Labels, completeLabel) && !e.completeLabelSkipOff.Load()
+	if !alreadyComplete {
+		if err := e.addLabelChecked(item, completeLabel); err != nil {
+			e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
+			return // preserve fabrik:awaiting-ci so the next poll retries
+		}
 	}
 	if stage.Name == "Validate" {
 		repoStr := owner + "/" + repo
