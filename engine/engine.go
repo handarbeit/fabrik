@@ -407,9 +407,6 @@ type Engine struct {
 	reviewConfirmLiveOff      atomic.Bool            // test seam: SetReviewConfirmLiveDisabledForTest (#2350)
 	reviewWaitHeadAnchorOff   atomic.Bool            // test seam: SetReviewWaitHeadAnchorDisabledForTest (#2467)
 	reviewAdvanceGateOff      atomic.Bool            // test seam: SetReviewGateAdvanceDisabledForTest (#2491)
-	postRunAdvanceOff         atomic.Bool            // test seam: SetPostRunAdvanceAdmissionDisabledForTest (#2528)
-	longCooldownCapOff        atomic.Bool            // test seam: SetLongCooldownCapDisabledForTest (#2528)
-	afterAdvanceHook          atomic.Pointer[func(gh.ProjectItem, string)] // test seam: SetAfterAdvanceHookForTest (#2528)
 	headTimes                 headTimeCache          // per-SHA commit dates for the review-wait head anchor (#2467)
 	liveFreshOverride         atomic.Int64           // test seam: SetLiveFreshForTest, nanoseconds (#2350)
 	live                      liveReadState          // engine-clock stamps of the last live read of a fact (#2350)
@@ -419,6 +416,11 @@ type Engine struct {
 	completionMergedCheckOff  atomic.Bool            // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
 	mergeInFlightGuardOff     atomic.Bool            // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
 	mergedPushGuardOff        atomic.Bool            // test seam: SetMergedPushGuardDisabledForTest (#2299)
+	// Test seams of #2528 (ADR 2528): the column-change admission at worker exit,
+	// the idle-interval cap on long cooldowns, and a hook run after a Status write.
+	postRunAdvanceOff  atomic.Bool
+	longCooldownCapOff atomic.Bool
+	afterAdvanceHook   atomic.Pointer[func(gh.ProjectItem, string)]
 	// stageOutcomes holds the recorded, not-yet-published stage outcomes (#2394); nil on
 	// NewWithDeps engines. stageOutcomeRecordOff is the SetStageOutcomeRecordDisabledForTest seam.
 	stageOutcomes                         *stageOutcomeStore
