@@ -1635,6 +1635,15 @@ production's live `unlabeled` events read. It is what the CI settle scan's
 removal of `fabrik:paused`). Because `RemoveLabelFromIssue` deletes the
 applied-at entry, the log is the only place the removal time survives.
 
+### Re-adding a present label bumps `updatedAt` — **Modelled** (#2530)
+
+`AddLabelToIssue` on a label the issue already carries records no label event
+and leaves applied-at alone, but it **does** advance the issue's `updatedAt` and
+its write stamp (the `Date` header analogue). Real GitHub behaves this way
+(verified live: a 6 s `updated_at` move with no timeline event). Without it the
+sim could not reproduce the redundant completion-label re-add of the CI gate
+and the light-reconcile drift it caused.
+
 ### Probe linked-PR scalars (#2122)
 
 `ProbeProjectBoard` carries `BoardProbeItem.LinkedPRFacts` (state, draft,
