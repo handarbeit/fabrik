@@ -63,3 +63,11 @@ Fix A (pre-dispatch gate for `fabrik:blocked` in `itemNeedsWork`) eliminates the
 - Issue #576 (root cause analysis and fix)
 - ADR-038 (observer wiring — the single-store architecture this change builds on)
 - `docs/state-machine.md` §9.2, §9.9
+
+## Amendment (ADR 2528)
+
+Consequence 3 held only when no poll drained the `StatusChanged` entry while the worker was still
+registered. When one does, the item is dropped and re-stamped `periodic-re-eval`, and this ADR's
+exclusion keeps the exit from re-admitting it. `postRunAdvanceAdmission` now admits the item at
+worker exit when its Status changed during the run; an exit that changed nothing still admits
+nothing. See ADR 2528.
