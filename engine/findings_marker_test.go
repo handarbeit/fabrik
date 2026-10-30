@@ -9,6 +9,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 const cleanMarker = "<!-- pruefer:findings inline=0 body=0 coverage=complete -->"
@@ -206,6 +207,118 @@ func TestCleanReviewAgreesAcrossReaders(t *testing.T) {
 			_ = arrived // zero SubmittedAt is never counted as arrived; covered by the sim twin
 			if gap, _ := eng.dispatcherGap(item, pendingFeedback{}); len(gap) != 0 {
 				t.Errorf("nothing held, expected no dispatcher gap, got %v", gap)
+			}
+		})
+	}
+}
+
+// trainStagesWithReviewer is the default stage set with a holding stage (Queued)
+// after Validate, Validate declaring the given expected reviewers (#2525).
+func trainStagesWithReviewer(names ...string) []*stages.Stage {
+	validate := &stages.Stage{Name: "Validate", Order: 4, Prompt: "validate"}
+	if len(names) > 0 {
+		validate.ExpectedReviewers = &names
+	}
+	return []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "research"},
+		{Name: "Plan", Order: 2, Prompt: "plan"},
+		{Name: "Implement", Order: 3, Prompt: "implement"},
+		validate,
+		{Name: "Queued", Order: 5, HoldingStage: true},
+		{Name: "Done", Order: 6, Prompt: "done"},
+	}
+}
+
+func TestReviewContextStage(t *testing.T) {
+	e := testEngineWithStages(t, landingClient(), trainStagesWithReviewer("handarbeit-pruefer"))
+	if got := e.reviewContextStage("Queued"); got == nil || got.Name != "Validate" {
+		t.Fatalf("holding stage must resolve to the stage before it, got %v", got)
+	}
+	if got := e.reviewContextStage("Validate"); got == nil || got.Name != "Validate" {
+		t.Errorf("a non-holding stage resolves to itself, got %v", got)
+	}
+	if e.reviewContextStage("NoSuchColumn") != nil {
+		t.Error("an unknown status resolves to no stage")
+	}
+	e.SetHoldingStageReviewContextDisabledForTest(true)
+	if got := e.reviewContextStage("Queued"); got == nil || got.Name != "Queued" {
+		t.Errorf("seam on must restore the holding stage, got %v", got)
+	}
+
+	// A holding stage with no earlier stage declares nothing (fail safe).
+	only := testEngineWithStages(t, landingClient(), []*stages.Stage{{Name: "Queued", Order: 1, HoldingStage: true}})
+	if only.reviewContextStage("Queued") != nil {
+		t.Error("a holding stage with no earlier stage must resolve to nil")
+	}
+}
+
+func TestCleanReviewSkipper_QueuedUsesValidatingStage(t *testing.T) {
+	e := testEngineWithStages(t, landingClient(), trainStagesWithReviewer("handarbeit-pruefer"))
+	skip := e.cleanReviewSkipper("Queued", 1, nil)
+	if skip == nil || !skip(cleanReview("handarbeit-pruefer", "COMMENTED")) {
+		t.Fatal("a clean review by the validating stage's declared reviewer must be skipped in Queued")
+	}
+	if skip(cleanReview("stranger", "COMMENTED")) {
+		t.Error("an undeclared author must stay actionable in Queued")
+	}
+	if skip(cleanReview("handarbeit-pruefer", "CHANGES_REQUESTED")) {
+		t.Error("a change request must stay actionable in Queued")
+	}
+	if e.cleanReviewSkipper("Queued", 1, []string{"expected-reviewers:none"}) != nil {
+		t.Error("the expected-reviewers:none label override must still win in Queued")
+	}
+	e.SetHoldingStageReviewContextDisabledForTest(true)
+	if e.cleanReviewSkipper("Queued", 1, nil) != nil {
+		t.Error("seam on must reproduce the pre-#2525 nil skipper")
+	}
+	// Nothing declared on the validating stage: nothing skipped.
+	none := testEngineWithStages(t, landingClient(), trainStagesWithReviewer())
+	if none.cleanReviewSkipper("Queued", 1, nil) != nil {
+		t.Error("undeclared validating stage must skip nothing")
+	}
+}
+
+// The Queued scan and every funnel reader agree for a Queued item (#2525).
+func TestCleanReviewAgreesAcrossReaders_Queued(t *testing.T) {
+	cases := []struct {
+		name   string
+		review gh.PRReview
+		want   bool
+	}{
+		{"clean by declared reviewer", cleanReview("handarbeit-pruefer", "COMMENTED"), false},
+		{"clean by stranger", cleanReview("stranger", "COMMENTED"), true},
+		{"findings by declared reviewer", func() gh.PRReview {
+			r := cleanReview("handarbeit-pruefer", "COMMENTED")
+			r.Body = "x\n\n<!-- pruefer:findings inline=1 body=0 coverage=complete -->"
+			return r
+		}(), true},
+		{"marker-less body", func() gh.PRReview {
+			r := cleanReview("handarbeit-pruefer", "COMMENTED")
+			r.Body = "looks fine"
+			return r
+		}(), true},
+		{"clean change request", cleanReview("handarbeit-pruefer", "CHANGES_REQUESTED"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eng := testEngineWithStages(t, landingClient(), trainStagesWithReviewer("handarbeit-pruefer"))
+			item := feedbackItem(func(i *gh.ProjectItem) {
+				i.Status = "Queued"
+				i.LinkedPRNumber = 34
+				i.LinkedPRReviews = []gh.PRReview{c.review}
+			})
+			eng.store.Apply(itemstate.IssueOpened{Item: item})
+			snap, ok := eng.store.Peek("owner/repo", 1)
+			if !ok {
+				t.Fatal("item not in store")
+			}
+			st := snap.State()
+			cached := eng.cachedPendingFeedback(snap, &st).any()
+			live := eng.feedbackGateBlocks(item, true, "advance")
+			view := len(eng.dispatcherVisibleIDs(item)) > 0
+			queued := len(eng.buildReviewBodyCommentsFromReviews(item, []gh.PRReview{c.review})) > 0
+			if cached != c.want || live != c.want || view != c.want || queued != c.want {
+				t.Errorf("cached=%v live=%v dispatcher-view=%v queued-scan=%v, want all %v", cached, live, view, queued, c.want)
 			}
 		})
 	}
