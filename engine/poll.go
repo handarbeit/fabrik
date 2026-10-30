@@ -1201,6 +1201,18 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 			e.logf(0, "poll", "next poll capped to %v: engine-scheduled retry due\n", capped)
 			effectiveInterval = capped
 		}
+		// #2528: the periodic re-evaluation (and every other long cooldown) is the
+		// backstop for missed admissions, so an idle backoff must not push it out
+		// either. Capped at due + one configured interval so dues stamped by
+		// different polls coalesce into one poll instead of one each.
+		if !e.longCooldownCapOff.Load() {
+			if due := e.earliestLongCooldown(now); !due.IsZero() {
+				if capped := capIntervalToDue(effectiveInterval, due.Add(configuredInterval), now, minDueWakeInterval); capped < effectiveInterval {
+					e.logf(0, "poll", "next poll capped to %v: admission cooldown due\n", capped)
+					effectiveInterval = capped
+				}
+			}
+		}
 	}
 
 	// Forge-unreachable hold (#2393): do not stretch the idle interval while held,
@@ -2164,6 +2176,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		// turn. Genuine "supplant on new event" semantics need to distinguish
 		// self-generated label changes from external ones — left as future work.
 		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
+			e.logf(item.Number, "poll", "skipping dispatch: worker in flight\n")
 			continue
 		}
 		// R5 (#1779): the item's own Worker() == nil at this point, but a prior
@@ -2257,6 +2270,9 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			// the worker ends raises no change signal afterwards, so admit it here,
 			// before the WorkerExited wake (FR-001b, #2232).
 			defer e.postRunFeedbackAdmission(issueCtx, item, e.now())
+			// Also runs before the WorkerExited wake: a column move the worker made
+			// can be drained by a poll while it is still registered (#2528).
+			defer e.postRunAdvanceAdmission(issueCtx, item, e.statusAtWorkerStart(item))
 			err := e.processItem(issueCtx, board, item)
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)

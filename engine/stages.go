@@ -953,6 +953,9 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 		// "clear at Done" rule (#2048); a following stage dispatch writes its own
 		// line.
 		e.clearStatusLine(item)
+		if hook := e.afterAdvanceHook.Load(); hook != nil {
+			(*hook)(item, next.Name)
+		}
 	}
 	return err
 }
