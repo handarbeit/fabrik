@@ -55,6 +55,10 @@ func TestNoWorkNeeded(t *testing.T) {
 	AssertFabrikRunning(t, env)
 
 	startedAt := time.Now()
+	// The README names its own repo, so the claimed substring must be this
+	// bed's repo name, not a literal: on a second bed RepoAlpha is not
+	// fabrik-test-alpha and Specify rightly pauses on the false claim.
+	_, repoName, _ := strings.Cut(env.RepoAlpha, "/")
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e no-work-needed (%s)", startedAt.Format("15:04:05")),
 		`## Goal
@@ -63,7 +67,7 @@ Verify that the FABRIK_NO_WORK_NEEDED short-circuit closes the issue without cre
 
 ## What this asks for
 
-`+"`README.md` in this repo already exists and contains a description of the test bed. Please verify that the README.md file is present, contains the substring \"`+`fabrik-test-alpha`+`\", and has the Apache 2.0 LICENSE pointer."+`
+`+"`README.md` in this repo already exists and contains a description of the test bed. Please verify that the README.md file is present, contains the substring \""+repoName+"\", and has the Apache 2.0 LICENSE pointer."+`
 
 ## Hint to Plan
 
