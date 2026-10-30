@@ -1587,7 +1587,7 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	e.resumeCleanStopPauses(board)
 
 	e.setPollStep("selecting deep-fetch candidates")
-	deepFetchCandidates, deepFetched := e.selectDeepFetchCandidates(board, repoFilter, cycleSet, priorInQueue)
+	deepFetchCandidates, deepFetched, periodicOnly := e.selectDeepFetchCandidatesCounted(board, repoFilter, cycleSet, priorInQueue)
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
 	//
@@ -1933,7 +1933,7 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	}
 
 	return pollResult{
-		Active:     dispatched > 0 || deepFetched > 0,
+		Active:     dispatched > 0 || e.activeDeepFetches(deepFetched, periodicOnly) > 0,
 		ItemCount:  len(board.Items),
 		Dispatched: dispatched,
 		SeenRepos:  seenRepos,
@@ -2389,8 +2389,16 @@ func (e *Engine) rearmPeriodicReEval(item gh.ProjectItem) {
 // populated in place with each item's previous-poll merge-queue membership,
 // captured before ItemDeepFetched overwrites the store (ADR-058 D4 OQ-3).
 func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter string, cycleSet map[string]bool, priorInQueue map[string]bool) ([]gh.ProjectItem, int) {
+	candidates, deepFetched, _ := e.selectDeepFetchCandidatesCounted(board, repoFilter, cycleSet, priorInQueue)
+	return candidates, deepFetched
+}
+
+// selectDeepFetchCandidatesCounted is selectDeepFetchCandidates that also returns how
+// many of the deep-fetched items were admitted only by an expired periodic-re-eval
+// cooldown (#2530); activeDeepFetches turns that into the poll's activity signal.
+func (e *Engine) selectDeepFetchCandidatesCounted(board *gh.ProjectBoard, repoFilter string, cycleSet map[string]bool, priorInQueue map[string]bool) ([]gh.ProjectItem, int, int) {
 	var deepFetchCandidates []gh.ProjectItem
-	var deepFetched int
+	var deepFetched, periodicOnly int
 	for i := range board.Items {
 		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
 			continue
@@ -2567,11 +2575,27 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		}
 		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 		deepFetched++
+		if periodicReeval {
+			periodicOnly++
+		}
 	}
 	if deepFetched > 0 {
 		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
-	return deepFetchCandidates, deepFetched
+	return deepFetchCandidates, deepFetched, periodicOnly
+}
+
+// activeDeepFetches is the deep-fetch count that counts as poll activity for the
+// idle backoff (#2530, ADR 2530). An admission caused only by an expired
+// periodic-re-eval cooldown (periodicOnly: not in cycleSet, no bypass label, not a
+// cleanup stage, not a first sighting) is the safety net re-reading an unchanged
+// item, not activity; a re-evaluation that acts shows up as a dispatch or as a
+// Store change that puts the item in the next poll's cycleSet.
+func (e *Engine) activeDeepFetches(deepFetched, periodicOnly int) int {
+	if e.periodicActivityNarrowingOff.Load() {
+		return deepFetched
+	}
+	return deepFetched - periodicOnly
 }
 
 // queuedRepoGroup is the Queued-column subset for a single owner/repo, preserving
