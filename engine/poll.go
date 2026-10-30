@@ -2041,6 +2041,13 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 	if e.feedbackGateBlocks(item, false, "advance") {
 		return
 	}
+	// Review gate (#2491, ADR 2491): a wait_for_reviews stage must not be left while
+	// the review verdict blocks. handleReviewGate skips checkReviewGate on a frozen
+	// hasComplete == false (#617), so on the pass where CI clears and adds the
+	// completion label this is the only place the verdict is consulted.
+	if e.reviewGateHoldsAdvance(item, stage) {
+		return
+	}
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
 		// A failed advance moved nothing, so there is no StatusChanged entry to
 		// re-admit the item. Leave it out of advancedItems: the poll defer then
