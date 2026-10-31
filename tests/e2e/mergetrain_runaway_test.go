@@ -120,12 +120,15 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 	WaitForLogLine(t, env, fmt.Sprintf("runaway guard fired for %s", env.RepoBeta), logStart, 50*time.Minute)
 	t.Logf("runaway guard fired; checking member labels and comments")
 
-	// Labels are applied inside fireRunawayGuard before the log line is written,
-	// so by the time WaitForLogLine returns they should already be set. Allow a
-	// generous 5-minute window for GitHub API propagation.
+	// fireRunawayGuard pauses the members that are Queued when it fires, before
+	// the log line is written. A member that bisection ejected earlier is not
+	// Queued then: it is paused when it re-enters Queued after its own CI, by the
+	// guard's next firing ("already tripped … before dispatch"), which can come
+	// several minutes later (0.0.91 gate: 303 s after the first firing). Allow 15
+	// minutes per member for that.
 	for _, issueNum := range members {
-		WaitForIssueLabel(t, env, env.RepoBeta, issueNum, "fabrik:paused", 5*time.Minute)
-		WaitForIssueLabel(t, env, env.RepoBeta, issueNum, "fabrik:awaiting-input", 5*time.Minute)
+		WaitForIssueLabel(t, env, env.RepoBeta, issueNum, "fabrik:paused", 15*time.Minute)
+		WaitForIssueLabel(t, env, env.RepoBeta, issueNum, "fabrik:awaiting-input", 15*time.Minute)
 		t.Logf("member #%d has fabrik:paused + fabrik:awaiting-input", issueNum)
 	}
 
