@@ -14,7 +14,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.5.64
 	golang.org/x/sys v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.104.2
+	tailscale.com v1.104.4
 )
 
 require (
