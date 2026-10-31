@@ -39,8 +39,8 @@ import (
 // from tests/e2e/testdata/train-poison-guard.yml — see README "Merge-train
 // scenarios"). Skips cleanly if the Queued column is absent.
 //
-// Wall-clock: ~20–40 min (combined validate + O(log N) bisection rounds, each a
-// full trial CI). Cost: low-moderate (no conflict resolution; bisection is git +
+// Wall-clock: ~20–60 min (combined validate + O(log N) bisection rounds, each a
+// full trial CI, doubled for a red trial by its failed-job re-run, #2052). Cost: low-moderate (no conflict resolution; bisection is git +
 // CI only).
 func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	t.Parallel()
@@ -116,14 +116,17 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	// The poison member is ejected — asserted via the ejection comment the engine
 	// posts on the member issue (posted on every ejection path: halving-isolated,
 	// isolation-fail, and one-at-a-time fallback), so this is path-independent.
-	WaitForIssueComment(t, env, repo, poisonIssue, "merge-train — ejected", 25*time.Minute)
+	// Each red trial re-runs its failed jobs once before it is judged red (#2052),
+	// so a bisection step costs two train-poison-guard runs (~5 min each on a busy
+	// Actions day): isolating the poisoner can take most of an hour (0.0.91 gate).
+	WaitForIssueComment(t, env, repo, poisonIssue, "merge-train — ejected", 50*time.Minute)
 	t.Logf("poison member #%d ejected", poisonIssue)
 
 	// The two survivors re-form and land Queued → Done, PRs closed.
 	for _, m := range []struct {
 		issue, pr int
 	}{{clean1Issue, clean1PR}, {clean2Issue, clean2PR}} {
-		WaitForMemberLanded(t, env, repo, m.issue, 25*time.Minute)
+		WaitForMemberLanded(t, env, repo, m.issue, 40*time.Minute)
 		waitForPRClosed(t, env, repo, m.pr, 5*time.Minute)
 		t.Logf("survivor #%d landed (Done, PR #%d closed)", m.issue, m.pr)
 	}

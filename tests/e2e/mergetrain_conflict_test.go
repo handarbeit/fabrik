@@ -168,7 +168,10 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 	t.Logf("bisection engaged on the red batch")
 
 	// A3 (GitHub side): P is ejected.
-	WaitForIssueComment(t, env, repo, pIssue, "merge-train — ejected", 25*time.Minute)
+	// Each red trial re-runs its failed jobs once before it is judged red (#2052),
+	// so a bisection step costs two train-poison-guard runs (~5 min each on a busy
+	// Actions day): isolating the poisoner can take most of an hour (0.0.91 gate).
+	WaitForIssueComment(t, env, repo, pIssue, "merge-train — ejected", 50*time.Minute)
 	t.Logf("poisoner #%d ejected", pIssue)
 
 	// A6: A, B, C land, member PRs closed.
@@ -176,7 +179,7 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 		name      string
 		issue, pr int
 	}{{"A", aIssue, aPR}, {"B", bIssue, bPR}, {"C", cIssue, cPR}} {
-		WaitForMemberLanded(t, env, repo, m.issue, 25*time.Minute)
+		WaitForMemberLanded(t, env, repo, m.issue, 40*time.Minute)
 		waitForPRClosed(t, env, repo, m.pr, 5*time.Minute)
 		t.Logf("member %s #%d landed (PR #%d closed)", m.name, m.issue, m.pr)
 	}
