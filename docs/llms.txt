@@ -20,3 +20,15 @@
 ## Positioning
 
 - [Fabrik Positioning](https://fabrik.handarbeit.io/positioning): Landscape overview comparing Fabrik to similar agentic development tools.
+
+## Companion Tools
+
+- [Companion Tools](https://fabrik.handarbeit.io/companion-tools): Optional handarbeit tools that run alongside Fabrik — Pruefer for PR review and Werkbank for self-hosted Actions runners.
+
+## Pruefer
+
+- [Pruefer](https://fabrik.handarbeit.io/pruefer): Self-hosted Claude Code PR review bot (GitHub App daemon) that satisfies Fabrik's wait_for_reviews gate — install, minimal configuration, main settings, and how it works with the review gate.
+
+## Werkbank
+
+- [Werkbank](https://github.com/handarbeit/werkbank): Tooling for self-hosted GitHub Actions runners (ephemeral Linux containers, native macOS and Windows runners, overflow controller, host watchdog), for when Fabrik-driven CI uses many runner minutes on private repos.

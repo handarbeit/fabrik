@@ -623,6 +623,13 @@ fabrik --auto-upgrade</pre>
           <div class="link-desc">Short, honest answers to the questions people ask most</div>
         </div>
       </a>
+      <a href="{{ '/companion-tools' | relative_url }}" class="link-card">
+        <span class="link-icon">🧰</span>
+        <div>
+          <div class="link-title">Companion Tools</div>
+          <div class="link-desc">Pruefer, a self-hosted Claude Code PR review bot, and Werkbank, tooling for self-hosted Actions runners</div>
+        </div>
+      </a>
       <a href="{{ '/USER_GUIDE' | relative_url }}" class="link-card">
         <span class="link-icon">📖</span>
         <div>
