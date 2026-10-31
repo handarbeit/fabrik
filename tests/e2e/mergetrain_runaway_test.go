@@ -53,7 +53,9 @@ import (
 // train-caps file removed, so neither the engine's memory nor the disk holds the
 // tripped trial window afterwards (see the t.Cleanup below).
 //
-// Wall-clock: ~10–20 min (~6 trials × 2 required checks ≈ 12 Actions runs).
+// Wall-clock: ~20–50 min. Each red trial re-runs its failed jobs once before it
+// is judged red (#2052), so ~6 trials cost ~12 train-poison-guard runs; at ~4 min
+// a run on a busy Actions day that is ~50 min.
 // Cost: low (no Claude invocations).
 func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 	env := LoadEnv(t)
@@ -113,8 +115,9 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 	}
 	t.Logf("all 4 poison members queued on %s; awaiting runaway guard", env.RepoBeta)
 
-	// Wait for the guard to fire — the longest assertion (up to 25 min).
-	WaitForLogLine(t, env, fmt.Sprintf("runaway guard fired for %s", env.RepoBeta), logStart, 25*time.Minute)
+	// Wait for the guard to fire — the longest assertion (up to 50 min; see the
+	// wall-clock note above).
+	WaitForLogLine(t, env, fmt.Sprintf("runaway guard fired for %s", env.RepoBeta), logStart, 50*time.Minute)
 	t.Logf("runaway guard fired; checking member labels and comments")
 
 	// Labels are applied inside fireRunawayGuard before the log line is written,
