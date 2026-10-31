@@ -195,8 +195,12 @@ func TestCIFixReinvoke(t *testing.T) {
 		t.Fatalf("%s on PR #%d does not contain %q (content: %q)", ackFile, prNumber, ackLine(nonce), ack)
 	}
 
-	// Issue must close (Validate completes and yolo auto-merges the PR).
-	WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 30*time.Minute)
+	// Issue must close (Validate completes and yolo auto-merges the PR). Plain
+	// WaitForIssueClosed: the PR is seeded expected-reviewers:none with
+	// pruefer:ignore, so it never gets a review, and the review-check variant's
+	// ten-minute zero-review fail-fast would fire while the CI-fix head's checks
+	// are still running (0.0.91 gate, pat/on).
+	WaitForIssueClosed(t, env, env.RepoAlpha, num, 30*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "stage:Validate:complete")
 	t.Logf("%s#%d closed with stage:Validate:complete", env.RepoAlpha, num)
 
