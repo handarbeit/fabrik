@@ -42,7 +42,7 @@ func TestDriftCheck(t *testing.T) {
 		{"untracked test file is fine", true, "", "tests/e2e/new_test.go\n", true, nil, ""},
 		{"sim script and dev guide are fine", true, "scripts/sim/run.sh\nCLAUDE.md\n", "", true, nil, ""},
 		{"repo docs and specs are fine", true, "docs/USER_GUIDE.md\ndocs/_layouts/docs.html\ndocs/llms-full.txt\nspecs/2535-x/spec.md\n", "", true, nil, ""},
-		{"embedded docs and sim tests invalidate", true, "docs/pruefer.md\nplugin/fabrik-workflows/skills/review/SKILL.md\nstages/examples/review.yaml\ntests/sim/x_test.go\n", "", false,
+		{"plugin, stages and sim tests invalidate; docs beside them pass", true, "docs/pruefer.md\nplugin/fabrik-workflows/skills/review/SKILL.md\nstages/examples/review.yaml\ntests/sim/x_test.go\n", "", false,
 			[]string{"plugin/fabrik-workflows/skills/review/SKILL.md", "stages/examples/review.yaml", "tests/sim/x_test.go"}, ""},
 		{"similar docs prefix is not allowed", true, "docsx/a.md\nspecsheet.go\n", "", false, []string{"docsx/a.md", "specsheet.go"}, ""},
 		{"similar prefix is not allowed", true, "tests/e2e2/x.go\nscripts/e2e-other/y\n", "", false, []string{"scripts/e2e-other/y", "tests/e2e2/x.go"}, ""},
