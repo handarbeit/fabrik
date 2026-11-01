@@ -1203,6 +1203,13 @@ type queuedMember struct {
 // moves observed in one reconcile are stamped in arbitrary order (0.0.84 gate:
 // [A,P,B,C] for a back-to-back [A,B,C,P]), so back-to-back placement does not
 // fix the order. Callers keep the members paused so nothing batches meanwhile.
+//
+// On a webhook leg the move usually arrives as a projects_v2_item delivery, so
+// the cache is already fresh and no probe or fetch line is logged for it; the
+// daemon's own fabrik_status reporting Queued is then the evidence. Waiting for
+// a log line alone held a member until an idle poll (~11 min), long enough for a
+// poison member's delayed own-PR failure to land first (0.0.91 gate, bed B
+// app/on/webhook).
 func queueInObservedOrder(t *testing.T, env *Env, repo string, members []queuedMember) {
 	t.Helper()
 	for _, m := range members {
@@ -1213,11 +1220,23 @@ func queueInObservedOrder(t *testing.T, env *Env, repo string, members []queuedM
 		staleProbe, newProbe := probe+"stale", probe+"new item discovered"
 		fetched := fmt.Sprintf("[cache] stale for #%d (", m.issue)
 		missed := fmt.Sprintf("[cache] miss for #%d ", m.issue)
-		waitForLogMatch(t, env, offset, 10*time.Minute, fmt.Sprintf("the engine reading #%d's move to Queued", m.issue),
-			func(l string) bool {
-				return strings.Contains(l, staleProbe) || strings.Contains(l, newProbe) ||
-					strings.Contains(l, fetched) || strings.Contains(l, missed)
-			})
+		logged := func(l string) bool {
+			return strings.Contains(l, staleProbe) || strings.Contains(l, newProbe) ||
+				strings.Contains(l, fetched) || strings.Contains(l, missed)
+		}
+		if !awaitCond(10*time.Minute, func() bool {
+			if st, err := bedStatus(env, repo, m.issue); err == nil && st.Place.Status.Valid && st.Place.Status.V == "Queued" {
+				return true
+			}
+			for _, l := range logLinesSince(t, env, offset) {
+				if logged(l) {
+					return true
+				}
+			}
+			return false
+		}) {
+			t.Fatalf("timed out after 10m waiting for the engine reading #%d's move to Queued (no probe/fetch line from offset %d, and fabrik_status never reported Queued)", m.issue, offset)
+		}
 		// The lines above are logged just before the fetch that applies the move;
 		// leave it time to land so the next member is stamped strictly later.
 		time.Sleep(5 * time.Second)
