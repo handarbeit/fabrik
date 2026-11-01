@@ -114,6 +114,7 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 	// sender (actor unknown, ADR 2125) — the 0.0.90 gate's failure, not a drain fault.
 	HoldPolls(t)
 	base := mustReadIntake(t, env)
+	added := time.Now()
 	for _, l := range labels[:before] {
 		AddLabel(t, env, repo, issue, l)
 	}
@@ -122,6 +123,22 @@ func TestWebhookRestartUnderLoad(t *testing.T) {
 		return err == nil && c.Accepted >= base.Accepted+before
 	}) {
 		webhookEffectMissing(t, env, "the daemon did not accept the %d label deliveries made before the restart within %v (intake counters before %+v)", before, webhookApplyWait, base)
+	}
+	// The Accepted delta alone does not prove each label's own delivery is queued:
+	// every label add also sends a projects_v2_item edit (the Labels field), so the
+	// first label moved Accepted by two while the second label's issues delivery
+	// was still unsent — it then arrived after the signal and was lost to the exec
+	// (0.0.91 gate: GitHub sent it 10 s after the SIGHUP). A 2xx in the App's
+	// delivery log means the transport handed it to the intake before answering;
+	// the apply itself is left free (the no-intake-drain fault delays it on purpose).
+	for _, l := range labels[:before] {
+		d, ok, lastErr := findAppDelivery(env, added, "issues", "labeled", payloadIssueLabel(repo, issue, l), webhookApplyWait)
+		if !ok {
+			webhookEffectMissing(t, env, "the issues.labeled delivery for %s made before the restart was not in the App's delivery log within %v (last error: %v)", l, webhookApplyWait, lastErr)
+		}
+		if d.StatusCode < 200 || d.StatusCode > 299 {
+			webhookEffectMissing(t, env, "the issues.labeled delivery for %s made before the restart was not accepted (status %d %q)", l, d.StatusCode, d.Status)
+		}
 	}
 	// The hold stays on through the SIGHUP: the restarted process starts released
 	// and clears the request (ADR 1978), so the ReleasePolls below is a no-op unless
