@@ -2336,7 +2336,7 @@ since it exercises only part of a test. Without `--resume` the gate runs everyth
 
 ```
 == live coverage for engine SHA 1a2b3c4 ==
-ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate-only path(s) differ; none touch the engine)
+ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate/docs-only path(s) differ; none touch the engine)
   app/off  covered 40/44  missing 3  known-skip 1  structural-skip 0  inconclusive 0
     missing          TestX: no record
     known-skip       TestY: blocked on open #123 — "blocked on #123"

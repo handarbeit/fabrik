@@ -12,10 +12,15 @@ import (
 // the live suite, its scripts, the gate runner itself (#1994's tests/gate,
 // which #1973–#1977 all change) and the sim pre-gate's script (scripts/sim/,
 // which only decides how the pre-gate runs the sim; the pre-gate itself is
-// re-run for every new HEAD). A diff confined to them, and to driftAllowedFiles,
-// leaves the ledger valid (R2); anything else means a new engine SHA and a new,
-// empty ledger.
-var driftAllowedPrefixes = []string{"tests/e2e/", "scripts/e2e/", "tests/gate/", "scripts/sim/"}
+// re-run for every new HEAD), plus the repository's own documentation: docs/
+// (the published site and the canonical as-built docs) and specs/ (persisted
+// Specify specs). Neither is compiled or embedded into the binary — the embedded
+// documents live under plugin/ and stages/, which stay outside the allowlist —
+// and the unit tests that read docs/ run in CI on every PR (0.0.91 gate: a
+// docs-only page added after the gated SHA voided a complete ledger). A diff
+// confined to them, and to driftAllowedFiles, leaves the ledger valid (R2);
+// anything else means a new engine SHA and a new, empty ledger.
+var driftAllowedPrefixes = []string{"tests/e2e/", "scripts/e2e/", "tests/gate/", "scripts/sim/", "docs/", "specs/"}
 
 // driftAllowedFiles are single files that are never compiled or embedded into
 // the binary. CLAUDE.md is the repository's development guide; the embedded
@@ -153,11 +158,11 @@ func (d Drift) Report() string {
 	var b strings.Builder
 	switch {
 	case d.Valid:
-		fmt.Fprintf(&b, "ledger drift check: engine SHA %s — VALID (%d test/gate-only path(s) differ; none touch the engine)", shortSHA(d.SHA), d.Changed)
+		fmt.Fprintf(&b, "ledger drift check: engine SHA %s — VALID (%d test/gate/docs-only path(s) differ; none touch the engine)", shortSHA(d.SHA), d.Changed)
 	case d.Reason != "":
 		fmt.Fprintf(&b, "ledger drift check: engine SHA %s — INVALID: %s", shortSHA(d.SHA), d.Reason)
 	default:
-		fmt.Fprintf(&b, "ledger drift check: engine SHA %s — INVALID: %d path(s) outside tests/e2e, scripts/e2e and tests/gate differ:", shortSHA(d.SHA), len(d.Paths))
+		fmt.Fprintf(&b, "ledger drift check: engine SHA %s — INVALID: %d path(s) outside the test, gate and docs paths differ:", shortSHA(d.SHA), len(d.Paths))
 		for i, p := range d.Paths {
 			if i == 10 {
 				fmt.Fprintf(&b, "\n  … and %d more", len(d.Paths)-10)
