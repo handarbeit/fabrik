@@ -120,6 +120,8 @@ GitHub Project Board (source of truth)
 
 > **v0.0.90 highlights:** one theme, **webhooks without a relay**. Under [GitHub App authentication](#github-app-authentication) the daemon can now receive App webhooks itself: `event_source: direct` is a plain HTTP receiver you place behind your own tunnel or proxy, and `event_source: tailscale` embeds a Tailscale node so each daemon joins your tailnet as its own machine and serves its own Funnel endpoint — see [Direct App Webhook Receiver](docs/USER_GUIDE.md#direct-app-webhook-receiver-event_source-direct) and [Embedded Tailscale Funnel Receiver](docs/USER_GUIDE.md#embedded-tailscale-funnel-receiver-event_source-tailscale). **Nothing is lost while the daemon is down**: on start and on every reconnect the two receivers find deliveries GitHub failed to deliver and ask it to redeliver them; duplicates are dropped by delivery ID (`replay_failed_deliveries`, default on). **Webhook health you can read**: `fabrik_health` reports, per receiver, whether GitHub can reach it (`route`: `reachable`, `unreachable` with GitHub's reason, or `unknown`) and counts the deliveries the intake accepted, dropped and applied (`webhook.intake`); a route unreachable for 10 minutes raises the `webhook_route_unreachable` warning. **Upgrading:** nothing changes for poll-only setups apart from the binary, which is now about 35 MB because every build carries the Tailscale node, and building from source needs Go 1.27.3. The receivers are opt-in and need App auth: set `event_source` to `direct` (with `direct_listen`) or `tailscale` (with `tailscale_hostname` and, on first start, a Tailscale auth key in `FABRIK_TS_AUTHKEY`), and put the App's webhook secret in `FABRIK_GITHUB_WEBHOOK_SECRET`. Replay is on by default for those two receivers only; set `replay_failed_deliveries: false` to turn it off. **Hookdeck is deprecated in v0.0.90 and removed in v0.0.92** (`event_source: hookdeck` works unchanged until then): if you use it, move to `tailscale` or `direct` by following [Migrating off Hookdeck](docs/USER_GUIDE.md#migrating-off-hookdeck) in the User Guide.
 
+> **v0.0.91 highlights:** two themes. **Review gates read the reviewer, not the clock**: the authoritative gate judges each reviewer at the PR's current head, so a verdict on an older commit reads as "awaiting re-review" and a declared bot's clean review at head withdraws its own earlier change request; every route out of a `wait_for_reviews` stage, including the catch-up advance, asks that same verdict. A clean review from an expected reviewer (Pruefer now ends each review body with a hidden findings-count marker) starts no worker and holds no gate, including for `Queued` merge-train members, a bot finding Review declined at the current head pauses for your decision instead of waiting out a timeout, and the review-wait timeout restarts when a new head arrives — see [Pending Reviewer Gate](docs/USER_GUIDE.md#pending-reviewer-gate) and [Reviewer verdicts at the PR head](docs/USER_GUIDE.md#reviewer-verdicts-at-the-pr-head). **Pauses say why, and clean stops resume themselves**: every engine pause carries exactly one `fabrik:pause:<cause>` label (shown as `pause_cause` in `fabrik_status` and channel events), and items paused by a daemon clean stop are resumed on the next start (`resume_after_clean_stop`, default on) — see [Graceful Shutdown](docs/USER_GUIDE.md#graceful-shutdown). Smaller changes: optional reserved worker slots for review, CI-fix and rebase rounds (`fix_round_slots`, default `0` = off), a closed paused item at Done is cleaned up, `fabrik upgrade` refuses to migrate the plugin while a daemon holds the directory, and label changes around a SIGHUP restart are applied before the exec and announced once (`fabrik_health.channel.ready`). **Known issue:** a merge-train trial's CI verdict can be read up to one idle poll interval late, slowing bisection on a quiet daemon; landings are unaffected (#2542, planned for v0.0.92). **Upgrading:** no configuration changes are needed. Hookdeck is still deprecated and is removed in v0.0.92. Pruefer and Werkbank are described on the [Companion Tools](docs/companion-tools.md) page.
+
 ### Webhook Mode (Optional)
 
 Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. With the default in-memory board cache active, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
@@ -190,8 +192,10 @@ requires auto-advance to be active):
    (`CHANGES_REQUESTED`, `COMMENTED`, and `APPROVED` bodies are all treated
    as potentially actionable — this is what lets a bot reviewer like Pruefer,
    which submits its entire finding set as a `COMMENTED` review, get picked
-   up and addressed instead of silently dropped), then waits for the next
-   review round. Only a truly empty-bodied `APPROVED` review with no inline
+   up and addressed instead of silently dropped; the exception is a clean
+   review from an expected reviewer whose body ends in a Pruefer findings
+   marker reading `inline=0 body=0`, which starts no worker and holds no
+   gate), then waits for the next review round. Only a truly empty-bodied `APPROVED` review with no inline
    comments has nothing to route, so re-invocation is skipped and the issue
    advances normally. After each re-invocation cycle, Fabrik posts a PR
    summary comment with a per-thread footer listing how each inline review
@@ -257,7 +261,10 @@ by `--drain-deadline` (default 30 seconds), so Fabrik exits rather than
 hanging if something gets stuck. Force-quit remains available as an escape
 hatch: press Ctrl-C (or send SIGINT/SIGTERM) a second time while the clean
 stop is in progress to exit immediately with no further label writes or
-worktree commits. See
+worktree commits. On the next start, issues whose pause came from a clean
+stop are resumed automatically unless a human has since changed their pause
+(`resume_after_clean_stop`, default on; set it to `false` to keep them paused).
+See
 [USER_GUIDE.md §Graceful Shutdown](docs/USER_GUIDE.md#graceful-shutdown)
 for the full sequence.
 
@@ -370,6 +377,8 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `--retry-backoff` | Seconds before re-dispatching a stage that did not complete; independent of `--poll` (also `FABRIK_RETRY_BACKOFF`; minimum 1) | `60` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
+| `--fix-round-slots` | Reserved worker slots, on top of `--max-concurrent`, usable only by review, CI-fix and rebase rounds (`0` = off; also `FABRIK_FIX_ROUND_SLOTS` / `fix_round_slots`) | `0` |
+| `--resume-after-clean-stop` | On startup, resume issues whose pause was set by a daemon clean stop (also `FABRIK_RESUME_AFTER_CLEAN_STOP` / `resume_after_clean_stop`) | `true` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
 | `--max-tools-denied-retries` | Maximum number of consecutive tool-permission-denial exits per stage before pausing (0 = default 3; also `FABRIK_MAX_TOOLS_DENIED_RETRIES`). Independent of `--max-retries` — a permission misconfiguration is not a stage failure. | `0` (3 denials) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output when grandchild processes hold stdout pipe open (0 = use built-in default of 30 sec; env: `FABRIK_CLAUDE_WAIT_DELAY`). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool. | `0` (30 sec) |
@@ -455,7 +464,8 @@ Fabrik uses labels to track state:
 | `fabrik:locked:<user>` | Issue is being processed by this user's Fabrik instance |
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
-| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new human comment is posted after the pause |
+| `fabrik:awaiting-input` | Marks every engine pause (it always co-occurs with `fabrik:paused`); auto-clears when a new human comment is posted after the pause. Read `fabrik:pause:<cause>` to see why |
+| `fabrik:pause:<cause>` | Why the engine paused the issue — exactly one of `question`, `review-timeout`, `ci-timeout`, `cycle-limit`, `daemon-stop`, `breaker`, `failed`, `other`; removed with `fabrik:paused`. Informational only: nothing that resumes or dispatches reads it. Also reported as `pause_cause` by `fabrik_status` and in channel events |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
 | `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is deferred until CI passes (conjunctive gate). Triggers cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses, at which point the issue is paused with `fabrik:awaiting-input` |

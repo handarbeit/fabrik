@@ -50,8 +50,9 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.90: webhooks without a relay. Under GitHub App auth the daemon can receive App webhooks itself, directly behind your own tunnel or through an embedded Tailscale Funnel node, and asks GitHub to redeliver anything it missed while it was down. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#direct-app-webhook-receiver-event_source-direct">Direct App Webhook Receiver</a>.
+      New in v0.0.91: review gates that read the reviewer, not the clock. Each reviewer is judged at the PR's current head, a clean review from an expected reviewer starts no worker, and every engine pause now says why with a <code>fabrik:pause:&lt;cause&gt;</code> label, with clean-stop pauses resuming on the next start. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate">Pending Reviewer Gate</a>. (v0.0.90 added
+      <a href="{{ '/USER_GUIDE' | relative_url }}#direct-app-webhook-receiver-event_source-direct">webhooks without a relay</a>.)
     </p>
 
     <div class="hero-diagram">
