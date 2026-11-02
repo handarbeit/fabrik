@@ -107,7 +107,16 @@ func (n *tsnetNode) ListenFunnel(addr string) (net.Listener, error) {
 		return nil, errTailnetClosed
 	}
 	n.mu.Unlock()
-	return n.srv.ListenFunnel("tcp", addr)
+	return n.srv.ListenFunnel("tcp", addr, tsnetFunnelOptions()...)
+}
+
+// tsnetFunnelOptions are the options the webhook listener is opened with.
+// FunnelOnly keeps it off the node's tailnet address: without it tsnet listens
+// on both, and any tailnet peer the policy admits could reach the receiver.
+// GitHub delivers through the public Funnel only, and nothing in Fabrik
+// connects to the node over the tailnet (#2553).
+func tsnetFunnelOptions() []tsnet.FunnelOption {
+	return []tsnet.FunnelOption{tsnet.FunnelOnly()}
 }
 
 func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
