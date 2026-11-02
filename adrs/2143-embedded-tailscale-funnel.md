@@ -49,6 +49,10 @@ The node adds ~19.5 MB (+114%). The first version of this ADR kept it behind `-t
 
 No extra job or step is needed: the single `go vet ./...` and `go test -race ./...` of the Go test job compile and test the adapter and its tests (including the status-tracker tests in `engine/tailnet_tsnet_test.go`). The tagged steps the first version proposed were never added.
 
+## Amendment (#2553): the listener is Funnel-only
+
+The adapter originally called `ListenFunnel("tcp", ":443")` with no options, and tsnet then listens on both the public Funnel and the node's tailnet address, so any tailnet peer the operator's policy admitted could reach the receiver on 443. GitHub delivers only through the Funnel and no Fabrik code or test connects over the tailnet, so the adapter now passes `tsnet.FunnelOnly()` (`tsnetFunnelOptions`, pinned by `TestTsnetFunnelListenerIsFunnelOnly`). HMAC verification was and remains the guard on the handler; this removes network reachability nobody needs. Keeping a node from reaching other devices is the tailnet policy's job (no grant naming the node's tag), not the daemon's.
+
 ## Consequences
 
 - Each daemon is its own tailnet machine with its own Funnel endpoint, visible and revocable in Tailscale's admin console.
