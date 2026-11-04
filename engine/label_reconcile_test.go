@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -166,10 +167,23 @@ func TestApplyLabelRemove_AmbiguousFailureLanded(t *testing.T) {
 			return []string{"bug"}, nil
 		},
 	}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.removeLabel(gh.ProjectItem{Number: 73, Repo: "owner/repo"}, "fabrik:locked:testuser")
+	// A board cache is wired: a cacheless engine deliberately does not mirror lock
+	// labels into the Store (local_write.go), so only this engine can show the sync.
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	// The live re-read applies its labels to the Store itself; switch that off so
+	// the assertion below can only pass through syncLabelRemoval.
+	eng.SetLiveReadApplyDisabledForTest(true)
+	const lock = "fabrik:locked:testuser"
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), lock)
+	if snap, ok := eng.store.Peek("owner/repo", 1); !ok || !hasLabel(snap.Labels(), lock) {
+		t.Fatal("test setup: label not seeded in the Store")
+	}
+	eng.removeLabel(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, lock)
 	if reads.Load() != 1 {
 		t.Errorf("FetchLabels calls = %d, want 1", reads.Load())
+	}
+	if snap, ok := eng.store.Peek("owner/repo", 1); ok && hasLabel(snap.Labels(), lock) {
+		t.Error("label still in the Store although GitHub shows the removal landed")
 	}
 }
 
