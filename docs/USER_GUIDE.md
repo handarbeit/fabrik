@@ -2490,6 +2490,14 @@ Two rules keep Fabrik from starting model work that it could not record:
   for the item. Nothing is counted against `--max-retries`, no `in_progress` label is written,
   and the item is tried again on the next poll. The same holds for a comment review: it does
   not run, and its comments stay unprocessed until the label can be written.
+  GitHub sometimes answers such a write with a 5xx or a timeout and applies it anyway. After a
+  timeout or 5xx Fabrik re-reads the item's labels once and, if the label landed, carries on
+  as its holder instead of backing off. If a lock label is still left on an item with nothing
+  working on it (for example because that re-read failed too), a running Fabrik removes its own
+  `fabrik:locked:<id>` and `fabrik:editing` after about three minutes (at least three poll
+  intervals), logs one `lock-reclaim` line and picks the item up again. Until then
+  `fabrik_status` and `fabrik_situation` report the item as `stalled` with the code
+  `lock-orphaned`, not as an ordinary wait. A restart is no longer needed.
 - **GitHub unreachable.** After a sustained run of timeouts, connection errors or 5xx
   responses, Fabrik holds all new model work — stage runs, comment passes, review/CI-fix/rebase
   re-invocations and merge-train conflict resolution — until any GitHub call gets an answer
