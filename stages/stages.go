@@ -150,6 +150,14 @@ type Stage struct {
 	// validateExpectedReviewers (FR-8).
 	ExpectedReviewers *[]string `yaml:"expected_reviewers,omitempty"`
 
+	// FeedbackBots opts bots in as a source of conversation-comment feedback
+	// (#2552, ADR 2552). A comment whose author is a bot login is not feedback
+	// unless the bot is named here or in the stage's effective
+	// expected_reviewers. Unlike expected_reviewers it does not make the review
+	// gate wait for a formal review, so it suits bots that only comment. Same
+	// identity form as expected_reviewers (bare handle, no "@", no "[bot]").
+	FeedbackBots []string `yaml:"feedback_bots,omitempty"`
+
 	// CIFixSkill names the plugin skill to invoke for CI-fix re-invocations.
 	// When absent, falls back to CommentSkill.
 	CIFixSkill string `yaml:"ci_fix_skill,omitempty"`
@@ -342,22 +350,29 @@ func validateSkillRef(ref string) error {
 // timeout message lists it twice — a duplicate is malformed in the same way
 // as the other rejected forms.
 func validateExpectedReviewers(stageName string, names []string) ([]string, error) {
+	return validateBotHandles(stageName, "expected_reviewers", names)
+}
+
+// validateBotHandles is validateExpectedReviewers' body, parameterised by the
+// YAML key name so feedback_bots (#2552) shares the identical rules and error
+// wording.
+func validateBotHandles(stageName, field string, names []string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	seen := make(map[string]string, len(names))
 	for _, raw := range names {
 		name := strings.TrimSpace(raw)
 		if name == "" {
-			return nil, fmt.Errorf("stage %q: expected_reviewers entry must not be empty", stageName)
+			return nil, fmt.Errorf("stage %q: %s entry must not be empty", stageName, field)
 		}
 		if strings.HasPrefix(name, "@") {
-			return nil, fmt.Errorf("stage %q: expected_reviewers entry %q must not start with \"@\" — declare the bare handle", stageName, name)
+			return nil, fmt.Errorf("stage %q: %s entry %q must not start with \"@\" — declare the bare handle", stageName, field, name)
 		}
 		if strings.HasSuffix(strings.ToLower(name), "[bot]") {
-			return nil, fmt.Errorf("stage %q: expected_reviewers entry %q must not end with \"[bot]\" — it would not resolve as an @mention; declare the bare handle instead", stageName, name)
+			return nil, fmt.Errorf("stage %q: %s entry %q must not end with \"[bot]\" — it would not resolve as an @mention; declare the bare handle instead", stageName, field, name)
 		}
 		key := expectedReviewerNormalize(name)
 		if prior, dup := seen[key]; dup {
-			return nil, fmt.Errorf("stage %q: expected_reviewers entries %q and %q refer to the same reviewer — declare it once", stageName, prior, name)
+			return nil, fmt.Errorf("stage %q: %s entries %q and %q refer to the same reviewer — declare it once", stageName, field, prior, name)
 		}
 		seen[key] = name
 		out = append(out, name)
@@ -422,6 +437,14 @@ func loadOne(path string) (*Stage, error) {
 			return nil, err
 		}
 		s.ExpectedReviewers = &validated
+	}
+
+	if len(s.FeedbackBots) > 0 {
+		validated, err := validateBotHandles(s.Name, "feedback_bots", s.FeedbackBots)
+		if err != nil {
+			return nil, err
+		}
+		s.FeedbackBots = validated
 	}
 
 	if s.MaxWallTimeRaw != "" {
