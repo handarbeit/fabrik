@@ -215,6 +215,7 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 	e.channelMu.Unlock()
 	ce.wg.Add(1)
 	go ce.run()
+	e.startLabelRepair()
 }
 
 // flushChannelEvents persists the hub's coalesced dedup and counter state without
@@ -252,6 +253,7 @@ func (e *Engine) closeChannelEvents() {
 	ce.stopMu.Unlock()
 	close(ce.stop)
 	ce.wg.Wait()
+	e.stopLabelRepair()
 	ce.spillWarm()
 	ce.ledger.Close()
 	ce.hub.Close()
@@ -424,6 +426,9 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		(*h)() // TEST-ONLY (#2484): park between the ledger record and the queue append
 	}
 	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
+	// A divergence on an engine lock or state label is confirmed and, if it was a
+	// lost write, repaired off this goroutine (#2551).
+	ce.e.handleLabelDivergence(ce.takeLabelDivergences())
 	diverged := len(evs) // events from here on are built from the suspect change
 	rebaseApplied := false
 	for _, d := range c.LabelDeltas {

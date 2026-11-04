@@ -810,6 +810,10 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 		return false
 	}
 	e.removeLabel(item, completeLabel)
+	// The bracket is open from here (#2551): the repair and the trust gate need to
+	// know a rework is running, which neither the Store nor a possibly-lost label
+	// can say.
+	e.openRework(itemOwnerRepoString(item, e.defaultRepo()), item.Number, stage.Name)
 	return true
 }
 
@@ -857,6 +861,9 @@ func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasRew
 	if !wasReworking {
 		return
 	}
+	// The intent behind the complete-label removal ends with the bracket (#2551),
+	// whatever the exits below do.
+	defer e.closeRework(itemOwnerRepoString(item, e.defaultRepo()), item.Number)
 	if !completedThisCycle && !(stage.Name == "Validate" && !e.validateReworkRestoreGuardOff.Load() && e.validateRerunPending(item)) {
 		// A forced Validate re-run withdrew the label (#2378, ADR 2378): a pass that
 		// began from a stale snapshot must not put it back on a non-completing exit
