@@ -360,7 +360,16 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// re-admits the item. The loop that ADR 1413's charge bounded is now bounded
 	// by that cooldown (one failed write per poll, no model run).
 	editingEcho := e.reserveLabelAdd(item, "fabrik:editing", "")
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil && !e.lockWriteRefusalDisabled.Load() {
+	addErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing")
+	if addErr != nil {
+		// A 5xx or timeout does not say the label is absent (#2550, ADR 2550): GitHub
+		// may have applied it. Ask before refusing; an applied label means this pass
+		// holds it, exactly as if the write had returned success.
+		if e.reconcileLabelWrite(item, "fabrik:editing", true, addErr) == labelWriteApplied {
+			addErr = nil
+		}
+	}
+	if err := addErr; err != nil && !e.lockWriteRefusalDisabled.Load() {
 		editingEcho.Cancel()
 		e.logf(item.Number, "lock", "could not add fabrik:editing: %v — not starting comment review; retrying after a short cooldown\n", err)
 		e.recordLockWriteCooldown(item)

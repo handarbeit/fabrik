@@ -1140,7 +1140,11 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 	lockAcquired := false
 	workerStartedAt = time.Now()
 	lockEcho := e.reserveLabelAdd(item, lockLabel, "")
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
+	lockAddErr := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel)
+	if lockAddErr != nil && e.reconcileLabelWrite(item, lockLabel, true, lockAddErr) == labelWriteApplied {
+		lockAddErr = nil // the lock landed behind a 5xx: proceed as its holder (#2550)
+	}
+	if err := lockAddErr; err != nil {
 		lockEcho.Cancel()
 		if !e.lockWriteRefusalDisabled.Load() {
 			return func() {}, workerStartedAt, nil, false, err
@@ -1216,7 +1220,11 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 	}
 
 	inProgressEcho := e.reserveLabelAdd(item, inProgressLabel, "")
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
+	inProgressErr := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel)
+	if inProgressErr != nil && e.reconcileLabelWrite(item, inProgressLabel, true, inProgressErr) == labelWriteApplied {
+		inProgressErr = nil // landed behind a 5xx: release() must remove it (#2550)
+	}
+	if err := inProgressErr; err != nil {
 		inProgressEcho.Cancel()
 		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
@@ -3106,6 +3114,10 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 			return
 		}
 		if !isTransientError(err) {
+			if e.reconcileLabelWrite(item, "fabrik:editing", false, err) == labelWriteApplied {
+				e.syncLabelRemoval(item, "fabrik:editing", false)
+				return
+			}
 			e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
 			return
 		}
@@ -3114,6 +3126,10 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 			delay := editingLabelRetryDelay << attempt
 			time.Sleep(delay)
 		}
+	}
+	if e.reconcileLabelWrite(item, "fabrik:editing", false, lastErr) == labelWriteApplied {
+		e.syncLabelRemoval(item, "fabrik:editing", false)
+		return
 	}
 	e.logf(issueNumber, "warn", "could not remove editing label after %d attempts: %v\n", maxAttempts, lastErr)
 }

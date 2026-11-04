@@ -337,6 +337,11 @@ func (e *Engine) applyLabelRemove(item gh.ProjectItem, label string, echo bool) 
 		res.Cancel()
 	}
 	if err != nil && !errors.Is(err, gh.ErrNotFound) {
+		// A transport-class failure may still have removed the label (#2550).
+		if e.reconcileLabelWrite(item, label, false, err) == labelWriteApplied {
+			e.syncLabelRemoval(item, label, false)
+			return
+		}
 		e.logf(item.Number, "warn", "could not remove label %q: %v\n", label, err)
 		return
 	}
