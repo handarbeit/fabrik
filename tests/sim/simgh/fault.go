@@ -112,7 +112,6 @@ type appliedError struct{ err error }
 func (e *appliedError) Error() string { return e.err.Error() }
 func (e *appliedError) Unwrap() error { return e.err }
 
-
 // FaultTable holds the registered faults for one Instrumented client.
 type FaultTable struct {
 	mu sync.Mutex

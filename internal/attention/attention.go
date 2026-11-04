@@ -216,7 +216,7 @@ type Input struct {
 	// first seen and the grace after which the engine reclaims it (#2550). nil =
 	// none; set only by the engine, so the classifier stays pure.
 	LockOrphan *LockOrphanFact
-	Gate  *GateFact
+	Gate       *GateFact
 	// RebaseAfterLanding is true when fabrik:rebase-needed was applied because main
 	// moved after a sibling landed (the engine recorded it); DaemonStop is true
 	// when the item is paused by the daemon's own clean stop (the pause comment's

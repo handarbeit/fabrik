@@ -435,9 +435,11 @@ func TestApplyThenFailWhenRejectsBadArguments(t *testing.T) {
 	in, _ := newInstrumented(t)
 	for name, fn := range map[string]func(){
 		"nil match": func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", nil, 1, ErrServerError()) },
-		"zero":      func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 0, ErrServerError()) },
-		"nil err":   func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 1, nil) },
-		"bad name":  func() { in.Faults().ApplyThenFailWhen("Nope", func(Args) bool { return true }, 1, ErrServerError()) },
+		"zero": func() {
+			in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 0, ErrServerError())
+		},
+		"nil err":  func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 1, nil) },
+		"bad name": func() { in.Faults().ApplyThenFailWhen("Nope", func(Args) bool { return true }, 1, ErrServerError()) },
 	} {
 		func() {
 			defer func() {
