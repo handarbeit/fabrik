@@ -51,7 +51,7 @@ two comments went unprocessed for more than two hours while `fabrik_status` desc
    registration races, a worker that has just exited and replica lag, and scales with a slow poll
    cadence.
 6. **Scope.** Reclaim covers `fabrik:editing` and the own lock only. `stage:<name>:in_progress` and
-   `fabrik:reworking:*` stay with the startup scans (ADR 1135 context; the rework marker has its own
+   `fabrik:reworking:*` stay with the startup scans (#1135 context; the rework marker has its own
    mark-first-then-clear invariant); R1 still reconciles `in_progress` writes. No new label, config
    key or `FABRIK_*` variable.
 7. **Sim fault.** `simgh.FaultTable.ApplyThenFailWhen` runs the call against the model and then
