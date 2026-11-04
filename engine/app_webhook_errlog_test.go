@@ -275,3 +275,33 @@ func TestErrorLog_StopBeforeStartDoesNotHang(t *testing.T) {
 		t.Fatal("Stop before Start hung")
 	}
 }
+
+// Handshake failures are counted whatever the source address (the Tailscale
+// Funnel shows only two fd7a:: addresses, IPv6 in brackets) and whatever the
+// reason net/http appends (community report #2502, seen on a second daemon).
+func TestErrorLog_CountsEveryHandshakeReasonAndSourceAddress(t *testing.T) {
+	std := captureStdLogger(t)
+	tr, logs := startErrlogTransport(t, "tailscale", func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
+		func(tr *appWebhookTransport) { tr.SetHandshakeSummaryIntervalForTest(time.Hour) })
+	lines := []string{
+		"http: TLS handshake error from [fd7a:115c:a1e0::1e01:7098]:52393: EOF",
+		"http: TLS handshake error from [fd7a:115c:a1e0::401:c29f]:35253: EOF",
+		"http: TLS handshake error from [fd7a:115c:a1e0::1e01:7098]:47311: tls: no cipher suite supported by both client and server; client offered: [0x1301 0x1302]",
+		"http: TLS handshake error from [fd7a:115c:a1e0::1e01:7098]:35987: tls: client offered only unsupported versions: [302 301]",
+	}
+	el := log.New(serverErrorWriter{t: tr}, "", 0)
+	for i := 0; i < 50; i++ { // a burst of dozens
+		for _, l := range lines {
+			el.Print(l)
+		}
+	}
+	if got := tr.HealthRow().TLSHandshakeFailures.V; got != int64(50*len(lines)) {
+		t.Fatalf("counter = %d, want %d", got, 50*len(lines))
+	}
+	if got := noHealthLines(logs.String()); got != "" {
+		t.Fatalf("handshake lines reached the engine log individually: %q", got)
+	}
+	if std.String() != "" {
+		t.Fatalf("stderr received %q", std.String())
+	}
+}
