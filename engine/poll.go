@@ -1598,6 +1598,10 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// capture on the first populated board, then bounded evaluation per poll.
 	e.resumeCleanStopPauses(board)
 
+	// Runtime reclaim of engine lock labels orphaned past the grace period, and the
+	// clock the attention classifier shares (#2550, ADR 2550).
+	e.settleOrphanedLocks()
+
 	e.setPollStep("selecting deep-fetch candidates")
 	deepFetchCandidates, deepFetched, periodicOnly := e.selectDeepFetchCandidatesCounted(board, repoFilter, cycleSet, priorInQueue)
 

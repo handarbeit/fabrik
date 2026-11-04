@@ -326,6 +326,10 @@ type Engine struct {
 	// neutralises the runtime orphan reclaim (R2). Test seams.
 	ambiguousWriteReconcileOff atomic.Bool
 	lockOrphanReclaimOff       atomic.Bool
+	// lockOrphans is the orphan-lock clock shared by the runtime reclaim and the
+	// attention classifier (lock_orphan.go); zero value ready.
+	lockOrphans             lockOrphanClock
+	lockOrphanGraceOverride atomic.Int64
 	// usageHoldReinvokeGateDisabled is the test seam that restores the pre-#2407
 	// behaviour (usage_hold_admission.go).
 	usageHoldReinvokeGateDisabled atomic.Bool

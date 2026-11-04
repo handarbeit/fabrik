@@ -56,6 +56,9 @@ const (
 	CodeWorkerNoProgress      = "worker-no-progress"
 	CodeNoProgress            = "no-progress"
 	CodeStageCompleteStuck    = "stage-complete-not-advanced"
+	// CodeLockOrphaned marks an engine lock label with no worker behind it, past
+	// the grace period (#2550): the item is held by nobody.
+	CodeLockOrphaned = "lock-orphaned"
 	// CodeWaitingForPoll marks an item whose only obstacle is that the daemon's
 	// poll loop is overdue (#2124); the engine, not the item, is stalled.
 	CodeWaitingForPoll = "waiting-for-poll"
@@ -208,6 +211,11 @@ type Input struct {
 	// Gate the gate holding the item's advance; nil = none known (#2121). The
 	// caller drops a gate hold the gate stopped confirming.
 	Retry *RetryFact
+	// LockOrphan is an engine lock label (fabrik:editing, the daemon's own
+	// fabrik:locked:<id>) present with no worker for the item, with the time it was
+	// first seen and the grace after which the engine reclaims it (#2550). nil =
+	// none; set only by the engine, so the classifier stays pure.
+	LockOrphan *LockOrphanFact
 	Gate  *GateFact
 	// RebaseAfterLanding is true when fabrik:rebase-needed was applied because main
 	// moved after a sibling landed (the engine recorded it); DaemonStop is true
@@ -682,6 +690,13 @@ func classify(in Input) Result {
 	// wall-clock budget plus a margin.
 	if wr, ok := workerRow(res, in); ok {
 		return wr
+	}
+
+	// 5a'. An engine lock label with no worker, past the grace period (#2550): the
+	// item is held by nobody. It outranks every wait row below — a feedback-gate
+	// hold or a pending retry is not the story while a stray lock blocks the item.
+	if lo, ok := lockOrphanRow(res, in); ok {
+		return lo
 	}
 
 	// waitOutcome turns a wait (a label, a cooldown, the holding stage) into the

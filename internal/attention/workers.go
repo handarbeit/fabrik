@@ -164,6 +164,36 @@ func withoutCooldownReasons(rs []Reason) []Reason {
 	return out
 }
 
+// LockOrphanFact is an engine lock label present with no worker for the item.
+type LockOrphanFact struct {
+	// Label is the lock label (fabrik:editing or fabrik:locked:<id>).
+	Label string
+	// Since is when the engine first saw the label with no worker.
+	Since time.Time
+	// Grace is how long the engine tolerates it before reclaiming it.
+	Grace time.Duration
+}
+
+// lockOrphanRow classifies an item whose engine lock label has outlived the grace
+// period with no worker (#2550). It is Stalled without waiting for the stall
+// threshold: the engine itself defines the grace, and the reclaim that follows
+// clears the verdict. Inside the grace, or with a worker, it does not apply.
+func lockOrphanRow(res Result, in Input) (Result, bool) {
+	lo := in.LockOrphan
+	if lo == nil || hasWorkerLike(in) || lo.Since.IsZero() || in.Now.IsZero() {
+		return res, false
+	}
+	age := in.Now.Sub(lo.Since)
+	if age < lo.Grace {
+		return res, false
+	}
+	res.State, res.Code, res.Rank = Stalled, CodeLockOrphaned, RankStalled
+	res.Summary = fmt.Sprintf("%s has been on the item for %s with no worker holding it (grace %s); it blocks the item until the engine reclaims it",
+		lo.Label, age.Round(time.Second), lo.Grace)
+	res.Next.Action = "the engine removes the orphaned lock label on its next poll and re-admits the item; remove it by hand to act sooner"
+	return res, true
+}
+
 // hasWorkerLike reports whether a worker, or a merge-train conflict resolution,
 // is queued or running for the item.
 func hasWorkerLike(in Input) bool { return in.HasWorker || in.Conflict != nil }
