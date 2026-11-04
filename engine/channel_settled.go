@@ -155,7 +155,7 @@ func (e *Engine) cachedPendingFeedback(snap itemstate.Snapshot, st *itemstate.It
 func (e *Engine) cachedPendingFeedbackOf(st *itemstate.ItemState) cachedFeedback {
 	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
 	var f cachedFeedback
-	f.Comments = len(filterNewComments(st.Comments, processed))
+	f.Comments = len(filterNewComments(st.Comments, processed, e.botCommentOptIn(st.Status, st.Number, st.Labels)))
 	if lpr := st.LinkedPR; lpr != nil {
 		f.Threads = len(dropOutdatedThreadComments(filterReviewThreadComments(lpr.ThreadComments, processed)))
 		cands := reviewBodyCandidates(lpr.Reviews, processed, e.cleanReviewSkipper(st.Status, st.Number, st.Labels))
