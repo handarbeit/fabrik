@@ -192,3 +192,33 @@ func TestRemoveEditingLabel_AmbiguousFailureReconcilesAfterRetries(t *testing.T)
 		t.Errorf("FetchLabels calls = %d, want exactly 1 after the retries", reads.Load())
 	}
 }
+
+// R1 covers only engine lock/state labels: a failed removal of an unrelated label
+// costs no live re-read (#2550 review finding).
+func TestReconcileLabelWrite_OnlyEngineLockStateLabels(t *testing.T) {
+	cases := []struct {
+		label string
+		reads int32
+	}{
+		{"fabrik:editing", 1},
+		{"fabrik:locked:testuser", 1},
+		{"stage:Implement:in_progress", 1},
+		{"stage:Implement:complete", 0},
+		{"fabrik:paused", 0},
+		{"fabrik:awaiting-ci", 0},
+		{"fabrik:pause:question", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			eng, _, reads := reconcileEngine(t, nil, nil)
+			item := gh.ProjectItem{Number: 5, Repo: "owner/repo"}
+			got := eng.reconcileLabelWrite(item, tc.label, false, errTimeout)
+			if reads.Load() != tc.reads {
+				t.Errorf("FetchLabels calls = %d, want %d", reads.Load(), tc.reads)
+			}
+			if tc.reads == 0 && got != labelWriteUnreconciled {
+				t.Errorf("outcome = %v, want unreconciled", got)
+			}
+		})
+	}
+}

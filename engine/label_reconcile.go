@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"strings"
+
 	gh "github.com/handarbeit/fabrik/github"
 )
 
@@ -46,6 +48,15 @@ func (o labelWriteOutcome) String() string {
 	}
 }
 
+// isEngineLockStateLabel reports the labels R1 covers: fabrik:editing,
+// fabrik:locked:<id> and stage:<name>:in_progress. Any other label (completion,
+// pause, awaiting-* and cause labels) is never reconciled, so a 5xx storm does not
+// add a live read to every failed unrelated removal.
+func isEngineLockStateLabel(label string) bool {
+	return label == "fabrik:editing" || strings.HasPrefix(label, "fabrik:locked:") ||
+		(strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":in_progress"))
+}
+
 // reconcileLabelWrite re-reads the item's labels live after writeErr, a failed
 // add (wantPresent true) or removal (wantPresent false) of label. It re-reads
 // only after a transport-class failure (gh.IsTransportError: 5xx or timeout) —
@@ -53,7 +64,7 @@ func (o labelWriteOutcome) String() string {
 // never sees the extra call. The read goes through liveLabels, so the Store
 // receives it. One log line per decision.
 func (e *Engine) reconcileLabelWrite(item gh.ProjectItem, label string, wantPresent bool, writeErr error) labelWriteOutcome {
-	if writeErr == nil || e.ambiguousWriteReconcileOff.Load() || !gh.IsTransportError(writeErr) {
+	if writeErr == nil || e.ambiguousWriteReconcileOff.Load() || !isEngineLockStateLabel(label) || !gh.IsTransportError(writeErr) {
 		return labelWriteUnreconciled
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
