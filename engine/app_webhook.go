@@ -81,8 +81,20 @@ type appWebhookTransport struct {
 	rejectedSigs atomic.Int64
 	malformed    atomic.Int64
 	oversized    atomic.Int64
+	// tlsHandshakeFailures counts failed TLS handshakes net/http reports through
+	// the server's ErrorLog (#2549). Counter only: it feeds no state, warning or
+	// route verdict.
+	tlsHandshakeFailures atomic.Int64
+
+	// errorLogDisabled and summaryInterval are test seams (app_webhook_errlog.go).
+	errorLogDisabled bool
+	summaryInterval  time.Duration
 
 	stopOnce sync.Once
+	// wg joins the handshake summary goroutine; done stops it (created in Start,
+	// closed by Stop).
+	wg   sync.WaitGroup
+	done chan struct{}
 
 	mu             sync.Mutex
 	sink           func(delivery)
@@ -279,10 +291,21 @@ func (t *appWebhookTransport) Start(context.Context) error {
 		ReadTimeout:       appWebhookReadTimeout,
 		WriteTimeout:      appWebhookWriteTimeout,
 		IdleTimeout:       appWebhookIdleTimeout,
+		// Never the std logger: a nil ErrorLog writes net/http's server errors
+		// (a scanner's aborted TLS handshake above all) raw to stderr (#2549).
+		ErrorLog: t.errorLog(),
+	}
+	interval := t.summaryInterval
+	if interval <= 0 {
+		interval = handshakeSummaryInterval
 	}
 	t.mu.Lock()
 	t.srv, t.ln, t.listening = srv, ln, true
+	t.done = make(chan struct{})
+	done := t.done
+	t.wg.Add(1)
 	t.mu.Unlock()
+	go t.runHandshakeSummary(done, interval)
 	t.recomputeState("")
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -310,7 +333,7 @@ func (t *appWebhookTransport) Addr() string {
 func (t *appWebhookTransport) Stop() {
 	t.stopOnce.Do(func() {
 		t.mu.Lock()
-		srv, ln, hook := t.srv, t.ln, t.stopHook
+		srv, ln, hook, done := t.srv, t.ln, t.stopHook, t.done
 		t.listening = false
 		t.mu.Unlock()
 		if srv != nil {
@@ -327,6 +350,10 @@ func (t *appWebhookTransport) Stop() {
 		// second Close on an already-closed listener is harmless.
 		if ln != nil {
 			_ = ln.Close()
+		}
+		if done != nil {
+			close(done)
+			t.wg.Wait()
 		}
 		t.recomputeState("stopped")
 		if hook != nil {
@@ -623,8 +650,10 @@ func (t *appWebhookTransport) HealthRow() localapi.TransportHealth {
 		RejectedSignatures: localapi.Some(t.rejectedSigs.Load()),
 		MalformedRequests:  localapi.Some(t.malformed.Load()),
 		OversizedRequests:  localapi.Some(t.oversized.Load()),
-		Replay:             replay,
-		Route:              route,
+
+		TLSHandshakeFailures: localapi.Some(t.tlsHandshakeFailures.Load()),
+		Replay:               replay,
+		Route:                route,
 	}
 	if nw.set {
 		row.Tailnet = localapi.Some(nw.tailnet)
