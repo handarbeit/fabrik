@@ -104,6 +104,11 @@ func (in *Instrumented) Log() *MutationLog { return in.log }
 func do0(in *Instrumented, method string, mutation bool, args Args, fn func() error) error {
 	seq := in.log.reserve(method, mutation, args, in.sim.now())
 	if err := in.faults.next(method, args, mutation); err != nil {
+		if ae, ok := err.(*appliedError); ok {
+			_ = fn() // the write lands; the caller is told it failed (#2550)
+			in.log.complete(seq, ae.err, false)
+			return ae.err
+		}
 		in.log.complete(seq, err, true)
 		return err
 	}
@@ -117,6 +122,11 @@ func do1[T any](in *Instrumented, method string, mutation bool, args Args, fn fu
 	seq := in.log.reserve(method, mutation, args, in.sim.now())
 	if err := in.faults.next(method, args, mutation); err != nil {
 		var zero T
+		if ae, ok := err.(*appliedError); ok {
+			_, _ = fn()
+			in.log.complete(seq, ae.err, false)
+			return zero, ae.err
+		}
 		in.log.complete(seq, err, true)
 		return zero, err
 	}
@@ -131,6 +141,11 @@ func do2[A, B any](in *Instrumented, method string, mutation bool, args Args, fn
 	if err := in.faults.next(method, args, mutation); err != nil {
 		var zeroA A
 		var zeroB B
+		if ae, ok := err.(*appliedError); ok {
+			_, _, _ = fn()
+			in.log.complete(seq, ae.err, false)
+			return zeroA, zeroB, ae.err
+		}
 		in.log.complete(seq, err, true)
 		return zeroA, zeroB, err
 	}

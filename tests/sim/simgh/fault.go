@@ -99,7 +99,19 @@ type faultRule struct {
 	match func(Args) bool
 	// fired counts how many times this rule has produced an error.
 	fired int
+	// afterApply makes the call run against the Sim first and only then fail
+	// with err: the "GitHub answered 5xx but applied the write" shape (#2550).
+	afterApply bool
 }
+
+// appliedError wraps an injected error that must be returned only after the
+// underlying call has been executed (ApplyThenFailWhen). The interception
+// helpers unwrap it; no caller ever sees the wrapper.
+type appliedError struct{ err error }
+
+func (e *appliedError) Error() string { return e.err.Error() }
+func (e *appliedError) Unwrap() error { return e.err }
+
 
 // FaultTable holds the registered faults for one Instrumented client.
 type FaultTable struct {
@@ -305,6 +317,21 @@ func (f *FaultTable) FailWhen(method string, match func(Args) bool, times int, e
 	f.add(method, &faultRule{err: err, remaining: times, match: match})
 }
 
+// ApplyThenFailWhen makes the next times calls to method whose arguments satisfy
+// match execute against the model and then return err: the write lands and the
+// caller is told it failed. This is the ambiguous-write shape GitHub produces
+// during an incident (a 5xx for a label add that was applied, #2550), which a
+// fail-before-call rule cannot express. times is a positive count or Always.
+func (f *FaultTable) ApplyThenFailWhen(method string, match func(Args) bool, times int, err error) {
+	if match == nil {
+		panic(fmt.Sprintf("simgh: ApplyThenFailWhen(%s): nil match", method))
+	}
+	if times < 1 && times != Always {
+		panic(fmt.Sprintf("simgh: ApplyThenFailWhen(%s, …, %d): count must be positive or simgh.Always", method, times))
+	}
+	f.add(method, &faultRule{err: err, remaining: times, match: match, afterApply: true})
+}
+
 // Clear removes every rule registered against method. The call counter is left
 // alone, so a subsequent FailOnCall still counts from the table's creation.
 func (f *FaultTable) Clear(method string) {
@@ -349,7 +376,15 @@ func (f *FaultTable) next(method string, args Args, mutation bool) error {
 	obs := f.observer
 	f.mu.Unlock()
 	if obs != nil {
-		obs(err)
+		obs(unwrapApplied(err))
+	}
+	return err
+}
+
+// unwrapApplied strips the appliedError wrapper.
+func unwrapApplied(err error) error {
+	if ae, ok := err.(*appliedError); ok {
+		return ae.err
 	}
 	return err
 }
@@ -389,6 +424,9 @@ func (f *FaultTable) nextInner(method string, args Args, mutation bool) error {
 				continue
 			}
 			r.fired++
+			if r.afterApply {
+				return &appliedError{err: r.err}
+			}
 			return r.err
 		}
 		if r.remaining == 0 {
@@ -398,6 +436,9 @@ func (f *FaultTable) nextInner(method string, args Args, mutation bool) error {
 			r.remaining--
 		}
 		r.fired++
+		if r.afterApply {
+			return &appliedError{err: r.err}
+		}
 		return r.err
 	}
 	return nil
