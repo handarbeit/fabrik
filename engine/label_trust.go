@@ -72,7 +72,7 @@ func (e *Engine) refuseIfLabelsUntrusted(item gh.ProjectItem, stage *stages.Stag
 				// The cached item claims a completion GitHub does not have.
 				reason = fmt.Sprintf("GitHub does not carry %s although the cached item does", complete)
 			default:
-				g.unmark(ref, complete) // GitHub and the engine agree: trusted again
+				e.clearDivergence(ref, complete) // GitHub and the engine agree: trusted again
 			}
 		}
 	}

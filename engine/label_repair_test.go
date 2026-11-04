@@ -165,6 +165,30 @@ func TestLabelRepair_FailedReadIsReported(t *testing.T) {
 	}
 }
 
+// A problem reported earlier (a failed read) must leave the panel when a later
+// divergence on the same label ends without a repair — here the intent is no longer
+// current — rather than staying until a restart.
+func TestLabelRepair_EarlierProblemClearsWhenTheEpisodeEndsWithoutRepair(t *testing.T) {
+	f := newLabelRepairFixture(t)
+	f.withWorker()
+	f.e.noteLabelIntent("owner/repo", 1, f.lock, true)
+	f.e.labels.mark("owner/repo#1", f.lock, f.e.now())
+	f.readFn = func() ([]string, error) { return nil, errors.New("boom") }
+	f.e.repairLabel(f.divergence(f.lock, "added"))
+	if f.problems() != 1 {
+		t.Fatalf("problems=%d, want the failed read reported", f.problems())
+	}
+	// The worker exits: the intent is no longer current.
+	f.e.store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 1})
+	f.e.repairLabel(f.divergence(f.lock, "added"))
+	if f.problems() != 0 {
+		t.Errorf("problems=%d, want the stale warning cleared once the intent ended", f.problems())
+	}
+	if f.e.labels.marked("owner/repo#1", f.lock) {
+		t.Error("the mark must clear when the intent ended")
+	}
+}
+
 // R3: a failed re-apply is reported, and not retried.
 func TestLabelRepair_FailedReapplyIsReported(t *testing.T) {
 	f := newLabelRepairFixture(t)

@@ -184,13 +184,13 @@ func (e *Engine) repairLabel(r labelDivergence) {
 	in, ok := g.intent(ref, r.label)
 	if !ok || in.added != wantAdded {
 		e.logf(r.number, "label-repair", "%s: the engine's intent changed since the divergence (superseded by a later write) — nothing to restore\n", r.label)
-		g.unmark(ref, r.label)
+		e.clearDivergence(ref, r.label)
 		return
 	}
 	cur, needPause := e.intentCurrent(ref, r.repo, r.number, r.label, in)
 	if !cur {
 		e.logf(r.number, "label-repair", "%s: contradicted %s ago, but the intent behind that write is no longer current — not re-applying\n", r.label, now.Sub(in.at).Round(time.Second))
-		g.unmark(ref, r.label)
+		e.clearDivergence(ref, r.label)
 		return
 	}
 
@@ -206,8 +206,7 @@ func (e *Engine) repairLabel(r labelDivergence) {
 	// 4. A lagging listing: GitHub already matches the intent.
 	if present == in.added {
 		e.logf(r.number, "label-repair", "stale-read: %s %s on GitHub as the engine intended; the listing that contradicted it lagged — nothing written\n", r.label, presentWord(present))
-		g.unmark(ref, r.label)
-		e.resolveLabelProblem(ref, r.label)
+		e.clearDivergence(ref, r.label)
 		return
 	}
 
@@ -222,7 +221,7 @@ func (e *Engine) repairLabel(r labelDivergence) {
 		}
 		if !removedAt.IsZero() && removedAt.After(in.at) {
 			e.logf(r.number, "label-repair", "%s: removed on GitHub after the engine's write (a person lifted it) — not re-applying\n", r.label)
-			g.unmark(ref, r.label)
+			e.clearDivergence(ref, r.label)
 			return
 		}
 	}
@@ -233,7 +232,7 @@ func (e *Engine) repairLabel(r labelDivergence) {
 	cur2, _ := e.intentCurrent(ref, r.repo, r.number, r.label, in2)
 	if !ok2 || in2.added != in.added || !cur2 {
 		e.logf(r.number, "label-repair", "%s: the intent ended while it was being confirmed — not re-applying\n", r.label)
-		g.unmark(ref, r.label)
+		e.clearDivergence(ref, r.label)
 		return
 	}
 	g.mu.Lock()
@@ -256,8 +255,7 @@ func (e *Engine) repairLabel(r labelDivergence) {
 	}
 	e.logf(r.number, "label-repair", "lost-write: GitHub %s %s although the engine wrote it %s ago (live read, Store value contradicted by a listing) — re-applied once\n",
 		absentWord(present), r.label, now.Sub(in.at).Round(time.Second))
-	g.unmark(ref, r.label)
-	e.resolveLabelProblem(ref, r.label)
+	e.clearDivergence(ref, r.label)
 }
 
 func presentWord(present bool) string {
@@ -288,6 +286,15 @@ func (e *Engine) reportLabelProblem(ref, label, detail string) {
 	g.mu.Unlock()
 	e.logf(0, "label-repair", "%s %s: %s\n", ref, label, detail)
 	e.syncLabelProblems()
+}
+
+// clearDivergence ends an episode: the label is trusted again and any unresolved
+// warning for it leaves the panel. Every exit that drops the divergence mark goes
+// through it, so a problem reported earlier (a failed read, say) cannot outlive the
+// episode it described.
+func (e *Engine) clearDivergence(ref, label string) {
+	e.labels.unmark(ref, label)
+	e.resolveLabelProblem(ref, label)
 }
 
 func (e *Engine) resolveLabelProblem(ref, label string) {
