@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
 
 // fakeTailnet is a appwebhook.Node with no tailnet: the Funnel listener is a

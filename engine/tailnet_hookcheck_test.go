@@ -3,11 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
-	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
 
 func stubHookConfig(t *testing.T, cfg gh.AppHookConfig, err error) {

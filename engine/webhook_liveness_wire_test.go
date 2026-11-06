@@ -3,13 +3,13 @@ package engine
 import (
 	"bytes"
 	"context"
-	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
 

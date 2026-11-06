@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
 
 // gatedHookAPI wraps a fakeHookAPI and holds ListAppHookDeliveries until gate
