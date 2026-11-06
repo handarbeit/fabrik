@@ -611,6 +611,30 @@ func TestLogReviewerBudget(t *testing.T) {
 			t.Errorf("out:\n%s", g.Out.(*bytes.Buffer).String())
 		}
 	})
+	t.Run("slow identity probes do not starve the reviewer line of its own bound", func(t *testing.T) {
+		fi := reviewerFake()
+		fi.blockTokens = map[string]bool{"bed-token": true} // an identity probe that uses its whole window
+		g, _ := reviewerGate(t, fi)
+		g.Cfg.GHAPITimeout = 50 * time.Millisecond
+		done := make(chan struct{})
+		go func() {
+			g.logIdentityBudget(context.Background(), Cell{Auth: "pat", Train: "off"}, "end")
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(failsafe):
+			t.Fatal("the reviewer line ignored its bound")
+		}
+		out, errs := g.Out.(*bytes.Buffer).String(), g.Err.(*bytes.Buffer).String()
+		if !strings.Contains(out, "== reviewer budget (leg: pat/off, end): reviewer-login") {
+			t.Errorf("the reviewer line is missing after slow identity probes:\nout=%s\nerr=%s", out, errs)
+		}
+		if !strings.Contains(errs, "reading bed FABRIK_TOKEN's budget failed") {
+			t.Errorf("the identity probes should have stopped on their bound:\n%s", errs)
+		}
+		noSecret(t, "budget lines", out+errs)
+	})
 	t.Run("non-vacuity: disabled, the old output has no reviewer line", func(t *testing.T) {
 		g, _ := reviewerGate(t, reviewerFake())
 		g.reviewerBudgetCheckDisabledForTest = true

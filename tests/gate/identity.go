@@ -405,21 +405,36 @@ func (g *Gate) identityLabel(id Identity) string {
 // installation token per probe. A failure warns and never gates; no token text
 // ever reaches the output.
 //
-// All of a call's probes share one bound, GHAPITimeout: the end-of-leg call
-// runs inside the post-suite watchdog, and a report must never be what trips it.
+// The identity probes of a call share one bound, GHAPITimeout, and the reviewer
+// line has its own (see below): the end-of-leg call runs inside the post-suite
+// watchdog, which still cancels both, so a report must never be what trips it.
 func (g *Gate) logIdentityBudget(ctx context.Context, cell Cell, which string) {
 	if g.Identity == nil {
 		return
 	}
+	label := cell.Label()
+	// The reviewer account's line comes last (#2536, R3); deferred so every early
+	// return below still reports it. It gets its own GHAPITimeout window derived
+	// from the caller's context, not the identity probes' shared one: otherwise
+	// slow identity probes would use up the window and the reviewer line (the data
+	// for tuning the thresholds) would be replaced by a "probes stopped" warning.
+	// It is still bounded, and the caller's cancellation (the post-suite watchdog)
+	// still reaches it.
+	parent := ctx
+	defer func() {
+		rctx := parent
+		if g.Cfg.GHAPITimeout > 0 {
+			var cancel context.CancelFunc
+			rctx, cancel = context.WithTimeout(parent, g.Cfg.GHAPITimeout)
+			defer cancel()
+		}
+		g.logReviewerBudget(rctx, label, which)
+	}()
 	if g.Cfg.GHAPITimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, g.Cfg.GHAPITimeout)
 		defer cancel()
 	}
-	label := cell.Label()
-	// The reviewer account's line comes last (#2536, R3); deferred so every early
-	// return above still reports it.
-	defer g.logReviewerBudget(ctx, label, which)
 	for _, id := range g.identitySet(cell.Auth) {
 		if ctx.Err() != nil {
 			g.errf("warning: identity budget (leg: %s, %s): probes stopped after %ds\n", label, which, int(g.Cfg.GHAPITimeout.Seconds()))

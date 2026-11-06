@@ -434,8 +434,8 @@ process**, serialized only where they share a GitHub identity.
   engine identity is marked exhausted, cells charging it **in either role** are not started, and
   everything else goes on.
   The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
-  probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
-  watchdog. `== multi-bed summary ==` lists
+  probes at a leg's end share one `GHAPITimeout` bound, and the reviewer line has its own, so
+  neither can trip the post-suite watchdog and slow identity probes cannot starve the reviewer line. `== multi-bed summary ==` lists
   every bed's cells with their outcome, every cell that never started with why, and any exhausted
   identity.
 * **Budget lines (R5, also on one bed).** At leg start and end, one
