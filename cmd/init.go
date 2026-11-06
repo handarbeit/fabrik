@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -731,9 +732,91 @@ func runInit(args []string) error {
 			"run `fabrik repair-board --apply` to create the missing field(s)", project, fieldsErr)
 	}
 
-	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
-	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
+	if *createBoard {
+		fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
+		fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
+		fmt.Print(pluginInstallHint())
+		return nil
+	}
+
+	// No board was created (plain init, <project-url>, --github-app alone, or a
+	// user-owned board): nothing has created or checked its Status columns, so
+	// say what remains instead of claiming readiness. Fully offline (#2496).
+	// An unreadable stage file must not fail init after the files are written
+	// (a re-run after fixing it is idempotent): warn, skip the list, and still
+	// make no readiness claim.
+	if err := printBoardColumnGuidance(os.Stdout, stagesDir, boardGuidanceInfoFromConfig()); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
+		fmt.Println("\nStage configs and plugin skills were written to .fabrik/")
+		fmt.Println("The board's Status columns have not been created or checked, and the column list could")
+		fmt.Println("not be printed because a stage config could not be read. Fix it, then run")
+		fmt.Println("`fabrik repair-board` to see which columns the board is missing.")
+	}
 	fmt.Print(pluginInstallHint())
+	return nil
+}
+
+// boardGuidanceInfo is what the closing guidance needs to know about the board,
+// read from .fabrik/config.yaml (a local file) so it covers a URL, the
+// interactive prompt and an already-existing config alike.
+type boardGuidanceInfo struct {
+	// ProjectConfigured is true only when config.yaml verifiably names a project.
+	ProjectConfigured bool
+	// UserOwned is true when config.yaml records owner_type: user.
+	UserOwned bool
+}
+
+// boardGuidanceInfoFromConfig reads the project config offline. A load error
+// reports "not configured" without claiming either way: the --create-board
+// hint is then shown, which is harmless advice rather than a false claim.
+func boardGuidanceInfoFromConfig() boardGuidanceInfo {
+	pc, err := config.LoadProjectConfig()
+	if err != nil {
+		return boardGuidanceInfo{}
+	}
+	return boardGuidanceInfo{
+		ProjectConfigured: pc.ProjectNum != nil,
+		UserOwned:         strings.EqualFold(pc.OwnerType, "user"),
+	}
+}
+
+// printBoardColumnGuidance prints the Status columns the board needs and what
+// remains to be done. It reads the stage configs on disk (including files init
+// skipped because they already existed) and touches no network or token.
+func printBoardColumnGuidance(w io.Writer, stagesDir string, info boardGuidanceInfo) error {
+	loaded, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		return fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
+	}
+
+	// boardColumnNames is a superset of what engine.checkStageColumnAlignment
+	// requires at startup, and the two rules are NOT identical: the startup
+	// check skips cleanup (Done) and unmanaged stages, and a missing holding-
+	// stage (Queued) column is fatal only with merge_train on. boardColumnNames
+	// drops only unmanaged stages, so every column the startup check demands is
+	// listed, plus Done and the holding stages. cmd's TestInitColumnsCoverStartupCheck
+	// drives both from one fixture so a divergence fails the build.
+	fmt.Fprintln(w, "\nStage configs and plugin skills were written to .fabrik/")
+	fmt.Fprintln(w, "The board's Status columns have not been created or checked. It needs these columns:")
+	for _, name := range boardColumnNames(loaded) {
+		fmt.Fprintln(w, name)
+	}
+
+	fmt.Fprintln(w, "\nNext steps:")
+	switch {
+	case info.UserOwned:
+		fmt.Fprintln(w, "  - Create the columns above on your board by hand (user-owned boards cannot be")
+		fmt.Fprintln(w, "    created or repaired by Fabrik).")
+		fmt.Fprintln(w, "  - Run `fabrik repair-board` (dry run) to see which columns are missing.")
+	default:
+		fmt.Fprintln(w, "  - Create the columns above on your board, or run `fabrik repair-board` to see")
+		fmt.Fprintln(w, "    what is missing (`fabrik repair-board --apply` adds the missing columns on an")
+		fmt.Fprintln(w, "    org-owned board).")
+		if !info.ProjectConfigured {
+			fmt.Fprintln(w, "  - For a fresh org board, run `fabrik init --create-board --owner <org>`.")
+		}
+	}
+	fmt.Fprintln(w, "  - Edit .fabrik/config.yaml with your project settings if needed, then run fabrik.")
 	return nil
 }
 

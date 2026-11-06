@@ -96,6 +96,15 @@ Without a URL, `fabrik init` behaves as before: if your terminal is interactive 
 prompts for owner, repo, project number, and username; otherwise it writes a
 fully-commented template for you to fill in.
 
+`fabrik init` without `--create-board` never creates or checks your board. It works
+offline (no token needed), and ends by printing the Status columns your board needs —
+one per line, in pipeline order, read from the stage configs in `.fabrik/stages/` — and
+what remains: create those columns, or run `fabrik repair-board` to see which are
+missing (`--apply` adds them on an org-owned board). When no board is configured yet it
+also points at `fabrik init --create-board --owner <org>`. For a user-owned board,
+create the columns by hand. The list may include `Done` and `Queued` even where the
+startup check would tolerate their absence.
+
 **GitHub Enterprise Server project URLs are also accepted.** Pass `--ghes-host` (or
 set `FABRIK_GHES_HOST`) alongside a project URL on your GHES instance:
 
