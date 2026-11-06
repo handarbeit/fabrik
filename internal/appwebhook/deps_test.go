@@ -23,6 +23,20 @@ func forbiddenDeps(deps []string) []string {
 	return bad
 }
 
+// tsnetDeps returns every dependency in deps that is the Tailscale adapter
+// sub-package or the Tailscale library. The core package must reach neither:
+// that is what lets a consumer that only wants `direct` (Pruefer) avoid linking
+// the embedded node (ADR 2475).
+func tsnetDeps(deps []string) []string {
+	var bad []string
+	for _, d := range deps {
+		if d == modulePrefix+"internal/appwebhook/tsnetnode" || d == "tailscale.com" || strings.HasPrefix(d, "tailscale.com/") {
+			bad = append(bad, d)
+		}
+	}
+	return bad
+}
+
 // The dependency graph of the package and of its tsnetnode sub-package must hold
 // neither the engine nor Pruefer. It fails (never skips) when `go list` cannot
 // run: a skipped guard would be a silently absent one.
@@ -56,5 +70,43 @@ func TestForbiddenDepsDetectsViolations(t *testing.T) {
 	// A look-alike name is not the engine.
 	if got := forbiddenDeps([]string{modulePrefix + "engineering"}); len(got) != 0 {
 		t.Errorf("look-alike reported: %v", got)
+	}
+}
+
+// The core package never links the Tailscale node: neither the tsnetnode
+// sub-package nor tailscale.com is in its dependency graph. The sub-package
+// itself legitimately has both, so only the core is checked.
+func TestCoreDoesNotLinkTailscale(t *testing.T) {
+	core := modulePrefix + "internal/appwebhook"
+	out, err := exec.Command("go", "list", "-deps", core).Output()
+	if err != nil {
+		t.Fatalf("go list -deps %s: %v", core, err)
+	}
+	deps := strings.Fields(string(out))
+	if len(deps) == 0 {
+		t.Fatalf("go list -deps %s returned nothing", core)
+	}
+	for _, bad := range tsnetDeps(deps) {
+		t.Errorf("%s depends on %s", core, bad)
+	}
+	// Non-vacuity: the sub-package does carry them, so the matcher can fail.
+	sub := modulePrefix + "internal/appwebhook/tsnetnode"
+	out, err = exec.Command("go", "list", "-deps", sub).Output()
+	if err != nil {
+		t.Fatalf("go list -deps %s: %v", sub, err)
+	}
+	if len(tsnetDeps(strings.Fields(string(out)))) == 0 {
+		t.Fatalf("%s reports no tailscale dependency: the guard cannot fail", sub)
+	}
+}
+
+func TestTsnetDepsDetectsViolations(t *testing.T) {
+	if got := tsnetDeps([]string{"fmt", modulePrefix + "github"}); len(got) != 0 {
+		t.Fatalf("clean graph reported: %v", got)
+	}
+	for _, dep := range []string{modulePrefix + "internal/appwebhook/tsnetnode", "tailscale.com/tsnet", "tailscale.com"} {
+		if got := tsnetDeps([]string{dep}); len(got) != 1 {
+			t.Errorf("violation %s not reported: %v", dep, got)
+		}
 	}
 }

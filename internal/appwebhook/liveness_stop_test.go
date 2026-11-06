@@ -222,7 +222,7 @@ func TestRouteLiveness_ArrivalsRacingStop(t *testing.T) {
 	}
 }
 
-// The stop function startRouteLiveness returns waits for an in-flight arrival
+// The stop function Liveness.Start returns waits for an in-flight arrival
 // refresh (cancelling it first) and is safe to call twice.
 func TestStartRouteLiveness_StopWaitsForArrivalRefresh(t *testing.T) {
 	hook := newBlockingHook(livenessHookURL, true)
