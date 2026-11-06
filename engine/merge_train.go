@@ -5295,6 +5295,7 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 	state.mu.Lock()
 	state.trialName = trialName
 	state.prNum = pr.Number
+	state.CIResult = TrainCIPending // #2542: a new trial has no verdict yet
 	state.assembling = false
 	state.mu.Unlock()
 

@@ -411,6 +411,7 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 		r.ci.restore(rec.Trial.CI)
 		state.trialName = rec.Trial.Name
 		state.prNum = rec.Trial.PRNum
+		state.CIResult = TrainCIPending // #2542: no verdict for an adopted open trial yet
 	}
 	state.bisecting = rec.Bisect != nil || rec.OAT != nil
 	r.rec.Version = trainRunVersion

@@ -383,6 +383,9 @@ func (e *Engine) openAndRecord(ctx context.Context, r *trainRun, p trialParams, 
 	r.state.mu.Lock()
 	r.state.trialName = trialName
 	r.state.prNum = prNum
+	// #2542: a new trial has no verdict yet; the dispatch guard's status line reads
+	// this (log only), and an earlier step's red must not be reported for it.
+	r.state.CIResult = TrainCIPending
 	r.state.assembling = false
 	r.state.mu.Unlock()
 	return survivors, nil, true

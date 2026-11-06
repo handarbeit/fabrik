@@ -157,3 +157,29 @@ func TestOpenTrialCapAndWake(t *testing.T) {
 		t.Error("no open trial: no wake")
 	}
 }
+
+// R4a (#2542): the dispatch guard's "train CI red … needs attention" line reads the
+// claim's CIResult; a step that went red must not leave it behind once the next
+// trial is open. Log only — no decision reads it.
+func TestTrainClaimCIResultIsPendingWhileANewTrialIsOpen(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy(2))
+	a.dispatch()
+	sawRed := false
+	for i := 0; i < 12 && a.open(); i++ {
+		a.round()
+		for _, r := range a.eng.trainRuns.liveRuns() {
+			if r.trial() == nil {
+				continue
+			}
+			r.state.mu.RLock()
+			got := r.state.CIResult
+			r.state.mu.RUnlock()
+			if got == TrainCIRed {
+				sawRed = true
+			}
+		}
+	}
+	if sawRed {
+		t.Fatal("a claim with an open trial must not report an earlier step's red")
+	}
+}
