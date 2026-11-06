@@ -40,8 +40,9 @@ type logPanel struct {
 	d   *Daemon
 	tag string
 
-	mu     sync.Mutex
-	active map[string]activeCondition // by Key()
+	mu      sync.Mutex
+	active  map[string]activeCondition // by Key(); conditions with a footer banner
+	notices map[string]activeCondition // by Key(); notice-level, logged only (no banner)
 }
 
 type activeCondition struct {
@@ -50,7 +51,11 @@ type activeCondition struct {
 }
 
 func newLogPanel(d *Daemon, tag string) *logPanel {
-	return &logPanel{d: d, tag: tag, active: make(map[string]activeCondition)}
+	return &logPanel{
+		d: d, tag: tag,
+		active:  make(map[string]activeCondition),
+		notices: make(map[string]activeCondition),
+	}
 }
 
 // Report raises c. A notice-level condition is logged only (no banner): it is
@@ -62,11 +67,15 @@ func (p *logPanel) Report(c warnings.Condition) {
 		fp = c.Detail
 	}
 	p.mu.Lock()
-	prev, had := p.active[key]
-	changed := !had || prev.fingerprint != fp
-	if c.Level != warnings.LevelNotice {
-		p.active[key] = activeCondition{typ: c.Type, fingerprint: fp}
+	// A notice is tracked apart from the bannered conditions, so a periodic
+	// check that re-reports an unchanged notice logs it once, not every pass.
+	tracked := p.active
+	if c.Level == warnings.LevelNotice {
+		tracked = p.notices
 	}
+	prev, had := tracked[key]
+	changed := !had || prev.fingerprint != fp
+	tracked[key] = activeCondition{typ: c.Type, fingerprint: fp}
 	p.mu.Unlock()
 	if !changed {
 		return
@@ -94,6 +103,7 @@ func (p *logPanel) Resolve(key string) {
 	p.mu.Lock()
 	_, had := p.active[key]
 	delete(p.active, key)
+	delete(p.notices, key) // a notice has no banner to clear, so no event for it
 	p.mu.Unlock()
 	if !had {
 		return
@@ -120,6 +130,11 @@ func (p *logPanel) Reconcile(typ string, conds []warnings.Condition) {
 	for k, a := range p.active {
 		if a.typ == typ && !want[k] {
 			stale = append(stale, k)
+		}
+	}
+	for k, a := range p.notices {
+		if a.typ == typ && !want[k] {
+			delete(p.notices, k)
 		}
 	}
 	p.mu.Unlock()

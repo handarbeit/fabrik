@@ -89,6 +89,34 @@ func TestLogPanelNoticeIsLoggedNotBannered(t *testing.T) {
 	}
 }
 
+// A notice re-reported unchanged by a periodic check logs once; a changed notice
+// logs again; resolving it lets the same notice log afresh.
+func TestLogPanelNoticeLogsOnceUntilItChanges(t *testing.T) {
+	rec := &recordedEvents{}
+	p := newLogPanel(&Daemon{Emit: rec.emit}, "direct")
+	n := warnings.Condition{Type: "t", Subject: "s", Level: warnings.LevelNotice, Title: "fyi", Detail: "one"}
+	logs := func() int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.notices)
+	}
+	p.Report(n)
+	p.Report(n)
+	if logs() != 1 || len(rec.snapshot()) != 0 || len(p.activeKeys()) != 0 {
+		t.Fatalf("notices=%d events=%+v active=%v", logs(), rec.snapshot(), p.activeKeys())
+	}
+	p.mu.Lock()
+	fp := p.notices[n.Key()].fingerprint
+	p.mu.Unlock()
+	if fp != "one" {
+		t.Fatalf("fingerprint = %q", fp)
+	}
+	p.Resolve(n.Key())
+	if logs() != 0 || len(rec.snapshot()) != 0 {
+		t.Errorf("resolve left notices=%d events=%+v", logs(), rec.snapshot())
+	}
+}
+
 func TestLogPanelReconcileSweepsOnlyItsType(t *testing.T) {
 	rec := &recordedEvents{}
 	p := newLogPanel(&Daemon{Emit: rec.emit}, "tailscale")
