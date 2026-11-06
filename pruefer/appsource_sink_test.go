@@ -144,6 +144,35 @@ func TestAppSink_DeliveryWithoutInstallationIDIgnoredOnceOwnershipKnown(t *testi
 	}
 }
 
+func TestAppSink_MissingInstallationIDLogLineDoesNotBlameAForeignApp(t *testing.T) {
+	h := newSinkHarness(t, 111)
+	var mu sync.Mutex
+	var lines []string
+	prev := Logf
+	Logf = func(_ int, _ string, format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { Logf = prev })
+
+	h.sink.Deliver(prDelivery("noinst-log", "opened", 0))
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, "noinst-log") {
+			n++
+			if !strings.Contains(l, "no installation.id") || strings.Contains(l, "another GitHub App") {
+				t.Errorf("line should say the delivery carries no installation.id, not blame a foreign App: %q", l)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("lines naming the delivery = %d, want exactly 1 (%q)", n, lines)
+	}
+}
+
 func TestAppSink_OwnershipUnknownPassesEverything(t *testing.T) {
 	h := newSinkHarness(t) // no installations derived yet
 	h.sink.Deliver(prDelivery("early", "opened", 999))

@@ -55,8 +55,16 @@ func (s *appSink) Deliver(del appwebhook.Delivery) {
 		return
 	}
 	if !s.daemon.deliveryIsOurs(ev) {
-		logf(0, "warn", "%s delivery %s (%s): installation %d is not served by this daemon — ignoring (is another GitHub App still pointed at this webhook URL?)\n",
-			del.Transport, del.ID, del.EventType, ev.Installation)
+		if ev.Installation == 0 {
+			// An App-level event (e.g. github_app_authorization) carries no
+			// installation.id, so it cannot be matched to this daemon. Say so
+			// rather than blaming a foreign App.
+			logf(0, "warn", "%s delivery %s (%s): carries no installation.id, so it cannot be matched to this daemon — ignoring\n",
+				del.Transport, del.ID, del.EventType)
+		} else {
+			logf(0, "warn", "%s delivery %s (%s): installation %d is not served by this daemon — ignoring (is another GitHub App still pointed at this webhook URL?)\n",
+				del.Transport, del.ID, del.EventType, ev.Installation)
+		}
 		s.daemon.recordDrop(events.DropForeignInstallation)
 		return
 	}
