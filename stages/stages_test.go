@@ -1085,3 +1085,60 @@ resume_threshold_tokens: -1
 		t.Fatal("expected error for negative resume_threshold_tokens")
 	}
 }
+
+func TestLoadAll_FeedbackBots(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Validate
+prompt: "Validate it"
+feedback_bots:
+  - "  vercel  "
+  - snyk-bot
+`)
+	got, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	want := []string{"vercel", "snyk-bot"}
+	if len(got[0].FeedbackBots) != len(want) {
+		t.Fatalf("FeedbackBots = %v, want %v", got[0].FeedbackBots, want)
+	}
+	for i := range want {
+		if got[0].FeedbackBots[i] != want[i] {
+			t.Errorf("FeedbackBots[%d] = %q, want %q", i, got[0].FeedbackBots[i], want[i])
+		}
+	}
+}
+
+func TestLoadAll_FeedbackBots_Undeclared(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", "name: Validate\nprompt: \"Validate it\"\n")
+	got, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(got[0].FeedbackBots) != 0 {
+		t.Errorf("FeedbackBots = %v, want none", got[0].FeedbackBots)
+	}
+}
+
+func TestLoadAll_FeedbackBots_Rejects(t *testing.T) {
+	for name, entries := range map[string]string{
+		"empty":     `  - ""`,
+		"at":        `  - "@vercel"`,
+		"bot":       `  - "vercel[bot]"`,
+		"duplicate": "  - vercel\n  - Vercel",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "stage.yaml", "name: Validate\nprompt: \"Validate it\"\nfeedback_bots:\n"+entries+"\n")
+			_, err := LoadAll(dir)
+			if err == nil {
+				t.Fatal("LoadAll succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), "feedback_bots") {
+				t.Errorf("error %q does not name feedback_bots", err)
+			}
+		})
+	}
+}

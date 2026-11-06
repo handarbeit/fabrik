@@ -34,6 +34,9 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	if err != nil {
 		return err
 	}
+	if s.consumeDroppedLabelWriteLocked(LabelEventLabeled, labelName) {
+		return nil
+	}
 	now := s.now()
 	if contains(iss.labels, labelName) {
 		// GitHub records no timeline event for re-adding a present label but
@@ -73,6 +76,9 @@ func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelNam
 	iss, err := s.issueLocked(owner, repo, issueNumber)
 	if err != nil {
 		return err
+	}
+	if s.consumeDroppedLabelWriteLocked(LabelEventUnlabeled, labelName) {
+		return nil
 	}
 	updated, removed := removeString(iss.labels, labelName)
 	if !removed {
@@ -226,4 +232,46 @@ func (s *Sim) prLocked(owner, repo string, prNumber int) (*repoState, *prRecord,
 		return nil, nil, fmt.Errorf("simgh: PR %s#%d not found", repoKey(owner, repo), prNumber)
 	}
 	return r, pr, nil
+}
+
+// droppedLabelWrite is one pending DropLabelWrite rule.
+type droppedLabelWrite struct {
+	kind  LabelEventKind
+	label string
+	times int
+}
+
+// DropLabelWrite makes the next `times` label writes of the given kind
+// (LabelEventLabeled = AddLabelToIssue, LabelEventUnlabeled =
+// RemoveLabelFromIssue) for labelName return success without changing the
+// issue: no label change, no event, no updated_at bump. It is the "the write was
+// reported successful but did not stick" shape (#2551), which no error fault can
+// express. The Instrumented layer still records the call, so a test sees that the
+// engine wrote. Applies to every issue in the sim; a later DropLabelWrite for the
+// same kind and label adds to the count.
+func (s *Sim) DropLabelWrite(kind LabelEventKind, labelName string, times int) {
+	if times <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.droppedLabelWrites {
+		if r.kind == kind && r.label == labelName {
+			r.times += times
+			return
+		}
+	}
+	s.droppedLabelWrites = append(s.droppedLabelWrites, &droppedLabelWrite{kind: kind, label: labelName, times: times})
+}
+
+// consumeDroppedLabelWriteLocked reports whether a write is dropped, consuming
+// one use of the matching rule. Caller must hold mu.
+func (s *Sim) consumeDroppedLabelWriteLocked(kind LabelEventKind, labelName string) bool {
+	for _, r := range s.droppedLabelWrites {
+		if r.kind == kind && r.label == labelName && r.times > 0 {
+			r.times--
+			return true
+		}
+	}
+	return false
 }

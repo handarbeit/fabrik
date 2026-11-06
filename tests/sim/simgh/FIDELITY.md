@@ -1644,6 +1644,25 @@ its write stamp (the `Date` header analogue). Real GitHub behaves this way
 sim could not reproduce the redundant completion-label re-add of the CI gate
 and the light-reconcile drift it caused.
 
+### A label write that returns success but does not stick — **Modelled** (#2551)
+
+`Sim.DropLabelWrite(kind, label, times)` makes the next `times` calls of
+`AddLabelToIssue` (`LabelEventLabeled`) or `RemoveLabelFromIssue`
+(`LabelEventUnlabeled`) for `label` return success while changing nothing: the
+issue's labels, applied-at, event log and `updatedAt` are untouched. The
+Instrumented layer still records the call, so a scenario sees that the engine
+wrote and that GitHub did not keep it. Every other fault in this package is an
+error return; this is the only way to express a *lost write*, as opposed to a
+failed one. It models the mechanism at the sim's own label state, not at the
+engine's cache, so the engine's write-through still reports success and the
+cache and the sim disagree until a read corrects it. The stale-*read* shape (the
+write stuck, a listing lags) is not modelled here: the sim has no stale-listing
+fault, and that case is covered by an engine-package test that feeds the Store a
+lagging listing directly. Whether GitHub produces lost label writes at all is the
+subject of ADR 2551 and is not something this sim can show. `nonvacuity.sh` is
+not extended: the fault is exercised by the engine twins, which have their own
+neutralised run.
+
 ### Probe linked-PR scalars (#2122)
 
 `ProbeProjectBoard` carries `BoardProbeItem.LinkedPRFacts` (state, draft,

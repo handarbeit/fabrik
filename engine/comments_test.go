@@ -784,8 +784,10 @@ func coderabbitAutoReplyFixture(acknowledgement string) string {
 // review comment and a human comment in the same batch.
 func TestFindNewComments_SkipsBotServiceNotice(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.stageByName("Research").FeedbackBots = []string{"gemini-code-assist"} // opted in (#2552)
 	item := gh.ProjectItem{
 		Number: 21,
+		Status: "Research",
 		Comments: []gh.Comment{
 			{ID: "C_quota", DatabaseID: 501, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
 			{ID: "C_review", DatabaseID: 502, Author: "gemini-code-assist[bot]", Body: "CHANGES_REQUESTED: this loop never terminates."},
@@ -821,8 +823,10 @@ func TestFindNewComments_SkipsBotServiceNotice(t *testing.T) {
 // #1103 and #1116).
 func TestFindNewComments_SkipsCodeRabbitRateLimitButAdmitsWalkthrough(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.stageByName("Research").FeedbackBots = []string{"coderabbitai"} // opted in (#2552)
 	item := gh.ProjectItem{
 		Number: 22,
+		Status: "Research",
 		Comments: []gh.Comment{
 			{ID: "C_ratelimit", DatabaseID: 601, Author: "coderabbitai[bot]", Body: coderabbitRateLimitFixture},
 			{ID: "C_walkthrough", DatabaseID: 602, Author: "coderabbitai[bot]", Body: coderabbitWalkthroughFixture},

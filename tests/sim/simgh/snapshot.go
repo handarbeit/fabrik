@@ -604,6 +604,10 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		// empty — which is what a restarted engine sees.
 		"issueWriteStamps": fieldSkipped,
 		"itemWriteStamps":  fieldSkipped,
+		// droppedLabelWrites are DropLabelWrite's pending rules (#2551): scenario
+		// fault injection, like the FaultTable's rules, and not part of the modelled
+		// GitHub state. A restore starts with none.
+		"droppedLabelWrites": fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,

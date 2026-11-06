@@ -134,7 +134,7 @@ func (e *Engine) cachedFeedbackArrivedSince(st *itemstate.ItemState, since time.
 	}
 	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
 	var f cachedFeedback
-	for _, c := range filterNewComments(st.Comments, processed) {
+	for _, c := range filterNewComments(st.Comments, processed, e.botCommentOptIn(st.Status, st.Number, st.Labels)) {
 		if arrived(c.CreatedAt) {
 			f.Comments++
 		}

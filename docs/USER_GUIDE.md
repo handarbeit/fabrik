@@ -1855,6 +1855,11 @@ expected_reviewers:       # Optional. Declares unrequested reviewers (self-submi
                           #   the gate advances immediately when nothing is requested either,
                           #   instead of waiting out the timeout. See §3 Declaring Expected
                           #   Reviewers for full details, including the required identity format.
+feedback_bots:            # Optional. Bots whose PR/issue conversation comments count as feedback
+  - vercel                #   (a bare handle, same form as expected_reviewers). Comments from any
+                          #   other bot login are ignored. A bot named in expected_reviewers is
+                          #   opted in too. Unlike expected_reviewers it does not make the review
+                          #   gate wait for a formal review. See §3 Bot comments as feedback.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -2504,6 +2509,14 @@ Two rules keep Fabrik from starting model work that it could not record:
   again. Workers already running are left alone. The hold appears as the `forge_unreachable`
   entry in the Warnings panel and as `forge_hold` in `fabrik_health`.
 
+### Lost label writes
+
+Fabrik keeps its lock and progress markers in GitHub labels: `fabrik:locked:<id>`, `fabrik:editing`, `stage:<name>:in_progress`, `stage:<name>:complete` and the pause pair (`fabrik:paused` + `fabrik:awaiting-input`). Occasionally GitHub reports a label write as successful and a later read still shows the old state. When a later board listing contradicts a label Fabrik just wrote (the `cache-divergence` channel event), Fabrik now checks GitHub once and, if the write really was lost and Fabrik still means it (a worker is running, a rework is open), writes it again — once. If GitHub already shows the state Fabrik wrote, nothing is written: the listing was simply behind.
+
+While a rework of a stage is open, or the stage's completion label is known to disagree with GitHub, Fabrik does not advance the item on that label. It re-reads and waits until they agree.
+
+If the check or the re-write fails, or the same label diverges again within the divergence window (`--cache-divergence-window`, default 5 minutes), the item is **not** paused. A `label_divergence` entry appears in the Warnings panel naming the issue and label, and clears once a later check shows GitHub and Fabrik agree. The log lines `lost-write` and `stale-read` (tag `label-repair`) say which of the two happened each time.
+
 > **Troubleshooting: a stage keeps failing at 1 turn / $0.0000 after a large
 > prior invocation.** A `--resume` invocation resumes the same session every
 > time, including when the session's own transcript (grown too large, or
@@ -3065,6 +3078,22 @@ A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fail
 - **Pruefer reviews a PR even when GitHub never created its `refs/pull/<N>/head` ref.** It then fetches the head commit by its SHA from the base repository and requires the checked-out commit to be that SHA; nothing needs configuring.
 
 ---
+
+#### Bot comments as feedback
+
+Fabrik treats a **conversation comment** (an issue comment or a PR comment, not a review thread or a review body) from a bot login as noise unless you opt the bot in. A deploy-preview bot such as Vercel posts a notice on every `fabrik/*` PR; counting it as feedback started a paid comment-review pass that found nothing to act on and held the feedback gate until it finished. A skipped comment starts no worker, holds no gate, and Fabrik writes nothing for it: no reaction, no processed marker, no reply.
+
+A bot is opted in when it is named in the stage's effective `expected_reviewers` (including the `expected-reviewers:` label override), or in the stage's `feedback_bots`:
+
+```yaml
+name: Validate
+feedback_bots:
+  - some-comment-bot    # bare handle: no "@", no "[bot]"
+```
+
+Use `feedback_bots` for a bot that only *comments*. Declaring such a bot under `expected_reviewers` would also make the review gate wait for a formal review from it, run the re-prompt ladder and pause at the timeout. `feedback_bots` has no label override. The stage that applies is the one the item is currently in (an item waiting in `Queued` uses the stage before the holding stage). Review threads, review bodies, `CHANGES_REQUESTED` reviews and the review gate are not affected by this setting.
+
+**Upgrading.** If you relied on an undeclared bot's comment as feedback (for example a bot summary comment that lists findings), add that bot to `feedback_bots` or `expected_reviewers`. A bot is anything whose login ends in `[bot]` or `-bot`, plus a few known bot accounts. Known service notices (quota and rate-limit banners) from an opted-in bot are still ignored.
 
 ### CI Gate and CI-Fix Workflow
 
@@ -4281,7 +4310,7 @@ counts. It renders with the same `↻` icon as a retry, since it is incomplete a
 resumable rather than a fault — `✗ (error)` is reserved for invocations that did not
 complete for some other reason.
 
-**Warnings panel**: Sits below History and surfaces *operator-level* conditions — configuration, environment or engine faults that block or degrade work and need a person to act. Per-item states (paused, awaiting input, escalated) are not shown here; they live on the board and in item comments. Conditions shown include: `allow_auto_merge` disabled on a managed repo, no write access to a repo, stage-config drift, undeclared reviewers, a stale or skewed binary, an unrecognised `.fabrik/config.yaml` key, invalid settings that fell back to defaults (one aggregated entry), a gitignored `config.yaml`, a fine-grained PAT, local plugin customizations, a missing git credential helper, an unreadable Claude settings file, timeout settings in a bad order, a failed log rotation, the local API socket failing to start (`local_api:unavailable`; MCP tools and push events are unavailable until it binds), a deprecated bare or pre-rename skill reference (`skill_reference_deprecated`), a stage skill that failed to load at run time (`skill_load`), a pending workflow migration ("Workflow migration pending — run 'fabrik upgrade'"), missing board display fields ("Display fields missing", fixed by `fabrik repair-board --apply`), and repos receiving no webhooks. Every entry names its fix where one exists, and clears itself once the condition is gone (on the next check or restart) — you never have to remove one by hand. The same message is also written to the log, and headless (`--notui`) runs record entries too. The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
+**Warnings panel**: Sits below History and surfaces *operator-level* conditions — configuration, environment or engine faults that block or degrade work and need a person to act. Per-item states (paused, awaiting input, escalated) are not shown here; they live on the board and in item comments. Conditions shown include: `allow_auto_merge` disabled on a managed repo, no write access to a repo, stage-config drift, undeclared reviewers, a stale or skewed binary, an unrecognised `.fabrik/config.yaml` key, invalid settings that fell back to defaults (one aggregated entry), a gitignored `config.yaml`, a fine-grained PAT, local plugin customizations, a missing git credential helper, an unreadable Claude settings file, timeout settings in a bad order, a failed log rotation, the local API socket failing to start (`local_api:unavailable`; MCP tools and push events are unavailable until it binds), a deprecated bare or pre-rename skill reference (`skill_reference_deprecated`), a stage skill that failed to load at run time (`skill_load`), an engine label write that GitHub did not keep and Fabrik could not restore (`label_divergence`, see [Lost label writes](#lost-label-writes)), a pending workflow migration ("Workflow migration pending — run 'fabrik upgrade'"), missing board display fields ("Display fields missing", fixed by `fabrik repair-board --apply`), and repos receiving no webhooks. Every entry names its fix where one exists, and clears itself once the condition is gone (on the next check or restart) — you never have to remove one by hand. The same message is also written to the log, and headless (`--notui`) runs record entries too. The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
 
 - **No active and no dismissed warnings:** The panel renders nothing at all (zero height), so History retains maximum vertical space.
 - **No active warnings but dismissed entries exist:** The panel collapses to a single hint line: `Warnings: none (N dismissed, press tab + S to show)`.
@@ -5506,14 +5535,19 @@ Check `.fabrik/logs/<owner>-<repo>/issue-N/` for the full output.
 
 Multiple users and multiple Fabrik instances can safely share a project board.
 
-**Comment processing**: Fabrik processes comments from *any* author, not just the
-configured `--user`. Human colleagues, code-review bots (Copilot, Gemini), and
-other Fabrik instances all trigger comment processing. Three categories are
-skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output), comments
-that already carry a 🚀 rocket reaction (already processed), and non-actionable
-bot service-notices — e.g. a quota-exhaustion or rate-limit banner from a
-review bot — which are watermarked as processed without ever spawning a worker
-or receiving a reply, so they can't re-trigger the bot into a reply loop.
+**Comment processing**: Fabrik processes comments from *any human* author, not just
+the configured `--user`; colleagues and other Fabrik instances all trigger comment
+processing. Comments from **bots** are ignored unless the bot is opted in (see
+[Bot comments as feedback](#bot-comments-as-feedback)): a deploy-preview notice
+such as Vercel's would otherwise start a paid comment-review pass on every PR.
+Besides bot comments, three categories are skipped: comments that start with
+`🏭 **Fabrik` (Fabrik's own output), comments that already carry a 🚀 rocket
+reaction (already processed), and non-actionable bot service-notices — e.g. a
+quota-exhaustion or rate-limit banner from an opted-in review bot — which are
+watermarked as processed without ever spawning a worker or receiving a reply, so
+they can't re-trigger the bot into a reply loop. Review threads and review bodies
+from bots (Copilot, Gemini, Pruefer, ...) are not comments in this sense and are
+handled as before.
 
 **Multi-instance locking**: The `fabrik:locked:<user>` label is still the
 concurrency guard, but acquisition now uses a **lock-then-verify** protocol:

@@ -908,6 +908,10 @@ func TestOverseerAuditCommentIsNotSteering(t *testing.T) {
 		t.Run(a.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
 			eng, _, _ := overseerEngine(t, client, ovItem{number: 5, status: "Validate", labels: []string{"fabrik:paused", "fabrik:awaiting-input"}})
+			// Opt the bot author in (#2552): a bot that is not opted in is skipped by
+			// the funnel for being a bot, which would hide whether the audit prefix
+			// alone keeps these comments from being steering.
+			eng.stageByName("Validate").FeedbackBots = []string{"fabrik-app"}
 			var comments []gh.Comment
 			for i, body := range ovAuditBodies() {
 				comments = append(comments, gh.Comment{
@@ -915,7 +919,7 @@ func TestOverseerAuditCommentIsNotSteering(t *testing.T) {
 					CreatedAt: time.Now().Add(time.Hour), // strictly after the pause
 				})
 			}
-			item := gh.ProjectItem{Number: 5, Repo: "owner/repo", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, Comments: comments}
+			item := gh.ProjectItem{Number: 5, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, Comments: comments}
 
 			// Control: the same author's ordinary comment IS new human feedback,
 			// so the assertions below really are about the prefix.

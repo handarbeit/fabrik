@@ -53,3 +53,45 @@ func TestFetchLabelRemovedAt_PauseResumeRepause(t *testing.T) {
 		t.Fatalf("unrelated label has a removal time %v", other)
 	}
 }
+
+// TestDropLabelWrite pins the #2551 fault: a dropped write returns success and
+// changes nothing, a dropped removal likewise, only `times` writes are dropped,
+// and other labels are unaffected.
+func TestDropLabelWrite(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	const label = "fabrik:locked:me"
+
+	s.DropLabelWrite(LabelEventLabeled, label, 1)
+	if err := s.AddLabelToIssue("acme", "widgets", 7, label); err != nil {
+		t.Fatalf("dropped add must report success: %v", err)
+	}
+	if labels, _ := s.FetchLabels("acme", "widgets", 7); contains(labels, label) {
+		t.Fatalf("dropped add stuck: %v", labels)
+	}
+	if evs, _ := s.LabelEvents("acme", "widgets", 7); len(evs) != 0 {
+		t.Fatalf("dropped add left events: %v", evs)
+	}
+	if err := s.AddLabelToIssue("acme", "widgets", 7, label); err != nil {
+		t.Fatal(err)
+	}
+	if labels, _ := s.FetchLabels("acme", "widgets", 7); !contains(labels, label) {
+		t.Fatalf("second add (rule spent) did not stick: %v", labels)
+	}
+
+	s.DropLabelWrite(LabelEventUnlabeled, label, 1)
+	if err := s.RemoveLabelFromIssue("acme", "widgets", 7, label); err != nil {
+		t.Fatalf("dropped removal must report success: %v", err)
+	}
+	if labels, _ := s.FetchLabels("acme", "widgets", 7); !contains(labels, label) {
+		t.Fatalf("dropped removal removed the label: %v", labels)
+	}
+	if err := s.RemoveLabelFromIssue("acme", "widgets", 7, label); err != nil {
+		t.Fatal(err)
+	}
+	if labels, _ := s.FetchLabels("acme", "widgets", 7); contains(labels, label) {
+		t.Fatalf("second removal (rule spent) did not stick: %v", labels)
+	}
+	if err := s.AddLabelToIssue("acme", "widgets", 7, "other"); err != nil {
+		t.Fatal(err)
+	}
+}

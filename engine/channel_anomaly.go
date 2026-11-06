@@ -135,6 +135,9 @@ type anomalyState struct {
 	// the situation view can say one is active (#2171). cache-divergence is a
 	// point event; this is a bounded memory of it, not a new signal.
 	recent []divergenceNote
+	// repairs are the label divergences raised since the observer last took them
+	// (#2551); onChange hands them to the label repair outside this lock.
+	repairs []labelDivergence
 }
 
 // divergenceNote is one cache divergence remembered for the situation view.
@@ -367,6 +370,7 @@ func (ce *channelEvents) noteChangeForDivergence(c itemstate.Change, st *itemsta
 			written, observed = "added", "removed"
 		}
 		a.noteDivergenceLocked(divergenceNote{ref: ref, repo: c.Repo, number: c.Number, what: what, written: written, observed: observed, path: c.Path.String(), at: now}, window)
+		a.repairs = append(a.repairs, labelDivergence{repo: c.Repo, number: c.Number, label: d.Label, written: written, at: now})
 		out = append(out, ce.divergenceEvent(c, st, what, written, observed, en.at, now, a.nextSeq()))
 	}
 	if c.StatusTo != "" {
@@ -821,4 +825,15 @@ func maxDur(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// takeLabelDivergences returns and clears the label divergences noteChangeForDivergence
+// raised, for the observer to hand to the repair (#2551).
+func (ce *channelEvents) takeLabelDivergences() []labelDivergence {
+	a := &ce.anom
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.repairs
+	a.repairs = nil
+	return out
 }

@@ -33,9 +33,16 @@ func (e *Engine) settleBotServiceNoticesForItem(item gh.ProjectItem) {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	botOptedIn := e.botCommentOptIn(item.Status, item.Number, item.Labels)
 
 	for _, c := range item.Comments {
 		if !isBotServiceNotice(c) {
+			continue
+		}
+		// A bot that is not opted in is dropped by the funnel as derived state
+		// (#2552, R5): this scan writes nothing for it. It keeps watermarking the
+		// notices of opted-in bots, which the funnel still excludes by pattern.
+		if skipsBotComment(c, botOptedIn) {
 			continue
 		}
 		if !snap.CommentProcessed(c.ID).IsZero() {
