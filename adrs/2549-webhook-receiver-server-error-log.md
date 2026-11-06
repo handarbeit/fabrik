@@ -1,5 +1,7 @@
 # ADR 2549: Route the App webhook receiver's HTTP server errors through the engine log
 
+*Path note (#2475, ADR 2475): the App webhook receiver moved from `engine/` to `internal/appwebhook`; the file paths below name the new locations. The decisions are unchanged.*
+
 ## Status
 
 Accepted.
@@ -7,7 +9,7 @@ Accepted.
 ## Context
 
 The App webhook receiver (`event_source: direct` and `tailscale`) shares one `http.Server`
-(`engine/app_webhook.go`). It had no `ErrorLog`, so `net/http` wrote its server errors through
+(`internal/appwebhook/receiver.go`). It had no `ErrorLog`, so `net/http` wrote its server errors through
 the std `log` package to stderr. Behind the public, TLS-terminated Funnel hostname, certificate
 transparency scanners abort handshakes continuously and every abort produced
 `http: TLS handshake error from …: EOF` over the TUI, never reaching `.fabrik/fabrik.log`

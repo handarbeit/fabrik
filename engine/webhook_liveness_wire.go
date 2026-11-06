@@ -4,16 +4,19 @@ import (
 	"context"
 	"time"
 
-	"github.com/handarbeit/fabrik/warnings"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
+
+// Route liveness itself lives in internal/appwebhook (#2475, ADR 2475; design
+// #2452, ADR 2452). This file is the engine's factory for it.
 
 // newRouteLiveness builds the route-liveness controller for transport tr (log
 // and panel tag tag: "direct" or "tailscale"), or nil when it cannot work (no
 // App auth, no intake): nothing is reported on the health row then. ownURL is
 // the URL the receiver is served at ("" when not known); warmup is the span after
 // start in which failed attempts do not count (#2452, ADR 2452).
-func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL func() string, warmup time.Duration) *routeLiveness {
-	var api livenessAPI
+func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL func() string, warmup time.Duration) *appwebhook.Liveness {
+	var api appwebhook.LivenessAPI
 	switch {
 	case e.replayAPIOverride != nil:
 		api = e.replayAPIOverride
@@ -23,14 +26,15 @@ func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL fu
 	if api == nil || e.intake == nil {
 		return nil
 	}
-	wait := realReplayWait
+	wait := appwebhook.RealWait
 	if e.livenessWaitOverride != nil {
 		wait = e.livenessWaitOverride
 	}
-	rl := newRouteLiveness(routeLivenessConfig{
+	panel := enginePanel{e: e, tag: tag}
+	rl := appwebhook.NewLiveness(appwebhook.LivenessConfig{
 		Tag:    tag,
 		API:    api,
-		Ledger: e.intake,
+		Ledger: ledgerView{e.intake},
 		Sink:   tr,
 		HookURL: func(ctx context.Context) (string, error) {
 			cfg, err := fetchAppHookConfigFn(ctx, e)
@@ -44,34 +48,18 @@ func (e *Engine) newRouteLiveness(tr *appWebhookTransport, tag string, ownURL fu
 		Now:     e.now,
 		Wait:    wait,
 		Warmup:  warmup,
-		Report:  func(c warnings.Condition) { e.reportWarning(tag, c) },
-		Resolve: func(key string) { e.resolveWarning(tag, key) },
+		Report:  panel.Report,
+		Resolve: panel.Resolve,
 	})
 	tr.SetArrivalObserver(rl.Arrival)
 	return rl
 }
 
-// startRouteLiveness runs rl in the background until ctx ends or the returned
-// stop function is called; stop waits for the goroutine to exit and for any
-// in-flight arrival hook refresh (cancelling it first; none starts afterwards),
-// so a transport shutting down never leaves either reading engine state or
-// writing the warnings panel (#2480). nil rl is a no-op (stop is
-// still callable). A stale panel entry from a previous run is cleared first: the
-// in-memory verdict starts unknown, and unknown raises nothing.
-func (e *Engine) startRouteLiveness(ctx context.Context, rl *routeLiveness) (stop func()) {
-	if rl == nil {
-		return func() {}
-	}
-	e.resolveWarning(rl.cfg.Tag, warnings.Condition{Type: livenessPanelType, Subject: rl.cfg.Tag}.Key())
-	rctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		rl.Run(rctx)
-	}()
-	return func() {
-		cancel()
-		<-done
-		rl.Stop()
-	}
+// SetLivenessWaitForTest replaces the sleep the webhook route-liveness
+// controller (#2452) uses between wake-ups and while waiting for a probe's
+// result, so a test controls it without real time. wait returns false if ctx
+// ended first and must block (not return at once) when the test wants the
+// controller idle. Call before setUpIngestion; production code never sets it.
+func (e *Engine) SetLivenessWaitForTest(wait func(ctx context.Context, d time.Duration) bool) {
+	e.livenessWaitOverride = wait
 }

@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 
 const livenessHookURL = "https://n.t.ts.net/webhook"
 
-// livenessAPI fake: a mutable delivery log, per-attempt URLs for the detail
+// LivenessAPI fake: a mutable delivery log, per-attempt URLs for the detail
 // read and recorded redelivery requests.
 type fakeLivenessAPI struct {
 	mu          sync.Mutex
@@ -89,11 +89,11 @@ type fakeLivenessLedger struct {
 	at map[string]time.Time
 }
 
-func (l *fakeLivenessLedger) ledgerReceivedAt(id string, now time.Time) (time.Time, bool) {
+func (l *fakeLivenessLedger) ReceivedAt(id string, now time.Time) (time.Time, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	at, ok := l.at[id]
-	if !ok || now.Sub(at) > deliveryLedgerWindow {
+	if !ok || now.Sub(at) > LedgerWindow {
 		return time.Time{}, false
 	}
 	return at, true
@@ -121,7 +121,7 @@ type livenessHarness struct {
 	api       *fakeLivenessAPI
 	ledger    *fakeLivenessLedger
 	sink      *recRouteSink
-	r         *routeLiveness
+	r         *Liveness
 	mu        sync.Mutex
 	now       time.Time
 	hookURL   string
@@ -141,7 +141,7 @@ func newLivenessHarness(t *testing.T, warmup time.Duration) *livenessHarness {
 		now:     time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC),
 		hookURL: livenessHookURL,
 	}
-	h.r = newRouteLiveness(routeLivenessConfig{
+	h.r = NewLiveness(LivenessConfig{
 		Tag:    "tailscale",
 		API:    h.api,
 		Ledger: h.ledger,
@@ -946,7 +946,7 @@ func TestSanitizeStatusText(t *testing.T) {
 // The probe never applies anything: this file talks to the GitHub API and the
 // read-only ledger lookup only (the replay file's twin of FR-008).
 func TestWebhookLivenessNeverSubmits(t *testing.T) {
-	src, err := os.ReadFile("webhook_liveness.go")
+	src, err := os.ReadFile("liveness.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,9 +958,13 @@ func TestWebhookLivenessNeverSubmits(t *testing.T) {
 		code = append(code, line)
 	}
 	text := strings.Join(code, "\n")
+	// Non-vacuity: the scan must be reading the controller, not an empty file.
+	if !strings.Contains(text, "func (r *Liveness) Arrival(") {
+		t.Fatal("liveness.go does not hold the controller; the scan would pass vacuously")
+	}
 	for _, bad := range []string{".Submit(", "Accept(", "SetSink", "sink(", ".sink", "ledgerSeen", "Seen("} {
 		if strings.Contains(text, bad) {
-			t.Errorf("webhook_liveness.go must not reference %q", bad)
+			t.Errorf("liveness.go must not reference %q", bad)
 		}
 	}
 }
