@@ -23,6 +23,9 @@ import (
 // The sim's intake seam calls this same method, so production and the sim cannot
 // differ in what a closing intake does.
 func (e *Engine) applyDelivery(cache *boardcache.CacheImpl, eventType string, payload []byte, receivedAt time.Time, layer1 func()) {
+	// #2542: wake the poll for an open trial's PR. Engine-side and read-only; the
+	// board cache (and its #2483 train-PR guard) is not involved.
+	e.wakeForOpenTrial(eventType, payload)
 	cache.ApplyDeltaAt(eventType, payload, receivedAt)
 	if e.intake.Closing() && !e.chanTest.drainSlackOff.Load() {
 		return

@@ -1683,15 +1683,13 @@ func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, r
 	}()
 
 	for _, earlier := range red[:idx] {
-		mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", earlier.headSHA)
-		mergeCmd.Dir = wtDir
-		out, mergeErr := mergeCmd.CombinedOutput()
+		out, mergeErr := e.mergeToleratingRerereLock(ctx, wtDir, earlier.headSHA)
 		if mergeErr == nil {
 			continue
 		}
 		remaining, upErr := unmergedPaths(wtDir)
 		if upErr != nil || len(remaining) > 0 {
-			e.logf(poisoner.item.Number, "merge-train", "warn: could not faithfully reconstruct the trial-so-far state ahead of poisoner #%d (earlier member #%d did not fully replay via rerere) — skipping forget: %s\n", poisoner.item.Number, earlier.item.Number, strings.TrimSpace(string(out)))
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not faithfully reconstruct the trial-so-far state ahead of poisoner #%d (earlier member #%d did not fully replay via rerere) — skipping forget: %s\n", poisoner.item.Number, earlier.item.Number, strings.TrimSpace(dropRerereLockLines(string(out))))
 			earlierAbortCmd := exec.Command("git", "merge", "--abort")
 			earlierAbortCmd.Dir = wtDir
 			earlierAbortCmd.Run() // best-effort; wtDir is discarded regardless
@@ -1703,16 +1701,14 @@ func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, r
 		}
 	}
 
-	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", poisoner.headSHA)
-	mergeCmd.Dir = wtDir
-	out, mergeErr := mergeCmd.CombinedOutput()
+	out, mergeErr := e.mergeToleratingRerereLock(ctx, wtDir, poisoner.headSHA)
 	if mergeErr == nil {
 		// Clean merge against the reconstructed trial-so-far state — poisoner's own
 		// conflict resolution (if any, from a different bisection sub-trial) is not
 		// implicated in this episode's primary trial order; nothing to forget here.
 		return
 	}
-	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(string(out)))
+	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(dropRerereLockLines(string(out))))
 
 	// Paths are recovered from the merge's own output, not from unmergedPaths/`git
 	// status`: when rerere's autoupdate fully replays and stages a path, git no longer
@@ -5295,6 +5291,7 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 	state.mu.Lock()
 	state.trialName = trialName
 	state.prNum = pr.Number
+	state.CIResult = TrainCIPending // #2542: a new trial has no verdict yet
 	state.assembling = false
 	state.mu.Unlock()
 

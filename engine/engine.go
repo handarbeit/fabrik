@@ -438,7 +438,10 @@ type Engine struct {
 	// the idle-interval cap on long cooldowns, and a hook run after a Status write.
 	postRunAdvanceOff  atomic.Bool
 	longCooldownCapOff atomic.Bool
-	afterAdvanceHook   atomic.Pointer[func(gh.ProjectItem, string)]
+	// Test seams of #2542 (ADR 2542): the open-trial idle cap and the trial-PR wake.
+	openTrialCapOff  atomic.Bool
+	trialWakeOff     atomic.Bool
+	afterAdvanceHook atomic.Pointer[func(gh.ProjectItem, string)]
 	// stageOutcomes holds the recorded, not-yet-published stage outcomes (#2394); nil on
 	// NewWithDeps engines. stageOutcomeRecordOff is the SetStageOutcomeRecordDisabledForTest seam.
 	stageOutcomes                         *stageOutcomeStore

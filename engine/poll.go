@@ -1222,6 +1222,15 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		effectiveInterval = configuredInterval
 	}
 
+	// Open merge-train trial (#2542, ADR 2542): the verdict is read only when a poll
+	// runs, so do not stretch the idle interval (nor let a cooldown cap's
+	// due + one interval stretch it) past one configured interval while any run waits
+	// on trial CI. Applied last; it only ever shortens. Activity accounting is untouched.
+	if !e.backoffRateLimitLow && effectiveInterval > configuredInterval && !e.openTrialCapOff.Load() && e.openTrialPresent() {
+		e.logf(0, "poll", "next poll capped to %v: merge-train trial open, awaiting CI\n", configuredInterval)
+		effectiveInterval = configuredInterval
+	}
+
 	// Notify webhook manager of any new repos discovered during this poll.
 	if result.SeenRepos != nil {
 		e.transports.UpdateRepos(result.SeenRepos)
