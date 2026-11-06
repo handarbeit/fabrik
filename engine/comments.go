@@ -17,14 +17,22 @@ import (
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
-	return filterNewComments(item.Comments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() })
+	return filterNewComments(item.Comments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() },
+		e.botCommentOptIn(item.Status, item.Number, item.Labels))
 }
 
 // filterNewComments is findNewComments' pure core: the comments no one has
 // processed yet, given a predicate for the store's processed watermark. It is
 // shared with the cache-only channel-event path (#1968), which must apply the
 // identical definition without the store.Get GitHub fallback.
-func filterNewComments(comments []gh.Comment, processed func(id string) bool) []gh.Comment {
+//
+// botOptedIn decides whether a bot-authored comment is feedback (#2552, ADR
+// 2552): a comment whose author is a bot login (gh.IsBotLogin) is dropped unless
+// botOptedIn(author) is true. A nil predicate opts no bot in. The drop is
+// derived state — nothing is written for the skipped comment (R5). Every caller
+// passes Engine.botCommentOptIn so all readers agree
+// (TestBotCommentOptInAgreesAcrossReaders, TestFilterNewCommentsCallersPassTheOptIn).
+func filterNewComments(comments []gh.Comment, processed func(id string) bool, botOptedIn func(author string) bool) []gh.Comment {
 	var newComments []gh.Comment
 	for _, c := range comments {
 		// Skip comments we've already processed
@@ -37,6 +45,11 @@ func filterNewComments(comments []gh.Comment, processed func(id string) bool) []
 		}
 		// Skip comments already processed (marked with 🚀 reaction)
 		if c.HasReaction("ROCKET") {
+			continue
+		}
+		// Skip comments from a bot that is not opted in (#2552): a deploy-preview
+		// notice is not feedback and must start no paid worker or hold no gate.
+		if skipsBotComment(c, botOptedIn) {
 			continue
 		}
 		// Skip non-actionable bot service-notices (e.g. quota/rate-limit banners) —
@@ -1282,11 +1295,17 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments [
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 	pending := make(map[string]bool)
-	for _, c := range filterNewComments(preStageComments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() }) {
+	botOptedIn := e.botCommentOptIn(item.Status, item.Number, item.Labels)
+	for _, c := range filterNewComments(preStageComments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() }, botOptedIn) {
 		pending[c.ID] = true
 	}
 	for _, c := range preStageComments {
 		if pending[c.ID] {
+			continue
+		}
+		// A bot that is not opted in is skipped by the funnel as derived state
+		// (#2552, R5): no reaction and no processed marker.
+		if skipsBotComment(c, botOptedIn) {
 			continue
 		}
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {

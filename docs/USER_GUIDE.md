@@ -1855,6 +1855,11 @@ expected_reviewers:       # Optional. Declares unrequested reviewers (self-submi
                           #   the gate advances immediately when nothing is requested either,
                           #   instead of waiting out the timeout. See §3 Declaring Expected
                           #   Reviewers for full details, including the required identity format.
+feedback_bots:            # Optional. Bots whose PR/issue conversation comments count as feedback
+  - vercel                #   (a bare handle, same form as expected_reviewers). Comments from any
+                          #   other bot login are ignored. A bot named in expected_reviewers is
+                          #   opted in too. Unlike expected_reviewers it does not make the review
+                          #   gate wait for a formal review. See §3 Bot comments as feedback.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
                           #   Validate+yolo) on CI checks passing on the PR head. At
                           #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
@@ -3057,6 +3062,22 @@ A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fail
 - **Pruefer reviews a PR even when GitHub never created its `refs/pull/<N>/head` ref.** It then fetches the head commit by its SHA from the base repository and requires the checked-out commit to be that SHA; nothing needs configuring.
 
 ---
+
+#### Bot comments as feedback
+
+Fabrik treats a **conversation comment** (an issue comment or a PR comment, not a review thread or a review body) from a bot login as noise unless you opt the bot in. A deploy-preview bot such as Vercel posts a notice on every `fabrik/*` PR; counting it as feedback started a paid comment-review pass that found nothing to act on and held the feedback gate until it finished. A skipped comment starts no worker, holds no gate, and Fabrik writes nothing for it: no reaction, no processed marker, no reply.
+
+A bot is opted in when it is named in the stage's effective `expected_reviewers` (including the `expected-reviewers:` label override), or in the stage's `feedback_bots`:
+
+```yaml
+name: Validate
+feedback_bots:
+  - some-comment-bot    # bare handle: no "@", no "[bot]"
+```
+
+Use `feedback_bots` for a bot that only *comments*. Declaring such a bot under `expected_reviewers` would also make the review gate wait for a formal review from it, run the re-prompt ladder and pause at the timeout. `feedback_bots` has no label override. The stage that applies is the one the item is currently in (an item waiting in `Queued` uses the stage before the holding stage). Review threads, review bodies, `CHANGES_REQUESTED` reviews and the review gate are not affected by this setting.
+
+**Upgrading.** If you relied on an undeclared bot's comment as feedback (for example a bot summary comment that lists findings), add that bot to `feedback_bots` or `expected_reviewers`. A bot is anything whose login ends in `[bot]` or `-bot`, plus a few known bot accounts. Known service notices (quota and rate-limit banners) from an opted-in bot are still ignored.
 
 ### CI Gate and CI-Fix Workflow
 
@@ -5498,14 +5519,19 @@ Check `.fabrik/logs/<owner>-<repo>/issue-N/` for the full output.
 
 Multiple users and multiple Fabrik instances can safely share a project board.
 
-**Comment processing**: Fabrik processes comments from *any* author, not just the
-configured `--user`. Human colleagues, code-review bots (Copilot, Gemini), and
-other Fabrik instances all trigger comment processing. Three categories are
-skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output), comments
-that already carry a 🚀 rocket reaction (already processed), and non-actionable
-bot service-notices — e.g. a quota-exhaustion or rate-limit banner from a
-review bot — which are watermarked as processed without ever spawning a worker
-or receiving a reply, so they can't re-trigger the bot into a reply loop.
+**Comment processing**: Fabrik processes comments from *any human* author, not just
+the configured `--user`; colleagues and other Fabrik instances all trigger comment
+processing. Comments from **bots** are ignored unless the bot is opted in (see
+[Bot comments as feedback](#bot-comments-as-feedback)): a deploy-preview notice
+such as Vercel's would otherwise start a paid comment-review pass on every PR.
+Besides bot comments, three categories are skipped: comments that start with
+`🏭 **Fabrik` (Fabrik's own output), comments that already carry a 🚀 rocket
+reaction (already processed), and non-actionable bot service-notices — e.g. a
+quota-exhaustion or rate-limit banner from an opted-in review bot — which are
+watermarked as processed without ever spawning a worker or receiving a reply, so
+they can't re-trigger the bot into a reply loop. Review threads and review bodies
+from bots (Copilot, Gemini, Pruefer, ...) are not comments in this sense and are
+handled as before.
 
 **Multi-instance locking**: The `fabrik:locked:<user>` label is still the
 concurrency guard, but acquisition now uses a **lock-then-verify** protocol:
