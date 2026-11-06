@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 func TestTrialWakeTarget(t *testing.T) {
@@ -181,5 +184,41 @@ func TestTrainClaimCIResultIsPendingWhileANewTrialIsOpen(t *testing.T) {
 	}
 	if sawRed {
 		t.Fatal("a claim with an open trial must not report an earlier step's red")
+	}
+}
+
+// The cap is applied after the cooldown caps: a long admission cooldown caps the poll
+// at due + one interval (#2528, ~10 min in the 0.0.91 log), and an open trial still
+// brings it down to one interval.
+func TestOpenTrialCapBeatsLongCooldownCap(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	eng := a.eng
+	now := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	eng.SetClock(stubClock{t: now})
+	configured := 30 * time.Second
+	a.dispatch()
+	if !eng.openTrialPresent() {
+		t.Fatal("expected an open trial")
+	}
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 7, Repo: cooldownTestRepo, Title: "x", Status: "Implement"}})
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 7, Reason: "periodic-re-eval", Until: now.Add(10 * time.Minute)})
+
+	poll := func() time.Duration {
+		now = now.Add(time.Minute)
+		eng.SetClock(stubClock{t: now})
+		eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 7, Reason: "periodic-re-eval", Until: now.Add(10 * time.Minute)})
+		eng.SetIdleStartForTest(time.Now().Add(-time.Hour))
+		res, err := eng.PollWithBackoff(context.Background(), configured)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.NextInterval
+	}
+	if got := poll(); got != configured {
+		t.Errorf("with an open trial the interval = %v, want %v", got, configured)
+	}
+	eng.SetOpenTrialCapDisabledForTest(true)
+	if got := poll(); got <= configured {
+		t.Errorf("without the open-trial cap the long-cooldown cap rules, got %v", got)
 	}
 }
