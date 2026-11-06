@@ -1,0 +1,698 @@
+package appwebhook
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/handarbeit/fabrik/internal/events"
+	"github.com/handarbeit/fabrik/internal/localapi"
+)
+
+// networkCondition is the optional upstream-connectivity input to the derived
+// health state. The direct transport never sets it. The tailscale transport
+// (#2143) reports its tailnet connection through it, so a drop is unhealthy
+// independently of every other hint (reconcile, signature drift).
+type networkCondition struct {
+	set           bool // a condition has been reported
+	connected     bool
+	everConnected bool // a connected state has been seen: a later reconnect is a recovery
+	tailnet       string
+	funnel        string
+}
+
+// reachable reports whether deliveries can arrive: the tailnet is connected and
+// the Funnel has not been reported unavailable (the node can stay connected
+// after the "funnel" node attribute is revoked or HTTPS certificates are turned
+// off, and then no delivery can reach the listener). An unknown Funnel status
+// is not treated as unavailable.
+func (c networkCondition) reachable() bool {
+	return c.connected && c.funnel != FunnelUnavailable
+}
+
+// Receiver is the direct App webhook transport (#2142, ADR 2142):
+// the daemon receives a GitHub App's own webhook straight from an HTTP request
+// the operator's tunnel or proxy forwards to it, with no third-party relay.
+//
+// It is a receiver and nothing more: it verifies X-Hub-Signature-256 against the
+// App's static webhook secret and hands a verified delivery to the consumer's
+// Sink. Dedupe, the fast ack, echo attribution, ordering and reconnect catch-up
+// all belong to the consumer behind that Sink and are not repeated here (the one
+// thing the receiver must do itself is read at most MaxBodyBytes+1 so an
+// oversized body is answered 413 before any verification).
+//
+// The listener is injected as a factory (Config.Listen, called inside Start) so
+// a different listener source (the embedded tsnet node of #2143) reuses the whole
+// receiver unchanged and a bind failure is an ordinary Start error, which the
+// consumer decides how to handle (the engine degrades to poll-only). The receiver
+// speaks plain HTTP: TLS is the fronting proxy's job.
+type Receiver struct {
+	name     string
+	path     string
+	listenFn func() (net.Listener, error)
+	logFn    LogFunc
+	health   HealthSink
+
+	// secret is the App's webhook secret. It is only ever used as the HMAC key
+	// and is never logged.
+	secret string
+
+	// onDrift, when set, is called (outside any lock) with true when a
+	// signature-failure streak reaches the threshold and false on recovery.
+	onDrift func(active bool)
+
+	sigDrift events.SigDrift
+
+	// driftMu serialises driftTransition so the drift callback is never
+	// invoked out of order by concurrent requests; driftReported is the last
+	// state it reported.
+	driftMu       sync.Mutex
+	driftReported bool
+
+	rejectedSigs atomic.Int64
+	malformed    atomic.Int64
+	oversized    atomic.Int64
+	// tlsHandshakeFailures counts failed TLS handshakes net/http reports through
+	// the server's ErrorLog (#2549). Counter only: it feeds no state, warning or
+	// route verdict.
+	tlsHandshakeFailures atomic.Int64
+
+	// errorLogDisabled and summaryInterval are test seams (errlog.go).
+	errorLogDisabled bool
+	summaryInterval  time.Duration
+
+	stopOnce sync.Once
+	// wg joins the handshake summary goroutine; done stops it (created in Start,
+	// closed by Stop).
+	wg   sync.WaitGroup
+	done chan struct{}
+
+	mu             sync.Mutex
+	sink           Sink
+	reconnectFn    func()                 // called only by SetNetworkCondition on a tailnet recovery (#2143)
+	replay         *localapi.ReplayHealth // last delivery replay pass (#2144); nil = replay not enabled for this transport
+	stopHook       func()                 // run at the end of Stop (the tailscale transport closes its node)
+	network        networkCondition
+	route          *localapi.RouteLiveness // #2452; nil until route liveness is enabled for this transport
+	arrivalFn      func(guid string) bool  // #2452: reports whether a request is a route-check probe copy
+	coverageFn     func()
+	srv            *http.Server
+	ln             net.Listener
+	listening      bool
+	cacheDrift     bool
+	lastState      HealthState
+	lastDeliveryAt time.Time
+	lastSigWarnAt  time.Time
+	eventCounts    map[string]int
+	managedRepos   []string
+	installNote    string
+}
+
+// App webhook server timeouts: long enough for GitHub to upload a body at the
+// cap, short enough to bound a slow client behind a public route.
+const (
+	appWebhookReadHeaderTimeout = 10 * time.Second
+	appWebhookReadTimeout       = 2 * time.Minute
+	// The write deadline runs from the end of the request-header read, not from
+	// the end of the body, so it must cover the whole body upload (ReadTimeout)
+	// plus time to write the response; otherwise a slow 25 MiB upload would be
+	// accepted and then its 2xx/413 could not be written.
+	appWebhookWriteTimeout  = appWebhookReadTimeout + 30*time.Second
+	appWebhookIdleTimeout   = 2 * time.Minute
+	appWebhookShutdownGrace = 5 * time.Second
+	// appWebhookSigWarnInterval rate-limits the bad-signature log line: the
+	// listener is exposed through a public route.
+	appWebhookSigWarnInterval = 30 * time.Second
+)
+
+// Config configures a Receiver.
+type Config struct {
+	// Name is the delivery's Transport label and the health row's name.
+	Name string
+	// Path is the URL path served.
+	Path string
+	// Listen provides the listener (called inside Start).
+	Listen func() (net.Listener, error)
+	// Secret is the App's webhook secret (HMAC key; never logged).
+	Secret string
+	Logf   LogFunc
+	// Health, when set, receives the receiver's state on every change.
+	Health HealthSink
+}
+
+// New builds a receiver named cfg.Name that serves cfg.Path on the listener
+// cfg.Listen returns, verifying with cfg.Secret.
+func New(cfg Config) *Receiver {
+	// A consumer that supplies no logger gets a silent one, as Replayer and
+	// Liveness already do, rather than a nil-func panic on Start.
+	if cfg.Logf == nil {
+		cfg.Logf = func(int, string, string, ...any) {}
+	}
+	return &Receiver{
+		name:        cfg.Name,
+		path:        cfg.Path,
+		listenFn:    cfg.Listen,
+		secret:      cfg.Secret,
+		logFn:       cfg.Logf,
+		health:      cfg.Health,
+		eventCounts: make(map[string]int),
+		lastState:   StateUnhealthy,
+	}
+}
+
+// Name is the receiver's name.
+func (t *Receiver) Name() string { return t.name }
+
+// SetSink installs the consumer's Sink, which receives every verified,
+// non-ping delivery.
+func (t *Receiver) SetSink(sink Sink) {
+	t.mu.Lock()
+	t.sink = sink
+	t.mu.Unlock()
+}
+
+// SetReplayStatus implements ReplayStatusSink (#2144): it stores the summary of
+// the last delivery replay pass for HealthRow. The first call (a zero value)
+// marks replay as enabled for this transport.
+func (t *Receiver) SetReplayStatus(h localapi.ReplayHealth) {
+	t.mu.Lock()
+	t.replay = &h
+	t.mu.Unlock()
+}
+
+// SetReconnectHandler installs the reconnect callback. A direct receiver has no
+// connection to re-establish and the reconcile ticker is unchanged (FR-017), so
+// there the handler is stored and never called. The tailscale transport calls
+// it, through SetNetworkCondition, when a lost tailnet connection comes back.
+// Delivery replay (#2144) reaches the same conclusion for the direct transport:
+// its only trigger is startup, and a consumer's composite reconnect handler is
+// there for receivers (the tailnet one) that do signal a reconnect.
+func (t *Receiver) SetReconnectHandler(fn func()) {
+	t.mu.Lock()
+	t.reconnectFn = fn
+	t.mu.Unlock()
+}
+
+// SetCoverageCheck installs the installation-coverage re-check.
+func (t *Receiver) SetCoverageCheck(fn func()) {
+	t.mu.Lock()
+	t.coverageFn = fn
+	t.mu.Unlock()
+}
+
+// SetStopHook installs a function Stop runs last, after the listener is closed.
+func (t *Receiver) SetStopHook(fn func()) {
+	t.mu.Lock()
+	t.stopHook = fn
+	t.mu.Unlock()
+}
+
+// SetNetworkCondition reports the upstream connection (the tailnet, #2143):
+// connected, its state label and the Funnel status. While a reported condition
+// is not connected, or the Funnel is reported unavailable, the transport is
+// unhealthy. A not-reachable→reachable transition after an
+// earlier reachable state calls the reconnect handler (outside any lock) so the
+// intake's catch-up reconcile runs; the first connect never does.
+func (t *Receiver) SetNetworkCondition(connected bool, tailnet, funnel string) {
+	t.mu.Lock()
+	prev := t.network
+	t.network = networkCondition{set: true, connected: connected, tailnet: tailnet, funnel: funnel}
+	t.network.everConnected = prev.everConnected || t.network.reachable()
+	recovered := t.network.reachable() && prev.set && !prev.reachable() && prev.everConnected
+	fn := t.reconnectFn
+	t.mu.Unlock()
+	reason := ""
+	switch {
+	case !connected:
+		reason = "tailnet disconnected"
+	case funnel == FunnelUnavailable:
+		reason = "funnel unavailable"
+	}
+	t.recomputeState(reason)
+	if recovered {
+		t.logFn(0, t.name, "tailnet connection re-established — requesting a catch-up reconcile\n")
+		if fn != nil {
+			fn()
+		}
+	}
+}
+
+// SetRouteLiveness implements RouteSink (#2452): it stores the decided webhook
+// route liveness and re-derives health. The first call marks route liveness as
+// enabled for this transport. A transition into or out of unreachable changes
+// the derived state: the poll cadence must not rely on webhooks while GitHub
+// cannot deliver.
+func (t *Receiver) SetRouteLiveness(rl localapi.RouteLiveness) {
+	t.mu.Lock()
+	prev := ""
+	if t.route != nil {
+		prev = t.route.Liveness
+	}
+	t.route = &rl
+	t.mu.Unlock()
+	if prev == rl.Liveness {
+		return
+	}
+	reason := ""
+	if rl.Liveness == localapi.RouteUnreachable {
+		reason = "GitHub cannot deliver to the webhook route"
+	}
+	t.recomputeState(reason)
+}
+
+// SetArrivalObserver installs the route-liveness hook called for every verified
+// non-ping request before the intake sees it. It returns true for the copy of a
+// route-check redelivery, which then leaves lastDeliveryAt alone (#2452).
+func (t *Receiver) SetArrivalObserver(fn func(guid string) bool) {
+	t.mu.Lock()
+	t.arrivalFn = fn
+	t.mu.Unlock()
+}
+
+// FireReconnect calls the reconnect handler (outside any lock): the intake's
+// catch-up reconcile and, with #2144, a delivery replay pass.
+func (t *Receiver) FireReconnect() {
+	t.mu.Lock()
+	fn := t.reconnectFn
+	t.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// SetDriftHandler installs the callback for signature-drift transitions.
+func (t *Receiver) SetDriftHandler(fn func(active bool)) { t.onDrift = fn }
+
+// Start binds the listener and serves in the background. A bind failure is
+// returned and leaves the transport not listening.
+func (t *Receiver) Start(context.Context) error {
+	ln, err := t.listenFn()
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(t.handle),
+		ReadHeaderTimeout: appWebhookReadHeaderTimeout,
+		ReadTimeout:       appWebhookReadTimeout,
+		WriteTimeout:      appWebhookWriteTimeout,
+		IdleTimeout:       appWebhookIdleTimeout,
+		// Never the std logger: a nil ErrorLog writes net/http's server errors
+		// (a scanner's aborted TLS handshake above all) raw to stderr (#2549).
+		ErrorLog: t.errorLog(),
+	}
+	interval := t.summaryInterval
+	if interval <= 0 {
+		interval = handshakeSummaryInterval
+	}
+	t.mu.Lock()
+	t.srv, t.ln, t.listening = srv, ln, true
+	t.done = make(chan struct{})
+	done := t.done
+	t.wg.Add(1)
+	t.mu.Unlock()
+	go t.runHandshakeSummary(done, interval)
+	t.recomputeState("")
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.logFn(0, t.name, "listener stopped: %v\n", err)
+			t.mu.Lock()
+			t.listening = false
+			t.mu.Unlock()
+			t.recomputeState("listener stopped")
+		}
+	}()
+	return nil
+}
+
+// Addr is the bound listener address ("" before Start).
+func (t *Receiver) Addr() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ln == nil {
+		return ""
+	}
+	return t.ln.Addr().String()
+}
+
+// Stop shuts the server down, giving in-flight requests a short grace.
+func (t *Receiver) Stop() {
+	t.stopOnce.Do(func() {
+		t.mu.Lock()
+		srv, ln, hook, done := t.srv, t.ln, t.stopHook, t.done
+		t.listening = false
+		t.mu.Unlock()
+		if srv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), appWebhookShutdownGrace)
+			defer cancel()
+			if err := srv.Shutdown(ctx); err != nil {
+				_ = srv.Close()
+			}
+		}
+		// Shutdown only closes listeners Serve has already registered. A Stop
+		// that races ahead of the Serve goroutine would otherwise leave the
+		// socket bound (and accepting into its backlog) until that goroutine
+		// runs; close it here so the port is released when Stop returns. The
+		// second Close on an already-closed listener is harmless.
+		if ln != nil {
+			_ = ln.Close()
+		}
+		if done != nil {
+			close(done)
+			t.wg.Wait()
+		}
+		t.recomputeState("stopped")
+		if hook != nil {
+			hook()
+		}
+	})
+}
+
+// handle is the HTTP handler. Check order is fixed: path (404), method (405),
+// capped read (413, not a signature failure), signature (401, counted), JSON
+// (400, not counted), ping (acknowledged, not submitted), then the sink (200).
+func (t *Receiver) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != t.path {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// A declared length above the cap is answered 413 without reading the body
+	// at all (same status, still before verification, still not a signature
+	// failure). A chunked or understated body falls through to the capped read.
+	if r.ContentLength > MaxBodyBytes {
+		t.oversized.Add(1)
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
+	if err != nil {
+		t.malformed.Add(1)
+		http.Error(w, "could not read request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > MaxBodyBytes {
+		t.oversized.Add(1)
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	if !events.VerifySignature(body, r.Header.Get("X-Hub-Signature-256"), t.secret) {
+		t.rejectedSigs.Add(1)
+		t.warnBadSignature()
+		if t.sigDrift.RecordFailure() {
+			t.driftTransition()
+		}
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+	// A verified request proves the secret is right, whatever else is wrong.
+	if t.sigDrift.RecordSuccess() {
+		t.driftTransition()
+	}
+
+	if !json.Valid(body) {
+		t.malformed.Add(1)
+		t.logFn(0, t.name, "rejected a correctly signed request whose body is not JSON — set the GitHub App's webhook content type to application/json\n")
+		http.Error(w, "body is not JSON; set the App's webhook content type to application/json", http.StatusBadRequest)
+		return
+	}
+
+	eventType := r.Header.Get("X-GitHub-Event")
+	if eventType == "ping" {
+		t.logFn(0, t.name, "received GitHub ping (delivery %s) — signature verified\n", r.Header.Get("X-GitHub-Delivery"))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	t.mu.Lock()
+	sink, arrival := t.sink, t.arrivalFn
+	t.mu.Unlock()
+	// A route-check redelivery (#2452) is a copy of a delivery already applied: it
+	// proves the route but is not a new event, so it neither moves lastDeliveryAt
+	// nor counts. The intake dedupes it either way.
+	probe := false
+	if arrival != nil {
+		probe = arrival(r.Header.Get("X-GitHub-Delivery"))
+	}
+	t.mu.Lock()
+	if sink != nil && !probe {
+		t.lastDeliveryAt = time.Now()
+		t.eventCounts[eventType]++
+	}
+	t.mu.Unlock()
+	if sink == nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	t.emitCurrentState()
+	sink(Delivery{
+		ID:        r.Header.Get("X-GitHub-Delivery"),
+		EventType: eventType,
+		Payload:   body,
+		Transport: t.name,
+	})
+	w.WriteHeader(http.StatusOK)
+}
+
+// warnBadSignature logs a rejected signature at most once per interval.
+func (t *Receiver) warnBadSignature() {
+	t.mu.Lock()
+	now := time.Now()
+	log := now.Sub(t.lastSigWarnAt) >= appWebhookSigWarnInterval
+	if log {
+		t.lastSigWarnAt = now
+	}
+	t.mu.Unlock()
+	if log {
+		t.logFn(0, t.name, "rejected a request with a missing or invalid X-Hub-Signature-256 (check the App's webhook secret)\n")
+	}
+}
+
+// driftTransition reports the tracker's current drift state to the operator
+// (log line and onDrift callback) and re-derives health. RecordFailure and
+// RecordSuccess decide their transition atomically, but their callers reach
+// this function on separate request goroutines, so it is serialised and always
+// reports the tracker's present state (not the state the caller saw): a late
+// "drift began" can never overwrite a recovery that already happened, and a
+// transition that has since been reversed is not reported twice.
+func (t *Receiver) driftTransition() {
+	t.driftMu.Lock()
+	active := t.sigDrift.Active()
+	changed := active != t.driftReported
+	if changed {
+		t.driftReported = active
+		if active {
+			t.logFn(0, t.name, "signature verification drift: %d consecutive failures with no interleaved success — "+
+				"the App's webhook secret probably does not match the daemon's\n", events.SignatureDriftThreshold)
+		} else {
+			t.logFn(0, t.name, "signature verification recovered after a drift episode\n")
+		}
+		if t.onDrift != nil {
+			t.onDrift(active)
+		}
+	}
+	t.driftMu.Unlock()
+	if !changed {
+		return
+	}
+	reason := ""
+	if active {
+		reason = "signature verification drift"
+	}
+	t.recomputeState(reason)
+}
+
+// state derives the externally reported health state from the independently
+// tracked conditions, so no single hint can mask another.
+func (t *Receiver) state() HealthState {
+	t.mu.Lock()
+	listening, cacheDrift := t.listening, t.cacheDrift
+	netDown := t.network.set && !t.network.reachable()
+	routeDown := t.route != nil && t.route.Liveness == localapi.RouteUnreachable
+	t.mu.Unlock()
+	if !listening || cacheDrift || netDown || routeDown || t.sigDrift.Active() {
+		return StateUnhealthy
+	}
+	return StateHealthy
+}
+
+func (t *Receiver) recomputeState(reason string) {
+	newState := t.state()
+	t.mu.Lock()
+	prev := t.lastState
+	t.lastState = newState
+	t.mu.Unlock()
+	if prev == newState {
+		return
+	}
+	if reason != "" {
+		t.logFn(0, t.name, "health state: %s → %s (%s)\n", prev, newState, reason)
+	} else {
+		t.logFn(0, t.name, "health state: %s → %s\n", prev, newState)
+	}
+	t.emitCurrentState()
+}
+
+func (t *Receiver) emitCurrentState() {
+	if t.health == nil {
+		return
+	}
+	state := string(t.state())
+	t.mu.Lock()
+	counts := make(map[string]int, len(t.eventCounts))
+	for k, v := range t.eventCounts {
+		counts[k] = v
+	}
+	note := t.installNote
+	t.mu.Unlock()
+	t.health(state, counts, note)
+}
+
+// IsHealthyOrStartingUp reports whether the receiver is healthy.
+func (t *Receiver) IsHealthyOrStartingUp() bool {
+	return t.state() == StateHealthy
+}
+
+// IsDisabled: there is no circuit breaker here.
+func (t *Receiver) IsDisabled() bool { return false }
+
+// TransitionHealth applies a reconcile-derived health hint. A reconcile "healthy" hint is
+// one input to the derived state, so it cannot clear signature drift or make a
+// dead listener look alive.
+func (t *Receiver) TransitionHealth(healthy bool, reason string) {
+	t.mu.Lock()
+	t.cacheDrift = !healthy
+	t.mu.Unlock()
+	t.recomputeState(reason)
+}
+
+// SubscribesTo: an App-level webhook receives every
+// event type the App is subscribed to.
+func (t *Receiver) SubscribesTo(string) bool { return true }
+
+// UpdateRepos records the managed-repo set; the set feeds only the coverage check.
+func (t *Receiver) UpdateRepos(repos map[string]bool) {
+	list := SortedRepoList(repos)
+	t.mu.Lock()
+	t.managedRepos = list
+	t.mu.Unlock()
+}
+
+// ManagedRepos is a sorted snapshot of the managed-repo set.
+func (t *Receiver) ManagedRepos() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.managedRepos...)
+}
+
+// CheckCoverage runs the installed coverage re-check.
+func (t *Receiver) CheckCoverage() {
+	t.mu.Lock()
+	fn := t.coverageFn
+	t.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// setInstallationCoverageNote records the installation-coverage result and
+// re-emits the current state, mirroring hookdeckManager.
+func (t *Receiver) SetInstallationCoverageNote(missing []string, truncated bool) {
+	var note string
+	if len(missing) > 0 {
+		note = fmt.Sprintf("installation missing: %d repo(s) (%s)", len(missing), strings.Join(missing, ", "))
+		if truncated {
+			note += " [unreliable: installation-repo listing was truncated by the pagination ceiling; some of these may actually be granted]"
+		}
+	}
+	t.mu.Lock()
+	changed := t.installNote != note
+	t.installNote = note
+	t.mu.Unlock()
+	if changed {
+		t.emitCurrentState()
+	}
+}
+
+// HealthRow is the fabrik_health transport row.
+func (t *Receiver) HealthRow() localapi.TransportHealth {
+	t.mu.Lock()
+	listening, last, nw := t.listening, t.lastDeliveryAt, t.network
+	var route *localapi.RouteLiveness
+	if t.route != nil {
+		cp := *t.route
+		route = &cp
+	}
+	var replay *localapi.ReplayHealth
+	if t.replay != nil {
+		cp := *t.replay
+		replay = &cp
+	}
+	t.mu.Unlock()
+	state := "not listening"
+	switch {
+	case t.sigDrift.Active():
+		state = "signature drift"
+	case nw.set && !nw.connected:
+		state = "tailnet disconnected"
+	case nw.set && !nw.reachable():
+		state = "funnel unavailable"
+	case listening && route != nil && route.Liveness == localapi.RouteUnreachable:
+		state = "listening (route unreachable)"
+	case listening:
+		state = "listening"
+	}
+	row := localapi.TransportHealth{
+		Name:               t.name,
+		State:              state,
+		LastDeliveryAt:     localapi.KnownTime(last),
+		RejectedSignatures: localapi.Some(t.rejectedSigs.Load()),
+		MalformedRequests:  localapi.Some(t.malformed.Load()),
+		OversizedRequests:  localapi.Some(t.oversized.Load()),
+
+		TLSHandshakeFailures: localapi.Some(t.tlsHandshakeFailures.Load()),
+		Replay:               replay,
+		Route:                route,
+	}
+	if nw.set {
+		row.Tailnet = localapi.Some(nw.tailnet)
+		row.Funnel = localapi.Some(nw.funnel)
+	}
+	return row
+}
+
+var _ ReplayStatusSink = (*Receiver)(nil)
+var _ RouteSink = (*Receiver)(nil)
+
+// SortedRepoList is a sorted list of the managed repos in set.
+func SortedRepoList(repos map[string]bool) []string {
+	list := make([]string, 0, len(repos))
+	for r := range repos {
+		list = append(list, r)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// ReconnectHandlerForTest returns the installed reconnect handler (nil if none),
+// so a consumer test can drive it without a tailnet.
+func (t *Receiver) ReconnectHandlerForTest() func() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reconnectFn
+}

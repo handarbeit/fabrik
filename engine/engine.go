@@ -12,6 +12,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
@@ -244,12 +245,12 @@ type Engine struct {
 	releaseClient                      GitHubClient                                    // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
 	hostClient                         *gh.Client                                      // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	appIdent                           *appIdentity                                    // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
-	replayAPIOverride                  hookDeliveryAPI                                 // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
+	replayAPIOverride                  appwebhook.HookDeliveryAPI                      // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
 	livenessWaitOverride               func(ctx context.Context, d time.Duration) bool // test seam: stands in for the route-liveness controller's sleep (#2452); set only by SetLivenessWaitForTest.
-	liveness                           *routeLiveness                                  // webhook route liveness controller (#2452, ADR 2452; direct and tailscale); nil without App auth and an intake.
+	liveness                           *appwebhook.Liveness                            // webhook route liveness controller (#2452, ADR 2452; direct and tailscale); nil without App auth and an intake.
 	replayWaitOverride                 func(ctx context.Context, d time.Duration) bool // test seam: stands in for the replayer's sleep (start grace, follow-up delay); set only by SetReplayWaitForTest.
-	replayBuilt                        func(*deliveryReplayer)                         // test seam: called with every replayer newDeliveryReplayer builds, so a test guard can await its goroutines (#2447); nil in production.
-	replayer                           *deliveryReplayer                               // App webhook receiver delivery replay (#2144, ADR 2144; direct and tailscale); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport / startTailscaleTransport before the transport can signal a reconnect.
+	replayBuilt                        func(*appwebhook.Replayer)                      // test seam: called with every replayer newDeliveryReplayer builds, so a test guard can await its goroutines (#2447); nil in production.
+	replayer                           *appwebhook.Replayer                            // App webhook receiver delivery replay (#2144, ADR 2144; direct and tailscale); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport / startTailscaleTransport before the transport can signal a reconnect.
 	ghAppAuth                          *githubauth.Reconciler                          // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
 	skillResolver                      *skillResolver                                  // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
 	readClient                         boardcache.ReadClient                           // read-only GitHub calls; may be CacheImpl or GitHubAdapter
@@ -496,7 +497,7 @@ type Engine struct {
 	pauseIssueMu                          map[string]*pauseIssueMuEntry             // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
 	baseBranchWarnedSet                   sync.Map                                  // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	ciGateCoverageWarnedSet               sync.Map                                  // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
-	hookCheckLog                          hookCheckLogState                         // throttle of the R7 webhook-config "could not read" log line (#2143); in memory
+	hookCheck                             appwebhook.HookChecker                    // throttle of the R7 webhook-config "could not read" log line (#2143); in memory
 	startFailures                         startFailureState                         // stage start failures (#2499): per-item consecutive-failure holds and the daemon-wide claude_start warning state; in memory by design — a restart begins again from the first failure
 	labels                                labelGuard                                // engine label intent, open reworks, divergence marks and the repair worker (#2551); in memory by design
 	labelRepairOff                        atomic.Bool                               // TEST-ONLY: neutralises the confirm-and-re-apply (#2551)
@@ -781,7 +782,7 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	if err := RefuseTailscaleMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg)),
-		os.Getenv(tailscaleAuthKeyEnvName(cfg)), tailnetStateExists(tailscaleStateDir(cfg, fabrikDir))); err != nil {
+		os.Getenv(tailscaleAuthKeyEnvName(cfg)), appwebhook.StateExists(tailscaleStateDir(cfg, fabrikDir))); err != nil {
 		return nil, err
 	}
 

@@ -1,4 +1,4 @@
-package engine
+package tsnetnode
 
 import (
 	"go/ast"
@@ -25,7 +25,7 @@ func TestTsnetFunnelListenerIsFunnelOnly(t *testing.T) {
 		t.Fatalf("tsnetFunnelOptions() = %#v; want it to include tsnet.FunnelOnly()", opts)
 	}
 
-	f, err := parser.ParseFile(token.NewFileSet(), "tailnet_tsnet.go", nil, 0)
+	f, err := parser.ParseFile(token.NewFileSet(), "node.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestTsnetFunnelListenerIsFunnelOnly(t *testing.T) {
 			return true
 		}
 		if recv, ok := sel.X.(*ast.SelectorExpr); !ok || recv.Sel.Name != "srv" {
-			return true // the tailnetNode method itself, not the tsnet call
+			return true // the appwebhook.Node method itself, not the tsnet call
 		}
 		calls++
 		if call.Ellipsis.IsValid() && len(call.Args) == 3 {
@@ -53,7 +53,7 @@ func TestTsnetFunnelListenerIsFunnelOnly(t *testing.T) {
 		return true
 	})
 	if calls == 0 {
-		t.Fatal("found no srv.ListenFunnel call in tailnet_tsnet.go")
+		t.Fatal("found no srv.ListenFunnel call in node.go")
 	}
 	if passing != calls {
 		t.Fatalf("%d of %d srv.ListenFunnel calls pass tsnetFunnelOptions()...; every call must", passing, calls)
