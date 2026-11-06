@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
@@ -1447,5 +1449,327 @@ func TestRunInit_PrintsPluginInstallHint(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "/plugin install fabrik@fabrik") {
 		t.Errorf("runInit output lacks the plugin install hint:\n%s", out)
+	}
+}
+
+// --- #2496: init names the required columns instead of claiming readiness ---
+
+// initInTempDir chdirs into a fresh directory with credentials cleared and
+// returns it. Tests using it are serial (os.Chdir).
+func initInTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint
+	for _, k := range []string{
+		"FABRIK_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "FABRIK_GITHUB_APP_ID",
+		"FABRIK_GITHUB_APP_INSTALLATION_ID", "FABRIK_GITHUB_APP_PRIVATE_KEY_PATH",
+		"FABRIK_HOOKDECK_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
+	return dir
+}
+
+func captureRunInit(t *testing.T, args ...string) string {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut := os.Stdout
+	os.Stdout = outW
+	runErr := runInit(args)
+	os.Stdout = oldOut
+	outW.Close()
+	out, _ := io.ReadAll(outR)
+	if runErr != nil {
+		t.Fatalf("runInit(%v): %v", args, runErr)
+	}
+	return string(out)
+}
+
+// printedColumns returns the column lines of init's output: the lines between
+// the "needs these columns:" header and the blank line after it.
+func printedColumns(t *testing.T, out string) []string {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	var cols []string
+	in := false
+	for _, l := range lines {
+		if strings.Contains(l, "needs these columns:") {
+			in = true
+			continue
+		}
+		if in {
+			if strings.TrimSpace(l) == "" {
+				break
+			}
+			cols = append(cols, l)
+		}
+	}
+	if len(cols) == 0 {
+		t.Fatalf("no column list in output:\n%s", out)
+	}
+	return cols
+}
+
+func writeInitStageFile(t *testing.T, dir string, s *stages.Stage) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "name: %s\norder: %d\n", s.Name, s.Order)
+	if s.CleanupWorktree {
+		b.WriteString("cleanup_worktree: true\n")
+	}
+	if s.HoldingStage {
+		b.WriteString("holding_stage: true\n")
+	}
+	if s.Unmanaged {
+		b.WriteString("unmanaged: true\n")
+	}
+	if !s.CleanupWorktree && !s.HoldingStage && !s.Unmanaged {
+		b.WriteString("prompt: do the work\n")
+	}
+	name := strings.ToLower(strings.ReplaceAll(s.Name, " ", "-")) + ".yaml"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunInit_DefaultPrintsColumnsInOrderWithoutReadyClaim(t *testing.T) {
+	initInTempDir(t)
+	out := captureRunInit(t)
+	cols := printedColumns(t, out)
+
+	loaded, err := stages.LoadAll(".fabrik/stages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := boardColumnNames(loaded); !reflect.DeepEqual(cols, want) {
+		t.Errorf("printed columns = %v, want %v", cols, want)
+	}
+	for _, name := range []string{"Queued", "Done"} {
+		found := false
+		for _, c := range cols {
+			found = found || c == name
+		}
+		if !found {
+			t.Errorf("column %q missing from %v", name, cols)
+		}
+	}
+	for _, c := range cols {
+		if c == "Backlog" {
+			t.Errorf("unmanaged Backlog must not be listed: %v", cols)
+		}
+	}
+	if strings.Contains(out, "Fabrik is ready") {
+		t.Errorf("output must not claim readiness:\n%s", out)
+	}
+	for _, want := range []string{"repair-board", "repair-board --apply", "init --create-board --owner <org>", "/plugin install fabrik@fabrik"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunInit_URLDoesNotSuggestCreateBoard(t *testing.T) {
+	initInTempDir(t)
+	out := captureRunInit(t, "https://github.com/orgs/acme/projects/7")
+	if strings.Contains(out, "Fabrik is ready") {
+		t.Errorf("claims readiness:\n%s", out)
+	}
+	if !strings.Contains(out, "repair-board") {
+		t.Errorf("lacks repair-board:\n%s", out)
+	}
+	if strings.Contains(out, "--create-board") {
+		t.Errorf("board already linked, must not suggest --create-board:\n%s", out)
+	}
+}
+
+func TestRunInit_UserOwnedURLSaysCreateByHand(t *testing.T) {
+	initInTempDir(t)
+	out := captureRunInit(t, "https://github.com/users/alice/projects/3")
+	if !strings.Contains(out, "by hand") {
+		t.Errorf("user-owned guidance should say create by hand:\n%s", out)
+	}
+	if strings.Contains(out, "--create-board") || strings.Contains(out, "repair-board --apply") {
+		t.Errorf("must not suggest commands refused for user-owned boards:\n%s", out)
+	}
+	if !strings.Contains(out, "repair-board") {
+		t.Errorf("lacks repair-board dry run:\n%s", out)
+	}
+}
+
+func TestRunInit_ExistingConfigWithProjectSuppressesCreateBoardHint(t *testing.T) {
+	dir := initInTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: acme\nproject: 9\nowner_type: organization\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureRunInit(t)
+	if strings.Contains(out, "--create-board") {
+		t.Errorf("project already configured, must not suggest --create-board:\n%s", out)
+	}
+}
+
+// AC2: a customised stage set changes the printed list. Stage files already on
+// disk are skipped by init, so this fails against any hardcoded list.
+func TestRunInit_CustomisedStageSetChangesList(t *testing.T) {
+	dir := initInTempDir(t)
+	stagesDir := filepath.Join(dir, ".fabrik", "stages")
+	if err := os.MkdirAll(stagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	custom := []*stages.Stage{
+		{Name: "Triage", Order: 0, Unmanaged: true},
+		{Name: "Design Review", Order: 1}, // renamed
+		{Name: "Build", Order: 2},         // added
+		{Name: "Finished", Order: 3, CleanupWorktree: true},
+	}
+	for _, s := range custom {
+		writeInitStageFile(t, stagesDir, s)
+	}
+	out := captureRunInit(t)
+	cols := printedColumns(t, out)
+
+	// init extracted the remaining embedded defaults too, so compare with what
+	// is on disk — and pin the customised names explicitly.
+	loaded, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := boardColumnNames(loaded); !reflect.DeepEqual(cols, want) {
+		t.Errorf("printed = %v, want %v", cols, want)
+	}
+	has := func(n string) bool {
+		for _, c := range cols {
+			if c == n {
+				return true
+			}
+		}
+		return false
+	}
+	for _, n := range []string{"Design Review", "Build", "Finished"} {
+		if !has(n) {
+			t.Errorf("custom column %q missing: %v", n, cols)
+		}
+	}
+	if has("Triage") {
+		t.Errorf("unmanaged Triage must not be listed: %v", cols)
+	}
+}
+
+// A removed stage: calling the guidance directly with a dir that lacks a stage
+// (runInit would re-extract a deleted default).
+func TestPrintBoardColumnGuidance_RenamedAddedRemoved(t *testing.T) {
+	dir := t.TempDir()
+	for _, s := range []*stages.Stage{
+		{Name: "Specify", Order: 1},
+		{Name: "Engineer", Order: 2}, // renamed from Implement
+		{Name: "Polish", Order: 3},   // added
+		{Name: "Done", Order: 5, CleanupWorktree: true},
+	} {
+		writeInitStageFile(t, dir, s)
+	}
+	var buf strings.Builder
+	if err := printBoardColumnGuidance(&buf, dir, boardGuidanceInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	got := printedColumns(t, buf.String())
+	want := []string{"Specify", "Engineer", "Polish", "Done"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("columns = %v, want %v", got, want)
+	}
+}
+
+func TestPrintBoardColumnGuidance_InvalidStageIsError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte("name: Bad\norder: 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	if err := printBoardColumnGuidance(&buf, dir, boardGuidanceInfo{}); err == nil {
+		t.Fatal("expected error for a stage with neither prompt nor skill")
+	}
+	if strings.Contains(buf.String(), "ready") {
+		t.Errorf("must not claim readiness on error: %q", buf.String())
+	}
+}
+
+// AC1: every column the real startup check demands is printed, driven from the
+// same fixture; the unmanaged stage is not printed.
+func TestInitColumnsCoverStartupCheck(t *testing.T) {
+	fixture := []*stages.Stage{
+		{Name: "Backlog", Order: 0, Unmanaged: true},
+		{Name: "Specify", Order: 1},
+		{Name: "Implement", Order: 2},
+		{Name: "Validate", Order: 3},
+		{Name: "Queued", Order: 4, HoldingStage: true},
+		{Name: "Done", Order: 5, CleanupWorktree: true},
+	}
+	dir := t.TempDir()
+	for _, s := range fixture {
+		writeInitStageFile(t, dir, s)
+	}
+	var buf strings.Builder
+	if err := printBoardColumnGuidance(&buf, dir, boardGuidanceInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	printed := map[string]bool{}
+	for _, c := range printedColumns(t, buf.String()) {
+		printed[c] = true
+	}
+	required, err := engine.StartupRequiredColumnsForTest(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(required) == 0 {
+		t.Fatal("startup check required nothing; test would be vacuous")
+	}
+	for _, name := range required {
+		if !printed[name] {
+			t.Errorf("startup check requires %q but init does not print it", name)
+		}
+	}
+	if printed["Backlog"] {
+		t.Error("unmanaged Backlog must not be printed")
+	}
+}
+
+// AC3: identical guidance with no credentials and with credentials present.
+func TestRunInit_GuidanceIndependentOfCredentials(t *testing.T) {
+	initInTempDir(t)
+	without := captureRunInit(t)
+
+	initInTempDir(t)
+	t.Setenv("FABRIK_TOKEN", "ghp_dummy")
+	t.Setenv("GITHUB_TOKEN", "ghp_dummy")
+	with := captureRunInit(t)
+	if with != without {
+		t.Errorf("output differs with credentials present:\n--- without ---\n%s\n--- with ---\n%s", without, with)
+	}
+}
+
+// AC4: the --create-board branch keeps the original closing lines verbatim.
+func TestRunInit_CreateBoardClosingLinesUnchanged(t *testing.T) {
+	src, err := os.ReadFile("init.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\tif *createBoard {\n" +
+		"\t\tfmt.Println(\"\\nFabrik is ready. Stage configs and plugin skills are in .fabrik/\")\n" +
+		"\t\tfmt.Println(\"Edit .fabrik/config.yaml with your project settings, then run fabrik.\")\n" +
+		"\t\tfmt.Print(pluginInstallHint())\n" +
+		"\t\treturn nil\n\t}\n"
+	if !strings.Contains(string(src), want) {
+		t.Errorf("--create-board closing lines changed; expected block:\n%s", want)
 	}
 }
