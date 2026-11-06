@@ -94,9 +94,10 @@ func classifyRateLimitErr(err error) bool {
 		return false
 	}
 	m := strings.ToLower(err.Error())
-	return strings.Contains(m, "rate limit exceeded") ||
-		strings.Contains(m, "rate_limited") ||
-		strings.Contains(m, "secondary rate limit")
+	// GitHub words it "API rate limit exceeded" and "API rate limit already
+	// exceeded"; the GraphQL error code is RATE_LIMITED.
+	return (strings.Contains(m, "rate limit") && strings.Contains(m, "exceeded")) ||
+		strings.Contains(m, "rate_limited")
 }
 
 // readReviewerBudget reads the reviewer account's REST core and GraphQL budgets,
