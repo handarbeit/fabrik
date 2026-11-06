@@ -464,6 +464,10 @@ process**, serialized only where they share a GitHub identity.
     token budget exhausted…)`, starts nothing new and does **not** mark the engine identity exhausted.
     A running leg is never touched. In multi-bed the hold happens after the cell's engine/harness
     identities are acquired (the scheduler does no I/O under its lock); it is bounded and logged.
+    **An exhausted GraphQL bucket is never held:** the inline `rateLimit` query of an exhausted bucket
+    is refused with a rate-limit error that carries no reset time, so the reset is unknown and the cell
+    is declined at once (exit 3). Only an exhausted REST `core` bucket, whose reset
+    `GET /rate_limit` reports, can be held. `--resume` picks the cell up after the (hourly) reset.
   * **Budget lines (R3).** `== reviewer budget (leg: L, start|end): <login> — core N/L resets T;
     graphql N/L resets T ==`, per bed, beside the identity lines.
   * **Competing consumers (R4).** `E2E_SKIP_TOKEN_CHECK` also skips this. Local `fabrik` processes
