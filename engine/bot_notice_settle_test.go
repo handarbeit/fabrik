@@ -16,8 +16,10 @@ func TestSettleBotServiceNotices_WatermarksQuotaNotice(t *testing.T) {
 		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.stageByName("Research").FeedbackBots = []string{"gemini-code-assist"} // opted in (#2552)
 	item := gh.ProjectItem{
 		Number: 30,
+		Status: "Research",
 		Comments: []gh.Comment{
 			{ID: "C_quota", DatabaseID: 601, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
 		},
@@ -48,8 +50,10 @@ func TestSettleBotServiceNotices_AlreadyProcessed_NoOp(t *testing.T) {
 		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.stageByName("Research").FeedbackBots = []string{"gemini-code-assist"} // opted in (#2552)
 	item := gh.ProjectItem{
 		Number: 31,
+		Status: "Research",
 		Comments: []gh.Comment{
 			{ID: "C_quota", DatabaseID: 602, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
 		},
@@ -122,5 +126,29 @@ func TestSettleBotServiceNotices_ReactionFailure_LeavesUnwatermarked(t *testing.
 	snap, _ := eng.store.Get("owner/repo", 33)
 	if !snap.CommentProcessed("C_quota").IsZero() {
 		t.Error("expected C_quota to remain unprocessed after a failed reaction call, so it retries next poll")
+	}
+}
+
+// A notice from a bot that is not opted in is derived state (#2552, R5): the
+// settle scan writes no reaction and no processed marker for it.
+func TestSettleBotServiceNotices_UndeclaredBot_WritesNothing(t *testing.T) {
+	client := &mockGitHubClient{
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 32,
+		Status: "Research",
+		Comments: []gh.Comment{
+			{ID: "C_quota", DatabaseID: 603, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+		},
+	}
+	eng.settleBotServiceNotices(&gh.ProjectBoard{Items: []gh.ProjectItem{item}})
+
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Fatalf("expected no reaction on an undeclared bot's comment, got %v", client.addCommentReactionCalls)
+	}
+	if snap, ok := eng.store.Peek("owner/repo", 32); ok && !snap.CommentProcessed("C_quota").IsZero() {
+		t.Error("an undeclared bot's comment must not be recorded as processed")
 	}
 }

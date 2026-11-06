@@ -103,9 +103,11 @@ func TestWriteContextFiles_PostToPR_NoPR_SkipsPRDescription(t *testing.T) {
 func TestMarkCommentsSeenByStage_SkipsPendingComments(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.stageByName("Research").FeedbackBots = []string{"coderabbitai"} // C_4's bot is opted in (#2552)
 
 	item := gh.ProjectItem{
 		Number: 30,
+		Status: "Research",
 		Comments: []gh.Comment{
 			// Pending user comment — must stay unprocessed (#2220): the stage ran
 			// first and the comment pass follows.
@@ -282,5 +284,27 @@ func TestUpdateWorktreeFromMain_RemovesContextDir(t *testing.T) {
 	// After the call, .fabrik-context/ must not exist on disk.
 	if _, err := os.Stat(filepath.Join(wtDir, ".fabrik-context")); !os.IsNotExist(err) {
 		t.Error(".fabrik-context/ should have been removed by updateWorktreeFromMain")
+	}
+}
+
+// A pre-stage comment from a bot that is not opted in is derived state (#2552,
+// R5): markCommentsSeenByStage leaves it alone — no reaction, no marker.
+func TestMarkCommentsSeenByStage_UndeclaredBotLeftAlone(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 31,
+		Status: "Research",
+		Comments: []gh.Comment{
+			{ID: "C_bot", DatabaseID: 701, Author: "vercel[bot]", Body: "Deployment ready"},
+			{ID: "C_done", DatabaseID: 702, Author: "alice", Body: "seen", Reactions: []gh.ReactionGroup{{Content: "ROCKET", Count: 1}}},
+		},
+	}
+	eng.markCommentsSeenByStage(item, item.Comments)
+	if len(client.addCommentReactionCalls) != 0 {
+		t.Fatalf("expected no reactions, got %v", client.addCommentReactionCalls)
+	}
+	if snap, ok := eng.store.Peek("owner/repo", 31); ok && !snap.CommentProcessed("C_bot").IsZero() {
+		t.Error("an undeclared bot's comment must not be recorded as processed")
 	}
 }

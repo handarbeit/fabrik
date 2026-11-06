@@ -572,6 +572,11 @@ type TransportHealth struct {
 	RejectedSignatures Known[int64]     `json:"rejected_signatures"`
 	MalformedRequests  Known[int64]     `json:"malformed_requests"`
 	OversizedRequests  Known[int64]     `json:"oversized_requests"`
+	// TLSHandshakeFailures counts TLS handshakes the App receiver's HTTP server
+	// saw fail (internet probes of a public TLS route; #2549, ADR 2549). It is
+	// background noise: it feeds no state, warning or route verdict. Unknown for
+	// transports that cannot report it.
+	TLSHandshakeFailures Known[int64] `json:"tls_handshake_failures"`
 	// Replay reports the last webhook-delivery replay pass (#2144, ADR 2144).
 	// Nil (omitted) when replay does not apply to the transport; present with
 	// unknown values before the first pass has completed.

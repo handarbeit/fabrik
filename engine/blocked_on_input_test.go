@@ -342,6 +342,8 @@ func TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock(t *
 		},
 		client, claude, wm,
 	)
+	// The batch's bot is opted in (#2552); an undeclared bot is not feedback.
+	eng.stageByName("Research").FeedbackBots = []string{"gemini-code-assist"}
 
 	var gotIDs []string
 	claude.invokeForCommentsFn = func(_ *stages.Stage, _ gh.ProjectItem, comments []gh.Comment, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {
@@ -647,6 +649,8 @@ func TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause(t *testing
 		},
 		client, claude, wm,
 	)
+	// The batch's bot is opted in (#2552); an undeclared bot is not feedback.
+	eng.stageByName("Research").FeedbackBots = []string{"gemini-code-assist"}
 
 	var gotIDs []string
 	claude.invokeForCommentsFn = func(_ *stages.Stage, _ gh.ProjectItem, comments []gh.Comment, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {

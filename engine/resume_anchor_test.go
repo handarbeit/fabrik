@@ -71,16 +71,25 @@ func TestResumeAuthorised(t *testing.T) {
 	})
 	t.Run("post-pause human comment resumes and returns full raw set (R5)", func(t *testing.T) {
 		eng := testEngine(t, anchoredClient(anchorPausedAt), &mockClaudeInvoker{})
-		ok, raw, refused := eng.resumeAuthorised(gh.ProjectItem{Number: 1, Comments: []gh.Comment{oldHuman, newBot, newHuman}})
+		eng.stageByName("Research").FeedbackBots = []string{"some-bot"} // opted in (#2552)
+		ok, raw, refused := eng.resumeAuthorised(gh.ProjectItem{Number: 1, Status: "Research", Comments: []gh.Comment{oldHuman, newBot, newHuman}})
 		if !ok || refused != 0 || len(raw) != 3 {
 			t.Errorf("got ok=%v refused=%d raw=%d, want true/0/3", ok, refused, len(raw))
 		}
 	})
 	t.Run("bot-only chatter refused without refused count", func(t *testing.T) {
 		eng := testEngine(t, anchoredClient(anchorPausedAt), &mockClaudeInvoker{})
-		ok, raw, refused := eng.resumeAuthorised(gh.ProjectItem{Number: 1, Comments: []gh.Comment{newBot}})
+		eng.stageByName("Research").FeedbackBots = []string{"some-bot"} // opted in (#2552)
+		ok, raw, refused := eng.resumeAuthorised(gh.ProjectItem{Number: 1, Status: "Research", Comments: []gh.Comment{newBot}})
 		if ok || refused != 0 || len(raw) != 1 {
 			t.Errorf("got ok=%v refused=%d raw=%d, want false/0/1", ok, refused, len(raw))
+		}
+	})
+	t.Run("undeclared bot chatter is not even in the raw set (#2552)", func(t *testing.T) {
+		eng := testEngine(t, anchoredClient(anchorPausedAt), &mockClaudeInvoker{})
+		ok, raw, refused := eng.resumeAuthorised(gh.ProjectItem{Number: 1, Status: "Research", Comments: []gh.Comment{newBot}})
+		if ok || refused != 0 || len(raw) != 0 {
+			t.Errorf("got ok=%v refused=%d raw=%d, want false/0/0", ok, refused, len(raw))
 		}
 	})
 	t.Run("anchor fetch error resumes (R6)", func(t *testing.T) {

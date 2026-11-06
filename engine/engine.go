@@ -405,6 +405,7 @@ type Engine struct {
 	dispatchRereadOff         atomic.Bool            // test seam: SetDispatchRereadDisabledForTest (#2350)
 	reviewStandingOff         atomic.Bool            // test seam: SetReviewStandingDisabledForTest (#2465)
 	cleanReviewSkipOff        atomic.Bool            // test seam: SetCleanReviewSkipDisabledForTest (#2489)
+	botCommentRuleOff         atomic.Bool            // test seam: SetBotCommentRuleDisabledForTest (#2552)
 	holdingReviewCtxOff       atomic.Bool            // test seam: SetHoldingStageReviewContextDisabledForTest (#2525)
 	declinedReviewPauseOff    atomic.Bool            // test seam: SetDeclinedReviewPauseDisabledForTest (#2466)
 	liveOverlayOff            atomic.Bool            // test seam: SetLiveOverlayDisabledForTest (#2350)

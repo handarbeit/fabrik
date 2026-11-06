@@ -989,6 +989,38 @@ func (s *Sim) SeedComment(ownerRepo string, issueNumber int, author, body string
 	return s
 }
 
+// SeedPRComment adds a conversation comment, written by an arbitrary author, to
+// a pull request (#2552). SeedComment targets issues only and AddComment always
+// writes as the sim's own actor; this is how a scenario models a third-party
+// bot such as vercel[bot] commenting on a PR. The comment is tagged as coming
+// from the PR, as the engine's board query tags it.
+func (s *Sim) SeedPRComment(ownerRepo string, prNumber int, author, body string) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		s.fail("simgh: PR %s#%d not found", ownerRepo, prNumber)
+		return s
+	}
+	id := s.nextCommentDatabaseID
+	s.nextCommentDatabaseID++
+	now := s.now()
+	pr.comments = append(pr.comments, &commentRecord{
+		databaseID: id,
+		author:     author,
+		body:       body,
+		createdAt:  now,
+		reactions:  make(map[string]int),
+		fromPR:     prNumber,
+	})
+	pr.updatedAt = now
+	return s
+}
+
 // SeedBlockedBy records that an issue is blocked by another. The blocker's
 // state is resolved live on read, so closing the blocker unblocks the issue
 // the way GitHub's dependency graph does.
