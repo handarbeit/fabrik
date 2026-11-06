@@ -1,4 +1,4 @@
-package hookdeck
+package events
 
 import (
 	"testing"
@@ -15,9 +15,9 @@ func TestNormalizeEvent_PullRequestOpened(t *testing.T) {
 	}`)
 	at := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
 
-	ev, err := normalizeEvent(body, "pull_request", "delivery-1", at)
+	ev, err := NormalizeWebhook(body, "pull_request", "delivery-1", at)
 	if err != nil {
-		t.Fatalf("normalizeEvent: %v", err)
+		t.Fatalf("NormalizeWebhook: %v", err)
 	}
 	if ev.DeliveryID != "delivery-1" {
 		t.Errorf("DeliveryID = %q, want 'delivery-1'", ev.DeliveryID)
@@ -47,9 +47,9 @@ func TestNormalizeEvent_PullRequestOpened(t *testing.T) {
 
 func TestNormalizeEvent_PullRequestSynchronize(t *testing.T) {
 	body := []byte(`{"action":"synchronize","pull_request":{"number":7},"repository":{"name":"fabrik","owner":{"login":"handarbeit"}}}`)
-	ev, err := normalizeEvent(body, "pull_request", "delivery-2", time.Now())
+	ev, err := NormalizeWebhook(body, "pull_request", "delivery-2", time.Now())
 	if err != nil {
-		t.Fatalf("normalizeEvent: %v", err)
+		t.Fatalf("NormalizeWebhook: %v", err)
 	}
 	if ev.Action != "synchronize" || ev.ResourceID != "7" {
 		t.Errorf("got Action=%q ResourceID=%q, want synchronize/7", ev.Action, ev.ResourceID)
@@ -58,9 +58,9 @@ func TestNormalizeEvent_PullRequestSynchronize(t *testing.T) {
 
 func TestNormalizeEvent_PullRequestReadyForReview(t *testing.T) {
 	body := []byte(`{"action":"ready_for_review","pull_request":{"number":9},"repository":{"name":"fabrik","owner":{"login":"handarbeit"}}}`)
-	ev, err := normalizeEvent(body, "pull_request", "delivery-3", time.Now())
+	ev, err := NormalizeWebhook(body, "pull_request", "delivery-3", time.Now())
 	if err != nil {
-		t.Fatalf("normalizeEvent: %v", err)
+		t.Fatalf("NormalizeWebhook: %v", err)
 	}
 	if ev.Action != "ready_for_review" || ev.ResourceID != "9" {
 		t.Errorf("got Action=%q ResourceID=%q, want ready_for_review/9", ev.Action, ev.ResourceID)
@@ -71,9 +71,9 @@ func TestNormalizeEvent_InstallationRepositoriesChange(t *testing.T) {
 	// installation_repositories events have no top-level "repository" or
 	// "pull_request" field — only installation + action.
 	body := []byte(`{"action":"added","installation":{"id":555}}`)
-	ev, err := normalizeEvent(body, "installation_repositories", "delivery-4", time.Now())
+	ev, err := NormalizeWebhook(body, "installation_repositories", "delivery-4", time.Now())
 	if err != nil {
-		t.Fatalf("normalizeEvent: %v", err)
+		t.Fatalf("NormalizeWebhook: %v", err)
 	}
 	if ev.EventType != "installation_repositories" || ev.Action != "added" {
 		t.Errorf("got EventType=%q Action=%q, want installation_repositories/added", ev.EventType, ev.Action)
@@ -87,7 +87,7 @@ func TestNormalizeEvent_InstallationRepositoriesChange(t *testing.T) {
 }
 
 func TestNormalizeEvent_MalformedBody(t *testing.T) {
-	_, err := normalizeEvent([]byte(`not json`), "pull_request", "delivery-5", time.Now())
+	_, err := NormalizeWebhook([]byte(`not json`), "pull_request", "delivery-5", time.Now())
 	if err == nil {
 		t.Fatal("expected an error for malformed JSON")
 	}
@@ -97,9 +97,9 @@ func TestNormalizeEvent_UnrecognizedEventType(t *testing.T) {
 	// An event type Pruefer doesn't act on (e.g. "star") should still
 	// normalize without error — the sink decides what to do with it.
 	body := []byte(`{"action":"created"}`)
-	ev, err := normalizeEvent(body, "star", "delivery-6", time.Now())
+	ev, err := NormalizeWebhook(body, "star", "delivery-6", time.Now())
 	if err != nil {
-		t.Fatalf("normalizeEvent: %v", err)
+		t.Fatalf("NormalizeWebhook: %v", err)
 	}
 	if ev.EventType != "star" {
 		t.Errorf("EventType = %q, want 'star'", ev.EventType)

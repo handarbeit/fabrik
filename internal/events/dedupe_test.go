@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDedupe_FreshIDNotSeen(t *testing.T) {
@@ -83,4 +84,56 @@ func TestDedupe_ConcurrentUseIsRaceFree(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestDedupe_SeenDoesNotRecord(t *testing.T) {
+	d := NewDedupe(4)
+	if d.Seen("a") {
+		t.Fatal("Seen on empty ring = true")
+	}
+	if d.SeenBefore("a") {
+		t.Fatal("Seen recorded the id: SeenBefore reported a duplicate")
+	}
+	if !d.Seen("a") {
+		t.Fatal("Seen after SeenBefore = false")
+	}
+	if d.Seen("") {
+		t.Fatal("empty id must never be seen")
+	}
+}
+
+func TestDedupe_NewestAndReceivedAt(t *testing.T) {
+	d := NewDedupe(2)
+	base := time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)
+	cur := base
+	d.SetClockForTest(func() time.Time { return cur })
+	if !d.Newest().IsZero() {
+		t.Fatal("Newest on empty ring must be zero")
+	}
+	d.SeenBefore("a")
+	cur = base.Add(time.Minute)
+	d.SeenBefore("b")
+	if got := d.Newest(); !got.Equal(base.Add(time.Minute)) {
+		t.Errorf("Newest = %v", got)
+	}
+	if got, ok := d.ReceivedAt("a", cur); !ok || !got.Equal(base) {
+		t.Errorf("ReceivedAt(a) = %v,%v", got, ok)
+	}
+	// A repeat lookup does not move the record time.
+	d.SeenBefore("a")
+	if got, _ := d.ReceivedAt("a", cur); !got.Equal(base) {
+		t.Errorf("repeat SeenBefore moved ReceivedAt to %v", got)
+	}
+	// Eviction keeps map and ring consistent.
+	cur = base.Add(2 * time.Minute)
+	d.SeenBefore("c") // evicts a
+	if _, ok := d.ReceivedAt("a", cur); ok {
+		t.Error("evicted id still has a ReceivedAt")
+	}
+	if got := d.Newest(); !got.Equal(cur) {
+		t.Errorf("Newest after eviction = %v", got)
+	}
+	if _, ok := d.ReceivedAt("", cur); ok {
+		t.Error("empty id has a ReceivedAt")
+	}
 }

@@ -1282,6 +1282,18 @@ func (r *Reconciler) RedeliverAppHookDelivery(deliveryID int64) error {
 	return gh.RedeliverAppHookDelivery(baseURL, jwt, deliveryID)
 }
 
+// FetchAppHookConfig reads the App's webhook configuration (GET
+// /app/hook/config, #2476) with a freshly minted App JWT. The webhook secret
+// GitHub returns alongside is never decoded. Pruefer's tailscale transport uses
+// it to compare the hook's URL and content type with the node's Funnel URL.
+func (r *Reconciler) FetchAppHookConfig(ctx context.Context) (gh.AppHookConfig, error) {
+	jwt, baseURL, err := r.appHookJWT()
+	if err != nil {
+		return gh.AppHookConfig{}, err
+	}
+	return gh.FetchAppHookConfigContext(ctx, baseURL, jwt)
+}
+
 // FetchAppHookDelivery reads one delivery of the App's delivery log with its
 // target URL (GET /app/hook/deliveries/{id}, #2452).
 func (r *Reconciler) FetchAppHookDelivery(deliveryID int64) (gh.AppHookDeliveryDetail, error) {

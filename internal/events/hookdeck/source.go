@@ -562,7 +562,7 @@ func (s *Source) processAttempt(ctx context.Context, sink events.EventSink, atte
 
 	deliveryID := lookupHeader(headers, "X-GitHub-Delivery")
 	eventType := lookupHeader(headers, "X-GitHub-Event")
-	ev, err := normalizeEvent([]byte(attempt.Request.DataString), eventType, deliveryID, time.Now())
+	ev, err := events.NormalizeWebhook([]byte(attempt.Request.DataString), eventType, deliveryID, time.Now())
 	if err != nil {
 		if time.Since(s.lastNormWarnAt) >= sigFailureLogInterval {
 			s.lastNormWarnAt = time.Now()

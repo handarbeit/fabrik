@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,12 @@ type FooterComponent struct {
 	// count back to zero.
 	unrecognizedAccounts []string
 	unrecognizedCount    int
+
+	// transport is the most recent TransportEvent (#2476); nil until an
+	// App-webhook event source reports. transportWarnings holds the active
+	// TransportWarningEvent conditions by key.
+	transport         *TransportEvent
+	transportWarnings map[string]string
 }
 
 // Drop-reason category strings mirroring events.DropReason's constants
@@ -78,6 +85,18 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		f.skipCounts[ev.Reason] = ev.Total // cumulative: overwrite, never add
 	case SignatureDriftEvent:
 		f.sigDriftActive = ev.Active
+	case TransportEvent:
+		t := ev
+		f.transport = &t
+	case TransportWarningEvent:
+		if ev.Active {
+			if f.transportWarnings == nil {
+				f.transportWarnings = make(map[string]string)
+			}
+			f.transportWarnings[ev.Key] = ev.Title
+		} else {
+			delete(f.transportWarnings, ev.Key)
+		}
 	case ClaudeAccountEvent:
 		f.info.ClaudeAccount = ev.Account
 	case UnrecognizedInstallationsEvent:
@@ -165,6 +184,80 @@ func (f FooterComponent) unrecognizedInstallationsBannerSegment() string {
 	return failStyle.Bold(true).Render(plain)
 }
 
+// transportSegment renders the event source's health (#2476): "tailscale:
+// listening · tailnet Running · funnel ok · last 2m ago · route reachable".
+// Parts that are unknown or not applicable are omitted, except the last
+// delivery, which reads "never" so a source that has not yet delivered anything
+// is distinguishable from one that does not report it. "" until an App-webhook
+// source has reported. Coloured by state: success when listening with no
+// unreachable route, dim while unknown, failure otherwise.
+func (f FooterComponent) transportSegment() string {
+	t := f.transport
+	if t == nil {
+		return ""
+	}
+	parts := []string{t.Name + ": " + t.State}
+	if t.Tailnet != "" {
+		parts = append(parts, "tailnet "+t.Tailnet)
+	}
+	if t.Funnel != "" {
+		parts = append(parts, "funnel "+t.Funnel)
+	}
+	if t.LastDelivery.IsZero() {
+		parts = append(parts, "last never")
+	} else {
+		parts = append(parts, "last "+fmtAgo(f.now, t.LastDelivery))
+	}
+	if t.Route != "" {
+		parts = append(parts, "route "+t.Route)
+	}
+	plain := strings.Join(parts, " · ")
+	switch {
+	case t.State != "listening" || t.Route == "unreachable":
+		return failStyle.Render(plain)
+	case t.Route == "unknown":
+		return dimStyle.Render(plain)
+	default:
+		return successStyle.Render(plain)
+	}
+}
+
+// fmtAgo renders how long before now at happened ("12s ago", "3m ago", "2h
+// ago"); with no clock yet (now zero) or a future instant it reads "just now".
+func fmtAgo(now, at time.Time) string {
+	if now.IsZero() || !at.Before(now) {
+		return "just now"
+	}
+	d := now.Sub(at)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+}
+
+// transportWarningBannerSegment renders a high-contrast banner for the active
+// event-source conditions: the first by key, with "(+N)" when more are active.
+// "" when there are none.
+func (f FooterComponent) transportWarningBannerSegment() string {
+	if len(f.transportWarnings) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(f.transportWarnings))
+	for k := range f.transportWarnings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	plain := "⚠ " + f.transportWarnings[keys[0]]
+	if len(keys) > 1 {
+		plain += fmt.Sprintf(" (+%d)", len(keys)-1)
+	}
+	return failStyle.Bold(true).Render(plain)
+}
+
 func (f FooterComponent) View(width int) string {
 	var leftParts []string
 	for _, p := range []string{f.info.CWD, f.info.Identity} {
@@ -178,8 +271,14 @@ func (f FooterComponent) View(width int) string {
 	if drift := f.driftBannerSegment(); drift != "" {
 		rightParts = append(rightParts, drift)
 	}
+	if tw := f.transportWarningBannerSegment(); tw != "" {
+		rightParts = append(rightParts, tw)
+	}
 	if unrecognized := f.unrecognizedInstallationsBannerSegment(); unrecognized != "" {
 		rightParts = append(rightParts, unrecognized)
+	}
+	if transport := f.transportSegment(); transport != "" {
+		rightParts = append(rightParts, transport)
 	}
 	if breakdown := f.dropBreakdownSegment(); breakdown != "" {
 		rightParts = append(rightParts, breakdown)
@@ -249,6 +348,17 @@ func (f FooterComponent) Height() int {
 // none has been recorded.
 func (f FooterComponent) DropCount(reason string) int {
 	return f.dropCounts[reason]
+}
+
+// TransportWarningCount reports how many event-source conditions are active.
+func (f FooterComponent) TransportWarningCount() int { return len(f.transportWarnings) }
+
+// Transport returns the most recent TransportEvent and whether one was received.
+func (f FooterComponent) Transport() (TransportEvent, bool) {
+	if f.transport == nil {
+		return TransportEvent{}, false
+	}
+	return *f.transport, true
 }
 
 // SignatureDriftActive reports whether the footer's signature-drift banner

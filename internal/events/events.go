@@ -132,6 +132,11 @@ const (
 	// open — e.g. a stale/delayed delivery arriving after the PR closed or
 	// merged.
 	DropPRNotOpen DropReason = "pr_not_open"
+	// DropForeignInstallation means a validly signed App webhook delivery
+	// carried an installation.id that is not one this daemon serves (#2476) —
+	// the backstop for a misconfigured shared App. Counted in the footer's
+	// "other" bucket.
+	DropForeignInstallation DropReason = "foreign_installation"
 )
 
 // EventSink receives normalized events from an EventSource. Handle must not
