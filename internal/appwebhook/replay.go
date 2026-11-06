@@ -13,8 +13,9 @@ import (
 )
 
 // LedgerWindow is how long the consumer's delivery ledger remembers a delivery
-// (the engine's LedgerWindow; a copy, as the ledger itself stays with
-// the consumer). Replay never looks back further than GitHub's log retention
+// (a copy of the engine's deliveryLedgerWindow, as the ledger itself stays with
+// the consumer; engine.TestAppWebhookSharedConstantsMatchEngine pins the two
+// values together). Replay never looks back further than GitHub's log retention
 // and the ledger's window.
 const LedgerWindow = 24 * time.Hour
 
