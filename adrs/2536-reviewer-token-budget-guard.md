@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (issue #2536). Builds on ADR 1684 (competing consumers), 1676 (bounded probes), 1972 (missing, not failed), 1976/2263 (identity scheduling).
+Accepted (issue #2536). Builds on issue #1684 (competing consumers), 1676 (bounded probes), 1972 (missing, not failed), 1976/2263 (identity scheduling).
 
 ## Context
 
@@ -17,7 +17,7 @@ On the 0.0.91 gate, `FABRIK_REVIEWER_TOKEN`'s REST `core` budget was 0/5000 when
 5. **Cell start check in `Gate.runLeg`**, shared by both schedulers, before `RunLeg` notes an invocation, restarts the bed or records anything. Hold when the reset is inside `E2E_REVIEWER_HOLD_MAX` (default 10 min), otherwise decline. A missing or past reset is not recovering. Applies to every cell (no registry field says which tests use the reviewer; over-guarding is the safe failure).
 6. **Decline reuses exit 3 through a distinct type**, `*ReviewerBudgetError` wrapping `ExitError`. It is the existing "budget exhausted" outcome, but `multiSched.finish` matches it first so the engine identity is not marked exhausted; it stops new cells and records the cell as not started. Nothing ran, so nothing is voided and pairs stay missing for `--resume`.
 7. **Multi-bed hold happens after identity acquisition**: the scheduler does no I/O under its lock. The hold is bounded and logged, and delays only cells wanting the same engine identity.
-8. **Competing consumers use the same `.env` proxy as ADR 1684**: local `fabrik` processes (not any bed's engine) whose cwd `.env` has the reviewer token. No pat-leg downgrade. Live process environments are platform-dependent (SIP) and processes elsewhere are invisible; the budget checks cover them.
+8. **Competing consumers use the same `.env` proxy as issue #1684**: local `fabrik` processes (not any bed's engine) whose cwd `.env` has the reviewer token. No pat-leg downgrade. Live process environments are platform-dependent (SIP) and processes elsewhere are invisible; the budget checks cover them.
 9. **Thresholds are absolute counts**, defaults 500 REST core and 100 GraphQL, `0` disables a bucket. They are provisional; the new per-leg reviewer lines are the data to tune from.
 10. **Unreadable means unavailable**: every read goes through the bounded `gh` path; a failure warns and never blocks. Error text is redacted of the token.
 
