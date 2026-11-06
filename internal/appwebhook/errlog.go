@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"io"
@@ -12,10 +12,10 @@ import (
 // A receiver behind a public TLS route (the tailscale Funnel) is probed
 // continuously by scanners that abort the handshake. net/http reports each one
 // through http.Server.ErrorLog, which falls back to the std logger and so to the
-// process's stderr when nil — drawing over the TUI and never reaching the engine
-// log. The server therefore gets an ErrorLog backed by serverErrorWriter: a TLS
-// handshake failure is only counted (and summarised once per interval); every
-// other server error is forwarded to the engine log.
+// process's stderr when nil — drawing over the consumer's TUI and never reaching
+// its log. The server therefore gets an ErrorLog backed by serverErrorWriter: a
+// TLS handshake failure is only counted (and summarised once per interval);
+// every other server error is forwarded to the consumer's LogFunc.
 
 // handshakeLinePrefix is the exact prefix net/http gives a failed TLS handshake
 // (net/http/server.go: "http: TLS handshake error from %s: %v"). Only this form
@@ -23,12 +23,12 @@ import (
 const handshakeLinePrefix = "http: TLS handshake error from "
 
 // handshakeSummaryInterval is how often the pending handshake-failure count is
-// summarised in the engine log. Fixed: operators who need the exact rate read
+// summarised in the consumer's log. Fixed: operators who need the exact rate read
 // the tls_handshake_failures counter.
 const handshakeSummaryInterval = time.Minute
 
 // serverErrorWriter is the io.Writer behind the receiver's http.Server.ErrorLog.
-type serverErrorWriter struct{ t *appWebhookTransport }
+type serverErrorWriter struct{ t *Receiver }
 
 // Write classifies one log record (log.Logger calls Write once per Printf).
 // It never writes to stderr and never fails.
@@ -49,7 +49,7 @@ func (w serverErrorWriter) Write(p []byte) (int, error) {
 var _ io.Writer = serverErrorWriter{}
 
 // errorLog builds the server's ErrorLog, or nil when the test seam disables it.
-func (t *appWebhookTransport) errorLog() *log.Logger {
+func (t *Receiver) errorLog() *log.Logger {
 	if t.errorLogDisabled {
 		return nil
 	}
@@ -58,19 +58,19 @@ func (t *appWebhookTransport) errorLog() *log.Logger {
 
 // SetErrorLogDisabledForTest skips the ErrorLog assignment in Start (the
 // non-vacuity seam: with it on, net/http falls back to the std logger).
-func (t *appWebhookTransport) SetErrorLogDisabledForTest(disabled bool) {
+func (t *Receiver) SetErrorLogDisabledForTest(disabled bool) {
 	t.errorLogDisabled = disabled
 }
 
 // SetHandshakeSummaryIntervalForTest overrides the summary interval; call it
 // before Start.
-func (t *appWebhookTransport) SetHandshakeSummaryIntervalForTest(d time.Duration) {
+func (t *Receiver) SetHandshakeSummaryIntervalForTest(d time.Duration) {
 	t.summaryInterval = d
 }
 
 // runHandshakeSummary logs one line per interval that saw handshake failures,
 // and flushes a pending count once when done closes.
-func (t *appWebhookTransport) runHandshakeSummary(done <-chan struct{}, interval time.Duration) {
+func (t *Receiver) runHandshakeSummary(done <-chan struct{}, interval time.Duration) {
 	defer t.wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

@@ -813,6 +813,10 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 13. **One of the following for R5 (joint-clear verification)**:
     - **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — a GitHub PAT for a
       non-`@arbeithand` account with write access to `fabrik-test-alpha`. The
+      gate checks this account's rate-limit budget before spending (#2536): it
+      refuses the run, and holds or skips a cell, when REST `core` or GraphQL
+      is below `E2E_REVIEWER_MIN_CORE` (500) / `E2E_REVIEWER_MIN_GRAPHQL` (100);
+      keep other sessions off the account while a gate runs. The
       test uses this token to submit an approving PR review from a second
       identity (GitHub forbids self-approval). This exercises the full
       approval-path joint-clear (R5). Combined with the launch-injected review
@@ -1614,7 +1618,12 @@ before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
   (already budgeted into the ~4,000/5,000 estimate). **Refuses by default**
   on a match, naming the offending PID(s) and directory/directories: a silent
   proceed-into-backoff is strictly worse than one operator round-trip.
-  Escape hatch: `E2E_SKIP_TOKEN_CHECK=1`.
+  Escape hatch: `E2E_SKIP_TOKEN_CHECK=1`. The same check (#2536) also
+  refuses a local `fabrik` process whose `.env` carries the bed's
+  `FABRIK_REVIEWER_TOKEN`, and the gate guards that token's REST `core` and
+  GraphQL budget (preflight refusal, per-cell hold or skip, per-leg budget
+  lines; `E2E_REVIEWER_MIN_CORE`/`E2E_REVIEWER_MIN_GRAPHQL`/
+  `E2E_REVIEWER_HOLD_MAX`) — see `tests/gate/README.md`.
 - `CheckReviewerReachable` (R2) checks Pruefer's own liveness via
   `$PRUEFER_DIR/.pruefer/pruefer.lock` (default `PRUEFER_DIR`:
   `$HOME/dev/fabrik`, matching the observed co-located deployment
@@ -1942,7 +1951,9 @@ different engine SHAs are refused. A failed leg lets the other bed's running leg
 starts nothing new; a RUN INVALID voids only that bed's cell and stops only the cells that
 would charge the exhausted identity. Both beds write the one per-SHA coverage ledger, each
 record naming its bed. Every leg logs `== identity budget (leg: …): <identity> (engine|harness|engine+harness) — N remaining,
-resets … ==` for each identity it charges, at start and end (also on a single bed). Bed
+resets … ==` for each identity it charges, plus
+`== reviewer budget (leg: …): <login> — core N/L resets …; graphql N/L resets … ==` for the bed's
+reviewer token (#2536), at start and end (also on a single bed). Bed
 output is prefixed `[bed A]` / `[bed B]`. `tests/gate/README.md` has the mechanics.
 
 #### Second bed: prerequisites, verification, retirement (#2263, #1990)

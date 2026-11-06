@@ -144,19 +144,103 @@ func (g *Gate) CheckCompetingTokenConsumers(ctx context.Context, modes []string)
 		}
 		return cands
 	}
+	var engineErr error
 	if !g.multiBed() {
-		return g.checkBedTokenConsumers(modes, []string{g.Cfg.TestBed}, discover)
-	}
-	var msgs []string
-	for _, b := range g.bedGates {
-		if err := b.checkBedTokenConsumers(modes, g.Cfg.BedDirs, discover); err != nil {
-			msgs = append(msgs, err.Error())
+		engineErr = g.checkBedTokenConsumers(modes, []string{g.Cfg.TestBed}, discover)
+	} else {
+		var msgs []string
+		for _, b := range g.bedGates {
+			if err := b.checkBedTokenConsumers(modes, g.Cfg.BedDirs, discover); err != nil {
+				msgs = append(msgs, err.Error())
+			}
+		}
+		if len(msgs) > 0 {
+			engineErr = &ExitError{Code: ExitPreconditionFailed, Msg: strings.Join(msgs, "\n")}
 		}
 	}
-	if len(msgs) > 0 {
-		return &ExitError{Code: ExitPreconditionFailed, Msg: strings.Join(msgs, "\n")}
+	revErr := g.checkReviewerTokenConsumers(discover)
+	switch {
+	case revErr == nil:
+		return engineErr
+	case engineErr == nil:
+		return revErr
 	}
-	return nil
+	return &ExitError{Code: ExitPreconditionFailed, Msg: engineErr.Error() + "\n" + revErr.Error()}
+}
+
+// FindCompetingReviewerConsumers is R4 (#2536): of candidates, those that are not
+// in an excluded directory (every bed's own engine) and whose .env carries the
+// reviewer token — as FABRIK_REVIEWER_TOKEN, or as the FABRIK_TOKEN a process
+// might run on. The proxy is the same one #1684 uses for the engine token (the
+// process's working-directory .env), not its live environment: that is
+// platform-dependent and unreadable for SIP-protected binaries. Non-fabrik
+// processes and other machines are the cover of CheckReviewerBudget and
+// reviewerCellGate.
+func FindCompetingReviewerConsumers(exclude []string, reviewerToken string, candidates []Candidate) []Candidate {
+	if reviewerToken == "" {
+		return nil
+	}
+	excluded := map[string]bool{}
+	for _, d := range exclude {
+		excluded[realPath(d)] = true
+	}
+	var found []Candidate
+	for _, c := range candidates {
+		if c.PID == 0 || c.Dir == "" || excluded[realPath(c.Dir)] {
+			continue
+		}
+		env := filepath.Join(c.Dir, ".env")
+		if EnvFileReviewerToken(env) == reviewerToken || EnvFileValue(env, "FABRIK_TOKEN") == reviewerToken {
+			found = append(found, c)
+		}
+	}
+	return found
+}
+
+// checkReviewerTokenConsumers refuses (ExitPreconditionFailed) when another local
+// Fabrik process uses a bed's reviewer token. Unlike the engine-token check it has
+// no pat-leg downgrade: the reviewer is a harness identity on every leg. The
+// caller has already honoured E2E_SKIP_TOKEN_CHECK. Names PIDs and directories,
+// never the token.
+func (g *Gate) checkReviewerTokenConsumers(discover func() []Candidate) error {
+	if g.root().reviewerBudgetCheckDisabledForTest {
+		return nil
+	}
+	refs := g.reviewerTokens()
+	if len(refs) == 0 {
+		return nil
+	}
+	exclude := []string{g.Cfg.TestBed}
+	if g.multiBed() {
+		exclude = g.Cfg.BedDirs
+	}
+	g.outln("== checking for competing consumers of the reviewer token (R4, #2536) ==")
+	var b strings.Builder
+	for _, ref := range refs {
+		for _, m := range FindCompetingReviewerConsumers(exclude, ref.token, discover()) {
+			fmt.Fprintf(&b, "##   pid %d   dir %s   (reviewer token of %s)\n", m.PID, m.Dir, strings.Join(ref.beds, " and "))
+		}
+	}
+	if b.Len() == 0 {
+		g.outln("   no competing reviewer-token consumers found")
+		return nil
+	}
+	var msg strings.Builder
+	msg.WriteString("\n############################################################\n")
+	msg.WriteString("## PRECONDITION FAILED: competing consumer(s) of FABRIK_REVIEWER_TOKEN\n")
+	msg.WriteString("## found (#2536).\n")
+	msg.WriteString("##\n")
+	msg.WriteString("## The following local Fabrik process(es) have an .env carrying the\n")
+	msg.WriteString("## reviewer token the live tests use:\n")
+	msg.WriteString("##\n")
+	msg.WriteString(b.String())
+	msg.WriteString("##\n")
+	msg.WriteString("## Their calls come out of the SAME rate-limit budget the reviewer\n")
+	msg.WriteString("## identity needs. Stop them, or re-run with E2E_SKIP_TOKEN_CHECK=1 to\n")
+	msg.WriteString("## proceed anyway (not recommended). Processes on other machines are\n")
+	msg.WriteString("## not visible here; the reviewer-budget checks cover those.\n")
+	msg.WriteString("############################################################")
+	return &ExitError{Code: ExitPreconditionFailed, Msg: msg.String()}
 }
 
 // checkBedTokenConsumers is the check for one bed: g's own token, the given

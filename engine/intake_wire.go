@@ -3,12 +3,12 @@ package engine
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"github.com/handarbeit/fabrik/warnings"
 )
 
@@ -268,7 +268,7 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	secretEnvName := appWebhookSecretEnvName(e.cfg)
 	listenAddr := e.cfg.DirectListen
 	tr := newAppWebhookTransport("direct", appWebhookPath(e.cfg),
-		func() (net.Listener, error) { return net.Listen("tcp", listenAddr) },
+		appwebhook.DirectListener(listenAddr),
 		os.Getenv(secretEnvName), e.logf, e.emit)
 	tr.UpdateRepos(initialRepos)
 	tr.SetCoverageCheck(func() {
@@ -276,7 +276,7 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	})
 	driftKey := e.wireAppWebhookWarnings(tr, "direct", "direct App webhook", secretEnvName)
 
-	e.replayer = e.newDeliveryReplayer(tr, "direct")
+	e.replayer = e.newDeliveryReplayer(tr.Receiver, "direct")
 	e.liveness = e.newRouteLiveness(tr, "direct", nil, 0)
 
 	listenKey := warnings.Condition{Type: "direct_listen", Subject: listenAddr}.Key()
@@ -312,9 +312,9 @@ func (e *Engine) startDirectTransport(ctx context.Context, set *transportSet, si
 	e.checkAppInstallationCoverage(tr, appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"})
 	// Replay failed deliveries from while the daemon was not receiving (#2144).
 	// Background, after the listener is up: it never delays startup.
-	e.startDeliveryReplay(ctx, e.replayer)
+	e.replayer.StartAfter(ctx, 0)
 	// Webhook route liveness from GitHub's delivery log (#2452).
-	stopLiveness := e.startRouteLiveness(ctx, e.liveness)
+	stopLiveness := e.liveness.Start(ctx)
 	tr.SetStopHook(stopLiveness)
 }
 

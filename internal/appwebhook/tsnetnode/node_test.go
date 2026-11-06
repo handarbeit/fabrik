@@ -1,4 +1,4 @@
-package engine
+package tsnetnode
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
@@ -33,11 +34,11 @@ func TestTsnetFunnelStatus(t *testing.T) {
 		self *ipnstate.PeerStatus
 		want string
 	}{
-		{"no self status", nil, tailnetFunnelUnknown},
-		{"https and funnel", selfWithCaps(tailcfg.CapabilityHTTPS, tailcfg.NodeAttrFunnel, funnelPortCap()), tailnetFunnelOK},
-		{"funnel attribute missing", selfWithCaps(tailcfg.CapabilityHTTPS, funnelPortCap()), tailnetFunnelUnavailable},
-		{"https missing", selfWithCaps(tailcfg.NodeAttrFunnel, funnelPortCap()), tailnetFunnelUnavailable},
-		{"neither", selfWithCaps(), tailnetFunnelUnavailable},
+		{"no self status", nil, appwebhook.FunnelUnknown},
+		{"https and funnel", selfWithCaps(tailcfg.CapabilityHTTPS, tailcfg.NodeAttrFunnel, funnelPortCap()), appwebhook.FunnelOK},
+		{"funnel attribute missing", selfWithCaps(tailcfg.CapabilityHTTPS, funnelPortCap()), appwebhook.FunnelUnavailable},
+		{"https missing", selfWithCaps(tailcfg.NodeAttrFunnel, funnelPortCap()), appwebhook.FunnelUnavailable},
+		{"neither", selfWithCaps(), appwebhook.FunnelUnavailable},
 	}
 	for _, c := range cases {
 		if got := tsnetFunnelStatus(c.self); got != c.want {
@@ -64,9 +65,9 @@ func revokedStatus() *ipnstate.Status {
 	return st
 }
 
-func newTestTracker() (*tsnetTracker, *[]tailnetState) {
-	var got []tailnetState
-	return &tsnetTracker{fn: func(s tailnetState) { got = append(got, s) }}, &got
+func newTestTracker() (*tsnetTracker, *[]appwebhook.NodeState) {
+	var got []appwebhook.NodeState
+	return &tsnetTracker{fn: func(s appwebhook.NodeState) { got = append(got, s) }}, &got
 }
 
 // A Funnel revoked while the node stays Running changes no backend state: it
@@ -80,7 +81,7 @@ func TestTsnetTracker_FunnelRevokedWithoutStateChange(t *testing.T) {
 	if len(*got) != 2 {
 		t.Fatalf("emitted %d states, want 2: %#v", len(*got), *got)
 	}
-	if st := (*got)[1]; !st.Connected || st.Funnel != tailnetFunnelUnavailable || st.BackendState != "Running" {
+	if st := (*got)[1]; !st.Connected || st.Funnel != appwebhook.FunnelUnavailable || st.BackendState != "Running" {
 		t.Fatalf("second state = %#v", st)
 	}
 }
@@ -95,13 +96,13 @@ func TestTsnetTracker_FailedReadKeepsLastFunnel(t *testing.T) {
 	if len(*got) != 1 {
 		t.Fatalf("emitted %d states, want 1 (unchanged): %#v", len(*got), *got)
 	}
-	if (*got)[0].Funnel != tailnetFunnelUnavailable {
+	if (*got)[0].Funnel != appwebhook.FunnelUnavailable {
 		t.Fatalf("state = %#v", (*got)[0])
 	}
 	// With nothing known yet, a failed read reports the Funnel as unknown.
 	tr2, got2 := newTestTracker()
 	tr2.observe(&running, nil)
-	if len(*got2) != 1 || (*got2)[0].Funnel != tailnetFunnelUnknown || !(*got2)[0].Connected {
+	if len(*got2) != 1 || (*got2)[0].Funnel != appwebhook.FunnelUnknown || !(*got2)[0].Connected {
 		t.Fatalf("first-read failure = %#v", *got2)
 	}
 }
@@ -120,13 +121,13 @@ func TestTsnetTracker_SelflessReadKeepsLastFunnel(t *testing.T) {
 	if len(*got) != 1 {
 		t.Fatalf("emitted %d states, want 1 (unchanged): %#v", len(*got), *got)
 	}
-	if st := (*got)[0]; st.Funnel != tailnetFunnelUnavailable || st.DNSName != "n.t.ts.net" {
+	if st := (*got)[0]; st.Funnel != appwebhook.FunnelUnavailable || st.DNSName != "n.t.ts.net" {
 		t.Fatalf("state = %#v", st)
 	}
 	// With nothing known yet, a Self-less read still reports unknown.
 	tr2, got2 := newTestTracker()
 	tr2.observe(nil, &ipnstate.Status{BackendState: "Running"})
-	if len(*got2) != 1 || (*got2)[0].Funnel != tailnetFunnelUnknown {
+	if len(*got2) != 1 || (*got2)[0].Funnel != appwebhook.FunnelUnknown {
 		t.Fatalf("first Self-less read = %#v", *got2)
 	}
 }

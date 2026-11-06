@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/handarbeit/fabrik/tui"
 	"github.com/handarbeit/fabrik/warnings"
 )
 
@@ -59,12 +58,12 @@ func tlsListenFn(t *testing.T) func() (net.Listener, error) {
 	}
 }
 
-func startErrlogTransport(t *testing.T, name string, listenFn func() (net.Listener, error), configure func(*appWebhookTransport)) (*appWebhookTransport, *syncLog) {
+func startErrlogTransport(t *testing.T, name string, listenFn func() (net.Listener, error), configure func(*Receiver)) (*Receiver, *syncLog) {
 	t.Helper()
 	logs := &syncLog{}
-	tr := newAppWebhookTransport(name, directTestPath, listenFn, directTestSecret,
+	tr := newReceiverForTest(name, directTestPath, listenFn, directTestSecret,
 		func(_ int, _ string, format string, args ...any) { logs.add(format, args...) },
-		func(tui.Event) {})
+		nil)
 	if configure != nil {
 		configure(tr)
 	}
@@ -135,7 +134,7 @@ func TestErrorLog_RealHandshakeFailureIsCountedAndNotPrinted(t *testing.T) {
 // on the std logger, so the stderr assertion above can fail.
 func TestErrorLog_NonVacuity_WithoutErrorLogHandshakeReachesStderr(t *testing.T) {
 	std := captureStdLogger(t)
-	tr, _ := startErrlogTransport(t, "tailscale", tlsListenFn(t), func(tr *appWebhookTransport) {
+	tr, _ := startErrlogTransport(t, "tailscale", tlsListenFn(t), func(tr *Receiver) {
 		tr.SetErrorLogDisabledForTest(true)
 	})
 	abortHandshake(t, tr.Addr())
@@ -148,7 +147,7 @@ func TestErrorLog_NonVacuity_WithoutErrorLogHandshakeReachesStderr(t *testing.T)
 func TestErrorLog_BurstProducesOneSummary(t *testing.T) {
 	std := captureStdLogger(t)
 	tr, logs := startErrlogTransport(t, "direct", func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-		func(tr *appWebhookTransport) { tr.SetHandshakeSummaryIntervalForTest(300 * time.Millisecond) })
+		func(tr *Receiver) { tr.SetHandshakeSummaryIntervalForTest(300 * time.Millisecond) })
 	w := serverErrorWriter{t: tr}
 	for i := 0; i < 5; i++ {
 		_, _ = w.Write([]byte(handshakeLine(i) + "\n"))
@@ -176,7 +175,7 @@ func TestErrorLog_BurstProducesOneSummary(t *testing.T) {
 
 func TestErrorLog_NoSummaryWithoutFailures(t *testing.T) {
 	_, logs := startErrlogTransport(t, "direct", func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-		func(tr *appWebhookTransport) { tr.SetHandshakeSummaryIntervalForTest(20 * time.Millisecond) })
+		func(tr *Receiver) { tr.SetHandshakeSummaryIntervalForTest(20 * time.Millisecond) })
 	time.Sleep(150 * time.Millisecond)
 	if got := noHealthLines(logs.String()); got != "" {
 		t.Fatalf("logged with no failures: %q", got)
@@ -185,7 +184,7 @@ func TestErrorLog_NoSummaryWithoutFailures(t *testing.T) {
 
 func TestErrorLog_StopFlushesPendingCount(t *testing.T) {
 	tr, logs := startErrlogTransport(t, "direct", func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-		func(tr *appWebhookTransport) { tr.SetHandshakeSummaryIntervalForTest(time.Hour) })
+		func(tr *Receiver) { tr.SetHandshakeSummaryIntervalForTest(time.Hour) })
 	w := serverErrorWriter{t: tr}
 	for i := 0; i < 3; i++ {
 		_, _ = w.Write([]byte(handshakeLine(i)))
@@ -265,8 +264,8 @@ func TestErrorLog_PlainHTTPListenerCountsNothing(t *testing.T) {
 }
 
 func TestErrorLog_StopBeforeStartDoesNotHang(t *testing.T) {
-	tr := newAppWebhookTransport("direct", directTestPath, func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-		directTestSecret, func(int, string, string, ...any) {}, func(tui.Event) {})
+	tr := newReceiverForTest("direct", directTestPath, func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
+		directTestSecret, func(int, string, string, ...any) {}, nil)
 	done := make(chan struct{})
 	go func() { tr.Stop(); close(done) }()
 	select {
@@ -282,7 +281,7 @@ func TestErrorLog_StopBeforeStartDoesNotHang(t *testing.T) {
 func TestErrorLog_CountsEveryHandshakeReasonAndSourceAddress(t *testing.T) {
 	std := captureStdLogger(t)
 	tr, logs := startErrlogTransport(t, "tailscale", func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
-		func(tr *appWebhookTransport) { tr.SetHandshakeSummaryIntervalForTest(time.Hour) })
+		func(tr *Receiver) { tr.SetHandshakeSummaryIntervalForTest(time.Hour) })
 	lines := []string{
 		"http: TLS handshake error from [fd7a:115c:a1e0::1e01:7098]:52393: EOF",
 		"http: TLS handshake error from [fd7a:115c:a1e0::401:c29f]:35253: EOF",

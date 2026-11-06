@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
 
 // gatedHookAPI wraps a fakeHookAPI and holds ListAppHookDeliveries until gate
@@ -38,7 +39,7 @@ func (f *fakeHookAPI) redeliveredIDs() []int64 {
 
 // startDirectEngineReplay is startDirectEngine with the replay switch and an
 // injected delivery-log API.
-func startDirectEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI) (*Engine, func()) {
+func startDirectEngineReplay(t *testing.T, enabled bool, api appwebhook.HookDeliveryAPI) (*Engine, func()) {
 	t.Helper()
 	isolateWarnings(t)
 	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
@@ -82,9 +83,7 @@ func replayWaitFor(t *testing.T, what string, cond func() bool) {
 // GitHub's redelivery re-enters through the normal handler and is applied once,
 // and the transport's health row reports the pass.
 func TestDirectReplay_StartupPassEndToEnd(t *testing.T) {
-	oldPace := replayPace
-	replayPace = 0
-	t.Cleanup(func() { replayPace = oldPace })
+	t.Cleanup(appwebhook.SetReplayPaceForTest(0))
 
 	now := time.Now()
 	recent := func(id int64, guid string, code int, ago time.Duration) gh.AppHookDelivery {
@@ -171,9 +170,7 @@ func TestDirectReplay_StartupPassEndToEnd(t *testing.T) {
 // The transport's reconnect callback triggers a further pass (for transports
 // that signal one, #2143); the direct transport itself never calls it.
 func TestDirectReplay_ReconnectHandlerTriggersAnotherPass(t *testing.T) {
-	oldPace := replayPace
-	replayPace = 0
-	t.Cleanup(func() { replayPace = oldPace })
+	t.Cleanup(appwebhook.SetReplayPaceForTest(0))
 	fake := &fakeHookAPI{}
 	eng, cleanup := startDirectEngineReplay(t, true, fake)
 	defer cleanup()
@@ -184,9 +181,7 @@ func TestDirectReplay_ReconnectHandlerTriggersAnotherPass(t *testing.T) {
 		r := tr.HealthRow().Replay
 		return r != nil && r.LastPassAt.Valid
 	})
-	tr.mu.Lock()
-	reconnect := tr.reconnectFn
-	tr.mu.Unlock()
+	reconnect := tr.ReconnectHandlerForTest()
 	if reconnect == nil {
 		t.Fatal("no reconnect handler installed")
 	}
@@ -204,9 +199,7 @@ func TestDirectReplay_DisabledMakesNoAPICalls(t *testing.T) {
 	if eng.replayer != nil {
 		t.Fatal("replayer must not exist when replay is disabled")
 	}
-	tr.mu.Lock()
-	reconnect := tr.reconnectFn
-	tr.mu.Unlock()
+	reconnect := tr.ReconnectHandlerForTest()
 	reconnect()
 	time.Sleep(50 * time.Millisecond)
 	if fake.listCount() != 0 || len(fake.redeliveredIDs()) != 0 {

@@ -1,4 +1,4 @@
-package engine
+package tsnetnode
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -25,7 +26,7 @@ const tsnetWatchRetry = 5 * time.Second
 // again would otherwise log on every retry.
 const tsnetStreamHealthy = time.Minute
 
-// tsnetNode is the real tailnetNode over a tsnet.Server.
+// tsnetNode is the real appwebhook.Node over a tsnet.Server.
 type tsnetNode struct {
 	srv  *tsnet.Server
 	logf func(format string, args ...any) // the redacted engine log; never nil
@@ -38,8 +39,8 @@ type tsnetNode struct {
 	wg      sync.WaitGroup // in-flight Up and Watch calls
 }
 
-// newTailnetNode builds the node. It touches no network: the server starts in Up.
-func newTailnetNode(cfg tailnetNodeConfig) (tailnetNode, error) {
+// New builds the node. It touches no network: the server starts in Up.
+func New(cfg appwebhook.NodeConfig) (appwebhook.Node, error) {
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -80,9 +81,9 @@ func (n *tsnetNode) begin() error {
 	return nil
 }
 
-func (n *tsnetNode) Up(ctx context.Context) (tailnetState, error) {
+func (n *tsnetNode) Up(ctx context.Context) (appwebhook.NodeState, error) {
 	if err := n.begin(); err != nil {
-		return tailnetState{}, err
+		return appwebhook.NodeState{}, err
 	}
 	defer n.wg.Done()
 	// Close cancels n.ctx, so an Up blocked on a bad key or no network returns.
@@ -93,9 +94,9 @@ func (n *tsnetNode) Up(ctx context.Context) (tailnetState, error) {
 	st, err := n.srv.Up(upCtx)
 	if err != nil {
 		if n.ctx.Err() != nil {
-			return tailnetState{}, errTailnetClosed
+			return appwebhook.NodeState{}, errTailnetClosed
 		}
-		return tailnetState{}, err
+		return appwebhook.NodeState{}, err
 	}
 	return tsnetStateFrom(st, true), nil
 }
@@ -119,7 +120,7 @@ func tsnetFunnelOptions() []tsnet.FunnelOption {
 	return []tsnet.FunnelOption{tsnet.FunnelOnly()}
 }
 
-func (n *tsnetNode) Watch(ctx context.Context, fn func(tailnetState)) error {
+func (n *tsnetNode) Watch(ctx context.Context, fn func(appwebhook.NodeState)) error {
 	if err := n.begin(); err != nil {
 		return err
 	}
@@ -229,9 +230,9 @@ type tsnetTracker struct {
 	// refresh). It is separate from mu, which observe takes and holds while fn runs.
 	readMu      sync.Mutex
 	mu          sync.Mutex
-	fn          func(tailnetState)
+	fn          func(appwebhook.NodeState)
 	have        bool
-	last        tailnetState
+	last        appwebhook.NodeState
 	backend     string // last known backend state (from a status read, else a notification)
 	haveBackend bool
 }
@@ -275,7 +276,7 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 	}
 	backend := t.backend
 	connected := backend == ipn.Running.String()
-	var st tailnetState
+	var st appwebhook.NodeState
 	if status != nil {
 		st = tsnetStateFrom(status, connected)
 		// A successful read with no Self (a transient gap while the node state
@@ -283,7 +284,7 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 		// overwrite what is known: reporting "unknown" would clear an active
 		// Funnel outage and fire a spurious catch-up reconcile.
 		if t.have {
-			if st.Funnel == tailnetFunnelUnknown {
+			if st.Funnel == appwebhook.FunnelUnknown {
 				st.Funnel = t.last.Funnel
 			}
 			if st.DNSName == "" {
@@ -291,7 +292,7 @@ func (t *tsnetTracker) observe(state *ipn.State, status *ipnstate.Status) {
 			}
 		}
 	} else {
-		st = tailnetState{Connected: connected, Funnel: tailnetFunnelUnknown}
+		st = appwebhook.NodeState{Connected: connected, Funnel: appwebhook.FunnelUnknown}
 		if t.have {
 			st.Funnel, st.DNSName = t.last.Funnel, t.last.DNSName
 		}
@@ -329,17 +330,17 @@ func (n *tsnetNode) Close() error {
 // unknown, not unavailable.
 func tsnetFunnelStatus(self *ipnstate.PeerStatus) string {
 	if self == nil {
-		return tailnetFunnelUnknown
+		return appwebhook.FunnelUnknown
 	}
 	if ipn.CheckFunnelAccess(tsnetFunnelPort, self) != nil {
-		return tailnetFunnelUnavailable
+		return appwebhook.FunnelUnavailable
 	}
-	return tailnetFunnelOK
+	return appwebhook.FunnelOK
 }
 
 // tsnetStateFrom maps a local-client status to the seam's state.
-func tsnetStateFrom(st *ipnstate.Status, connected bool) tailnetState {
-	out := tailnetState{Connected: connected, BackendState: "Running", Funnel: tailnetFunnelUnknown}
+func tsnetStateFrom(st *ipnstate.Status, connected bool) appwebhook.NodeState {
+	out := appwebhook.NodeState{Connected: connected, BackendState: "Running", Funnel: appwebhook.FunnelUnknown}
 	if st == nil {
 		return out
 	}
@@ -353,4 +354,4 @@ func tsnetStateFrom(st *ipnstate.Status, connected bool) tailnetState {
 	return out
 }
 
-var _ tailnetNode = (*tsnetNode)(nil)
+var _ appwebhook.Node = (*tsnetNode)(nil)
