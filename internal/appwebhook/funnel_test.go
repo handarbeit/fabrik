@@ -1,6 +1,7 @@
 package appwebhook
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"os"
@@ -169,4 +170,11 @@ func moduleRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// A consumer that supplies no Logf must not panic when the node logs or closes.
+func TestNewFunnelNilLogfDoesNotPanic(t *testing.T) {
+	f := NewFunnel(context.Background(), FunnelConfig{Tag: "t"})
+	f.cfg.Logf(0, "t", "x\n") // would be a nil-func call without the default
+	f.CloseNode()
 }

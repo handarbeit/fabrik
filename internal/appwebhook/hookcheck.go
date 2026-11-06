@@ -28,8 +28,10 @@ type HookCheckInput struct {
 	WantURL string
 	// Fetch reads GET /app/hook/config (App JWT; the secret is never decoded).
 	Fetch func(ctx context.Context) (gh.AppHookConfig, error)
+	// Panel is required: Check reports and clears the mismatch entries through it.
 	Panel Panel
-	Logf  LogFunc
+	// Logf is optional; nil logs nothing.
+	Logf LogFunc
 }
 
 // WebhookConfigType is the panel type of the R7 check. It owns its own type (each Reconcile sweep owns
@@ -91,6 +93,9 @@ func (s *hookCheckLogState) succeeded() {
 func (c *HookChecker) Check(in HookCheckInput) {
 	if in.WantURL == "" {
 		return
+	}
+	if in.Logf == nil {
+		in.Logf = func(int, string, string, ...any) {}
 	}
 	wantURL := in.WantURL
 	cfg, err := in.Fetch(context.Background())

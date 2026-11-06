@@ -175,6 +175,11 @@ type Funnel struct {
 
 // NewFunnel builds a Funnel whose node start and watch are bounded by ctx.
 func NewFunnel(ctx context.Context, cfg FunnelConfig) *Funnel {
+	// A consumer that supplies no logger gets a silent one rather than a nil-func
+	// panic the first time the node logs.
+	if cfg.Logf == nil {
+		cfg.Logf = func(int, string, string, ...any) {}
+	}
 	f := &Funnel{cfg: cfg}
 	f.watchCtx, f.cancelWatch = context.WithCancel(ctx)
 	f.startCtx = ctx
