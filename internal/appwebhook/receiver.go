@@ -152,6 +152,11 @@ type Config struct {
 // New builds a receiver named cfg.Name that serves cfg.Path on the listener
 // cfg.Listen returns, verifying with cfg.Secret.
 func New(cfg Config) *Receiver {
+	// A consumer that supplies no logger gets a silent one, as Replayer and
+	// Liveness already do, rather than a nil-func panic on Start.
+	if cfg.Logf == nil {
+		cfg.Logf = func(int, string, string, ...any) {}
+	}
 	return &Receiver{
 		name:        cfg.Name,
 		path:        cfg.Path,

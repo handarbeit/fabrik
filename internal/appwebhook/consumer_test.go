@@ -87,3 +87,29 @@ func TestConsumerDoublesRunTheReceiverEndToEnd(t *testing.T) {
 		t.Fatalf("health sink states=%v counts=%v", states, counts)
 	}
 }
+
+// A consumer that supplies no Logf must not panic: Start logs the state change
+// and a bad-signature request logs too.
+func TestNilLogfDoesNotPanic(t *testing.T) {
+	r := New(Config{
+		Name:   "nolog",
+		Path:   directTestPath,
+		Listen: DirectListener("127.0.0.1:0"),
+		Secret: directTestSecret,
+	})
+	r.SetSink(func(Delivery) {})
+	if err := r.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+	req, _ := http.NewRequest(http.MethodPost, "http://"+r.Addr()+directTestPath, bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("X-Hub-Signature-256", "sha256=bad")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
