@@ -39,12 +39,21 @@ func (e *Engine) mergeToleratingRerereLock(ctx context.Context, wtDir, ref strin
 	}
 	// The refused merge has already written the conflicted index, which blocks a
 	// second merge ("unmerged files"); the worktree is disposable, so drop that state.
+	cleared := false
 	for _, args := range [][]string{{"merge", "--abort"}, {"reset", "--merge"}} {
 		reset := exec.CommandContext(ctx, "git", args...)
 		reset.Dir = wtDir
 		if reset.Run() == nil {
+			cleared = true
 			break
 		}
+	}
+	if !cleared {
+		// A retry against the still-conflicted index would fail with an unrelated
+		// "unmerged files" error that replaces the lock error; keep the first
+		// attempt's output so the skip-forget warning names the real cause.
+		e.logf(0, "merge-train", "removed a leftover %s but could not reset the forget-reconstruction worktree; not retrying the merge\n", rerereLockName)
+		return out, err
 	}
 	e.logf(0, "merge-train", "removed a leftover %s in the forget-reconstruction worktree and retried the merge\n", rerereLockName)
 	return run()
