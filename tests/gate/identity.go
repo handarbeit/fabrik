@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	ghapi "github.com/handarbeit/fabrik/github"
 )
@@ -81,6 +82,11 @@ type IdentityOps interface {
 	// limit is the real one — an App installation's exceeds 5,000 — falling back
 	// to defaultRateLimit when GitHub does not report it.
 	Budget(ctx context.Context, token string) (remaining, limit int, resetAt string, err error)
+	// CoreBudget is the token's identity's REST core budget — remaining, limit and
+	// reset instant (RFC3339) — read from GET /rate_limit, which costs no budget and
+	// still answers while core is exhausted. Unlike the GraphQL bucket, REST core
+	// is a live gauge here (#2536). Used for the reviewer token only.
+	CoreBudget(ctx context.Context, token string) (remaining, limit int, resetAt string, err error)
 	// MintAppToken mints an installation token for the App configured in
 	// bedDir/.env (E2E_APP_ID, E2E_APP_PRIVATE_KEY_PATH, E2E_APP_INSTALLATION_ID).
 	MintAppToken(ctx context.Context, bedDir string) (string, error)
@@ -130,6 +136,39 @@ func (o osIdentityOps) Budget(ctx context.Context, token string) (int, int, stri
 		return 0, 0, "", err
 	}
 	return parseBudget(out)
+}
+
+func (o osIdentityOps) CoreBudget(ctx context.Context, token string) (int, int, string, error) {
+	out, err := o.gh(ctx, token, "api", "rate_limit",
+		"--jq", `"\(.resources.core.limit) \(.resources.core.remaining) \(.resources.core.reset)"`)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	return parseCoreBudget(out)
+}
+
+// parseCoreBudget reads "<limit> <remaining> <reset epoch seconds>" and returns
+// the reset as RFC3339 UTC ("" when absent or unparseable). A missing remaining
+// is an error; a missing limit falls back to defaultRateLimit.
+func parseCoreBudget(out string) (remaining, limit int, resetAt string, err error) {
+	f := strings.Fields(out)
+	if len(f) < 2 {
+		return 0, 0, "", fmt.Errorf("unparseable rate_limit core %q", out)
+	}
+	n, perr := strconv.Atoi(f[1])
+	if perr != nil || n < 0 {
+		return 0, 0, "", fmt.Errorf("unparseable rate_limit core %q", out)
+	}
+	l, lerr := strconv.Atoi(f[0])
+	if lerr != nil || l <= 0 {
+		l = defaultRateLimit
+	}
+	if len(f) >= 3 {
+		if epoch, eerr := strconv.ParseInt(f[2], 10, 64); eerr == nil && epoch > 0 {
+			resetAt = time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	return n, l, resetAt, nil
 }
 
 // parseBudget reads "<limit> <remaining> <resetAt>". A missing or non-positive
@@ -366,18 +405,36 @@ func (g *Gate) identityLabel(id Identity) string {
 // installation token per probe. A failure warns and never gates; no token text
 // ever reaches the output.
 //
-// All of a call's probes share one bound, GHAPITimeout: the end-of-leg call
-// runs inside the post-suite watchdog, and a report must never be what trips it.
+// The identity probes of a call share one bound, GHAPITimeout, and the reviewer
+// line has its own (see below): the end-of-leg call runs inside the post-suite
+// watchdog, which still cancels both, so a report must never be what trips it.
 func (g *Gate) logIdentityBudget(ctx context.Context, cell Cell, which string) {
 	if g.Identity == nil {
 		return
 	}
+	label := cell.Label()
+	// The reviewer account's line comes last (#2536, R3); deferred so every early
+	// return below still reports it. It gets its own GHAPITimeout window derived
+	// from the caller's context, not the identity probes' shared one: otherwise
+	// slow identity probes would use up the window and the reviewer line (the data
+	// for tuning the thresholds) would be replaced by a "probes stopped" warning.
+	// It is still bounded, and the caller's cancellation (the post-suite watchdog)
+	// still reaches it.
+	parent := ctx
+	defer func() {
+		rctx := parent
+		if g.Cfg.GHAPITimeout > 0 {
+			var cancel context.CancelFunc
+			rctx, cancel = context.WithTimeout(parent, g.Cfg.GHAPITimeout)
+			defer cancel()
+		}
+		g.logReviewerBudget(rctx, label, which)
+	}()
 	if g.Cfg.GHAPITimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, g.Cfg.GHAPITimeout)
 		defer cancel()
 	}
-	label := cell.Label()
 	for _, id := range g.identitySet(cell.Auth) {
 		if ctx.Err() != nil {
 			g.errf("warning: identity budget (leg: %s, %s): probes stopped after %ds\n", label, which, int(g.Cfg.GHAPITimeout.Seconds()))

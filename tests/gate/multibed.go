@@ -672,10 +672,17 @@ func (s *multiSched) finish(ctx context.Context, i int, q *queued, set []Identit
 	b := s.beds[i]
 	outcome := "passed"
 	var ee *ExitError
+	var rbe *ReviewerBudgetError
 	switch {
 	case err == nil:
 	case ctx.Err() != nil:
 		outcome = "cancelled"
+		s.stopNew = true
+	case errors.As(err, &rbe):
+		// The reviewer account's budget (#2536), not the engine identity's: nothing
+		// ran, so nothing is voided, and no identity is marked exhausted. The cell's
+		// pairs stay missing; start nothing new, as after any failure.
+		outcome = "not started (reviewer token budget exhausted; nothing recorded — resume after the reset)"
 		s.stopNew = true
 	case errors.As(err, &ee) && ee.Code == ExitBudgetExhausted:
 		outcome = fmt.Sprintf("exit %d (RUN INVALID; this cell's records voided)", ee.Code)

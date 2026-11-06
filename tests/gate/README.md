@@ -126,6 +126,7 @@ All 29 functions of the bash `run.sh`, plus its top-level code.
 | `find_competing_token_consumers` | `consumers.go`: `FindCompetingTokenConsumers` |
 | `check_competing_token_consumers` | `consumers.go`: `Gate.CheckCompetingTokenConsumers` |
 | `check_reviewer_reachable` | `consumers.go`: `Gate.CheckReviewerReachable` |
+| (new, #2536) reviewer-token budget guard | `reviewer.go`: `Gate.CheckReviewerBudget` (live preflight), `Gate.reviewerCellGate` (cell start), `Gate.logReviewerBudget` (budget lines); `consumers.go`: `FindCompetingReviewerConsumers` |
 | `run_pregate` | `pregate.go`: `Gate.RunPregate` |
 | `preflight_bed` | `bed.go`: `Gate.PreflightBed` |
 | `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` (preflight/idle stop, SIGTERM); the exit-time stop is `teardown.go` (below) |
@@ -159,6 +160,9 @@ workaround rather than gate behaviour have no counterpart, and are listed with t
 | | …with a pat leg: refused, exit 7, names the pid | `TestCheckCompetingTokenConsumers/a competitor with a pat leg…` |
 | `token_consumer_check_test.sh` | matching token; mismatched; the bed's own dir excluded; no `.env`; empty list; mixed | `TestFindCompetingTokenConsumers` (+ a symlink-to-the-bed case) |
 | | `E2E_SKIP_TOKEN_CHECK`; empty `BED_TOKEN` degrades; orchestrator match → exit 7 naming pid and dir | `TestCheckCompetingTokenConsumers` |
+| (new, #2536) | reviewer budget: `core` 0/5000 → exit 7 naming login and reset, no token; GraphQL below minimum; exhausted-GraphQL read; overrides and 0; login fallback; shared token read once; unreadable probe warns; disabled-seam control | `TestCheckReviewerBudget`, `TestRunRefusesAnExhaustedReviewerTokenBeforeAnyLivePreflight` |
+| | reviewer cell start: hold then start, not started (bound / past / missing reset), between-cells drop, unreadable probe, cancel, running leg untouched, no engine-identity poisoning, disabled-seam control | `TestReviewerCellGate*`, `TestMultiBedReviewer*` |
+| | reviewer budget lines at leg start/end; reviewer competing consumers | `TestLogReviewerBudget`, `TestReviewerConsumers` |
 | `reviewer_reachable_check_test.sh` | live pid; missing lock; dead pid; skip env; missing `PRUEFER_DIR` warns; `-run`; `--run=` | `TestCheckReviewerReachable` (+ garbled lock, `-run=`, `--run X`) |
 | `pregate_test.sh` | skip; both layers pass; sim fails (exit 5, one call); matching SHA skips; mismatched runs full; matching SHA + dirty tree runs full; allowlisted dirt skips; non-allowlisted dirt runs full | `TestPregate` (+ wire-contract failure, RE2 against the exact `cut-release.sh` regex, bad-regex fail-closed) |
 | | structural: `run_pregate` precedes `prepare_bed_and_reset` in the dispatch guard (a grep of the script) | `TestRunExitCode5PregateFailureSpendsNothing`, `TestRunOrderAndCleanHandling` (asserted by running it, not by grepping) |
@@ -364,7 +368,7 @@ process**, serialized only where they share a GitHub identity.
 * **Order (ADR-1454 kept).** Static preflights once per bed where bed-scoped — auth mode over every
   bed, then `bed-topology`, then the competing-consumer check per bed; the reviewer check, parity
   summary and host-load probe once. The pre-gate once (its record is repo-scoped, D10). Then the live
-  preflights: `bed-identity` (each bed token's login, one `gh api user` per distinct token) and the
+  preflights: `reviewer-budget` first (below), then `bed-identity` (each bed token's login, one `gh api user` per distinct token) and the
   board-lag probe on each bed's own board. Then `prepareBeds`: `PrepareBedAndReset` per bed,
   **serially**, followed by the engine-SHA check. Nothing live runs before the pre-gate.
 * **Topology refusal (exit 7, before the pre-gate).** Two beds with the same App installation (when an
@@ -430,8 +434,8 @@ process**, serialized only where they share a GitHub identity.
   engine identity is marked exhausted, cells charging it **in either role** are not started, and
   everything else goes on.
   The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
-  probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
-  watchdog. `== multi-bed summary ==` lists
+  probes at a leg's end share one `GHAPITimeout` bound, and the reviewer line has its own, so
+  neither can trip the post-suite watchdog and slow identity probes cannot starve the reviewer line. `== multi-bed summary ==` lists
   every bed's cells with their outcome, every cell that never started with why, and any exhausted
   identity.
 * **Budget lines (R5, also on one bed).** At leg start and end, one
@@ -440,6 +444,40 @@ process**, serialized only where they share a GitHub identity.
   (`rateLimit { limit remaining resetAt }`; App identities mint an
   installation token per probe). A failure warns and never gates; no token text reaches the output.
   The existing `budget_before`/`budget_after` harness-token lines are unchanged.
+* **Reviewer-token budget guard (#2536, ADR-2536).** `FABRIK_REVIEWER_TOKEN` (the bed `.env`'s,
+  read with the live harness's semantics) is the non-author identity the live tests use for reviews
+  and "human" comments. It is not in the identity set (no engine/harness role, no scheduling); a
+  read-only facility in `reviewer.go` guards its **REST `core`** bucket (`GET /rate_limit`, free,
+  live — the "dead gauge" caveat is GraphQL's only) and its **GraphQL** bucket (the inline
+  `rateLimit`, 1 point). Beds sharing a token are read once. Every read is bounded (`GHAPITimeout`);
+  one that cannot be read is `unavailable` — a warning, never a block. A GraphQL read that fails
+  *because* the bucket is exhausted counts as 0 remaining.
+  * **Preflight (R1).** The first live preflight, after the free pre-gate and ahead of `bed-identity`
+    and the board-lag probe. Below a minimum → exit 7, naming the login (or the bed and variable when
+    an exhausted token cannot answer `GET /user`), remaining/limit and reset, never the token.
+  * **Cell start (R2).** `Gate.runLeg` — both schedulers — checks before the cell does anything (no
+    invocation noted, no restart, no ledger record). Short with a reset inside the hold bound → the
+    cell is held (`== holding <cell>: reviewer … ==`, re-checked every `E2E_PROBE_INTERVAL`) and
+    starts on recovery; otherwise (reset beyond the bound, past or unknown, or still short at its end)
+    it is **not started**: `*ReviewerBudgetError`, exit 3 ("budget exhausted"), nothing voided,
+    pairs stay missing for `--resume`. The multi-bed scheduler records it as `not started (reviewer
+    token budget exhausted…)`, starts nothing new and does **not** mark the engine identity exhausted.
+    A running leg is never touched. In multi-bed the hold happens after the cell's engine/harness
+    identities are acquired (the scheduler does no I/O under its lock); it is bounded and logged.
+    **An exhausted GraphQL bucket is never held:** the inline `rateLimit` query of an exhausted bucket
+    is refused with a rate-limit error that carries no reset time, so the reset is unknown and the cell
+    is declined at once (exit 3). Only an exhausted REST `core` bucket, whose reset
+    `GET /rate_limit` reports, can be held. `--resume` picks the cell up after the (hourly) reset.
+  * **Budget lines (R3).** `== reviewer budget (leg: L, start|end): <login> — core N/L resets T;
+    graphql N/L resets T ==`, per bed, beside the identity lines.
+  * **Competing consumers (R4).** `E2E_SKIP_TOKEN_CHECK` also skips this. Local `fabrik` processes
+    (not any bed's engine) whose cwd `.env` carries the reviewer token (as `FABRIK_REVIEWER_TOKEN` or
+    `FABRIK_TOKEN`) are refused, exit 7, naming pid and directory. No pat-leg downgrade (the reviewer is
+    a harness identity on every leg). Like #1684 it reads the `.env`, not live process environments;
+    other processes and other machines are covered by R1/R2 only.
+  * **Knobs.** `E2E_REVIEWER_MIN_CORE` (default 500), `E2E_REVIEWER_MIN_GRAPHQL` (default 100) —
+    absolute remaining counts, `0` disables that bucket — and `E2E_REVIEWER_HOLD_MAX` (seconds,
+    default 600). The defaults are provisional: tune them from the new budget lines.
 * **Ledger and archive (R4).** Every bed writes the one per-SHA ledger. Records carry `bed` (the
   directory, `omitempty`, so the format version is unchanged); a void line with a bed voids only
   that bed's records; each leg archive has `bed.json`; `bedconfig.json` is keyed
