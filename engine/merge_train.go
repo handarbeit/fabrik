@@ -1708,7 +1708,7 @@ func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, r
 		// implicated in this episode's primary trial order; nothing to forget here.
 		return
 	}
-	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(string(out)))
+	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(dropRerereLockLines(string(out))))
 
 	// Paths are recovered from the merge's own output, not from unmergedPaths/`git
 	// status`: when rerere's autoupdate fully replays and stages a path, git no longer
