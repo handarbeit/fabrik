@@ -94,6 +94,13 @@ func classifyRateLimitErr(err error) bool {
 		return false
 	}
 	m := strings.ToLower(err.Error())
+	// A secondary (abuse) limit is a transient throttle, not an exhausted bucket:
+	// the account still has budget and a retry soon would succeed, so it is
+	// "unavailable" — treating it as 0 remaining would refuse a healthy gate or
+	// decline a cell with no reset to wait for.
+	if strings.Contains(m, "secondary") {
+		return false
+	}
 	// GitHub words it "API rate limit exceeded" and "API rate limit already
 	// exceeded"; the GraphQL error code is RATE_LIMITED.
 	return (strings.Contains(m, "rate limit") && strings.Contains(m, "exceeded")) ||
