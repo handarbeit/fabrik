@@ -1997,6 +1997,13 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		return
 	}
 
+	// Completion-label trust gate (#2551, ADR 2551): a stage whose completion label
+	// the engine withdrew for a rework, or that is marked diverged, is not advanced
+	// or landed on the cached copy of that label. A no-op for every other item.
+	if e.refuseIfLabelsUntrusted(item, stage, "advancing") {
+		return
+	}
+
 	if stage.Name == "Validate" {
 		// auto-merge is yolo-only — cruise and auto_advance:true stop here.
 		yoloActive := e.cfg.Yolo || hasYoloLabel(item)

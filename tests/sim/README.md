@@ -295,6 +295,21 @@ three pre-gate runs.) See `poll.go`'s doc comments for the full
 detail. This is still the dominant contributor to this package's own
 runtime; see Runtime below.
 
+## Lost label writes (#2551)
+
+`simgh.Sim.DropLabelWrite(kind, label, times)` makes the next `times` label adds
+(`LabelEventLabeled`) or removals (`LabelEventUnlabeled`) of `label` return success
+without changing the issue: no label change, no event, no `updatedAt` bump. It is
+the only fault that expresses a write that was *reported* successful but did not
+stick, as opposed to a failed one. `label_divergence_test.go` uses it for the two
+shapes of ADR 2551: a lock add not held while the worker runs, and a completion-label
+removal not held during a rework. Both act from inside the worker script (which runs
+synchronously on the worker goroutine) and apply the contradicting listing with
+`reconcileBoard`, so no sleep is involved. Each twin has a neutralised run
+(`SetLabelRepairDisabledForTest`, `SetLabelTrustGateDisabledForTest`) that must fail the
+positive assertion. The stale-*read* case has no sim fault; it is covered in
+`engine/label_repair_test.go` by feeding the Store a lagging listing.
+
 ## Vocabulary mapping: `tests/e2e` ↔ `tests/sim` (R5)
 
 The goal is that a reader of a live scenario can read a sim scenario without

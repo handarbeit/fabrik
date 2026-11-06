@@ -171,6 +171,9 @@ type Sim struct {
 	issueWriteStamps map[string]time.Time
 	itemWriteStamps  map[string]time.Time
 
+	// droppedLabelWrites are the pending DropLabelWrite rules (labels.go, #2551).
+	droppedLabelWrites []*droppedLabelWrite
+
 	repos    map[string]*repoState    // keyed "owner/repo"
 	projects map[string]*projectState // keyed "owner:projectNum"
 
