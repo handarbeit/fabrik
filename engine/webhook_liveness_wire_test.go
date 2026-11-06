@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"net/http"
 	"sync"
 	"testing"
@@ -17,7 +18,7 @@ import (
 // controller's own sleep blocks, so only the start-up check and explicit
 // triggers evaluate. neutraliseDedupe turns the intake's dedupe off (the
 // non-vacuity switch).
-func startLivenessDirectEngine(t *testing.T, api hookDeliveryAPI, neutraliseDedupe bool) (*Engine, *appWebhookTransport, func(), <-chan struct{}) {
+func startLivenessDirectEngine(t *testing.T, api appwebhook.HookDeliveryAPI, neutraliseDedupe bool) (*Engine, *appWebhookTransport, func(), <-chan struct{}) {
 	t.Helper()
 	isolateWarnings(t)
 	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
@@ -95,9 +96,7 @@ func runProbeScenario(t *testing.T, neutraliseDedupe bool) (applied bool, tr *ap
 	}
 	// That real delivery already proved the route; reset to isolate the probe.
 	transport.SetRouteLiveness(localapi.RouteLiveness{Liveness: localapi.RouteUnknown})
-	e.liveness.mu.Lock()
-	e.liveness.state, e.liveness.evidenceAt = localapi.RouteUnknown, time.Time{}
-	e.liveness.mu.Unlock()
+	e.liveness.ResetVerdictForTest()
 	lastBefore = transport.HealthRow().LastDeliveryAt.V
 
 	// The log shows that delivery only as a stale success (no recent 2xx).
@@ -188,9 +187,7 @@ func TestLivenessWire_UnreachableMakesTheTransportUnhealthy(t *testing.T) {
 	// poll of the wait: whichever order the two land in, a later reconnect
 	// evaluates against it.
 	replayWaitFor(t, "unreachable", func() bool {
-		eng.liveness.mu.Lock()
-		eng.liveness.started = time.Now().Add(-time.Hour)
-		eng.liveness.mu.Unlock()
+		eng.liveness.SetStartedForTest(time.Now().Add(-time.Hour))
 		tr.FireReconnect()
 		r := routeOf(tr)
 		return r != nil && r.Liveness == localapi.RouteUnreachable

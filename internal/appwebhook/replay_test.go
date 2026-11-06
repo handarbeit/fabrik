@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"context"
@@ -61,8 +61,8 @@ type fakeReplayLedger struct {
 	newest time.Time
 }
 
-func (l *fakeReplayLedger) ledgerSeen(id string) bool { return l.seen[id] }
-func (l *fakeReplayLedger) ledgerNewest() time.Time   { return l.newest }
+func (l *fakeReplayLedger) Seen(id string) bool { return l.seen[id] }
+func (l *fakeReplayLedger) Newest() time.Time   { return l.newest }
 
 type recordingStatus struct {
 	mu   sync.Mutex
@@ -84,7 +84,7 @@ func dlv(id int64, guid string, code int, ago time.Duration) gh.AppHookDelivery 
 }
 
 type replayHarness struct {
-	r      *deliveryReplayer
+	r      *Replayer
 	api    *fakeHookAPI
 	ledger *fakeReplayLedger
 	status *recordingStatus
@@ -98,7 +98,7 @@ func newReplayHarness(t *testing.T, pages ...[]gh.AppHookDelivery) *replayHarnes
 		ledger: &fakeReplayLedger{seen: map[string]bool{}},
 		status: &recordingStatus{},
 	}
-	h.r = newDeliveryReplayer(h.api, h.ledger, h.status, func(f string, a ...any) {
+	h.r = NewReplayer(h.api, h.ledger, h.status, func(f string, a ...any) {
 		h.logs = append(h.logs, fmt.Sprintf(f, a...))
 	}, func() time.Time { return replayTestNow })
 	oldPace := replayPace
@@ -188,7 +188,7 @@ func TestReplayPass_StartupLookbackIgnoresLiveDeliveryAcceptedBeforePass(t *test
 	old := replayPace
 	replayPace = 0
 	t.Cleanup(func() { replayPace = old })
-	r := newDeliveryReplayer(api, ledger, &recordingStatus{}, nil, func() time.Time { return replayTestNow })
+	r := NewReplayer(api, ledger, &recordingStatus{}, nil, func() time.Time { return replayTestNow })
 	// The listener is up and GitHub delivers a live event before the pass runs.
 	ledger.newest = replayTestNow
 	r.pass(context.Background())
@@ -346,7 +346,7 @@ func TestReplayer_TriggerCoalescesAndStopsOnCancel(t *testing.T) {
 	if len(h.r.trigger) != 1 {
 		t.Fatalf("trigger queue = %d, want 1", len(h.r.trigger))
 	}
-	var nilR *deliveryReplayer
+	var nilR *Replayer
 	nilR.Trigger() // must not panic
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -384,7 +384,7 @@ func TestReplayer_StatusMarkedEnabledBeforeFirstPass(t *testing.T) {
 
 // FR-008: replay talks to the GitHub API and the read-only ledger lookups only.
 func TestDeliveryReplayNeverSubmits(t *testing.T) {
-	src, err := os.ReadFile("delivery_replay.go")
+	src, err := os.ReadFile("replay.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,9 +397,13 @@ func TestDeliveryReplayNeverSubmits(t *testing.T) {
 		code = append(code, line)
 	}
 	text := strings.Join(code, "\n")
+	// Non-vacuity: the scan must be reading the replayer, not an empty file.
+	if !strings.Contains(text, "func (r *Replayer) pass") {
+		t.Fatal("replay.go does not hold the replayer; the scan would pass vacuously")
+	}
 	for _, bad := range []string{".Submit(", "Accept(", "SetSink", "sink(", ".sink"} {
 		if strings.Contains(text, bad) {
-			t.Errorf("delivery_replay.go must not reference %q", bad)
+			t.Errorf("replay.go must not reference %q", bad)
 		}
 	}
 }

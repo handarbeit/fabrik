@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"testing"
 	"time"
 
@@ -11,11 +12,11 @@ import (
 
 // startTailscaleEngineReplay is startTailscaleEngine with the delivery replay
 // switch (#2144) and an injected delivery-log API.
-func startTailscaleEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI) (*Engine, func()) {
+func startTailscaleEngineReplay(t *testing.T, enabled bool, api appwebhook.HookDeliveryAPI) (*Engine, func()) {
 	t.Helper()
 	// The startup grace passes at once; the follow-up delay never fires.
 	return startTailscaleEngineReplayWait(t, enabled, api, func(ctx context.Context, d time.Duration) bool {
-		if d == tailnetReplayStartGrace {
+		if d == appwebhook.ReplayStartGrace {
 			return true
 		}
 		<-ctx.Done()
@@ -25,12 +26,10 @@ func startTailscaleEngineReplay(t *testing.T, enabled bool, api hookDeliveryAPI)
 
 // startTailscaleEngineReplayWait is startTailscaleEngineReplay with the
 // replayer's sleep (start grace, follow-up delay) under the test's control.
-func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDeliveryAPI, wait func(context.Context, time.Duration) bool) (*Engine, func()) {
+func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api appwebhook.HookDeliveryAPI, wait func(context.Context, time.Duration) bool) (*Engine, func()) {
 	t.Helper()
 	isolateWarnings(t)
-	oldPace := replayPace
-	replayPace = 0
-	t.Cleanup(func() { replayPace = oldPace })
+	t.Cleanup(appwebhook.SetReplayPaceForTest(0))
 	t.Setenv(DefaultAppWebhookSecretEnv, directTestSecret)
 	t.Setenv(DefaultTailscaleAuthKeyEnv, tailscaleTestKey)
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
@@ -58,7 +57,7 @@ func startTailscaleEngineReplayWait(t *testing.T, enabled bool, api hookDelivery
 // never on the drop itself or on the first connect's baseline, and the
 // transport's health row reports the last pass.
 func TestTailscaleReplay_RunsAtStartAndOnRecovery(t *testing.T) {
-	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	nodes := installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	fake := &fakeHookAPI{}
 	eng, cleanup := startTailscaleEngineReplay(t, true, fake)
 	defer cleanup()
@@ -81,17 +80,17 @@ func TestTailscaleReplay_RunsAtStartAndOnRecovery(t *testing.T) {
 	}
 
 	// A drop alone triggers nothing; the recovery does.
-	n.emit(tailnetState{Connected: false, BackendState: "Stopped", Funnel: tailnetFunnelUnknown})
+	n.emit(appwebhook.NodeState{Connected: false, BackendState: "Stopped", Funnel: appwebhook.FunnelUnknown})
 	if got := fake.listCount(); got != 1 {
 		t.Fatalf("a tailnet drop ran a replay pass (%d)", got)
 	}
-	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelOK})
+	n.emit(appwebhook.NodeState{Connected: true, BackendState: "Running", Funnel: appwebhook.FunnelOK})
 	replayWaitFor(t, "recovery pass", func() bool { return fake.listCount() >= 2 })
 }
 
 // A Funnel that comes back on a connected node is a recovery too (R6).
 func TestTailscaleReplay_FunnelRecoveryTriggersAPass(t *testing.T) {
-	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	nodes := installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	fake := &fakeHookAPI{}
 	eng, cleanup := startTailscaleEngineReplay(t, true, fake)
 	defer cleanup()
@@ -99,15 +98,15 @@ func TestTailscaleReplay_FunnelRecoveryTriggersAPass(t *testing.T) {
 	n := (*nodes)[0]
 	replayWaitFor(t, "startup pass", func() bool { return fake.listCount() >= 1 })
 
-	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelUnavailable})
-	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelOK})
+	n.emit(appwebhook.NodeState{Connected: true, BackendState: "Running", Funnel: appwebhook.FunnelUnavailable})
+	n.emit(appwebhook.NodeState{Connected: true, BackendState: "Running", Funnel: appwebhook.FunnelOK})
 	replayWaitFor(t, "funnel recovery pass", func() bool { return fake.listCount() >= 2 })
 }
 
 // With replay off the deliveries API is never called — at start or on a
 // recovery — and the health row carries no replay object.
 func TestTailscaleReplay_DisabledMakesNoAPICalls(t *testing.T) {
-	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	nodes := installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	fake := &fakeHookAPI{}
 	eng, cleanup := startTailscaleEngineReplay(t, false, fake)
 	defer cleanup()
@@ -116,8 +115,8 @@ func TestTailscaleReplay_DisabledMakesNoAPICalls(t *testing.T) {
 	if eng.replayer != nil {
 		t.Fatal("replayer must not exist when replay is disabled")
 	}
-	n.emit(tailnetState{Connected: false, BackendState: "Stopped"})
-	n.emit(tailnetState{Connected: true, BackendState: "Running", Funnel: tailnetFunnelOK})
+	n.emit(appwebhook.NodeState{Connected: false, BackendState: "Stopped"})
+	n.emit(appwebhook.NodeState{Connected: true, BackendState: "Running", Funnel: appwebhook.FunnelOK})
 	time.Sleep(50 * time.Millisecond)
 	if fake.listCount() != 0 || len(fake.redeliveredIDs()) != 0 {
 		t.Fatalf("API called with replay disabled: list=%d redeliver=%v", fake.listCount(), fake.redeliveredIDs())
@@ -129,7 +128,7 @@ func TestTailscaleReplay_DisabledMakesNoAPICalls(t *testing.T) {
 
 // A node that fails to start leaves the daemon poll-only: no replay pass runs.
 func TestTailscaleReplay_FailedStartRunsNoPass(t *testing.T) {
-	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet {
+	installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet {
 		f := newFakeTailnet(cfg, "n.t.ts.net")
 		f.upErr = errors.New("control plane unreachable")
 		return f
@@ -143,11 +142,11 @@ func TestTailscaleReplay_FailedStartRunsNoPass(t *testing.T) {
 	}
 }
 
-// The startup pass of a tailscale daemon waits tailnetReplayStartGrace after the
+// The startup pass of a tailscale daemon waits appwebhook.ReplayStartGrace after the
 // node and its listener are up (Funnel ingress needs a while to route to a new
 // node; a redelivery requested earlier fails), and shutdown cancels the wait.
 func TestTailscaleReplay_StartupPassWaitsForTheGrace(t *testing.T) {
-	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	fake := &fakeHookAPI{}
 	release := make(chan struct{})
 	waits := make(chan time.Duration, 4)
@@ -163,8 +162,8 @@ func TestTailscaleReplay_StartupPassWaitsForTheGrace(t *testing.T) {
 	defer cleanup()
 	select {
 	case d := <-waits:
-		if d != tailnetReplayStartGrace || tailnetReplayStartGrace != 90*time.Second {
-			t.Fatalf("grace = %s (constant %s), want 90s", d, tailnetReplayStartGrace)
+		if d != appwebhook.ReplayStartGrace || appwebhook.ReplayStartGrace != 90*time.Second {
+			t.Fatalf("grace = %s (constant %s), want 90s", d, appwebhook.ReplayStartGrace)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the startup pass did not wait on the grace")
@@ -178,7 +177,7 @@ func TestTailscaleReplay_StartupPassWaitsForTheGrace(t *testing.T) {
 }
 
 func TestTailscaleReplay_ShutdownCancelsTheGrace(t *testing.T) {
-	installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
+	installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net") })
 	fake := &fakeHookAPI{}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
@@ -188,14 +187,14 @@ func TestTailscaleReplay_ShutdownCancelsTheGrace(t *testing.T) {
 		<-c.Done()
 		return false
 	})
-	r := newDeliveryReplayer(fake, &fakeReplayLedger{seen: map[string]bool{}}, &recordingStatus{}, nil, time.Now)
-	r.wait = e.replayWaitOverride
+	r := appwebhook.NewReplayer(fake, &fakeReplayLedger{seen: map[string]bool{}}, &recordingStatus{}, nil, time.Now)
+	r.SetWait(e.replayWaitOverride)
 	trackReplayer(t, r)
 	t.Cleanup(cancel)
-	e.startDeliveryReplayAfter(ctx, r, tailnetReplayStartGrace)
+	r.StartAfter(ctx, appwebhook.ReplayStartGrace)
 	<-entered
 	cancel()
-	if !r.waitStopped(replayStopWait) {
+	if !r.WaitStopped(replayStopWait) {
 		t.Fatal("replayer goroutines did not exit after cancel")
 	}
 	if fake.listCount() != 0 {

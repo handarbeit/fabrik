@@ -32,8 +32,10 @@ var operatorWarnLiteral = regexp.MustCompile(
 
 // scannedDirs are the daemon's own source trees (plus cmd's startup path). The
 // shared internal packages and Pruefer are separate products with their own
-// surfaces.
-var scannedDirs = []string{"engine", "cmd", "config", "stages"}
+// surfaces, except internal/appwebhook: the engine's App webhook receiver lives
+// there since #2475 (ADR 2475), so its operator-facing lines are scanned as the
+// engine's own.
+var scannedDirs = []string{"engine", "cmd", "config", "stages", "internal/appwebhook"}
 
 // skippedFiles are interactive one-shot subcommands: the operator is reading
 // their stderr as they run, so a panel entry would only linger after the fact.

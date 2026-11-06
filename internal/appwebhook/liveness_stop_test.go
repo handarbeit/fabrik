@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"context"
@@ -177,7 +177,7 @@ func TestRouteLiveness_NoRefreshAfterStop(t *testing.T) {
 
 // Stop is idempotent, concurrent-safe and nil-safe.
 func TestRouteLiveness_StopIsIdempotentAndConcurrent(t *testing.T) {
-	var nilR *routeLiveness
+	var nilR *Liveness
 	nilR.Stop()
 	hook := newBlockingHook(livenessHookURL, true)
 	h := newStopHarness(t, hook)
@@ -225,8 +225,6 @@ func TestRouteLiveness_ArrivalsRacingStop(t *testing.T) {
 // The stop function startRouteLiveness returns waits for an in-flight arrival
 // refresh (cancelling it first) and is safe to call twice.
 func TestStartRouteLiveness_StopWaitsForArrivalRefresh(t *testing.T) {
-	isolateWarnings(t)
-	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	hook := newBlockingHook(livenessHookURL, true)
 	var armed atomic.Bool
 	h := newLivenessHarness(t, 0)
@@ -244,7 +242,7 @@ func TestStartRouteLiveness_StopWaitsForArrivalRefresh(t *testing.T) {
 		return hook.read(ctx)
 	}
 	h.r.cfg.OwnURL = func() string { return "https://mine.example/webhook" }
-	stop := eng.startRouteLiveness(context.Background(), h.r)
+	stop := h.r.Start(context.Background())
 	t.Cleanup(hook.release)
 	waitClosed(t, idle, "the start-up evaluation to finish")
 

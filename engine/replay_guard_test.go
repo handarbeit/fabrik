@@ -2,13 +2,12 @@ package engine
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 )
 
 // Replayer leak guard (#2447). A delivery replayer outlives its test unless the
@@ -25,7 +24,7 @@ const replayStopWait = 5 * time.Second
 
 type replayGuard struct {
 	mu sync.Mutex
-	rs []*deliveryReplayer
+	rs []*appwebhook.Replayer
 }
 
 // errorfer is the part of testing.TB the guard reports through, so its own test
@@ -35,7 +34,7 @@ type errorfer interface {
 }
 
 // track records r so check waits for it.
-func (g *replayGuard) track(r *deliveryReplayer) {
+func (g *replayGuard) track(r *appwebhook.Replayer) {
 	if r == nil {
 		return
 	}
@@ -47,10 +46,10 @@ func (g *replayGuard) track(r *deliveryReplayer) {
 // check fails t for every tracked replayer that has not exited within d.
 func (g *replayGuard) check(t errorfer, d time.Duration) {
 	g.mu.Lock()
-	rs := append([]*deliveryReplayer(nil), g.rs...)
+	rs := append([]*appwebhook.Replayer(nil), g.rs...)
 	g.mu.Unlock()
 	for i, r := range rs {
-		if !r.waitStopped(d) {
+		if !r.WaitStopped(d) {
 			t.Errorf("delivery replayer left running: replayer #%d started by this test did not exit within %s after cleanup; cancel its context and wait for it in t.Cleanup (startIngestion does this)", i+1, d)
 		}
 	}
@@ -83,67 +82,9 @@ func startIngestion(t *testing.T, eng *Engine, cache *boardcache.CacheImpl) func
 // trackReplayer guards a replayer a test builds directly (not through an
 // Engine start path, so replayBuilt never sees it). Register it before the
 // cleanup that cancels the replayer's context.
-func trackReplayer(t *testing.T, r *deliveryReplayer) {
+func trackReplayer(t *testing.T, r *appwebhook.Replayer) {
 	t.Helper()
 	g := &replayGuard{}
 	g.track(r)
 	t.Cleanup(func() { g.check(t, replayStopWait) })
-}
-
-type recordedErrors struct{ msgs []string }
-
-func (r *recordedErrors) Errorf(format string, args ...any) {
-	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
-}
-
-func TestReplayGuard_FailsOnALeakedReplayer(t *testing.T) {
-	r := newDeliveryReplayer(&fakeHookAPI{}, &fakeReplayLedger{seen: map[string]bool{}}, nil, nil, time.Now)
-	ctx, cancel := context.WithCancel(context.Background())
-	r.goTracked(func() { r.Run(ctx) })
-	g := &replayGuard{}
-	g.track(r)
-
-	var rec recordedErrors
-	g.check(&rec, 50*time.Millisecond)
-	if len(rec.msgs) != 1 || !strings.Contains(rec.msgs[0], "delivery replayer left running") {
-		t.Fatalf("leaked replayer not reported: %q", rec.msgs)
-	}
-
-	cancel()
-	rec = recordedErrors{}
-	g.check(&rec, replayStopWait)
-	if len(rec.msgs) != 0 {
-		t.Fatalf("stopped replayer reported: %q", rec.msgs)
-	}
-}
-
-func TestReplayGuard_QuietWithoutReplayers(t *testing.T) {
-	g := &replayGuard{}
-	g.track(nil)
-	var rec recordedErrors
-	g.check(&rec, 50*time.Millisecond)
-	// A built but never started replayer has nothing to wait for.
-	g.track(newDeliveryReplayer(&fakeHookAPI{}, &fakeReplayLedger{seen: map[string]bool{}}, nil, nil, time.Now))
-	g.check(&rec, 50*time.Millisecond)
-	if len(rec.msgs) != 0 {
-		t.Fatalf("unexpected failure: %q", rec.msgs)
-	}
-}
-
-// waitStopped covers all three goroutines: Run, the armed follow-up sleeper and
-// the start-grace sleeper.
-func TestReplayer_WaitStoppedCoversEveryGoroutine(t *testing.T) {
-	e := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-	r := newDeliveryReplayer(&fakeHookAPI{}, &fakeReplayLedger{seen: map[string]bool{}}, nil, nil, time.Now)
-	r.wait = func(ctx context.Context, d time.Duration) bool { <-ctx.Done(); return false }
-	ctx, cancel := context.WithCancel(context.Background())
-	e.startDeliveryReplayAfter(ctx, r, time.Hour) // Run + grace sleeper
-	r.armFollowUp(ctx)                            // follow-up sleeper
-	if r.waitStopped(50 * time.Millisecond) {
-		t.Fatal("waitStopped true while goroutines are live")
-	}
-	cancel()
-	if !r.waitStopped(replayStopWait) {
-		t.Fatal("waitStopped false after cancel")
-	}
 }

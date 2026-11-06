@@ -1,5 +1,7 @@
 # ADR 2142: Direct App webhook transport (`event_source: direct`)
 
+*Path note (#2475, ADR 2475): the App webhook receiver moved from `engine/` to `internal/appwebhook`; the file paths below name the new locations. The decisions are unchanged.*
+
 **Date**: 2026-10-22
 **Status**: Accepted
 **Issue**: #2142 — events: direct App webhook transport — receive App webhooks behind any tunnel or proxy
@@ -12,7 +14,7 @@ Under GitHub App auth the only real-time event path was Hookdeck: a third-party 
 
 ## Decision
 
-1. **A new `ingestTransport`, `appWebhookTransport` (`engine/app_webhook.go`)**, selected by `event_source: direct` (App auth only). It is a plain-HTTP receiver around an **injected listener factory** called in `Start`: a bind error is an ordinary `Start` error (poll-only via `attachTransport`), and #2143 reuses the whole transport by passing a different listener. The name is set by the constructor (`direct` here).
+1. **A new `ingestTransport`, `appWebhookTransport` (`internal/appwebhook/receiver.go`)**, selected by `event_source: direct` (App auth only). It is a plain-HTTP receiver around an **injected listener factory** called in `Start`: a bind error is an ordinary `Start` error (poll-only via `attachTransport`), and #2143 reuses the whole transport by passing a different listener. The name is set by the constructor (`direct` here).
 2. **Handler order is fixed**: path (404) → method (405) → a declared Content-Length above the cap is refused 413 without reading the body; otherwise read at most the 25 MiB cap + 1 byte (413, before verification, not counted as a signature failure) → `events.VerifySignature` (401, counted) → `json.Valid` (400 naming the content-type fix, not counted) → `ping` (a *verified* ping is acknowledged and logged, not submitted, and counts as a signature success) → `intake.Submit` and 200. A missing signature header is a signature failure. The transport adds no dedupe, ack, echo, reconnect or cap logic beyond the cap+1 read; the reconnect handler is stored and never called, and the reconcile ticker is unchanged.
 3. **The drift tracker is extracted** from `hookdeck.Source` into `internal/events` as the mutex-guarded `SigDrift` (`RecordFailure`/`RecordSuccess` return the transition; the caller fires callbacks outside the lock), with `SignatureDriftThreshold` defined once (20). `hookdeck.SignatureDriftThreshold` aliases it, so Hookdeck's behaviour, its tests and Pruefer are unchanged. The lock is new: the HTTP server handles each request on its own goroutine, where Hookdeck's read loop was single-threaded.
 4. **Health is derived, never overwritten**: the state is computed from *listening*, *cache drift* (the reconcile hint) and *signature drift*, so a reconcile "healthy" hint cannot mask drift or a dead listener. Cache drift affects the aggregate unhealthy mode only, not the row's name.

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"strings"
 	"testing"
 
@@ -135,7 +136,7 @@ func TestCheckAppWebhookConfig_UnreadableLogsOncePerStreak(t *testing.T) {
 
 // The check rides the transport's coverage hook, so reconcile re-runs it.
 func TestTailscale_CoverageHookRunsWebhookConfigCheck(t *testing.T) {
-	nodes := installFakeTailnet(t, func(cfg tailnetNodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net.") })
+	nodes := installFakeTailnet(t, func(cfg appwebhook.NodeConfig) *fakeTailnet { return newFakeTailnet(cfg, "n.t.ts.net.") })
 	_ = nodes
 	isolateWarnings(t)
 	stubHookConfig(t, gh.AppHookConfig{URL: "https://wrong/", ContentType: "json"}, nil)
@@ -159,15 +160,15 @@ func TestTailscale_CoverageHookRunsWebhookConfigCheck(t *testing.T) {
 }
 
 func TestNormalizeWebhookURL(t *testing.T) {
-	a := normalizeWebhookURL("https://Foo.ts.net:443/webhook/")
-	b := normalizeWebhookURL("https://foo.ts.net/webhook")
+	a := appwebhook.NormalizeWebhookURL("https://Foo.ts.net:443/webhook/")
+	b := appwebhook.NormalizeWebhookURL("https://foo.ts.net/webhook")
 	if a != b {
 		t.Fatalf("%q != %q", a, b)
 	}
-	if normalizeWebhookURL("https://foo.ts.net:8443/webhook") == b {
+	if appwebhook.NormalizeWebhookURL("https://foo.ts.net:8443/webhook") == b {
 		t.Fatal("a non-default port is significant")
 	}
-	if normalizeWebhookURL("http://foo.ts.net/webhook") == b {
+	if appwebhook.NormalizeWebhookURL("http://foo.ts.net/webhook") == b {
 		t.Fatal("scheme is significant")
 	}
 }

@@ -1,4 +1,4 @@
-package engine
+package appwebhook
 
 import (
 	"context"
@@ -89,33 +89,33 @@ var (
 
 const livenessPanelType = "webhook_route_unreachable"
 
-// livenessAPI is the App-JWT surface the controller needs. *githubauth.Reconciler
+// LivenessAPI is the App-JWT surface the controller needs. *githubauth.Reconciler
 // implements it; the detail read is optional (a fake without it cannot verify an
 // attempt's URL, so nothing is verified and nothing decides).
-type livenessAPI interface {
+type LivenessAPI interface {
 	ListAppHookDeliveries(cursor string, perPage int) ([]gh.AppHookDelivery, string, error)
 	RedeliverAppHookDelivery(deliveryID int64) error
 }
 
-type livenessDetailAPI interface {
+type LivenessDetailAPI interface {
 	FetchAppHookDelivery(deliveryID int64) (gh.AppHookDeliveryDetail, error)
 }
 
-// livenessLedger is the read-only slice of the delivery ledger the probe uses.
-type livenessLedger interface {
-	ledgerReceivedAt(id string, now time.Time) (time.Time, bool)
+// LivenessLedger is the read-only slice of the delivery ledger the probe uses.
+type LivenessLedger interface {
+	ReceivedAt(id string, now time.Time) (time.Time, bool)
 }
 
-// routeSink receives the decided liveness; the App webhook transport implements it.
-type routeSink interface {
+// RouteSink receives the decided liveness; the App webhook transport implements it.
+type RouteSink interface {
 	SetRouteLiveness(localapi.RouteLiveness)
 }
 
-type routeLivenessConfig struct {
+type LivenessConfig struct {
 	Tag    string
-	API    livenessAPI
-	Ledger livenessLedger
-	Sink   routeSink
+	API    LivenessAPI
+	Ledger LivenessLedger
+	Sink   RouteSink
 	// HookURL reads the hook's current URL (GET /app/hook/config).
 	HookURL func(ctx context.Context) (string, error)
 	// OwnURL is the URL this receiver is served at, "" when not known (the direct
@@ -143,9 +143,9 @@ type outstandingProbe struct {
 	known map[int64]bool
 }
 
-// routeLiveness is the controller; one per App webhook transport.
-type routeLiveness struct {
-	cfg     routeLivenessConfig
+// Liveness is the controller; one per App webhook transport.
+type Liveness struct {
+	cfg     LivenessConfig
 	started time.Time
 	trigger chan struct{}
 
@@ -217,18 +217,18 @@ type guidProbe struct {
 	at time.Time
 }
 
-func newRouteLiveness(cfg routeLivenessConfig) *routeLiveness {
+func NewLiveness(cfg LivenessConfig) *Liveness {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 	if cfg.Wait == nil {
-		cfg.Wait = realReplayWait
+		cfg.Wait = RealWait
 	}
 	if cfg.OwnURL == nil {
 		cfg.OwnURL = func() string { return "" }
 	}
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
-	r := &routeLiveness{
+	r := &Liveness{
 		cfg:        cfg,
 		started:    cfg.Now(),
 		trigger:    make(chan struct{}, 1),
@@ -243,7 +243,7 @@ func newRouteLiveness(cfg routeLivenessConfig) *routeLiveness {
 	return r
 }
 
-func (r *routeLiveness) log(format string, args ...any) {
+func (r *Liveness) log(format string, args ...any) {
 	if r.cfg.Logf != nil {
 		r.cfg.Logf(format, args...)
 	}
@@ -253,7 +253,7 @@ func (r *routeLiveness) log(format string, args ...any) {
 // in-flight one is cancelled, and Stop returns only once it has exited (#2480).
 // It does not stop Run (its context does). nil-safe and idempotent; it must not
 // be called from the refresh goroutine or from decide's callbacks.
-func (r *routeLiveness) Stop() {
+func (r *Liveness) Stop() {
 	if r == nil {
 		return
 	}
@@ -265,7 +265,7 @@ func (r *routeLiveness) Stop() {
 }
 
 // Trigger requests an evaluation (a transport reconnect). Never blocks; nil-safe.
-func (r *routeLiveness) Trigger() {
+func (r *Liveness) Trigger() {
 	if r == nil {
 		return
 	}
@@ -277,7 +277,7 @@ func (r *routeLiveness) Trigger() {
 
 // Run evaluates at start, on every trigger and whenever a passive re-read or a
 // scheduled check is due, until ctx ends.
-func (r *routeLiveness) Run(ctx context.Context) {
+func (r *Liveness) Run(ctx context.Context) {
 	// The warm-up is counted from here, when the listener (and, for tailscale, the
 	// node and its Funnel) is up: the controller is constructed before the node
 	// starts, and a slow Up must not use the warm-up and the start-up quiet period
@@ -317,7 +317,7 @@ func (r *routeLiveness) Run(ctx context.Context) {
 // arrival only proves the route while the App's hook URL (as last read) is that
 // URL: a redelivery GitHub sent to an older address says nothing about the
 // current one.
-func (r *routeLiveness) Arrival(guid string) (probe bool) {
+func (r *Liveness) Arrival(guid string) (probe bool) {
 	if r == nil {
 		return false
 	}
@@ -349,7 +349,7 @@ func (r *routeLiveness) Arrival(guid string) (probe bool) {
 }
 
 // noteRealArrival records a real delivery as proof of the route.
-func (r *routeLiveness) noteRealArrival() {
+func (r *Liveness) noteRealArrival() {
 	r.mu.Lock()
 	r.arrivedAt = r.cfg.Now()
 	r.mu.Unlock()
@@ -361,7 +361,7 @@ func (r *routeLiveness) noteRealArrival() {
 // in flight at a time and at most one per livenessArrivalRefreshGap, so a stream
 // of deliveries to a stale address cannot become a request loop; a skipped
 // arrival is covered by the next arrival or the passive read.
-func (r *routeLiveness) refreshHookForArrival(at time.Time) {
+func (r *Liveness) refreshHookForArrival(at time.Time) {
 	r.mu.Lock()
 	if r.stopped || r.refreshing || (!r.lastArrivalRefresh.IsZero() && at.Sub(r.lastArrivalRefresh) < livenessArrivalRefreshGap) {
 		r.mu.Unlock()
@@ -410,10 +410,10 @@ func (r *routeLiveness) refreshHookForArrival(at time.Time) {
 // adoptHookURL records the App's current hook URL and, when it differs from the
 // last one, forgets the verdict and its evidence (evidence for another URL says
 // nothing about this one). It reports whether the URL changed.
-func (r *routeLiveness) adoptHookURL(hookURL string) bool {
+func (r *Liveness) adoptHookURL(hookURL string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	changed := r.lastURL != "" && normalizeWebhookURL(r.lastURL) != normalizeWebhookURL(hookURL)
+	changed := r.lastURL != "" && NormalizeWebhookURL(r.lastURL) != NormalizeWebhookURL(hookURL)
 	r.lastURL = hookURL
 	if changed {
 		r.state, r.reason, r.evidenceAt, r.unreachAt = localapi.RouteUnknown, "", time.Time{}, time.Time{}
@@ -426,9 +426,9 @@ func (r *routeLiveness) adoptHookURL(hookURL string) bool {
 // arrivalMatchesHook reports whether a request that reached this receiver counts
 // as evidence for the App's hook URL. Unknown on either side counts: the passive
 // read corrects a wrong verdict within livenessPassiveInterval.
-func (r *routeLiveness) arrivalMatchesHook(hookURL string) bool {
+func (r *Liveness) arrivalMatchesHook(hookURL string) bool {
 	own := r.cfg.OwnURL()
-	return own == "" || hookURL == "" || normalizeWebhookURL(own) == normalizeWebhookURL(hookURL)
+	return own == "" || hookURL == "" || NormalizeWebhookURL(own) == NormalizeWebhookURL(hookURL)
 }
 
 // groupInfo summarises the attempts of one GUID.
@@ -445,7 +445,7 @@ type logRead struct {
 	groups   []groupInfo          // in first-appearance (newest-first) order
 }
 
-func (r *routeLiveness) readLog(now time.Time, pages int) (logRead, error) {
+func (r *Liveness) readLog(now time.Time, pages int) (logRead, error) {
 	var out logRead
 	bound := now.Add(-livenessLogWindow)
 	idx := map[string]int{}
@@ -565,7 +565,7 @@ func sanitizeStatusText(s string, code int) string {
 }
 
 // decide records a liveness verdict from evidence at now.
-func (r *routeLiveness) decide(state, reason string) {
+func (r *Liveness) decide(state, reason string) {
 	r.decideMu.Lock()
 	now := r.cfg.Now()
 	r.mu.Lock()
@@ -603,7 +603,7 @@ func (r *routeLiveness) decide(state, reason string) {
 
 // syncPanel raises the warnings-panel entry once an unreachable verdict has been
 // held for livenessSustained and clears it whenever the verdict is not unreachable.
-func (r *routeLiveness) syncPanel() {
+func (r *Liveness) syncPanel() {
 	r.panelMu.Lock()
 	defer r.panelMu.Unlock()
 	now := r.cfg.Now()
@@ -641,7 +641,7 @@ func livenessCondition(tag, reason string) warnings.Condition {
 
 // evaluate runs one passive read and, when it decides nothing and an active
 // check is due, one probe.
-func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
+func (r *Liveness) evaluate(ctx context.Context, forced bool) {
 	now := r.cfg.Now()
 	r.mu.Lock()
 	due := forced || r.lastPassive.IsZero() || now.Sub(r.lastPassive) >= livenessPassiveInterval ||
@@ -719,7 +719,7 @@ func (r *routeLiveness) evaluate(ctx context.Context, forced bool) {
 
 // noteFailure records the delivered_at of the failure behind an unreachable
 // verdict about to be decided.
-func (r *routeLiveness) noteFailure(at time.Time) {
+func (r *Liveness) noteFailure(at time.Time) {
 	r.mu.Lock()
 	r.failAt = at
 	r.mu.Unlock()
@@ -730,7 +730,7 @@ func (r *routeLiveness) noteFailure(at time.Time) {
 // livenessFailWindow) and the probe that was allowed to run decided nothing. A
 // route that has since been fixed must not read unreachable on a quiet bed
 // until the 24 h backstop; the honest value with no evidence is unknown.
-func (r *routeLiveness) dropStaleUnreachable() {
+func (r *Liveness) dropStaleUnreachable() {
 	now := r.cfg.Now()
 	r.mu.Lock()
 	stale := r.state == localapi.RouteUnreachable && !r.failAt.IsZero() && now.Sub(r.failAt) > livenessFailWindow
@@ -742,9 +742,9 @@ func (r *routeLiveness) dropStaleUnreachable() {
 }
 
 // classifyLog verifies attempt URLs through the detail endpoint when available.
-func (r *routeLiveness) classifyLog(lr logRead, hookURL string, now time.Time) passiveResult {
-	detail, _ := r.cfg.API.(livenessDetailAPI)
-	want := normalizeWebhookURL(hookURL)
+func (r *Liveness) classifyLog(lr logRead, hookURL string, now time.Time) passiveResult {
+	detail, _ := r.cfg.API.(LivenessDetailAPI)
+	want := NormalizeWebhookURL(hookURL)
 	verify := func(id int64) (bool, bool) {
 		if detail == nil {
 			return false, false
@@ -753,7 +753,7 @@ func (r *routeLiveness) classifyLog(lr logRead, hookURL string, now time.Time) p
 		if err != nil || d.URL == "" {
 			return false, false
 		}
-		return normalizeWebhookURL(d.URL) == want, true
+		return NormalizeWebhookURL(d.URL) == want, true
 	}
 	r.mu.Lock()
 	floor := r.started.Add(r.cfg.Warmup)
@@ -761,7 +761,7 @@ func (r *routeLiveness) classifyLog(lr logRead, hookURL string, now time.Time) p
 	return classifyAttempts(lr.attempts, now, floor, verify)
 }
 
-func (r *routeLiveness) hookURL(ctx context.Context) (string, error) {
+func (r *Liveness) hookURL(ctx context.Context) (string, error) {
 	if r.cfg.HookURL == nil {
 		return "", errors.New("no hook URL source")
 	}
@@ -769,7 +769,7 @@ func (r *routeLiveness) hookURL(ctx context.Context) (string, error) {
 }
 
 // logOnce logs a read failure once per distinct message.
-func (r *routeLiveness) logOnce(format string, err error) {
+func (r *Liveness) logOnce(format string, err error) {
 	msg := fmt.Sprintf(format, err)
 	r.mu.Lock()
 	same := r.cfgLogged == msg
@@ -782,7 +782,7 @@ func (r *routeLiveness) logOnce(format string, err error) {
 
 // age moves a verdict whose evidence has grown too old to unknown: a reachable
 // verdict after twice the quiet period, an unreachable one after the log window.
-func (r *routeLiveness) age(now time.Time) {
+func (r *Liveness) age(now time.Time) {
 	r.mu.Lock()
 	state, ev := r.state, r.evidenceAt
 	r.mu.Unlock()
@@ -795,7 +795,7 @@ func (r *routeLiveness) age(now time.Time) {
 }
 
 // maybeProbe makes an active check when one is due and allowed.
-func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL string, now time.Time, forced bool) {
+func (r *Liveness) maybeProbe(ctx context.Context, lr logRead, hookURL string, now time.Time, forced bool) {
 	r.mu.Lock()
 	if r.out != nil {
 		r.mu.Unlock()
@@ -856,7 +856,7 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 		if p := r.perGUID[g.guid]; p != nil && p.n >= livenessMaxProbesPerGUID {
 			continue
 		}
-		at, ok := r.cfg.Ledger.ledgerReceivedAt(g.guid, now)
+		at, ok := r.cfg.Ledger.ReceivedAt(g.guid, now)
 		if !ok || now.Sub(at) > livenessMaxEligibleAge {
 			continue
 		}
@@ -926,7 +926,7 @@ func (r *routeLiveness) maybeProbe(ctx context.Context, lr logRead, hookURL stri
 // awaitProbe waits for the probe's copy to arrive or its attempt to show in the
 // log. A timeout or a failed attempt that does not yet make a run schedules one
 // early retry; it is never an unreachable verdict by itself.
-func (r *routeLiveness) awaitProbe(ctx context.Context, out *outstandingProbe, hookURL string) {
+func (r *Liveness) awaitProbe(ctx context.Context, out *outstandingProbe, hookURL string) {
 	defer func() {
 		r.mu.Lock()
 		r.out = nil
@@ -998,16 +998,91 @@ func (r *routeLiveness) awaitProbe(ctx context.Context, out *outstandingProbe, h
 // arrivalProves reports whether a probe copy arriving at this receiver proves
 // the route for the hook's current URL: where the receiver knows its own URL it
 // must be the one the App is configured with.
-func (r *routeLiveness) arrivalProves(hookURL string) bool {
+func (r *Liveness) arrivalProves(hookURL string) bool {
 	own := r.cfg.OwnURL()
-	return own == "" || normalizeWebhookURL(own) == normalizeWebhookURL(hookURL)
+	return own == "" || NormalizeWebhookURL(own) == NormalizeWebhookURL(hookURL)
 }
 
-func (r *routeLiveness) scheduleRetry() {
+func (r *Liveness) scheduleRetry() {
 	r.mu.Lock()
 	if !r.retryUsed {
 		r.retryUsed = true
 		r.retryAt = r.cfg.Now().Add(livenessRetryDelay)
 	}
+	r.mu.Unlock()
+}
+
+// setRefreshTrackingDisabledForTest neutralises the arrival-refresh tracking
+// (#2480): the refresh goroutine is not counted by Stop and reads on an
+// uncancellable context, the pre-fix behaviour the non-vacuity test must catch.
+func (r *Liveness) setRefreshTrackingDisabledForTest(off bool) {
+	r.mu.Lock()
+	r.refreshTrackingOff = off
+	r.mu.Unlock()
+}
+
+// SetLivenessConstantsForTest shrinks the controller's fixed windows for a test
+// and returns a restore function. Zero values leave a constant unchanged.
+func SetLivenessConstantsForTest(fresh, failWindow, quiet, minProbe, retry, sustained, resultWait, resultPoll time.Duration) (restore func()) {
+	o := [8]time.Duration{livenessFreshWindow, livenessFailWindow, livenessQuiet, livenessMinProbeInterval, livenessRetryDelay, livenessSustained, livenessResultWait, livenessResultPoll}
+	set := func(dst *time.Duration, v time.Duration) {
+		if v != 0 {
+			*dst = v
+		}
+	}
+	set(&livenessFreshWindow, fresh)
+	set(&livenessFailWindow, failWindow)
+	set(&livenessQuiet, quiet)
+	set(&livenessMinProbeInterval, minProbe)
+	set(&livenessRetryDelay, retry)
+	set(&livenessSustained, sustained)
+	set(&livenessResultWait, resultWait)
+	set(&livenessResultPoll, resultPoll)
+	return func() {
+		livenessFreshWindow, livenessFailWindow, livenessQuiet, livenessMinProbeInterval = o[0], o[1], o[2], o[3]
+		livenessRetryDelay, livenessSustained, livenessResultWait, livenessResultPoll = o[4], o[5], o[6], o[7]
+	}
+}
+
+// Start runs the controller in the background until ctx ends or the returned
+// stop function is called; stop waits for the goroutine to exit and for any
+// in-flight arrival hook refresh (cancelling it first; none starts afterwards),
+// so a transport shutting down never leaves either reading consumer state or
+// writing the warnings panel (#2480). A nil controller is a no-op (stop is
+// still callable). A stale panel entry from a previous run is cleared first:
+// the in-memory verdict starts unknown, and unknown raises nothing.
+func (r *Liveness) Start(ctx context.Context) (stop func()) {
+	if r == nil {
+		return func() {}
+	}
+	if r.cfg.Resolve != nil {
+		r.cfg.Resolve(warnings.Condition{Type: livenessPanelType, Subject: r.cfg.Tag}.Key())
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Run(rctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+		r.Stop()
+	}
+}
+
+// ResetVerdictForTest puts the verdict back to unknown with no evidence, so a
+// consumer test can isolate one check from an earlier real delivery.
+func (r *Liveness) ResetVerdictForTest() {
+	r.mu.Lock()
+	r.state, r.evidenceAt = localapi.RouteUnknown, time.Time{}
+	r.mu.Unlock()
+}
+
+// SetStartedForTest back-dates the controller's start (the warm-up is counted
+// from it), so a consumer test need not wait out the warm-up.
+func (r *Liveness) SetStartedForTest(t time.Time) {
+	r.mu.Lock()
+	r.started = t
 	r.mu.Unlock()
 }
