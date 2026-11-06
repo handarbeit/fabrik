@@ -11,6 +11,7 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/internal/githubauth"
@@ -207,6 +208,19 @@ func Execute() error {
 		})
 		logf(0, "poll", "event_source: hookdeck — Hookdeck API key from $%s, webhook secret from $%s\n",
 			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
+	}
+
+	// event_source: direct / tailscale (#2476, ADR 2476): the App's own webhook,
+	// received by the shared internal/appwebhook receiver. The names of the
+	// secret and auth-key variables are logged, never their values.
+	if isAppWebhookSource(cfg.EventSource) {
+		secret := os.Getenv(cfg.AppWebhookSecretEnv)
+		authKey := os.Getenv(cfg.TailscaleAuthKeyEnv)
+		stateExists := cfg.EventSource == EventSourceTailscale && appwebhook.StateExists(cfg.TailscaleStateDir)
+		if err := RefuseAppSourceMisconfigured(cfg, secret, authKey, stateExists); err != nil {
+			return err
+		}
+		daemon.EventSource = newAppWebhookSource(daemon, cfg, secret)
 	}
 
 	// SIGHUP triggers a config reload (ADR-1640) — deliberately a separate
