@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -135,7 +136,8 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if ee, ok := err.(*ExitError); ok {
+	var ee *ExitError
+	if errors.As(err, &ee) {
 		return ee.Code
 	}
 	return -1

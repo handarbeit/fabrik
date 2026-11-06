@@ -239,7 +239,7 @@ interpret_e2e_exit_code() {
       echo "live e2e integration suite passed"
       ;;
     3)
-      echo "live e2e integration suite aborted: GraphQL budget exhausted mid-run (exit 3) — the verdict cannot be trusted. Wait for the budget window to reset and re-run scripts/cut-release.sh $VERSION."
+      echo "live e2e integration suite aborted: GraphQL budget exhausted mid-run (exit 3) — the verdict cannot be trusted. Wait for the budget window to reset and re-run scripts/cut-release.sh $VERSION. (If the output says the REVIEWER TOKEN budget is exhausted before a cell started, nothing ran or was recorded for that cell: wait for that account to reset and re-run — coverage resumes.)"
       ;;
     4)
       echo "live e2e integration suite aborted: bed preflight failed (exit 4) inside scripts/e2e/run.sh — the suite never ran. This is an infrastructure problem (stuck lock, unreachable SSH remote, dirty tracked files in the bed checkout, etc.), NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own preflight_bed output above for the specific cause, fix it, and re-run scripts/cut-release.sh $VERSION."

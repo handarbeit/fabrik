@@ -19,11 +19,44 @@ type fakeIdentity struct {
 	limits    map[string]int    // token -> limit (default 5000)
 	budgetErr error
 	mintErr   error
-	mintEmpty bool     // the mint "succeeds" with no token
-	block     bool     // Budget blocks until its context ends
-	resolves  []string // tokens ResolveLogin was asked about
-	mints     []string // bed dirs MintAppToken was asked about
-	probes    []string // tokens Budget was asked about
+	mintEmpty bool // the mint "succeeds" with no token
+	block     bool // Budget blocks until its context ends
+	// blockTokens makes Budget block until its context ends for just these tokens.
+	blockTokens map[string]bool
+	resolves    []string // tokens ResolveLogin was asked about
+	mints       []string // bed dirs MintAppToken was asked about
+	probes      []string // tokens Budget was asked about
+
+	// The REST core reader (#2536). cores is token -> remaining; a token absent
+	// from the map reads as 5000 (healthy). coreResets is token -> RFC3339 reset.
+	cores      map[string]int
+	coreLimits map[string]int
+	coreResets map[string]string
+	coreErr    map[string]error // per-token failure of CoreBudget
+	coreReads  []string         // tokens CoreBudget was asked about
+	// graphqlErr is per-token failure of Budget (budgetErr applies to every token).
+	graphqlErr map[string]error
+	// loginErr makes ResolveLogin fail for a token even if logins lists it (an
+	// exhausted account cannot answer GET /user).
+	loginErr map[string]error
+}
+
+func (f *fakeIdentity) CoreBudget(_ context.Context, token string) (int, int, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.coreReads = append(f.coreReads, token)
+	if err := f.coreErr[token]; err != nil {
+		return 0, 0, "", err
+	}
+	rem, ok := f.cores[token]
+	if !ok {
+		rem = 5000
+	}
+	limit := f.coreLimits[token]
+	if limit == 0 {
+		limit = 5000
+	}
+	return rem, limit, f.coreResets[token], nil
 }
 
 // mintedToken is what the fake mints; it must never reach the output.
@@ -33,6 +66,9 @@ func (f *fakeIdentity) ResolveLogin(_ context.Context, token string) (string, er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resolves = append(f.resolves, token)
+	if err := f.loginErr[token]; err != nil {
+		return "", err
+	}
 	if l, ok := f.logins[token]; ok {
 		return l, nil
 	}
@@ -40,7 +76,7 @@ func (f *fakeIdentity) ResolveLogin(_ context.Context, token string) (string, er
 }
 
 func (f *fakeIdentity) Budget(ctx context.Context, token string) (int, int, string, error) {
-	if f.block {
+	if f.block || f.blockTokens[token] {
 		<-ctx.Done()
 		return 0, 0, "", ctx.Err()
 	}
@@ -49,6 +85,9 @@ func (f *fakeIdentity) Budget(ctx context.Context, token string) (int, int, stri
 	f.probes = append(f.probes, token)
 	if f.budgetErr != nil {
 		return 0, 0, "", f.budgetErr
+	}
+	if err := f.graphqlErr[token]; err != nil {
+		return 0, 0, "", err
 	}
 	limit := f.limits[token]
 	if limit == 0 {

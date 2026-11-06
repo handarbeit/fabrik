@@ -40,6 +40,8 @@ type BedSpec struct {
 	// Token is the bed's .env FABRIK_TOKEN: the engine's PAT on pat legs and the
 	// harness's token on every leg ("" when unreadable).
 	Token string
+	// ReviewerToken is the bed's .env FABRIK_REVIEWER_TOKEN ("" when none; #2536).
+	ReviewerToken string
 	// AppInstallationID is the bed's .env E2E_APP_INSTALLATION_ID ("" when unset):
 	// the key of the bed's App identity on app legs (D3).
 	AppInstallationID string
@@ -67,6 +69,7 @@ func (g *Gate) resolveBedSpec(name, dir string) BedSpec {
 		Name:              name,
 		Dir:               dir,
 		Token:             EnvFileValue(envFile, "FABRIK_TOKEN"),
+		ReviewerToken:     EnvFileReviewerToken(envFile),
 		AppInstallationID: envAppInstallationID(envFile),
 		Reset: ResetConfig{
 			Alpha:         pick("FABRIK_TEST_REPO_ALPHA", defaultRepoAlpha),
@@ -127,12 +130,13 @@ func (g *Gate) buildBedGates() {
 // read-only (copied), or shared mutable (reached through parent, like the
 // INCONCLUSIVE list, or through a pointer, like cov, which propagateToBeds sets
 // once the ledger is open). roleSplitDisabledForTest is root-only: identitySet
-// reads it through root().
+// reads it through root(); so is reviewerBudgetCheckDisabledForTest (#2536).
 func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 	cfg := g.Cfg
 	cfg.TestBed = spec.Dir
 	cfg.EngineLog = filepath.Join(spec.Dir, ".fabrik", "fabrik.log")
 	cfg.BedToken = spec.Token
+	cfg.ReviewerToken = spec.ReviewerToken
 	prefix := "[bed " + spec.Name + "] "
 	b := &Gate{
 		Cfg:                           cfg,

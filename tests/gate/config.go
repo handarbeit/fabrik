@@ -83,10 +83,13 @@ type Config struct {
 	// bed directories whose first entry is bed A, or [TestBed] when it is unset.
 	// Two or more entries make the run multi-bed (beds.go); one — the default —
 	// is today's single-bed gate, unchanged. nil (a Config built by hand) is one bed.
-	BedDirs    []string
-	EngineLog  string // $TestBed/.fabrik/fabrik.log
-	BedToken   string // FABRIK_TOKEN from $TestBed/.env; "" when unreadable
-	PrueferDir string
+	BedDirs   []string
+	EngineLog string // $TestBed/.fabrik/fabrik.log
+	BedToken  string // FABRIK_TOKEN from $TestBed/.env; "" when unreadable
+	// ReviewerToken is FABRIK_REVIEWER_TOKEN from $TestBed/.env, the harness's
+	// second, non-author identity ("" when the bed has none; #2536). Never logged.
+	ReviewerToken string
+	PrueferDir    string
 
 	Timeout    string // E2E_TIMEOUT, default 4h (a go duration string, passed through)
 	Parallel   string // E2E_PARALLEL, default 4: the shared phase's -parallel (#1977; 8 is the value to try, not the default)
@@ -169,6 +172,14 @@ type Config struct {
 	// shrink it.
 	SharedIdentityReprobe time.Duration
 
+	// The reviewer-token budget guard (#2536, ADR-2536). A reviewer account whose
+	// REST core or GraphQL budget is below its minimum is refused at preflight and
+	// before each cell. A zero minimum disables that bucket, so a Config built by
+	// hand (the tests') guards nothing.
+	ReviewerMinCore    int           // E2E_REVIEWER_MIN_CORE: remaining REST core calls required (default 500; 0 disables)
+	ReviewerMinGraphQL int           // E2E_REVIEWER_MIN_GRAPHQL: remaining GraphQL points required (default 100; 0 disables)
+	ReviewerHoldMax    time.Duration // E2E_REVIEWER_HOLD_MAX (secs): longest a cell is held for the reviewer budget to reset (default 10m)
+
 	// The environment probes (#1974, ADR-1974). A zero threshold disables that
 	// probe, so a Config built by hand (the tests') probes nothing.
 	LagProbeThreshold  time.Duration // E2E_LAG_PROBE_THRESHOLD (secs): board-add→listing lag above which preflight waits (default 30s)
@@ -220,6 +231,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		LoadProbeFactor: 2,
 		LagPollInterval: 3 * time.Second,
 
+		ReviewerMinCore:    defaultReviewerMinCore,
+		ReviewerMinGraphQL: defaultReviewerMinGraphQL,
+
 		DeliveryProbeInterval: 15 * time.Second,
 	}
 	var err error
@@ -262,6 +276,15 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		return c, err
 	}
 	if c.LoadProbeThreshold, err = floatEnv(getenv, "E2E_LOAD_PROBE_THRESHOLD", 0); err != nil {
+		return c, err
+	}
+	if c.ReviewerMinCore, err = countEnv(getenv, "E2E_REVIEWER_MIN_CORE", c.ReviewerMinCore); err != nil {
+		return c, err
+	}
+	if c.ReviewerMinGraphQL, err = countEnv(getenv, "E2E_REVIEWER_MIN_GRAPHQL", c.ReviewerMinGraphQL); err != nil {
+		return c, err
+	}
+	if c.ReviewerHoldMax, err = secsEnv(getenv, "E2E_REVIEWER_HOLD_MAX", 600); err != nil {
 		return c, err
 	}
 	if c.InconclusiveRetries, err = countEnv(getenv, "E2E_INCONCLUSIVE_RETRIES", c.InconclusiveRetries); err != nil {
@@ -397,6 +420,14 @@ func countEnv(getenv func(string) string, key string, def int) (int, error) {
 	return n, nil
 }
 
+// Defaults of the reviewer-token budget guard (#2536). Provisional: no per-gate
+// reviewer spend has been measured; the reviewer budget lines every leg now
+// prints are the data to tune them from.
+const (
+	defaultReviewerMinCore    = 500
+	defaultReviewerMinGraphQL = 100
+)
+
 // defaultSharedIdentityFloor is E2E_SHARED_IDENTITY_FLOOR's default (#2263).
 const defaultSharedIdentityFloor = 40
 
@@ -435,6 +466,34 @@ func secsEnv(getenv func(string) string, key string, def int) (time.Duration, er
 		return 0, fmt.Errorf("%s=%q is not a non-negative integer", key, v)
 	}
 	return time.Duration(n) * time.Second, nil
+}
+
+// EnvFileReviewerToken is the bed .env's FABRIK_REVIEWER_TOKEN, read with the
+// live harness's semantics (tests/e2e/harness.go readEnvFileValue): the first
+// KEY= line, whitespace trimmed, comments and blank lines skipped, one matched
+// pair of surrounding quotes stripped. The gate must resolve the same token the
+// tests use, or it would guard a different account.
+func EnvFileReviewerToken(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != "FABRIK_REVIEWER_TOKEN" {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		return v
+	}
+	return ""
 }
 
 // EnvFileValue returns the value of the first KEY= line of an env file with no
