@@ -146,7 +146,7 @@ An operator moving a Pruefer instance off the shared App follows `cmd/pruefer/RE
 - A bind failure or Funnel failure degrades to poll-only rather than stopping the daemon.
 - `ping` deliveries are acknowledged and not dispatched.
 - Event types Pruefer has no use for are acknowledged and not dispatched (as today).
-- Installation lifecycle events (`installation`, `installation_repositories`) still trigger Pruefer's existing re-derivation when they belong to the daemon's own installation.
+- Installation lifecycle events (`installation`, `installation_repositories`) still trigger Pruefer's existing re-derivation when they belong to the daemon's own installation (an `installation` `created` event is the one exception; see Assumptions).
 - A delivery with no `installation.id` in its payload cannot be matched to the daemon and is treated as not belonging to it (ignored with one log line), except where the payload type legitimately carries none.
 - A daemon whose installation set is not yet known (very first start before derivation completes) cannot judge ownership; see Assumptions.
 - The new configuration names (secret env name, auth key env name, listen address, path, hostname, state dir) must not reach the environment of the review subprocess.
@@ -195,7 +195,7 @@ An operator moving a Pruefer instance off the shared App follows `cmd/pruefer/RE
 
 - **Dedicated App per daemon**: each Pruefer daemon runs under one App with one installation, so "the daemon's own installation" is the single installation that daemon derives for its App. A daemon holding several installations (a misconfigured shared App) treats a delivery as its own if its installation ID is among the installations the daemon currently serves, and ignores it otherwise.
 - **Before ownership is known**: if the daemon has not yet derived any installation, it cannot judge ownership and does not drop deliveries on that ground; the filter is a backstop, and the first derivation happens at startup before reviews run.
-- **Installation lifecycle events** are subject to the same ownership check, since each carries an installation ID; an event for the daemon's own installation still triggers re-derivation.
+- **Installation lifecycle events** are subject to the same ownership check, since each carries an installation ID; an event for the daemon's own installation still triggers re-derivation. One deliberate exception (ADR 2476 decision 5): an `installation` event with action `created` bypasses the check, because it is how a daemon holding several installations of its App learns of a new one, and it only triggers the re-derivation a timer tick would do anyway. `installation_repositories`, every other `installation` action and every other event type use the strict check.
 - **Hookdeck code is untouched here**: removing Pruefer's Hookdeck mode is separate work tracked with the 0.0.92 removal. This issue only adds the two new values alongside the existing ones.
 - **Shared receiver behaviour is unchanged**: Pruefer inherits the receiver's size cap, signature verification, Funnel-only listening, route-liveness and replay semantics as they stand after #2475.
 - **Pruefer's replay "seen" check** is read-only against its existing dedupe, mirroring how the engine's replayer uses the ledger.
