@@ -43,18 +43,18 @@ func (c networkCondition) reachable() bool {
 // the daemon receives a GitHub App's own webhook straight from an HTTP request
 // the operator's tunnel or proxy forwards to it, with no third-party relay.
 //
-// It is an ingestTransport and nothing more: it verifies X-Hub-Signature-256
-// against the App's static webhook secret and hands a delivery to the engine's
-// intake sink. Dedupe, the fast ack, echo attribution, reconnect catch-up and
-// the body cap's value all belong to the intake and are reused, not repeated
-// (the one thing it must do itself is read at most MaxBodyBytes+1 so an
+// It is a receiver and nothing more: it verifies X-Hub-Signature-256 against the
+// App's static webhook secret and hands a verified delivery to the consumer's
+// Sink. Dedupe, the fast ack, echo attribution, ordering and reconnect catch-up
+// all belong to the consumer behind that Sink and are not repeated here (the one
+// thing the receiver must do itself is read at most MaxBodyBytes+1 so an
 // oversized body is answered 413 before any verification).
 //
-// The listener is injected as a factory (listenFn, called inside Start) so a
-// different listener source (the embedded tsnet of #2143) reuses the whole
-// transport unchanged and a bind failure is an ordinary Start error, which
-// attachTransport turns into poll-only. The transport speaks plain HTTP: TLS is
-// the fronting proxy's job.
+// The listener is injected as a factory (Config.Listen, called inside Start) so
+// a different listener source (the embedded tsnet node of #2143) reuses the whole
+// receiver unchanged and a bind failure is an ordinary Start error, which the
+// consumer decides how to handle (the engine degrades to poll-only). The receiver
+// speaks plain HTTP: TLS is the fronting proxy's job.
 type Receiver struct {
 	name     string
 	path     string
@@ -172,7 +172,8 @@ func New(cfg Config) *Receiver {
 // Name is the receiver's name.
 func (t *Receiver) Name() string { return t.name }
 
-// SetSink implements ingestTransport.
+// SetSink installs the consumer's Sink, which receives every verified,
+// non-ping delivery.
 func (t *Receiver) SetSink(sink Sink) {
 	t.mu.Lock()
 	t.sink = sink
@@ -193,8 +194,8 @@ func (t *Receiver) SetReplayStatus(h localapi.ReplayHealth) {
 // there the handler is stored and never called. The tailscale transport calls
 // it, through SetNetworkCondition, when a lost tailnet connection comes back.
 // Delivery replay (#2144) reaches the same conclusion for the direct transport:
-// its only trigger is startup, and the composite handler attachTransportErr
-// installs is there for transports (this tailnet one) that do signal a reconnect.
+// its only trigger is startup, and a consumer's composite reconnect handler is
+// there for receivers (the tailnet one) that do signal a reconnect.
 func (t *Receiver) SetReconnectHandler(fn func()) {
 	t.mu.Lock()
 	t.reconnectFn = fn

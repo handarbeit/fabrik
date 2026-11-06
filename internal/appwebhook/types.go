@@ -21,7 +21,7 @@ type Sink func(Delivery)
 type LogFunc func(issueNumber int, tag, format string, args ...any)
 
 // Panel is the consumer's operator-warnings reporter. Implementations log (not
-// fail) on a recording error, as the engine's always has.
+// fail) on a recording error, as the engine's implementation does.
 type Panel interface {
 	Report(c warnings.Condition)
 	Resolve(key string)

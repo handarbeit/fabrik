@@ -12,10 +12,10 @@ import (
 // A receiver behind a public TLS route (the tailscale Funnel) is probed
 // continuously by scanners that abort the handshake. net/http reports each one
 // through http.Server.ErrorLog, which falls back to the std logger and so to the
-// process's stderr when nil — drawing over the TUI and never reaching the engine
-// log. The server therefore gets an ErrorLog backed by serverErrorWriter: a TLS
-// handshake failure is only counted (and summarised once per interval); every
-// other server error is forwarded to the engine log.
+// process's stderr when nil — drawing over the consumer's TUI and never reaching
+// its log. The server therefore gets an ErrorLog backed by serverErrorWriter: a
+// TLS handshake failure is only counted (and summarised once per interval);
+// every other server error is forwarded to the consumer's LogFunc.
 
 // handshakeLinePrefix is the exact prefix net/http gives a failed TLS handshake
 // (net/http/server.go: "http: TLS handshake error from %s: %v"). Only this form
@@ -23,7 +23,7 @@ import (
 const handshakeLinePrefix = "http: TLS handshake error from "
 
 // handshakeSummaryInterval is how often the pending handshake-failure count is
-// summarised in the engine log. Fixed: operators who need the exact rate read
+// summarised in the consumer's log. Fixed: operators who need the exact rate read
 // the tls_handshake_failures counter.
 const handshakeSummaryInterval = time.Minute
 

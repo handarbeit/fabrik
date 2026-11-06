@@ -21,7 +21,7 @@ import (
 // (tsnet) is touched only by tsnetnode/node.go; everything
 // here talks to it through the Node seam, so the listener acquisition,
 // health, drop/recovery, URL resolution and shutdown are all tested without a
-// tailnet. All request handling is the shared appWebhookTransport's.
+// tailnet. All request handling is the shared Receiver's.
 
 const (
 	// UpTimeout bounds how long startup waits for the node to join the
