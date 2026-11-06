@@ -147,7 +147,7 @@ An operator moving a Pruefer instance off the shared App follows `cmd/pruefer/RE
 - `ping` deliveries are acknowledged and not dispatched.
 - Event types Pruefer has no use for are acknowledged and not dispatched (as today).
 - Installation lifecycle events (`installation`, `installation_repositories`) still trigger Pruefer's existing re-derivation when they belong to the daemon's own installation (an `installation` `created` event is the one exception; see Assumptions).
-- A delivery with no `installation.id` in its payload cannot be matched to the daemon and is treated as not belonging to it (ignored with one log line), except where the payload type legitimately carries none.
+- A delivery with no `installation.id` in its payload cannot be matched to the daemon and is treated as not belonging to it (ignored with one log line, with a message saying the delivery carries no `installation.id` rather than blaming a foreign App). There is no exception by event type: once the daemon knows its installations, an App-level event that carries no installation ID (for example `github_app_authorization`) is ignored too, which is harmless because Pruefer's sink has nothing to do for those event types. `ping` never reaches this check; the shared receiver acknowledges it first.
 - A daemon whose installation set is not yet known (very first start before derivation completes) cannot judge ownership; see Assumptions.
 - The new configuration names (secret env name, auth key env name, listen address, path, hostname, state dir) must not reach the environment of the review subprocess.
 
@@ -161,7 +161,7 @@ An operator moving a Pruefer instance off the shared App follows `cmd/pruefer/RE
 - **FR-004**: A verified delivery MUST be converted to Pruefer's existing normalized event and handed to Pruefer's existing event sink and dispatch, the path Hookdeck deliveries take today. Pull-request actions that trigger a review and installation events that trigger re-derivation behave as they do now.
 - **FR-005**: Pruefer's own delivery-ID dedupe MUST apply to deliveries from the new receiver, so a redelivered or duplicated delivery dispatches at most once.
 - **FR-006**: Replay of failed deliveries MUST use Pruefer's dedupe as its read-only "seen" check, MUST NOT record a delivery as seen by checking it, and MUST NOT dispatch a review or call the sink itself; redelivered copies re-enter only through the normal handler.
-- **FR-007**: A delivery whose `installation.id` is not the daemon's own installation MUST be ignored with exactly one log line, and MUST NOT be dispatched, deduped-as-seen, or counted as a signature failure.
+- **FR-007**: A delivery whose `installation.id` is not the daemon's own installation MUST be ignored with exactly one log line, and MUST NOT be dispatched, deduped-as-seen, or counted as a signature failure. The one exception is an `installation` event with action `created` (see Assumptions, ADR 2476 decision 5).
 - **FR-008**: The reconciliation fallback poll and the startup sweep MUST keep their current behaviour and cadence in the new modes.
 - **FR-009**: The Pruefer TUI footer and status MUST show the transport state, tailnet state, Funnel state, last delivery time and route liveness.
 - **FR-010**: Listen failures, signature drift and (for `tailscale`) hook-configuration mismatch MUST be reported to the operator the way Pruefer reports other operator-level conditions, equivalent to how Fabrik reports them. A listen failure MUST degrade to poll-only rather than stop the daemon.
