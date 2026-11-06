@@ -452,9 +452,11 @@ type Config struct {
 
 	// EventSource selects Pruefer's event ingestion mode: EventSourcePoll
 	// (default — behavior is byte-for-byte unchanged from before this
-	// field existed) or EventSourceHookdeck (event-driven, with poll
-	// demoted to a low-frequency reconciliation fallback — see the
-	// Reconciliation* fields below). See adrs/1254-*.md. Restart-only:
+	// field existed), or an event-driven mode — EventSourceDirect,
+	// EventSourceTailscale (#2476, ADR 2476) or the deprecated
+	// EventSourceHookdeck — with poll demoted to a low-frequency
+	// reconciliation fallback (see the Reconciliation* fields below).
+	// See adrs/1254-*.md. Restart-only:
 	// switching modes means constructing (or tearing down) a whole
 	// events.EventSource, including its Hookdeck WebSocket session and
 	// dedupe ring — out of scope for a live reload.
@@ -498,8 +500,8 @@ type Config struct {
 
 	// ReconciliationStartup controls whether an event-driven run performs
 	// a full poll reconciliation pass at startup, before event delivery
-	// begins. Only consulted when EventSource == EventSourceHookdeck.
-	// Restart-only: read exactly once, synchronously, before
+	// begins. Consulted in every event-driven mode (anything but
+	// EventSourcePoll). Restart-only: read exactly once, synchronously, before
 	// runEventDriven's loop begins — by the time any SIGHUP could be
 	// handled concurrently with a running daemon, that read has already
 	// happened, so a reload can structurally never affect it.
@@ -507,8 +509,8 @@ type Config struct {
 	// ReconciliationFallbackInterval is the low-frequency poll interval
 	// used as a safety net in event-driven mode — a separate field from
 	// PollInterval, which remains poll-only mode's interval, unaffected by
-	// this one. Only consulted when EventSource == EventSourceHookdeck.
-	// Live: runEventDriven's ticker picks up the new value on its next
+	// this one. Consulted in every event-driven mode (anything but
+	// EventSourcePoll). Live: runEventDriven's ticker picks up the new value on its next
 	// reconciliationFallbackInterval() read.
 	ReconciliationFallbackInterval time.Duration `reload:"live"`
 }
