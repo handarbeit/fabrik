@@ -1799,9 +1799,12 @@ forge-unreachable hold tracker through the one shared classifier
 (`github.IsTransportError`), so the sim exercises the tracker, the gates and the
 classifier; the HTTP observer itself is covered by an `httptest` test in `github`.
 
-**Not modelled:** a call that times out *after* reaching the forge (the write landed
-but the client saw an error). A faulted call never reaches the model. Blanket faults
-and the observer are not carried through Sim snapshots. `ghfault.DeadlineExceeded()`
+**Modelled since #2550:** a call that fails *after* reaching the forge (the write landed
+but the client saw an error) is `FaultTable.ApplyThenFailWhen(method, match, times, err)`:
+the instrumented helpers run the underlying call, discard its result and return `err`
+(the result observer and the caller both see the plain error; the mutation log records the
+write as applied, `Injected` false). Every other rule still fails *before* the call and never
+reaches the model. Blanket faults and the observer are not carried through Sim snapshots. `ghfault.DeadlineExceeded()`
 builds the #2388 error as a real `*url.Error` wrapping `context.DeadlineExceeded`
 (not a string), because the transient classifiers match by substring and that error
 matches none of them.

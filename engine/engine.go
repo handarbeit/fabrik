@@ -320,6 +320,16 @@ type Engine struct {
 	// lockWriteRefusalDisabled is the test seam that restores the pre-#2393
 	// "spawn the worker unlocked" behaviour (forge_hold.go).
 	lockWriteRefusalDisabled atomic.Bool
+
+	// ambiguousWriteReconcileOff neutralises the live re-read after a
+	// transport-class lock/state label write failure (#2550, R1); lockOrphanReclaimOff
+	// neutralises the runtime orphan reclaim (R2). Test seams.
+	ambiguousWriteReconcileOff atomic.Bool
+	lockOrphanReclaimOff       atomic.Bool
+	// lockOrphans is the orphan-lock clock shared by the runtime reclaim and the
+	// attention classifier (lock_orphan.go); zero value ready.
+	lockOrphans             lockOrphanClock
+	lockOrphanGraceOverride atomic.Int64
 	// usageHoldReinvokeGateDisabled is the test seam that restores the pre-#2407
 	// behaviour (usage_hold_admission.go).
 	usageHoldReinvokeGateDisabled atomic.Bool

@@ -33,6 +33,7 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 		in.Conflict = &attention.ConflictFact{Queued: c.Queued, Since: c.Since}
 	}
 	in.SlotsBusy, in.SlotsMax = len(e.sem), cap(e.sem)
+	in.LockOrphan = e.lockOrphanFact(st)
 	if r := st.PendingRetry; r != nil {
 		in.Retry = &attention.RetryFact{Stage: r.Stage, Cause: r.Cause, Due: r.Due}
 	}

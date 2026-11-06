@@ -376,3 +376,78 @@ func TestBlanketFaultsCoverEveryFaultableMethod(t *testing.T) {
 		validateMethod(m) // panics on a method the blanket faults could never reach
 	}
 }
+
+// ApplyThenFailWhen is the ambiguous-write fault (#2550): the call executes
+// against the model and the caller is told it failed. A fail-before-call rule
+// cannot express a label add GitHub applied behind a 5xx.
+func TestApplyThenFailWhenAppliesTheWriteAndReturnsTheError(t *testing.T) {
+	in, _ := newInstrumented(t)
+	var observed []error
+	in.Faults().SetResultObserver(func(err error) { observed = append(observed, err) })
+	in.Faults().ApplyThenFailWhen("AddLabelToIssue",
+		func(a Args) bool { return a.Number == 7 && a.Label == "fabrik:editing" },
+		1, ErrServerError())
+
+	err := in.AddLabelToIssue("acme", "widgets", 7, "fabrik:editing")
+	if err == nil {
+		t.Fatal("the faulted call returned nil; the caller must be told it failed")
+	}
+	if _, wrapped := err.(*appliedError); wrapped {
+		t.Fatalf("the internal appliedError wrapper leaked to the caller: %T", err)
+	}
+	labels, lerr := in.FetchLabels("acme", "widgets", 7)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	found := false
+	for _, l := range labels {
+		if l == "fabrik:editing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the write did not land: labels = %v", labels)
+	}
+	if len(observed) == 0 || observed[0] == nil {
+		t.Fatalf("the result observer must see the plain injected error, got %v", observed)
+	}
+	if _, wrapped := observed[0].(*appliedError); wrapped {
+		t.Fatal("the result observer saw the internal wrapper")
+	}
+	// Spent after one use: the next identical call succeeds cleanly.
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "fabrik:editing"); err != nil {
+		t.Errorf("rule should be spent after 1 use: %v", err)
+	}
+	// A plain FailWhen is unchanged: it fails *before* the call.
+	in.Faults().FailWhen("AddLabelToIssue", func(a Args) bool { return a.Label == "fabrik:paused" }, 1, ErrServerError())
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "fabrik:paused"); err == nil {
+		t.Fatal("FailWhen did not fail")
+	}
+	labels, _ = in.FetchLabels("acme", "widgets", 7)
+	for _, l := range labels {
+		if l == "fabrik:paused" {
+			t.Fatal("FailWhen applied the write; it must fail before the call")
+		}
+	}
+}
+
+func TestApplyThenFailWhenRejectsBadArguments(t *testing.T) {
+	in, _ := newInstrumented(t)
+	for name, fn := range map[string]func(){
+		"nil match": func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", nil, 1, ErrServerError()) },
+		"zero": func() {
+			in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 0, ErrServerError())
+		},
+		"nil err":  func() { in.Faults().ApplyThenFailWhen("AddLabelToIssue", func(Args) bool { return true }, 1, nil) },
+		"bad name": func() { in.Faults().ApplyThenFailWhen("Nope", func(Args) bool { return true }, 1, ErrServerError()) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: expected a panic", name)
+				}
+			}()
+			fn()
+		}()
+	}
+}

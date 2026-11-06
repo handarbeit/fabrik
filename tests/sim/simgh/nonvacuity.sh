@@ -699,7 +699,15 @@ mutate "ClearBlanket leaves the blanket fault in place" \
 
 mutate "the result observer is never told" \
   'TestResultObserverSeesEveryOutcome' \
-  'fault.go::s{\t\tobs\(err\)\n}{\t\t_ = obs\n}'
+  'fault.go::s{\t\tobs\(unwrapApplied\(err\)\)\n}{\t\t_ = obs\n}'
+
+mutate "ApplyThenFailWhen fails before the call instead of after it" \
+  'TestApplyThenFailWhenAppliesTheWriteAndReturnsTheError' \
+  'instrumented.go::s{\t\t\t_ = fn\(\) // the write lands}{\t\t\t// skipped // the write lands}'
+
+mutate "ApplyThenFailWhen leaks its internal wrapper to the caller" \
+  'TestApplyThenFailWhenAppliesTheWriteAndReturnsTheError' \
+  'instrumented.go::s{\t\t\treturn ae\.err\n}{\t\t\treturn err\n}'
 
 # --- R4: mutation log (#1457) -----------------------------------------------
 
