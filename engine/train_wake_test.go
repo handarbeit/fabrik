@@ -13,7 +13,7 @@ import (
 
 func TestTrialWakeTarget(t *testing.T) {
 	pr := `{"action":"synchronize","repository":{"full_name":"o/r"},"pull_request":{"number":7,"head":{"sha":"abc"}}}`
-	if got, ok := trialWakeTarget("pull_request", []byte(pr)); !ok || got != (trialEventTarget{"o/r", "abc", 7}) {
+	if got, ok := trialWakeTarget("pull_request", []byte(pr)); !ok || got.repo != "o/r" || got.headSHA != "abc" || got.prNum != 7 {
 		t.Fatalf("pull_request: %+v ok=%v", got, ok)
 	}
 	cr := `{"action":"completed","repository":{"full_name":"o/r"},"check_run":{"head_sha":"abc","pull_requests":[]}}`
@@ -131,6 +131,12 @@ func TestOpenTrialCapAndWake(t *testing.T) {
 	}
 	if fire(wakeCheckRun(repo, tr.HeadSHA, tr.PRNum+1000, "completed")) {
 		t.Error("a different PR number must not wake")
+	}
+	// A head SHA shared by several PRs: the trial may be listed after another PR.
+	multi := fmt.Sprintf(`{"action":"completed","repository":{"full_name":%q},"check_run":{"head_sha":%q,"pull_requests":[{"number":%d},{"number":%d}]}}`,
+		repo, tr.HeadSHA, tr.PRNum+1000, tr.PRNum)
+	if !fire([]byte(multi)) {
+		t.Error("a trial listed after another PR number must still wake")
 	}
 	if fire(wakeCheckRun(repo, "deadbeef", tr.PRNum, "completed")) {
 		t.Error("a replaced trial's head must not wake")

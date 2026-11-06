@@ -42,6 +42,9 @@ type trialEventTarget struct {
 	repo    string // owner/repo
 	headSHA string
 	prNum   int // 0 when the payload carries none (fork PR, check_suite)
+	// morePRs holds any further PR numbers a check event lists for the same head SHA;
+	// a match on prNum or any of these counts.
+	morePRs []int
 }
 
 // trialWakeTarget decodes the repo, head SHA and (when present) PR number of a
@@ -90,16 +93,24 @@ func trialWakeTarget(eventType string, payload []byte) (t trialEventTarget, ok b
 			return t, false
 		}
 		t.headSHA = p.CheckRun.HeadSHA
-		if len(p.CheckRun.PRs) > 0 {
-			t.prNum = p.CheckRun.PRs[0].Number
+		for i, pr := range p.CheckRun.PRs {
+			if i == 0 {
+				t.prNum = pr.Number
+			} else {
+				t.morePRs = append(t.morePRs, pr.Number)
+			}
 		}
 	case "check_suite":
 		if p.Action != "completed" {
 			return t, false
 		}
 		t.headSHA = p.CheckSuite.HeadSHA
-		if len(p.CheckSuite.PRs) > 0 {
-			t.prNum = p.CheckSuite.PRs[0].Number
+		for i, pr := range p.CheckSuite.PRs {
+			if i == 0 {
+				t.prNum = pr.Number
+			} else {
+				t.morePRs = append(t.morePRs, pr.Number)
+			}
 		}
 	}
 	if t.repo == "" || t.headSHA == "" {
@@ -123,7 +134,7 @@ func (e *Engine) matchesOpenTrial(t trialEventTarget) bool {
 		if tr.HeadSHA != t.headSHA {
 			continue
 		}
-		if t.prNum != 0 && tr.PRNum != t.prNum {
+		if t.prNum != 0 && tr.PRNum != t.prNum && !containsInt(t.morePRs, tr.PRNum) {
 			continue
 		}
 		return true
@@ -149,4 +160,13 @@ func (e *Engine) wakeForOpenTrial(eventType string, payload []byte) {
 	case e.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+func containsInt(xs []int, v int) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
