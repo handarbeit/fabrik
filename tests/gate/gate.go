@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -178,6 +179,11 @@ type Gate struct {
 	// identity exclusive again — the #2263 rule — so the tests can show that
 	// sharing it with another bed's harness use is what lets the cells overlap.
 	patEngineShareDisabledForTest bool
+	// reviewerBudgetCheckDisabledForTest (root only, read through root()) turns the
+	// reviewer-token budget guard off — the preflight, the cell-start check, the
+	// budget lines and the consumer extension — so the tests can show the old
+	// behaviour: the gate proceeds (#2536).
+	reviewerBudgetCheckDisabledForTest bool
 }
 
 // NewGate wires a Gate around the real OS.
@@ -227,6 +233,9 @@ func DefaultPreflights() []Preflight {
 // and each bed's own board-listing lag.
 func DefaultLivePreflights() []Preflight {
 	return []Preflight{
+		// First: a gate that cannot succeed because the reviewer account is out of
+		// budget must refuse before any other live read spends (#2536).
+		{Name: "reviewer-budget", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.CheckReviewerBudget(ctx) }},
 		{Name: "bed-identity", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.ResolveBedIdentities(ctx) }},
 		{Name: "board-lag-probe", Run: func(ctx context.Context, g *Gate, _ *Plan) error {
 			for _, b := range g.beds() {
@@ -330,7 +339,8 @@ func (g *Gate) Run(ctx context.Context, argv []string) int {
 	if err == nil {
 		return 0
 	}
-	if ee, ok := err.(*ExitError); ok {
+	var ee *ExitError
+	if errors.As(err, &ee) {
 		if ee.Msg != "" {
 			g.errln(ee.Msg)
 		}
@@ -351,6 +361,7 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 	// beds (#1976) each per-bed view reads its own, and CheckBedTopology refuses
 	// a bed without one.
 	g.Cfg.BedToken = EnvFileValue(g.Cfg.TestBed+"/.env", "FABRIK_TOKEN")
+	g.Cfg.ReviewerToken = EnvFileReviewerToken(g.Cfg.TestBed + "/.env")
 	g.buildBedGates()
 	if g.Cfg.BedToken == "" && !g.multiBed() {
 		g.errf("warning: could not read FABRIK_TOKEN from %s/.env — GraphQL budget reporting and the competing-token-consumer check will be skipped\n", g.Cfg.TestBed)

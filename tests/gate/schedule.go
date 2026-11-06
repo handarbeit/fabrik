@@ -196,6 +196,12 @@ func (SerialScheduler) Run(ctx context.Context, g *Gate, cells []Cell) error {
 }
 
 func (g *Gate) runLeg(ctx context.Context, c Cell) error {
+	// The reviewer token's budget is checked before the cell does anything — no
+	// invocation noted, no bed restart, no ledger record — so a cell that cannot
+	// succeed leaves its pairs missing rather than failed (#2536, R2).
+	if err := g.reviewerCellGate(ctx, c); err != nil {
+		return err
+	}
 	if g.runLegFn != nil {
 		return g.runLegFn(ctx, c)
 	}
