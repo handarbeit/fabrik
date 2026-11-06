@@ -59,10 +59,16 @@ type appWebhookSource struct {
 	api    appHookAPI
 	dedupe *events.Dedupe
 
+	rcvMu sync.Mutex
+	rcv   *appwebhook.Receiver
+
 	// Test seams. Zero values are production.
 	sampleEvery  time.Duration
 	replayWait   func(ctx context.Context, d time.Duration) bool
 	livenessWait func(ctx context.Context, d time.Duration) bool
+	// noLiveness leaves route liveness unbuilt, so a test of delivery replay
+	// sees only the replayer's requests (a liveness probe also redelivers).
+	noLiveness bool
 }
 
 // newAppWebhookSource builds the source for cfg.EventSource (direct or
@@ -144,6 +150,9 @@ func (s *appWebhookSource) Run(ctx context.Context, sink events.EventSink) error
 			}
 		},
 	})
+	s.rcvMu.Lock()
+	s.rcv = rcv
+	s.rcvMu.Unlock()
 	rcv.SetSink(asink.Deliver)
 	rcv.SetDriftHandler(s.driftHandler(panel))
 
@@ -161,7 +170,7 @@ func (s *appWebhookSource) Run(ctx context.Context, sink events.EventSink) error
 	// Route liveness (#2452 in the engine): whether GitHub can deliver to the
 	// webhook, judged from GitHub's own delivery log.
 	var liveness *appwebhook.Liveness
-	if s.api != nil {
+	if s.api != nil && !s.noLiveness {
 		wait := appwebhook.RealWait
 		if s.livenessWait != nil {
 			wait = s.livenessWait
@@ -252,6 +261,18 @@ func (s *appWebhookSource) Run(ctx context.Context, sink events.EventSink) error
 		logf(0, tag, "replayer did not stop within 5s of shutdown\n")
 	}
 	return nil
+}
+
+// addr is the address the receiver is listening on, "" before it started or
+// after a failed start. Used by tests and diagnostics.
+func (s *appWebhookSource) addr() string {
+	s.rcvMu.Lock()
+	r := s.rcv
+	s.rcvMu.Unlock()
+	if r == nil {
+		return ""
+	}
+	return r.Addr()
 }
 
 // driftHandler reports signature drift: the shared handler's log line and

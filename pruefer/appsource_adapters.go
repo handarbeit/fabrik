@@ -105,10 +105,16 @@ func (p *logPanel) Resolve(key string) {
 // Reconcile sweeps one condition type to exactly conds: raises each, clears any
 // active condition of the type that is not among them.
 func (p *logPanel) Reconcile(typ string, conds []warnings.Condition) {
+	// Like warnings.Reconcile, the sweep owns the type: the conditions a check
+	// builds (the webhook-configuration check) leave Type empty.
+	stamped := make([]warnings.Condition, len(conds))
 	want := make(map[string]bool, len(conds))
-	for _, c := range conds {
+	for i, c := range conds {
+		c.Type = typ
+		stamped[i] = c
 		want[c.Key()] = true
 	}
+	conds = stamped
 	p.mu.Lock()
 	var stale []string
 	for k, a := range p.active {

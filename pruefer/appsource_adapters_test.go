@@ -110,3 +110,21 @@ func TestLogPanelReconcileSweepsOnlyItsType(t *testing.T) {
 		t.Errorf("active after empty reconcile = %v", keys)
 	}
 }
+
+// The webhook-configuration check builds conditions with no Type and relies on
+// Reconcile to stamp it; the banner key must carry the type or it can never be
+// cleared by the next sweep.
+func TestLogPanelReconcileStampsTheType(t *testing.T) {
+	rec := &recordedEvents{}
+	p := newLogPanel(&Daemon{Emit: rec.emit}, "tailscale")
+	p.Reconcile("tailscale_webhook_config", []warnings.Condition{{Subject: "url", Title: "wrong URL"}})
+	got := rec.snapshot()
+	if len(got) != 1 || got[0].Key != "tailscale_webhook_config:url" || !got[0].Active {
+		t.Fatalf("events = %+v", got)
+	}
+	p.Reconcile("tailscale_webhook_config", nil)
+	got = rec.snapshot()
+	if len(got) != 2 || got[1].Active || got[1].Key != "tailscale_webhook_config:url" {
+		t.Fatalf("clear events = %+v", got)
+	}
+}
