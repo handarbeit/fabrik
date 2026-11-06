@@ -173,3 +173,17 @@ func TestModel_ViewDoesNotPanicBeforeWindowSize(t *testing.T) {
 	m = next.(Model)
 	_ = m.View() // no panic
 }
+
+func TestModel_TransportEventsRouteToFooter(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(TransportEvent{Name: "direct", State: "listening"})
+	m = next.(Model)
+	if ev, ok := m.footer.Transport(); !ok || ev.State != "listening" {
+		t.Errorf("TransportEvent not routed: %+v %v", ev, ok)
+	}
+	next, _ = m.Update(TransportWarningEvent{Key: "k", Title: "t", Active: true})
+	m = next.(Model)
+	if m.footer.TransportWarningCount() != 1 {
+		t.Error("TransportWarningEvent not routed")
+	}
+}

@@ -328,3 +328,64 @@ func TestFooter_ClaudeAccountEventReplacesAccount(t *testing.T) {
 		t.Errorf("footer after ClaudeAccountEvent:\n%s", view)
 	}
 }
+
+func TestFooter_TransportSegment(t *testing.T) {
+	var f FooterComponent
+	if strings.Contains(f.View(160), "tailscale:") {
+		t.Fatal("transport segment shown before any TransportEvent")
+	}
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	comp, _ := f.Update(TickEvent{At: now})
+	f = comp.(FooterComponent)
+
+	comp, _ = f.Update(TransportEvent{
+		Name: "tailscale", State: "listening", Tailnet: "Running", Funnel: "ok",
+		LastDelivery: now.Add(-3 * time.Minute), Route: "reachable",
+	})
+	f = comp.(FooterComponent)
+	view := f.View(200)
+	for _, want := range []string{"tailscale: listening", "tailnet Running", "funnel ok", "last 3m ago", "route reachable"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q:\n%s", want, view)
+		}
+	}
+
+	// A direct source reports no tailnet or funnel, and no delivery yet.
+	comp, _ = f.Update(TransportEvent{Name: "direct", State: "listening"})
+	f = comp.(FooterComponent)
+	view = f.View(200)
+	if !strings.Contains(view, "direct: listening · last never") {
+		t.Errorf("direct segment wrong:\n%s", view)
+	}
+	if strings.Contains(view, "tailnet") || strings.Contains(view, "funnel") || strings.Contains(view, "route") {
+		t.Errorf("unknown parts must be omitted:\n%s", view)
+	}
+	if ev, ok := f.Transport(); !ok || ev.Name != "direct" {
+		t.Errorf("Transport() = %+v, %v", ev, ok)
+	}
+}
+
+func TestFooter_TransportWarningBannerLevelTriggered(t *testing.T) {
+	var f FooterComponent
+	if f.TransportWarningCount() != 0 {
+		t.Fatal("warnings before any event")
+	}
+	comp, _ := f.Update(TransportWarningEvent{Key: "listen", Title: "tailscale could not start", Active: true})
+	f = comp.(FooterComponent)
+	comp, _ = f.Update(TransportWarningEvent{Key: "hookcfg", Title: "App webhook URL mismatch", Active: true})
+	f = comp.(FooterComponent)
+	view := f.View(200)
+	if !strings.Contains(view, "App webhook URL mismatch (+1)") {
+		t.Errorf("banner should name the first key and count the rest:\n%s", view)
+	}
+	comp, _ = f.Update(TransportWarningEvent{Key: "hookcfg", Active: false})
+	f = comp.(FooterComponent)
+	comp, _ = f.Update(TransportWarningEvent{Key: "listen", Active: false})
+	f = comp.(FooterComponent)
+	if f.TransportWarningCount() != 0 || strings.Contains(f.View(200), "⚠") {
+		t.Errorf("banner lingers after clear:\n%s", f.View(200))
+	}
+	// Clearing a condition that was never raised is a no-op.
+	comp, _ = f.Update(TransportWarningEvent{Key: "never", Active: false})
+	_ = comp
+}
