@@ -1,6 +1,6 @@
 # ADR 1283: Declared unrequested reviewers for the review gate
 
-**Status:** Accepted
+**Status:** Accepted — amended by [ADR 1894](1894-first-run-polish.md): the shipped Review/Validate defaults now declare `expected_reviewers: []`, and the key is exempt from drift reporting.
 **Date:** 2026-07-31
 **Issue:** [#1283](https://github.com/handarbeit/fabrik/issues/1283)
 
