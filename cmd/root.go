@@ -1062,7 +1062,7 @@ func Execute() error {
 	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
 	if !useTUI {
 		fmt.Printf("Fabrik starting %s\n", Version)
-		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
+		fmt.Printf("  repo:    %s\n", engine.RepoScope(cfg.Owner, cfg.Repo))
 		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
 		if githubAppAuthIntended {
 			fmt.Printf("  identity: GitHub App installation %d\n", cfg.GitHubAppInstallationID)

@@ -1352,9 +1352,9 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	e.setPollStep("polling: refreshing the board cache")
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
-		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+		e.logf(0, "poll", "reading project board from cache: %s\n", projectRef(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum))
 	} else {
-		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+		e.logf(0, "poll", "fetching project board from GitHub: %s\n", projectRef(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum))
 	}
 
 	e.setPollStep("layer 2 status sweep")

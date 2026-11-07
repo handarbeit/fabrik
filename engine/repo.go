@@ -177,3 +177,30 @@ func (e *Engine) resolveFabrikEnvOpts(item gh.ProjectItem, stage *stages.Stage, 
 
 	return fabrikRoot, pr.Number
 }
+
+// AllReposScope is how the operator-facing surfaces describe the repo scope
+// when `repo:` is unset (multi-repo mode): every repository on the board.
+const AllReposScope = "(all repos on the board)"
+
+// RepoScope renders the configured repo scope for operator-facing output
+// (#1894): "owner/repo" when a repo is configured, AllReposScope when it is
+// unset. It never yields a bare "owner/".
+func RepoScope(owner, repo string) string {
+	if repo == "" {
+		return AllReposScope
+	}
+	if owner == "" {
+		return repo
+	}
+	return owner + "/" + repo
+}
+
+// projectRef renders "owner/repo#N" for a single-repo board and
+// "owner (all repos) project #N" in multi-repo mode, for engine log lines that
+// used to print "owner/#N" there.
+func projectRef(owner, repo string, projectNum int) string {
+	if repo == "" {
+		return fmt.Sprintf("%s (all repos) project #%d", owner, projectNum)
+	}
+	return fmt.Sprintf("%s/%s#%d", owner, repo, projectNum)
+}
