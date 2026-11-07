@@ -39,7 +39,7 @@ func UnrecognizedTopLevelKeys() ([]string, error) {
 	known := knownConfigKeys()
 	var unrecognized []string
 	for k := range raw {
-		if !known[k] {
+		if !known[k] && !legacyHookdeckKeys[k] {
 			unrecognized = append(unrecognized, k)
 		}
 	}

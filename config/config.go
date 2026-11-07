@@ -36,25 +36,17 @@ type ProjectConfig struct {
 	Webhooks              bool     `yaml:"webhooks"`
 	WebhookPort           *int     `yaml:"webhook_port"`
 	WebhookEvents         []string `yaml:"webhook_events"`
-	// EventSource selects the ingestion transport: "poll" (default, unset) or
-	// "hookdeck". Distinct from Webhooks/WebhookPort/WebhookEvents above,
-	// which configure the gh-webhook-forward (PAT-mode) transport only —
-	// event_source: hookdeck is a separate, App-auth-only opt-in, deliberately
-	// kept structurally independent so it can never collide with the
-	// Webhooks+App-auth refusal (#1752). See adrs/1142-hookdeck-ingestion-for-app-auth.md.
+	// EventSource selects the ingestion transport: "poll" (default, unset),
+	// "direct" or "tailscale" (App auth only). "hookdeck" was removed in
+	// v0.0.92 and is refused at startup (ADR 2477). Distinct from
+	// Webhooks/WebhookPort/WebhookEvents above, which configure the
+	// gh-webhook-forward (PAT-mode) transport only.
 	EventSource string `yaml:"event_source"`
-	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
-	// variable holding the actual secret (indirection, not the secret
-	// itself) — mirroring pruefer/config.go's hookdeck.api_key_env /
-	// hookdeck.webhook_secret_env convention exactly, so an operator already
-	// running Pruefer with Hookdeck recognizes the shape immediately.
-	HookdeckAPIKeyEnv        string `yaml:"hookdeck_api_key_env"`
-	HookdeckWebhookSecretEnv string `yaml:"hookdeck_webhook_secret_env"`
 	// DirectListen/AppWebhookPath/AppWebhookSecretEnv configure
 	// event_source: direct (#2142, ADR 2142), the App webhook received
 	// straight by the daemon behind the operator's own tunnel or proxy.
 	// AppWebhookSecretEnv names the variable holding the secret (indirection,
-	// like the hookdeck_* keys). The path and secret keys are shared with the
+	// not the secret itself). The path and secret keys are shared with the
 	// event_source: tailscale (#2143).
 	DirectListen        string `yaml:"direct_listen"`
 	AppWebhookPath      string `yaml:"app_webhook_path"`
