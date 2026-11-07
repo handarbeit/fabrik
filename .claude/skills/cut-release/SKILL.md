@@ -14,6 +14,45 @@ Invoked as `/cut-release` or `/cut-release v0.0.67`. If no version is provided, 
 
 ## Steps
 
+### 0. Run the release gate (before the cut)
+
+The live e2e gate runs for hours, so start it on its own and cut afterwards. `scripts/cut-release.sh` then only checks the coverage ledger (`run.sh coverage`) and resumes whatever is missing.
+
+**Ready?** Every non-`watch` issue on the milestone is closed and its PR merged: `gh issue list --repo handarbeit/fabrik --milestone <m> --state open`. Only `watch` items may stay open; they are handled at the cut (see step 4).
+
+**Matrix.** Use `E2E_MATRIX=full` when the release changes the auth layer, the landing path, test classification, or **event ingestion** (webhook transports). Otherwise leave it unset (the sparse default).
+
+**Daemons stay up.** Don't stop the dev daemon or any other daemon for the gate. With webhooks they barely compete for GraphQL, and CI runners live on the dedicated Linux box. Ask before stopping any daemon.
+
+**Launch.** Run from `~/dev/fabrik-release`, never `~/dev/fabrik`: `cut-release.sh` fast-forwards itself, so a stale checkout runs stale code. Run it in tmux, with logs in a durable directory (not `/tmp`):
+
+```bash
+cd ~/dev/fabrik-release && git fetch origin && git merge --ff-only origin/main
+SHA=$(git rev-parse origin/main)
+L=~/dev/.scratch/fabrik/$(date +%F)-cut-<NNNN>; mkdir -p $L
+cat > $L/gate.sh <<EOF
+#!/bin/zsh
+cd ~/dev/fabrik-release
+export E2E_MATRIX=full E2E_SKIP_TOKEN_CHECK=1
+export E2E_BEDS=\$HOME/dev/fabrik-test,\$HOME/dev/fabrik-test-2
+export E2E_BED_REF=$SHA
+export E2E_COVERAGE_DIR=\$HOME/dev/fabrik/.e2e-coverage
+scripts/e2e/run.sh --clean --resume 2>&1 | tee -a $L/gate.log
+echo "GATE EXIT: \${pipestatus[1]}" | tee -a $L/gate.log
+EOF
+chmod +x $L/gate.sh
+tmux new-session -d -s fabrik-gate-<NNNN> "$L/gate.sh; exec zsh"
+```
+
+- `E2E_BEDS`: both test beds run concurrently. Bed 2 is gamma/delta, board #7, App `fabrik-bed-2`.
+- `E2E_SKIP_TOKEN_CHECK=1` is required. The dev daemon runs as the `fabrik-dev-daemon` App, and the competing-token check (#1684) wrongly flags it.
+- `E2E_COVERAGE_DIR` keeps one ledger across gate runs and the cut, whichever checkout ran them.
+- `E2E_BED_REF` pins the engine SHA under test. If a tests-only fix (`tests/e2e/`, `tests/gate/`, `scripts/e2e/`) merges mid-gate, keep the pin: the ledger tolerates those paths, so recorded coverage still counts. An engine change invalidates the ledger and needs a new SHA.
+
+**Monitor.** `tail -f $L/gate.log`. Exit codes: 3 budget exhausted, 4 preflight, 5 pre-gate, 6 post-suite watchdog, 7 precondition, 8 coverage incomplete. An interrupted gate is resumed by re-running `gate.sh`; `--resume` runs only the missing (test, leg) pairs.
+
+**Cut.** Once coverage is complete, run step 3 from `~/dev/fabrik-release` with the **same** `E2E_*` exports (above all `E2E_COVERAGE_DIR`, `E2E_BED_REF` and `E2E_MATRIX`). Otherwise `run.sh coverage` looks at a different ledger or plan, and the release notes' coverage line names the wrong matrix.
+
 ### 1. Determine version
 
 - Find the latest tag: `git describe --tags --abbrev=0`
@@ -104,6 +143,11 @@ Flags:
 
 If the script exits 0, the release is live and verified. Report:
 - "✅ Release v0.0.67 published to handarbeit/fabrik — release + announcement authored by @arbeithand. Doc-update issue #<n> filed at Specify."
+
+After a successful cut:
+- Comment on each open `watch` issue on the milestone: "quiet as of <version>" with the evidence, or the action taken. Move it to the next milestone if it stays open.
+- Close each community report the release fixes **by hand**, with a comment naming the release, and move it to Shipped on the triage board (see CLAUDE.md "Handling Community Bug Reports").
+- In `~/dev/fabrik`, delete any local `release-notes/<version>.md` draft before fast-forwarding main, because the committed copy would otherwise conflict.
 
 If the script exits non-zero, surface the script's last error message verbatim. Do NOT attempt to repair the half-published state automatically — the script intentionally avoids destructive cleanup. The cleanup commands are commented at the bottom of the script for reference; relay them to the user and ask how they want to proceed.
 
