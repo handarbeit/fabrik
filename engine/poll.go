@@ -104,21 +104,6 @@ func ClaudeProfileAccount(configDir string) string {
 	return claudeprofile.Account(configDir)
 }
 
-// logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
-// notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
-// "CI-gate liveness-stall dwell" — an operator who tuned it must not
-// discover this silently. Unconditional (unlike logAnthropicAPIKeyOptIn/
-// logAnthropicEnvPassthrough, which are gated on an active opt-in): every
-// operator running the daemon needs this once per startup, whether or not
-// they've customized the value, since the setting's meaning changed under
-// them regardless of whether they ever touch it.
-func logCIWaitTimeoutSemantics(w io.Writer) {
-	fmt.Fprintf(w, "[startup] notice: CIWaitTimeout/--ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT now governs the "+
-		"CI-gate liveness-stall dwell (escalates only when CI shows no observable progress), not total CI wait "+
-		"time — a healthy, progressing CI suite waits indefinitely. See CIBackstopTimeout/--ci-backstop-timeout/"+
-		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
-}
-
 // logFileConditions builds the "log_file" panel conditions (#2135) from the
 // outcome of startup's log rotation and log-file open: an empty result means
 // both worked, which Reconcile turns into clearing any earlier entry.
@@ -288,7 +273,6 @@ func (e *Engine) Run() error {
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
 	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
 	clearRetiredHookdeckWarnings(startupW)
-	logCIWaitTimeoutSemantics(startupW)
 	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
 	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
 
