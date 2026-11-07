@@ -1519,3 +1519,100 @@ func TestRepoConfig_CannotSetTranscriptRetention(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfig_AppWebhookDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, ``)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppWebhookPath != "/webhook" || cfg.AppWebhookSecretEnv != "PRUEFER_GITHUB_WEBHOOK_SECRET" ||
+		cfg.TailscaleAuthKeyEnv != "PRUEFER_TS_AUTHKEY" || cfg.TailscaleStateDir != ".pruefer/state/tailscale" ||
+		!cfg.ReplayFailedDeliveries || cfg.DirectListen != "" || cfg.TailscaleHostname != "" {
+		t.Errorf("defaults wrong: %+v", cfg)
+	}
+}
+
+func TestLoadConfig_AppWebhookPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+event_source: direct
+direct_listen: 127.0.0.1:1111
+app_webhook_path: /yaml
+app_webhook_secret_env: YAML_SECRET
+replay_failed_deliveries: false
+`)
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourceDirect || cfg.DirectListen != "127.0.0.1:1111" || cfg.AppWebhookPath != "/yaml" ||
+		cfg.AppWebhookSecretEnv != "YAML_SECRET" || cfg.ReplayFailedDeliveries {
+		t.Fatalf("yaml not applied: %+v", cfg)
+	}
+
+	t.Setenv("PRUEFER_DIRECT_LISTEN", "127.0.0.1:2222")
+	t.Setenv("PRUEFER_APP_WEBHOOK_PATH", "/env")
+	t.Setenv("PRUEFER_APP_WEBHOOK_SECRET_ENV", "ENV_SECRET")
+	t.Setenv("PRUEFER_REPLAY_FAILED_DELIVERIES", "true")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.DirectListen != "127.0.0.1:2222" || cfg.AppWebhookPath != "/env" || cfg.AppWebhookSecretEnv != "ENV_SECRET" || !cfg.ReplayFailedDeliveries {
+		t.Fatalf("env should override yaml: %+v", cfg)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-direct-listen", "127.0.0.1:3333", "-app-webhook-path", "/flag",
+		"-app-webhook-secret-env", "FLAG_SECRET", "-replay-failed-deliveries=false"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.DirectListen != "127.0.0.1:3333" || cfg.AppWebhookPath != "/flag" || cfg.AppWebhookSecretEnv != "FLAG_SECRET" || cfg.ReplayFailedDeliveries {
+		t.Fatalf("flag should override env: %+v", cfg)
+	}
+}
+
+func TestLoadConfig_TailscaleKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+event_source: tailscale
+tailscale_hostname: pruefer-yaml
+tailscale_state_dir: /var/lib/pruefer/ts
+`)
+	t.Setenv("PRUEFER_TAILSCALE_HOSTNAME", "pruefer-env")
+	t.Setenv("PRUEFER_TAILSCALE_AUTH_KEY_ENV", "ENV_TSKEY")
+	cfg, err := LoadConfig([]string{"-config", path, "-tailscale-state-dir", "/flag/ts"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.TailscaleHostname != "pruefer-env" || cfg.TailscaleAuthKeyEnv != "ENV_TSKEY" || cfg.TailscaleStateDir != "/flag/ts" {
+		t.Fatalf("precedence wrong: %+v", cfg)
+	}
+}
+
+func TestLoadConfig_AppSourceRefusals(t *testing.T) {
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		yaml string
+		want string
+	}{
+		"direct without listen":    {"event_source: direct", "direct_listen"},
+		"tailscale no hostname":    {"event_source: tailscale", "tailscale_hostname"},
+		"relative path":            {"event_source: direct\ndirect_listen: 127.0.0.1:1\napp_webhook_path: hook", "app_webhook_path"},
+		"unknown event source":     {"event_source: smoke-signals", "direct"},
+		"secret value as env name": {"event_source: direct\ndirect_listen: 127.0.0.1:1\napp_webhook_secret_env: \"a b\"", "app_webhook_secret_env"},
+	} {
+		path := writeYAMLConfig(t, dir, tc.yaml)
+		_, err := LoadConfig([]string{"-config", path})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want mention of %q", name, err, tc.want)
+		}
+	}
+	// A poll config with the receiver keys unset is unaffected.
+	path := writeYAMLConfig(t, dir, `event_source: poll`)
+	if _, err := LoadConfig([]string{"-config", path}); err != nil {
+		t.Errorf("poll: %v", err)
+	}
+}

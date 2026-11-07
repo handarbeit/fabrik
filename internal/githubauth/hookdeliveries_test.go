@@ -1,6 +1,7 @@
 package githubauth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -68,5 +69,40 @@ func TestReconcilerHookDeliveries_AgainstStub(t *testing.T) {
 	}
 	if listed.Load() != 1 || redelivered.Load() != 1 {
 		t.Errorf("listed=%d redelivered=%d", listed.Load(), redelivered.Load())
+	}
+}
+
+func TestReconcilerFetchAppHookConfig(t *testing.T) {
+	var zero *Reconciler
+	if _, err := zero.FetchAppHookConfig(context.Background()); err == nil {
+		t.Error("nil reconciler: expected error")
+	}
+	if _, err := (&Reconciler{}).FetchAppHookConfig(context.Background()); err == nil {
+		t.Error("no credentials: expected error")
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/app/hook/config" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") == "" {
+			t.Error("missing Authorization")
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"url": "https://x.ts.net/webhook", "content_type": "json", "secret": "must-not-be-decoded",
+		})
+	}))
+	defer srv.Close()
+	r := &Reconciler{appID: 7, privateKey: key, baseURL: srv.URL}
+	cfg, err := r.FetchAppHookConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.URL != "https://x.ts.net/webhook" || cfg.ContentType != "json" {
+		t.Errorf("cfg = %+v", cfg)
 	}
 }

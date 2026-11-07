@@ -72,11 +72,23 @@ const (
 const (
 	EventSourcePoll     = "poll"
 	EventSourceHookdeck = "hookdeck"
+	// EventSourceDirect and EventSourceTailscale are the App-webhook receivers
+	// built on internal/appwebhook (#2476, ADR 2476): a plain listener, and an
+	// embedded Tailscale Funnel node. Both need a dedicated GitHub App.
+	EventSourceDirect    = "direct"
+	EventSourceTailscale = "tailscale"
 
-	DefaultEventSource                    = EventSourcePoll
-	DefaultHookdeckAPIKeyEnv              = "HOOKDECK_API_KEY"
-	DefaultHookdeckWebhookSecretEnv       = "PRUEFER_GITHUB_WEBHOOK_SECRET"
-	DefaultReconciliationStartup          = true
+	DefaultEventSource              = EventSourcePoll
+	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
+	DefaultHookdeckWebhookSecretEnv = "PRUEFER_GITHUB_WEBHOOK_SECRET"
+	DefaultReconciliationStartup    = true
+	// Defaults for the direct and tailscale App-webhook receivers (#2476).
+	// DefaultAppWebhookSecretEnv deliberately equals the Hookdeck default: a
+	// daemon uses exactly one event source, so the two never both read it.
+	DefaultAppWebhookPath                 = "/webhook"
+	DefaultAppWebhookSecretEnv            = "PRUEFER_GITHUB_WEBHOOK_SECRET"
+	DefaultTailscaleAuthKeyEnv            = "PRUEFER_TS_AUTHKEY"
+	DefaultTailscaleStateDir              = ".pruefer/state/tailscale"
 	DefaultReconciliationFallbackInterval = 2 * time.Minute
 )
 
@@ -440,9 +452,11 @@ type Config struct {
 
 	// EventSource selects Pruefer's event ingestion mode: EventSourcePoll
 	// (default — behavior is byte-for-byte unchanged from before this
-	// field existed) or EventSourceHookdeck (event-driven, with poll
-	// demoted to a low-frequency reconciliation fallback — see the
-	// Reconciliation* fields below). See adrs/1254-*.md. Restart-only:
+	// field existed), or an event-driven mode — EventSourceDirect,
+	// EventSourceTailscale (#2476, ADR 2476) or the deprecated
+	// EventSourceHookdeck — with poll demoted to a low-frequency
+	// reconciliation fallback (see the Reconciliation* fields below).
+	// See adrs/1254-*.md. Restart-only:
 	// switching modes means constructing (or tearing down) a whole
 	// events.EventSource, including its Hookdeck WebSocket session and
 	// dedupe ring — out of scope for a live reload.
@@ -463,10 +477,31 @@ type Config struct {
 	// HookdeckAPIKeyEnv above.
 	HookdeckWebhookSecretEnv string `reload:"restart"`
 
+	// DirectListen is the address (host:port) the direct receiver binds.
+	// Required for EventSource == EventSourceDirect; ignored otherwise.
+	DirectListen string `reload:"restart"`
+	// AppWebhookPath is the absolute URL path both App-webhook receivers serve.
+	AppWebhookPath string `reload:"restart"`
+	// AppWebhookSecretEnv names the environment variable holding the App's
+	// webhook secret (never the secret itself).
+	AppWebhookSecretEnv string `reload:"restart"`
+	// TailscaleHostname is the tailnet node name of the embedded Funnel node.
+	// Required for EventSource == EventSourceTailscale; unique per daemon.
+	TailscaleHostname string `reload:"restart"`
+	// TailscaleAuthKeyEnv names the environment variable holding a tagged
+	// Tailscale auth key. Needed only while TailscaleStateDir holds no
+	// logged-in node.
+	TailscaleAuthKeyEnv string `reload:"restart"`
+	// TailscaleStateDir persists the node identity so a restart needs no key.
+	TailscaleStateDir string `reload:"restart"`
+	// ReplayFailedDeliveries enables the post-start replay of deliveries GitHub
+	// recorded as failed (internal/appwebhook's Replayer).
+	ReplayFailedDeliveries bool `reload:"restart"`
+
 	// ReconciliationStartup controls whether an event-driven run performs
 	// a full poll reconciliation pass at startup, before event delivery
-	// begins. Only consulted when EventSource == EventSourceHookdeck.
-	// Restart-only: read exactly once, synchronously, before
+	// begins. Consulted in every event-driven mode (anything but
+	// EventSourcePoll). Restart-only: read exactly once, synchronously, before
 	// runEventDriven's loop begins — by the time any SIGHUP could be
 	// handled concurrently with a running daemon, that read has already
 	// happened, so a reload can structurally never affect it.
@@ -474,8 +509,8 @@ type Config struct {
 	// ReconciliationFallbackInterval is the low-frequency poll interval
 	// used as a safety net in event-driven mode — a separate field from
 	// PollInterval, which remains poll-only mode's interval, unaffected by
-	// this one. Only consulted when EventSource == EventSourceHookdeck.
-	// Live: runEventDriven's ticker picks up the new value on its next
+	// this one. Consulted in every event-driven mode (anything but
+	// EventSourcePoll). Live: runEventDriven's ticker picks up the new value on its next
 	// reconciliationFallbackInterval() read.
 	ReconciliationFallbackInterval time.Duration `reload:"live"`
 }
@@ -559,7 +594,14 @@ type yamlConfig struct {
 		APIKeyEnv        string `yaml:"api_key_env"`
 		WebhookSecretEnv string `yaml:"webhook_secret_env"`
 	} `yaml:"hookdeck"`
-	Reconciliation *struct {
+	DirectListen           string `yaml:"direct_listen"`
+	AppWebhookPath         string `yaml:"app_webhook_path"`
+	AppWebhookSecretEnv    string `yaml:"app_webhook_secret_env"`
+	TailscaleHostname      string `yaml:"tailscale_hostname"`
+	TailscaleAuthKeyEnv    string `yaml:"tailscale_auth_key_env"`
+	TailscaleStateDir      string `yaml:"tailscale_state_dir"`
+	ReplayFailedDeliveries *bool  `yaml:"replay_failed_deliveries"`
+	Reconciliation         *struct {
 		Startup *bool `yaml:"startup"`
 		// FallbackInterval is a Go duration string (e.g. "2m"), matching
 		// the issue's literal config example — unlike this file's other
@@ -629,6 +671,13 @@ type flagValues struct {
 	eventSource                    string
 	hookdeckAPIKeyEnv              string
 	hookdeckWebhookSecretEnv       string
+	directListen                   string
+	appWebhookPath                 string
+	appWebhookSecretEnv            string
+	tailscaleHostname              string
+	tailscaleAuthKeyEnv            string
+	tailscaleStateDir              string
+	replayFailedDeliveries         bool
 	reconciliationStartup          bool
 	reconciliationFallbackInterval string
 
@@ -691,9 +740,16 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
 	fs.BoolVar(&fv.autoUpgrade, "auto-upgrade", false, "At each poll boundary (never mid-review), check GitHub Releases for a newer version and self-upgrade; dev builds (built from the fabrik source checkout) rebuild from origin/main instead")
 	fs.BoolVar(&fv.versionRequested, "version", false, "Print the pruefer version and exit")
-	fs.StringVar(&fv.eventSource, "event-source", "", "Event ingestion mode: poll (default) or hookdeck")
+	fs.StringVar(&fv.eventSource, "event-source", "", "Event ingestion mode: poll (default), hookdeck, direct or tailscale")
 	fs.StringVar(&fv.hookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Environment variable name holding the Hookdeck API key")
 	fs.StringVar(&fv.hookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Environment variable name holding the GitHub App's webhook secret")
+	fs.StringVar(&fv.directListen, "direct-listen", "", "Address (host:port) the direct event source listens on")
+	fs.StringVar(&fv.appWebhookPath, "app-webhook-path", "", "Absolute URL path the direct/tailscale event sources serve (default /webhook)")
+	fs.StringVar(&fv.appWebhookSecretEnv, "app-webhook-secret-env", "", "Environment variable name holding the App's webhook secret (direct/tailscale)")
+	fs.StringVar(&fv.tailscaleHostname, "tailscale-hostname", "", "Tailnet hostname of the embedded Funnel node (tailscale event source)")
+	fs.StringVar(&fv.tailscaleAuthKeyEnv, "tailscale-auth-key-env", "", "Environment variable name holding a tagged Tailscale auth key")
+	fs.StringVar(&fv.tailscaleStateDir, "tailscale-state-dir", "", "Directory holding the Tailscale node state (default .pruefer/state/tailscale)")
+	fs.BoolVar(&fv.replayFailedDeliveries, "replay-failed-deliveries", true, "Ask GitHub to redeliver failed webhook deliveries after start (direct/tailscale)")
 	fs.BoolVar(&fv.reconciliationStartup, "reconciliation-startup", true, "Run a full poll reconciliation pass at startup in event-driven mode")
 	fs.StringVar(&fv.reconciliationFallbackInterval, "reconciliation-fallback-interval", "", "Low-frequency poll interval used as a safety net in event-driven mode (Go duration, e.g. 2m)")
 	fs.IntVar(&fv.maxDerivedRepos, "max-derived-repos", 0, "Cap on the number of repos a single installation-derivation may yield (R5); 0 or negative disables the cap")
@@ -757,6 +813,11 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		EventSource:                    DefaultEventSource,
 		HookdeckAPIKeyEnv:              DefaultHookdeckAPIKeyEnv,
 		HookdeckWebhookSecretEnv:       DefaultHookdeckWebhookSecretEnv,
+		AppWebhookPath:                 DefaultAppWebhookPath,
+		AppWebhookSecretEnv:            DefaultAppWebhookSecretEnv,
+		TailscaleAuthKeyEnv:            DefaultTailscaleAuthKeyEnv,
+		TailscaleStateDir:              DefaultTailscaleStateDir,
+		ReplayFailedDeliveries:         true,
 		ReconciliationStartup:          DefaultReconciliationStartup,
 		ReconciliationFallbackInterval: DefaultReconciliationFallbackInterval,
 	}
@@ -882,6 +943,27 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		if yc.Hookdeck.WebhookSecretEnv != "" {
 			cfg.HookdeckWebhookSecretEnv = yc.Hookdeck.WebhookSecretEnv
 		}
+	}
+	if yc.DirectListen != "" {
+		cfg.DirectListen = yc.DirectListen
+	}
+	if yc.AppWebhookPath != "" {
+		cfg.AppWebhookPath = yc.AppWebhookPath
+	}
+	if yc.AppWebhookSecretEnv != "" {
+		cfg.AppWebhookSecretEnv = yc.AppWebhookSecretEnv
+	}
+	if yc.TailscaleHostname != "" {
+		cfg.TailscaleHostname = yc.TailscaleHostname
+	}
+	if yc.TailscaleAuthKeyEnv != "" {
+		cfg.TailscaleAuthKeyEnv = yc.TailscaleAuthKeyEnv
+	}
+	if yc.TailscaleStateDir != "" {
+		cfg.TailscaleStateDir = yc.TailscaleStateDir
+	}
+	if yc.ReplayFailedDeliveries != nil {
+		cfg.ReplayFailedDeliveries = *yc.ReplayFailedDeliveries
 	}
 	if yc.Reconciliation != nil {
 		if yc.Reconciliation.Startup != nil {
@@ -1057,6 +1139,27 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		}
 		cfg.HookdeckWebhookSecretEnv = fv.hookdeckWebhookSecretEnv
 	}
+	for _, f := range []struct {
+		flag string
+		val  string
+		dst  *string
+	}{
+		{"direct-listen", fv.directListen, &cfg.DirectListen},
+		{"app-webhook-path", fv.appWebhookPath, &cfg.AppWebhookPath},
+		{"app-webhook-secret-env", fv.appWebhookSecretEnv, &cfg.AppWebhookSecretEnv},
+		{"tailscale-hostname", fv.tailscaleHostname, &cfg.TailscaleHostname},
+		{"tailscale-auth-key-env", fv.tailscaleAuthKeyEnv, &cfg.TailscaleAuthKeyEnv},
+		{"tailscale-state-dir", fv.tailscaleStateDir, &cfg.TailscaleStateDir},
+	} {
+		if explicit[f.flag] {
+			// An explicit empty value is kept: validateAppSourceStatic refuses
+			// it for the source that needs it, rather than silently defaulting.
+			*f.dst = f.val
+		}
+	}
+	if explicit["replay-failed-deliveries"] {
+		cfg.ReplayFailedDeliveries = fv.replayFailedDeliveries
+	}
 	if explicit["reconciliation-startup"] {
 		cfg.ReconciliationStartup = fv.reconciliationStartup
 	}
@@ -1068,8 +1171,11 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		cfg.ReconciliationFallbackInterval = d
 	}
 
-	if cfg.EventSource != EventSourcePoll && cfg.EventSource != EventSourceHookdeck {
-		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("invalid event_source %q: must be %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck)
+	if !validEventSource(cfg.EventSource) {
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("invalid event_source %q: must be %q, %q, %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourceTailscale)
+	}
+	if err := validateAppSourceStatic(cfg); err != nil {
+		return Config{}, claudeprofile.Resolution{}, err
 	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
@@ -1303,6 +1409,26 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV"); v != "" {
 		cfg.HookdeckWebhookSecretEnv = v
+	}
+	for _, e := range []struct {
+		name string
+		dst  *string
+	}{
+		{"PRUEFER_DIRECT_LISTEN", &cfg.DirectListen},
+		{"PRUEFER_APP_WEBHOOK_PATH", &cfg.AppWebhookPath},
+		{"PRUEFER_APP_WEBHOOK_SECRET_ENV", &cfg.AppWebhookSecretEnv},
+		{"PRUEFER_TAILSCALE_HOSTNAME", &cfg.TailscaleHostname},
+		{"PRUEFER_TAILSCALE_AUTH_KEY_ENV", &cfg.TailscaleAuthKeyEnv},
+		{"PRUEFER_TAILSCALE_STATE_DIR", &cfg.TailscaleStateDir},
+	} {
+		if v := os.Getenv(e.name); v != "" {
+			*e.dst = v
+		}
+	}
+	if v := os.Getenv("PRUEFER_REPLAY_FAILED_DELIVERIES"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ReplayFailedDeliveries = b
+		}
 	}
 	if v := os.Getenv("PRUEFER_RECONCILIATION_STARTUP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

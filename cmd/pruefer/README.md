@@ -33,7 +33,7 @@ The checks above used to run — each costing GitHub API calls (the repo's `.pru
 
 Each poll logs one line per owner — `owner=… requests=… not_modified=… prs=… memo_skipped=… evaluated=…` — so you can see what a cycle actually cost. The one cost that remains per repo per poll is the repo-config lookup: a repo with no `.pruefer/config.yaml` pays one `404` (which GitHub never returns an ETag for).
 
-`event_source: hookdeck` (deprecated in v0.0.90, removed in v0.0.92) does not make this moot: its reconciliation fallback poll defaults to `2m` — the same as `poll_interval_seconds` — so the fallback and startup sweeps still cost a full pass unless you raise `reconciliation.fallback_interval`; the mechanisms above are what keep those sweeps cheap. See [adrs/1952-pruefer-idle-poll-cost.md](../../adrs/1952-pruefer-idle-poll-cost.md) for the design, the measured before/after request counts, and the accepted edges.
+An event-driven `event_source` (`direct`, `tailscale`, or the deprecated `hookdeck`) does not make this moot: its reconciliation fallback poll defaults to `2m` — the same as `poll_interval_seconds` — so the fallback and startup sweeps still cost a full pass unless you raise `reconciliation.fallback_interval`; the mechanisms above are what keep those sweeps cheap. See [adrs/1952-pruefer-idle-poll-cost.md](../../adrs/1952-pruefer-idle-poll-cost.md) for the design, the measured before/after request counts, and the accepted edges.
 
 ## Setup
 
@@ -73,7 +73,7 @@ With no usable local App credentials, Pruefer walks you through GitHub's **App M
    no installations found for this App yet — install it on a repo, org, or account to begin reviewing: https://github.com/apps/<your-app-slug>/installations/new
    ```
 
-   Follow the printed link and install the App on whichever repo, org, or account you want reviewed — no restart needed: Pruefer picks up the new installation on its own within `repo_rederivation_interval` (default 10m), or immediately on the next `installation`/`installation_repositories` webhook event in `event_source: hookdeck` mode. See [Installation-derived repo discovery](#installation-derived-repo-discovery) below for the full model, including how to narrow what gets reviewed with `watched_repos`.
+   Follow the printed link and install the App on whichever repo, org, or account you want reviewed — no restart needed: Pruefer picks up the new installation on its own within `repo_rederivation_interval` (default 10m), or immediately on the next `installation`/`installation_repositories` webhook event in an event-driven mode (`direct`, `tailscale`, `hookdeck`). See [Installation-derived repo discovery](#installation-derived-repo-discovery) below for the full model, including how to narrow what gets reviewed with `watched_repos`.
 
 The App this flow creates is **yours** — owned by whichever GitHub account performs the manifest flow, and **private** (the manifest requests `"public": false`, unconditionally — there is no config knob to change this). A private App can only ever be installed on the account that owns it — not "wherever you choose," but specifically that one account. This is not a shared, publicly-installable App: each user who sets up their own Pruefer instance this way gets their own dedicated App, with no credential ever shared between instances.
 
@@ -94,7 +94,8 @@ Registering the App yourself is still fully supported — this is also how Pruef
    - **GitHub App name**: anything unique (e.g. `your-org-pruefer`). This becomes the `<slug>` in the App's `<slug>[bot]` identity.
    - **Homepage URL**: any placeholder URL — not used.
    - **Webhook**: depends on whether you already know you'll use `event_source: hookdeck` (deprecated in v0.0.90, removed in v0.0.92, so not recommended for new setups; see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck) below).
-     - **Not planning to use Hookdeck (the default)**: **uncheck "Active"**. Pruefer polls by default; it does not receive webhooks (see ADR-1113 for why this doesn't conflict with ADR-032's webhook-delivery ruling).
+     - **Using `event_source: tailscale` or `direct`**: set the webhook up once the receiver is running (it needs the URL the daemon logs) — see [Event-driven mode (direct and tailscale)](#event-driven-mode-direct-and-tailscale). Leave "Active" unchecked at creation.
+     - **Polling only (the default)**: **uncheck "Active"**. Pruefer polls by default; it does not receive webhooks (see ADR-1113 for why this doesn't conflict with ADR-032's webhook-delivery ruling).
      - **Already know you want Hookdeck** (deprecated in v0.0.90, removed in v0.0.92; polling is the replacement): you can declare the webhook **now, at creation**, or leave it unchecked and come back once a Hookdeck source is provisioned — both are equally fine. Unlike a *permission* change (see "Verifying granted permissions" below), GitHub applies a webhook's URL, content type, secret, and "Active" state to every installation **immediately, with no per-installation approval step**, whether you set it now or edit it later — there is no cost difference to timing. Declaring it now just saves a return trip to Settings: check **"Active"** and fill in the Webhook URL, content type, and secret exactly as described in [Provisioning a Hookdeck source](#provisioning-a-hookdeck-source) below — provisioning the Hookdeck source first, then returning to finish this form, is fine either way; App creation isn't time-limited the way the manifest flow's callback is. GitHub does reject "Active" checked with no URL supplied — the same `hook_attributes.url` requirement the App-Manifest flow runs into above, whose rejection there is confusingly worded as `"url" wasn't supplied` rather than naming the missing field (see [#1711](https://github.com/handarbeit/fabrik/issues/1711)) — so don't check Active until you have a real URL to give it.
 3. **Repository permissions**, minimum required:
    - **Pull requests**: Read and write (review submission, reading PR metadata/diff)
@@ -177,7 +178,7 @@ Which repos Pruefer reviews is decided by where the GitHub App is installed, not
 
   `served_accounts` must name every account you want served, **including your own** — there is no implicit self-exemption. It has no effect in `github_app_installation_id`-pinned mode (see below): that mode never enumerates installations at all, so there's nothing to allowlist.
 
-**Runtime re-derivation (no restart needed):** installing/uninstalling the App, or changing its repository selection, is picked up automatically — via the `installation`/`installation_repositories` webhook event in `event_source: hookdeck` mode, or on a timer (`repo_rederivation_interval`, default `10m`) in every mode, including plain polling. The same trigger re-evaluates `watched_repos`/`served_accounts`, so a config edit to either takes effect with no restart (see [Config reload](#config-reload-sighup) below). The daemon logs, and the TUI's Watched Repos pane shows, exactly which repos it derived, from which installation, and any `watched_repos` entry that wasn't covered — see [Terminal UI](#terminal-ui) below.
+**Runtime re-derivation (no restart needed):** installing/uninstalling the App, or changing its repository selection, is picked up automatically — via the `installation`/`installation_repositories` webhook event in an event-driven mode (`direct`, `tailscale`, `hookdeck`), or on a timer (`repo_rederivation_interval`, default `10m`) in every mode, including plain polling. The same trigger re-evaluates `watched_repos`/`served_accounts`, so a config edit to either takes effect with no restart (see [Config reload](#config-reload-sighup) below). The daemon logs, and the TUI's Watched Repos pane shows, exactly which repos it derived, from which installation, and any `watched_repos` entry that wasn't covered — see [Terminal UI](#terminal-ui) below.
 
 **A failed listing keeps the last good one (never "0 repos"):** each installation's accessible-repo list is enumerated fresh on every re-derivation, but a *failed* enumeration — a rate limit, a 5xx, a timeout, or a failure partway through pagination — is not evidence the installation grants nothing. Pruefer keeps that installation's last *successful* listing, in memory, and keeps reviewing it; only a successful listing can shrink the set. The retained listing is the raw grant, so a `watched_repos` or `max_derived_repos` change still applies to it. It is per installation: a failure on one never touches another. It is dropped when the installation leaves the list, is removed or unrecognized, or is narrowed out by `watched_repos`, so a revoked grant does not linger. Two log lines tell you it happened (grep for them):
 
@@ -370,17 +371,126 @@ Which upgrade path runs depends on how the binary was built:
 
 On macOS arm64, a release-mode upgrade re-signs the replacement binary ad-hoc after download (the same step Fabrik's own upgrade path uses) so the swapped-in binary isn't rejected by Gatekeeper/AMFI.
 
+## Event-driven mode (direct and tailscale)
+
+By default (`event_source: poll`) Pruefer polls. Two further values make it event-driven with **no third-party relay**: GitHub sends the GitHub App's webhook straight to the daemon, which reviews a PR within moments of `opened`/`reopened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval.
+
+| `event_source` | What receives the webhook |
+|---|---|
+| `tailscale` | An embedded Tailscale node. The daemon joins your tailnet **as its own machine** (for example `pruefer-acme`), serves its own public Funnel endpoint with TLS terminated on the node, and needs no reverse proxy. Recommended. |
+| `direct` | A plain HTTP listener on `direct_listen` (for example `127.0.0.1:8787`). TLS is not its job: put your own tunnel or reverse proxy (Tailscale Funnel through the system `tailscaled`, Cloudflare Tunnel, nginx) in front and point the App's webhook URL at that. |
+
+Both run the same receiver Fabrik's engine uses (`internal/appwebhook`): the same size cap, `X-Hub-Signature-256` check, fast acknowledgement, delivery replay and route-liveness check. Both require GitHub App authentication, which Pruefer always has.
+
+**Polling is never removed.** In either mode `poll()` is demoted to a low-frequency safety net: one reconciliation pass at startup (`reconciliation.startup`) and one every `reconciliation.fallback_interval` (default `2m`). A missed or dropped event, a listener that could not start, and the minutes after a restart are all covered by it, so nothing in this section is a single point of failure. If the receiver cannot start (port in use, the node cannot join the tailnet, Funnel is not permitted) the daemon keeps running on that fallback poll, logs the cause, and shows a banner in the TUI footer; fix the cause and restart.
+
+### One GitHub App per installation
+
+**A GitHub App has exactly one webhook URL.** One App installed on several accounts therefore cannot deliver to several daemons. The supported topology is the one [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) already describes: **one App, one installation, one daemon** — each daemon has its own webhook URL, its own secret and (for `tailscale`) its own Funnel node, so no fan-out component is needed and one daemon's public exposure can be seen and revoked on its own.
+
+As a backstop for a misconfigured shared App, a delivery whose `installation.id` is not one this daemon serves is **ignored with one log line** (`... installation 222 is not served by this daemon — ignoring ...`); it is not dispatched, not recorded as seen, not counted as a signature failure, and shows in the footer's `other` drop count. The exception is an `installation` event with action `created`, which is let through so a daemon that serves several installations of its App still learns about a new one; it only triggers the same re-derivation a timer tick would. Before the first derivation has found any installation, ownership cannot be judged and nothing is dropped on that ground.
+
+### Setup, step by step
+
+1. **Register the App for this installation.** Use [First run: automatic setup](#first-run-automatic-setup-recommended) (one App per run) or [Manual setup](#manual-setup-compat-mode). The manifest flow omits the webhook on purpose, so it creates an App with the webhook **inactive**; you switch it on in step 4.
+2. **Choose the secret.** Generate one yourself, for example `openssl rand -hex 32`, and put it in the environment (or `.env`) under the variable `app_webhook_secret_env` names (default `PRUEFER_GITHUB_WEBHOOK_SECRET`):
+   ```
+   PRUEFER_GITHUB_WEBHOOK_SECRET=<the secret>
+   ```
+   The configuration holds the variable's *name*, never the secret. Pruefer reads the secret only from that variable.
+3. **Configure Pruefer and start it** (for `tailscale`, do the [tailnet setup](#tailscale-prerequisites) first):
+   ```yaml
+   # .pruefer/config.yaml — tailscale
+   event_source: tailscale
+   tailscale_hostname: pruefer-acme               # required; unique per daemon
+   tailscale_auth_key_env: PRUEFER_TS_AUTHKEY     # the variable NAME; default shown
+   tailscale_state_dir: .pruefer/state/tailscale  # default shown; created with mode 0700
+   app_webhook_path: /webhook                     # default shown
+   app_webhook_secret_env: PRUEFER_GITHUB_WEBHOOK_SECRET   # default shown
+   replay_failed_deliveries: true                 # default shown
+   ```
+   ```yaml
+   # .pruefer/config.yaml — direct
+   event_source: direct
+   direct_listen: 127.0.0.1:8787                  # required
+   app_webhook_path: /webhook
+   app_webhook_secret_env: PRUEFER_GITHUB_WEBHOOK_SECRET
+   ```
+   Every key also has a flag (`--event-source`, `--tailscale-hostname`, `--direct-listen`, ...) and a `PRUEFER_*` variable; see the [Configuration reference](#configuration-reference). All of them are **restart-only**. Startup refuses an unusable configuration with a message naming the setting: a missing `direct_listen` or `tailscale_hostname`, an empty secret variable, a webhook path that does not start with `/`, a `*_env` setting that is not a variable name, or (for `tailscale`) no auth key while the state directory holds no logged-in node.
+4. **Point the App at the daemon.** When the receiver is up Pruefer logs the URL once:
+   ```
+   [tailscale] event_source: tailscale — node "pruefer-acme" is up; App webhook URL: https://pruefer-acme.tail1234.ts.net/webhook (secret from $PRUEFER_GITHUB_WEBHOOK_SECRET)
+   ```
+   In the App's settings (**Settings → Developer settings → GitHub Apps → your App → General → Webhook**): check **Active**; set the **Webhook URL** to that URL (for `direct`, the public URL of your tunnel or proxy plus the path); set the **Content type to `application/json`** (the other choice, `application/x-www-form-urlencoded`, wraps the payload and every delivery would fail to parse); set the **Webhook secret** to the value from step 2. Under **Subscribe to events**, tick **Pull request**. `installation` and `installation_repositories` events are delivered to every App without a subscription.
+
+   The URL is built from the name the node *reports*: Tailscale appends a suffix such as `-1` when a hostname is already taken, so it can differ from `tailscale_hostname`. Always copy it from the log.
+5. **Check it.** `tailscale` reads the App's webhook configuration (with the App's own JWT; the secret is never read) and raises a footer banner and a log line if the URL or content type does not match. Open or push to a PR on a watched repo: the review starts within moments, the footer's `last` time updates, and GitHub's **Advanced → Recent Deliveries** shows a `200`. A new node's public name can take several minutes to resolve; until then GitHub's deliveries fail and the poll covers.
+
+### Tailscale prerequisites
+
+Once, in Tailscale's admin console (Pruefer does not change your tailnet):
+
+1. **Enable HTTPS certificates** and MagicDNS for the tailnet (DNS page). Funnel cannot terminate TLS without them.
+2. **Tag the node.** Create a tag, for example `tag:pruefer`, in the access policy's `tagOwners`.
+3. **Grant Funnel to the tag** in the access policy's `nodeAttrs`:
+   ```json
+   "nodeAttrs": [{"target": ["tag:pruefer"], "attr": ["funnel"]}]
+   ```
+4. **Create a tagged auth key** (Settings → Keys): reusable is not needed; make it **pre-approved** and give it the tag `tag:pruefer`. Put it in the variable `tailscale_auth_key_env` names (default `PRUEFER_TS_AUTHKEY`).
+
+**The auth key is needed only until the node has joined.** Once `tailscale_state_dir` holds a node that has logged in, a restart reuses that node and needs no key. (A first start that failed on a bad or expired key leaves only a machine key, which does not count, so the key is still required.) If a key variable is set it is still handed to the node, which ignores it while the node is logged in; if the node's registration expired or was revoked, restart with a fresh pre-approved key and the existing node re-authenticates. The state directory is the node's only persisted credential: keep it out of version control, give each daemon its own, and do not delete it. The key is never logged, and the new variable names and their values are never passed to the review subprocess.
+
+The node adds the Tailscale library to the `pruefer` binary (several MB, in every build). Because every daemon is its own tailnet machine, give each a **distinct `tailscale_hostname`**.
+
+### What you see
+
+The TUI footer shows the event source's health, for example
+
+```
+tailscale: listening · tailnet Running · funnel ok · last 2m ago · route reachable
+```
+
+(`direct` has no tailnet or Funnel part; `last never` until the first delivery). It is red when the receiver is not listening, has signature drift, a lost tailnet connection or an unreachable Funnel, or when GitHub's own delivery log shows the route failing; `route` is judged from that log (a recent 2xx to the App's current webhook URL is `reachable`, two failed attempts since the last success is `unreachable`), never by DNS lookups of Pruefer's own, and `unknown` raises nothing. A high-contrast banner (`⚠ ...`) names a listen failure, a webhook-configuration mismatch, a dropped tailnet connection or an unavailable Funnel, and clears when the condition does. Signature drift (20 consecutive failures with no success) is the same banner as for Hookdeck. With `-notui` the same transitions are log lines tagged `direct` or `tailscale`.
+
+**Replay.** While the daemon was down GitHub recorded failed deliveries. After startup (for `tailscale`, after a fixed 90 s for the Funnel to route to the new node) and after a tailnet recovery, Pruefer asks GitHub to redeliver the failed ones from the last hour (a later recovery looks back to just before the newest delivery it has seen). It never dispatches a review itself: a redelivered copy arrives through the normal receiver and goes through the same delivery-ID dedupe, and the replayer's "has this been seen" check is read-only, so asking never makes a redelivery look like a duplicate. Delivery-ID dedupe is in memory (ADR 1113), so after a restart a redelivered copy of something already reviewed can reach the review path again; the review's own head-SHA check (see [How it works](#how-it-works)) is what keeps that from producing a second review. Turn replay off with `replay_failed_deliveries: false`.
+
+**Troubleshooting**
+
+| Symptom | Likely cause |
+|---|---|
+| Footer banner "could not start"; daemon keeps polling | `direct`: port in use or bad `direct_listen`. `tailscale`: no or expired auth key in the variable, Funnel not granted to the node's tag, HTTPS certificates disabled, or the tailnet unreachable. The log line names the cause. |
+| `SIGNATURE DRIFT` banner | The App's webhook secret differs from the value of `app_webhook_secret_env`, or the App's content type is not `application/json`. |
+| Banner "webhook URL is not this daemon's Funnel URL" | The App still points at an old URL. Copy the URL from the startup log into the App's settings. |
+| `route unreachable`, deliveries show `502` or connection errors in GitHub's Recent Deliveries | The public name is not routing yet (wait a few minutes), the webhook URL is wrong, or Funnel is not granted. |
+| `ignoring ... installation N is not served by this daemon` | Another App (or an old shared App) still sends its webhook to this daemon. Repoint or deactivate it. |
+| Everything works but reviews arrive only every `fallback_interval` | The webhook is not reaching the daemon; the poll is covering. Check Recent Deliveries on the App. |
+
+### Migrating one instance from the shared App
+
+This moves **one** Pruefer instance at a time from the shared public App (`handarbeit-pruefer`) to its own App and an event-driven receiver. Do it in a quiet window for that instance. The order below leaves no gap in review coverage: the old App keeps reviewing until the new one has proved itself, and polling covers every step in between. The bot-login and `expected_reviewers` parts are the ones in [Migration runbook: public multi-account App → private per-account Apps](#migration-runbook-public-multi-account-app--private-per-account-apps) (steps 2, 5, 8, 9); this runbook adds the webhook half.
+
+1. **Prepare the host.** Rebuild the binary (`go build -o bin/pruefer ./cmd/pruefer`). For `tailscale`, do the [tailnet setup](#tailscale-prerequisites) and create the auth key. For `direct`, set up the tunnel or proxy.
+2. **Register this installation's own private App** in a **separate working directory** for the new daemon (the manifest flow, one App per run). Do not touch the shared App yet. *Rollback: nothing has changed.*
+3. **Start the new daemon with the receiver, before moving any installation.** Set `event_source: tailscale` (or `direct`), the secret, and the hostname/listen address; start it. It has no installation yet, so it reviews nothing, but its node comes up and logs the webhook URL. Put that URL, the secret and content type `application/json` into the new App's settings (Setup, step 4). Confirm the footer reads `listening` and the webhook-configuration banner is absent. *Rollback: stop the new daemon; the shared App is untouched.*
+4. **Dual-list the reviewer** (runbook step 5): add the new App's bot login to `expected_reviewers` alongside the old one in this instance's repos.
+5. **Move the installation** (runbook step 6): install the new App on this account and uninstall the shared App from it. The new daemon's derivation picks the repos up (`repo_rederivation_interval`, or at once on the `installation` event); the old daemon, if it is still running on the shared App for other accounts, simply stops seeing this account's repos on its next re-derivation. The `installation` event triggers a re-derivation followed by a reconciliation poll, and the fallback poll repeats it, so no open PR waits for a webhook. *Rollback: reinstall the shared App on this account and leave both reviewers listed.*
+6. **Prove it** (runbook step 8): open or push to a PR on a watched repo and confirm the new bot reviewed it, within moments, with the footer's `last` time updated.
+7. **Remove the old reviewer** (runbook step 9), then repeat from step 1 for the next instance.
+8. **When the last instance has moved**, turn the shared App's webhook off (uncheck **Active**) if it was ever on, and retire it per runbook step 11.
+
+If the shared App's webhook URL still points at a migrated daemon during this, that daemon ignores those deliveries with the one log line above rather than reviewing another account's PR.
+
 ## Event-driven mode (Hookdeck)
 
-> **Deprecated.** `event_source: hookdeck` is deprecated in v0.0.90 and removed in v0.0.92. It works unchanged until then. Pruefer has no replacement transport in v0.0.90 (one is tracked separately); until it ships, the replacement is polling (`event_source: poll`, the default). The rest of this section is kept for existing setups.
+> **Deprecated.** `event_source: hookdeck` is deprecated in v0.0.90 and removed in v0.0.92. It works unchanged until then. The replacements are `event_source: tailscale` and `event_source: direct` (see [Event-driven mode (direct and tailscale)](#event-driven-mode-direct-and-tailscale)), which need no relay service, or polling (`event_source: poll`, the default). The rest of this section is kept for existing setups.
 >
 > **Migrating off Hookdeck:**
 >
-> 1. Set `event_source: poll` in `.pruefer/config.yaml` (or remove the key; `poll` is the default), or `--event-source poll` / `PRUEFER_EVENT_SOURCE=poll`.
-> 2. Remove the `hookdeck.*` keys (`hookdeck.api_key_env`, `hookdeck.webhook_secret_env`), the `reconciliation.*` keys (they are consulted only in Hookdeck mode) and the corresponding flags and `PRUEFER_HOOKDECK_*` / `PRUEFER_RECONCILIATION_*` variables.
+> 1. Set `event_source` to `tailscale` or `direct` (to stay event-driven; you need an App of your own per installation, see [Event-driven mode (direct and tailscale)](#event-driven-mode-direct-and-tailscale)) or to `poll` (or remove the key; `poll` is the default), in `.pruefer/config.yaml`, or with `--event-source` / `PRUEFER_EVENT_SOURCE`.
+> 2. Remove the `hookdeck.*` keys (`hookdeck.api_key_env`, `hookdeck.webhook_secret_env`), the `reconciliation.*` keys if you are going back to `poll` (they are consulted in every event-driven mode, so keep them for `direct` and `tailscale`) and the corresponding flags and `PRUEFER_HOOKDECK_*` / `PRUEFER_RECONCILIATION_*` variables.
 > 3. Remove the Hookdeck credentials from your environment or `.env`: the Hookdeck API key and the GitHub App's webhook secret variable. Delete the Hookdeck connection and, if you have no other use for it, the account.
-> 4. In the GitHub App's settings, uncheck **"Active"** under Webhook, as for any poll-only App (see [Manual setup](#manual-setup-compat-mode) and ADR-1113).
-> 5. Restart Pruefer. It now polls every `poll_interval_seconds`; no webhook configuration is needed.
+> 4. For `poll`: in the GitHub App's settings, uncheck **"Active"** under Webhook, as for any poll-only App (see [Manual setup](#manual-setup-compat-mode) and ADR-1113). For `direct`/`tailscale`: point the webhook at the new receiver instead (Setup, step 4 of the section above).
+> 5. Restart Pruefer. With `poll` it polls every `poll_interval_seconds` and no webhook configuration is needed.
 
 By default (`event_source: poll`, unset), Pruefer's behavior is exactly what's described above — poll every `poll_interval_seconds`, list open PRs, review the eligible ones. `event_source: hookdeck` is an opt-in alternative: GitHub webhooks are forwarded through [Hookdeck](https://hookdeck.com) into Pruefer, which reviews a PR within moments of `opened`/`reopened`/`synchronize`/`ready_for_review` instead of waiting up to a full poll interval. Polling is never removed in this mode — it's demoted to a low-frequency reconciliation safety net (`reconciliation.fallback_interval`, default `2m`), covering startup, a Hookdeck outage, and the moment right after reconnecting, so a missed or dropped event is never fatal.
 
@@ -438,7 +548,7 @@ When run with a real terminal attached (both stdin and stdout), Pruefer launches
 - Recently completed reviews (last 200, in-memory — not persisted across restarts): repo, PR, outcome (reviewed or errored), turns, cost, and duration, aligned into columns. **Skipped PRs are filtered out of this list by default** — at a typical repo count, "already reviewed at this head SHA" and the other skip categories (draft, self-authored, excluded author/label/path, diff too large) are the overwhelming steady-state outcome, and listing them evicted the reviews that actually carry information. The pane's title discloses the filtered count instead (`Completed Reviews (7) · 22 skipped`); a review that errored is never filtered, even if it was also a skip. When the terminal is too short to show every completed review, the list windows around your selection with a "… N more" line rather than overflowing.
 - Watched repositories, each with its last poll time, PR count found, last error (if any), and the installation that granted it — plus, when relevant, a warning if the last derivation hit a pagination ceiling or the `max_derived_repos` cap, and a count of `watched_repos` entries not covered by any installation (see [Installation-derived repo discovery](#installation-derived-repo-discovery)). As the panel lowest in priority, this is the one that shrinks first on a short terminal, windowing with "… N more" once space runs out.
 - Errors, plus GitHub REST API rate-limit state and a running session-total cost/turn count.
-- In `event_source: hookdeck` mode: a per-category breakdown of dropped deliveries (signature failures, unwatched-repo/owner, dedupe hits, other), and a signature-drift banner when signature verification has been failing on every delivery for a sustained stretch — see [Detecting a total protocol break](#detecting-a-total-protocol-break) below.
+- In an event-driven mode (`direct`, `tailscale`, `hookdeck`): a per-category breakdown of dropped deliveries (signature failures, unwatched-repo/owner, dedupe hits, other), and a signature-drift banner when signature verification has been failing on every delivery for a sustained stretch — see [Detecting a total protocol break](#detecting-a-total-protocol-break) below. With `direct`/`tailscale` it also shows the receiver's health (`tailscale: listening · tailnet Running · funnel ok · last 2m ago · route reachable`) and a banner for a listen failure, a webhook-configuration mismatch or a lost tailnet connection — see [Event-driven mode (direct and tailscale)](#event-driven-mode-direct-and-tailscale).
 - A `⚠ UNRECOGNIZED INSTALLATION: <account(s)>` banner while any App installation is currently unrecognized (R5) — naming the account(s) so it's visible without reading the log, clearing itself the moment a later re-derivation no longer finds one. See [Installation-derived repo discovery](#installation-derived-repo-discovery).
 
 Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k` to scroll and select an entry, `enter` to view its detail.
@@ -518,7 +628,14 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `tui` | Restart-only — the interactive dashboard is started once, before the daemon begins running. |
 | `log_file` | Restart-only. |
 | `transcript_dir` | Restart-only. |
-| `event_source` | Restart-only (`hookdeck` is deprecated in v0.0.90 and removed in v0.0.92) — switching between `poll` and `hookdeck` means constructing or tearing down a whole event source, including its WebSocket session and dedupe ring. |
+| `event_source` | Restart-only (`hookdeck` is deprecated in v0.0.90 and removed in v0.0.92) — switching modes means constructing or tearing down a whole event source: the Hookdeck session, or the receiver's listener and tailnet node, and the dedupe ring. |
+| `direct_listen` | Restart-only. |
+| `app_webhook_path` | Restart-only. |
+| `app_webhook_secret_env` | Restart-only. |
+| `tailscale_hostname` | Restart-only. |
+| `tailscale_auth_key_env` | Restart-only. |
+| `tailscale_state_dir` | Restart-only. |
+| `replay_failed_deliveries` | Restart-only. |
 | `hookdeck.api_key_env` | Restart-only. Deprecated in v0.0.90, removed in v0.0.92. |
 | `hookdeck.webhook_secret_env` | Restart-only. Deprecated in v0.0.90, removed in v0.0.92. |
 | `reconciliation.startup` | Restart-only — consulted once, before the event-driven run loop starts. |
@@ -872,11 +989,18 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
 | `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
 | `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
-| `--event-source` | `PRUEFER_EVENT_SOURCE` | `event_source` | `poll` | `poll` (default, unchanged behavior) or `hookdeck` (event-driven; **deprecated in v0.0.90, removed in v0.0.92** — see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck)) |
+| `--event-source` | `PRUEFER_EVENT_SOURCE` | `event_source` | `poll` | `poll` (default, unchanged behavior), `tailscale` or `direct` (event-driven; see [Event-driven mode (direct and tailscale)](#event-driven-mode-direct-and-tailscale)), or `hookdeck` (event-driven; **deprecated in v0.0.90, removed in v0.0.92** — see [Event-driven mode (Hookdeck)](#event-driven-mode-hookdeck)) |
+| `--direct-listen` | `PRUEFER_DIRECT_LISTEN` | `direct_listen` | — | `host:port` the `direct` source listens on (plain HTTP). Required for `event_source: direct` |
+| `--app-webhook-path` | `PRUEFER_APP_WEBHOOK_PATH` | `app_webhook_path` | `/webhook` | Absolute URL path `direct` and `tailscale` serve |
+| `--app-webhook-secret-env` | `PRUEFER_APP_WEBHOOK_SECRET_ENV` | `app_webhook_secret_env` | `PRUEFER_GITHUB_WEBHOOK_SECRET` | Name of the env var holding the App's webhook secret (`direct`, `tailscale`). The name, never the secret |
+| `--tailscale-hostname` | `PRUEFER_TAILSCALE_HOSTNAME` | `tailscale_hostname` | — | Tailnet machine name of the embedded node. Required for `event_source: tailscale`; unique per daemon |
+| `--tailscale-auth-key-env` | `PRUEFER_TAILSCALE_AUTH_KEY_ENV` | `tailscale_auth_key_env` | `PRUEFER_TS_AUTHKEY` | Name of the env var holding a tagged, pre-approved Tailscale auth key. Needed only while the state directory holds no logged-in node |
+| `--tailscale-state-dir` | `PRUEFER_TAILSCALE_STATE_DIR` | `tailscale_state_dir` | `.pruefer/state/tailscale` | Directory holding the node's identity (created mode `0700`); lets a restart skip the auth key |
+| `--replay-failed-deliveries` | `PRUEFER_REPLAY_FAILED_DELIVERIES` | `replay_failed_deliveries` | `true` | After start (and a tailnet recovery), ask GitHub to redeliver deliveries that failed while the daemon was not receiving (`direct`, `tailscale`) |
 | `--hookdeck-api-key-env` | `PRUEFER_HOOKDECK_API_KEY_ENV` | `hookdeck.api_key_env` | `HOOKDECK_API_KEY` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the env var holding the Hookdeck API key. Only consulted when `event_source: hookdeck` |
 | `--hookdeck-webhook-secret-env` | `PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck.webhook_secret_env` | `PRUEFER_GITHUB_WEBHOOK_SECRET` | **Deprecated in v0.0.90, removed in v0.0.92.** Name of the env var holding the GitHub App's webhook secret. Only consulted when `event_source: hookdeck` |
-| `--reconciliation-startup` | `PRUEFER_RECONCILIATION_STARTUP` | `reconciliation.startup` | `true` | **Deprecated in v0.0.90, removed in v0.0.92** (Hookdeck mode only). Run a full poll reconciliation pass at startup before event delivery begins. Only consulted when `event_source: hookdeck` |
-| `--reconciliation-fallback-interval` | `PRUEFER_RECONCILIATION_FALLBACK_INTERVAL` | `reconciliation.fallback_interval` | `2m` | **Deprecated in v0.0.90, removed in v0.0.92** (Hookdeck mode only). Go duration (e.g. `2m`, `90s`); the low-frequency poll interval used as a safety net in event-driven mode. Separate from `poll_interval_seconds`, which only applies in poll-only mode. Only consulted when `event_source: hookdeck` |
+| `--reconciliation-startup` | `PRUEFER_RECONCILIATION_STARTUP` | `reconciliation.startup` | `true` | Run a full poll reconciliation pass at startup before event delivery begins. Consulted in every event-driven mode (`direct`, `tailscale`, `hookdeck`), not in `poll` |
+| `--reconciliation-fallback-interval` | `PRUEFER_RECONCILIATION_FALLBACK_INTERVAL` | `reconciliation.fallback_interval` | `2m` | Go duration (e.g. `2m`, `90s`); the low-frequency poll interval used as a safety net in event-driven mode. Separate from `poll_interval_seconds`, which only applies in poll-only mode. Consulted in every event-driven mode (`direct`, `tailscale`, `hookdeck`), not in `poll` |
 
 Draft PRs are always skipped — there is no configuration flag to include them in V1.
 

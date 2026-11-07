@@ -222,3 +222,38 @@ type ClaudeAccountEvent struct {
 }
 
 func (ClaudeAccountEvent) tuiEvent() {}
+
+// TransportEvent carries the sampled health of an App-webhook event source
+// (event_source direct or tailscale; #2476, ADR 2476): its state, the embedded
+// node's tailnet and Funnel state, the time of the last delivery and the
+// webhook route liveness. It is a level, not a delta — each event replaces the
+// previous one — so the footer clears a problem the moment the next sample
+// reports it gone. Fields are plain strings and a time, not
+// internal/localapi's Known[T], to keep this package free of that dependency
+// (the same convention as DropEvent.Reason). "" means unknown or not
+// applicable (a direct source has no tailnet or Funnel).
+type TransportEvent struct {
+	Name         string // "direct" or "tailscale"
+	State        string // "listening", "not listening", "signature drift", ...
+	Tailnet      string // "Running", "NeedsLogin", ...; "" for direct
+	Funnel       string // "ok", "unavailable", "unknown"; "" for direct
+	LastDelivery time.Time
+	Route        string // "reachable", "unreachable", "unknown"; "" when not tracked
+	At           time.Time
+}
+
+func (TransportEvent) tuiEvent() {}
+
+// TransportWarningEvent raises or clears one operator-level condition of the
+// event source (a listen failure, a webhook-configuration mismatch, a tailnet
+// drop, an unreachable route). Key identifies the condition so a later event
+// with Active=false clears exactly that banner; Title is the one-line text.
+// Signature drift has its own event (SignatureDriftEvent) and banner.
+type TransportWarningEvent struct {
+	Key    string
+	Title  string
+	Active bool
+	At     time.Time
+}
+
+func (TransportWarningEvent) tuiEvent() {}

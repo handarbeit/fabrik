@@ -1,12 +1,10 @@
-package hookdeck
+package events
 
 import (
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
-
-	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // minPayload is the minimal set of fields read from a raw GitHub webhook
@@ -31,18 +29,18 @@ type minPayload struct {
 	} `json:"installation"`
 }
 
-// normalizeEvent builds an events.GitHubEvent from a raw webhook body and
+// NormalizeWebhook builds an GitHubEvent from a raw webhook body and
 // its GitHub-supplied metadata (X-GitHub-Event/X-GitHub-Delivery header
 // values). Owner/Repo/ResourceID are left empty for event types that carry
 // no repository or pull_request field (e.g. an installation/repo-selection
 // change) — callers key off EventType for those, not Owner/Repo.
-func normalizeEvent(body []byte, eventType, deliveryID string, receivedAt time.Time) (events.GitHubEvent, error) {
+func NormalizeWebhook(body []byte, eventType, deliveryID string, receivedAt time.Time) (GitHubEvent, error) {
 	var p minPayload
 	if err := json.Unmarshal(body, &p); err != nil {
-		return events.GitHubEvent{}, fmt.Errorf("parsing webhook payload: %w", err)
+		return GitHubEvent{}, fmt.Errorf("parsing webhook payload: %w", err)
 	}
 
-	ev := events.GitHubEvent{
+	ev := GitHubEvent{
 		DeliveryID: deliveryID,
 		EventType:  eventType,
 		Owner:      p.Repository.Owner.Login,

@@ -747,8 +747,8 @@ func (d *Daemon) reconciliationFallbackInterval() time.Duration {
 	return DefaultReconciliationFallbackInterval
 }
 
-// runEventDriven runs Pruefer in event_source: hookdeck mode: EventSource
-// delivers events to a daemonEventSink in the background, while poll() is
+// runEventDriven runs Pruefer in an event-driven mode (event_source: direct,
+// tailscale or the deprecated hookdeck): EventSource delivers events to a daemonEventSink in the background, while poll() is
 // demoted to a low-frequency safety net — an optional pass at startup, then
 // one every reconciliationFallbackInterval() for the lifetime of the run.
 // EventSource.Run is trusted to retry transport failures internally and
