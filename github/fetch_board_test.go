@@ -690,3 +690,41 @@ func TestFetchProjectBoard_LinkedPRNumberShallow_Empty(t *testing.T) {
 		t.Errorf("LinkedPRNumberShallow = %d, want 0 when no linked PRs", board.Items[0].LinkedPRNumberShallow)
 	}
 }
+
+// TestFetchProjectBoard_QuietModeSingleAttempt verifies that SetBoardRetryQuiet
+// makes an empty board cost one round trip and restores the full policy when
+// switched off (#1894).
+func TestFetchProjectBoard_QuietModeSingleAttempt(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"user": map[string]interface{}{
+					"projectV2": map[string]interface{}{
+						"id": "PVT_123",
+						"items": map[string]interface{}{
+							"totalCount": 0,
+							"pageInfo":   map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+							"nodes":      []interface{}{},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	c.SetBoardRetryQuiet(true)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("quiet mode: %d API calls, want 1", callCount)
+	}
+	if board.ProjectID != "PVT_123" {
+		t.Errorf("ProjectID = %q, want PVT_123 (an empty board still reports its ID)", board.ProjectID)
+	}
+}

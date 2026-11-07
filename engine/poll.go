@@ -104,21 +104,6 @@ func ClaudeProfileAccount(configDir string) string {
 	return claudeprofile.Account(configDir)
 }
 
-// logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
-// notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
-// "CI-gate liveness-stall dwell" — an operator who tuned it must not
-// discover this silently. Unconditional (unlike logAnthropicAPIKeyOptIn/
-// logAnthropicEnvPassthrough, which are gated on an active opt-in): every
-// operator running the daemon needs this once per startup, whether or not
-// they've customized the value, since the setting's meaning changed under
-// them regardless of whether they ever touch it.
-func logCIWaitTimeoutSemantics(w io.Writer) {
-	fmt.Fprintf(w, "[startup] notice: CIWaitTimeout/--ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT now governs the "+
-		"CI-gate liveness-stall dwell (escalates only when CI shows no observable progress), not total CI wait "+
-		"time — a healthy, progressing CI suite waits indefinitely. See CIBackstopTimeout/--ci-backstop-timeout/"+
-		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
-}
-
 // logFileConditions builds the "log_file" panel conditions (#2135) from the
 // outcome of startup's log rotation and log-file open: an empty result means
 // both worked, which Reconcile turns into clearing any earlier entry.
@@ -288,7 +273,6 @@ func (e *Engine) Run() error {
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
 	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
 	clearRetiredHookdeckWarnings(startupW)
-	logCIWaitTimeoutSemantics(startupW)
 	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
 	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
 
@@ -1352,9 +1336,9 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	e.setPollStep("polling: refreshing the board cache")
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
-		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+		e.logf(0, "poll", "reading project board from cache: %s\n", projectRef(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum))
 	} else {
-		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+		e.logf(0, "poll", "fetching project board from GitHub: %s\n", projectRef(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum))
 	}
 
 	e.setPollStep("layer 2 status sweep")
@@ -3024,6 +3008,7 @@ func (e *Engine) refreshCacheForPoll(c *boardcache.CacheImpl) {
 		// that as bootstrapped skipped BootstrapFromProbe for good, so every item
 		// was deep-fetched one by one as the probe discovered it. With an empty
 		// Store, BootstrapFromProbe (Store.Reset) has nothing to wipe.
+		e.noteBoardItems()
 		e.setPollStep("probe and deep fetch")
 		e.runProbeAndDeepFetch(c)
 	default:
@@ -3032,14 +3017,20 @@ func (e *Engine) refreshCacheForPoll(c *boardcache.CacheImpl) {
 		if refreshErr != nil {
 			e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
 		} else if projectID != "" && len(probeItems) > 0 {
+			e.noteBoardItems()
 			c.BootstrapFromProbe(probeItems, projectID)
 			e.seedTerminalFromProbeItems(probeItems)
 		} else if projectID != "" {
-			// Probe succeeded but returned 0 items — possible transient indexer hiccup.
-			// Leave cache virgin and retry on the next poll rather than bootstrapping
-			// with an empty store (which would cause every real item to be treated as
-			// "new" and deep-fetched on the next cycle).
-			e.logfThrottled("cache-bootstrap-deferred", 0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
+			// Probe succeeded but returned 0 items. Leave the cache virgin and probe
+			// again next poll rather than bootstrapping with an empty store (which
+			// would cause every real item to be treated as "new" and deep-fetched on
+			// the next cycle). Whether the zero is a genuinely empty board or a
+			// transient indexer fault is decided by observeZeroItemPoll (#1894): a
+			// never-populated board that stays empty is concluded empty with one
+			// log line; a board that held items before keeps the warning.
+			if e.observeZeroItemPoll() {
+				e.logfThrottled("cache-bootstrap-deferred", 0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
+			}
 		}
 	}
 }

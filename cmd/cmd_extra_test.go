@@ -551,3 +551,17 @@ func TestBuildProjectInfo_RepoFormat(t *testing.T) {
 		t.Errorf("Version = %q, want v1.2.3", info.Version)
 	}
 }
+
+// #1894 FR-007: in multi-repo mode (repo unset) the TUI project info carries no
+// repo at all, never a dangling "owner/".
+func TestBuildProjectInfo_MultiRepoHasNoDanglingOwner(t *testing.T) {
+	chdirTest(t, t.TempDir())
+	info := buildProjectInfo(&Config{Owner: "shadoworg"}, config.ProjectConfig{Version: "v1"})
+	if info.Repo != "" {
+		t.Errorf("Repo = %q, want empty in multi-repo mode", info.Repo)
+	}
+	single := buildProjectInfo(&Config{Owner: "org", Repo: "repo"}, config.ProjectConfig{Version: "v1"})
+	if single.Repo != "org/repo" {
+		t.Errorf("Repo = %q, want org/repo", single.Repo)
+	}
+}

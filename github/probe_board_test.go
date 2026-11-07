@@ -406,3 +406,25 @@ func TestProbeProjectBoard_LayerFields(t *testing.T) {
 		t.Errorf("comment total must be unknown when the response omits it")
 	}
 }
+
+func TestProbeProjectBoard_QuietModeSingleAttempt(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		json.NewEncoder(w).Encode(probeResponse("user", "PVT_123", []interface{}{}, 0, false, ""))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	c.SetBoardRetryQuiet(true)
+	items, projectID, err := c.ProbeProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("ProbeProjectBoard: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("quiet mode: %d API calls, want 1", callCount)
+	}
+	if len(items) != 0 || projectID != "PVT_123" {
+		t.Errorf("items=%d projectID=%q, want 0 / PVT_123", len(items), projectID)
+	}
+}

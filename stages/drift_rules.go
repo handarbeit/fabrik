@@ -22,7 +22,18 @@ const claudeKillGraceDefault = 10 * time.Second
 var noOpKeyRules = map[string]func(*Stage) bool{
 	"kill_grace": isKillGraceNoOp,
 	"completion": isCompletionNoOp,
+	// expected_reviewers is operator policy: which review bots run is repo
+	// specific, so a shipped value is a template, not a behavioural update.
+	// Reporting it as drift would add a stage_drift entry to every existing
+	// install and let `fabrik refresh-stages --apply` change gate behaviour
+	// (declared [] advances without waiting; omission waits the full timeout).
+	// ADR 1283 treats omission as a distinct state; ADR 1894 amends it to ship
+	// `expected_reviewers: []` while keeping drift silent about the key.
+	"expected_reviewers": isReviewerPolicyKey,
 }
+
+// isReviewerPolicyKey always reports true: the key is never drift.
+func isReviewerPolicyKey(*Stage) bool { return true }
 
 // isKillGraceNoOp reports whether defaultStage's kill_grace value resolves to
 // the same behavior as omitting kill_grace entirely. It consults the raw YAML

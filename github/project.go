@@ -184,10 +184,25 @@ func projectBoardFetchBackoff(attempt int) time.Duration {
 // retry with linear backoff up to projectBoardFetchAttempts times before
 // accepting the last observed result. Errors from fetch return immediately —
 // retry is for empty/inconsistent successes, not transport failures. opLabel
-// only affects the retry log line's wording.
+// only affects the recovery log line's wording.
+//
+// Retries are silent unless one recovers real items (#1894): a zero that
+// exhausts every attempt is indistinguishable here from a genuinely empty
+// board, and only the caller knows whether that is plausible, so it reports
+// (or deliberately does not) itself.
 func retryOnEmpty[T any](opLabel string, fetch func(attempt int) (result T, rawCount, totalCount int, err error)) (T, error) {
+	return retryOnEmptyN(opLabel, projectBoardFetchAttempts, fetch)
+}
+
+// retryOnEmptyN is retryOnEmpty with an explicit attempt bound. attempts <= 1
+// makes a single attempt with no sleep (the quiet mode used while the engine
+// has concluded the board is empty).
+func retryOnEmptyN[T any](opLabel string, attempts int, fetch func(attempt int) (result T, rawCount, totalCount int, err error)) (T, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
 	var lastResult T
-	for attempt := 1; attempt <= projectBoardFetchAttempts; attempt++ {
+	for attempt := 1; attempt <= attempts; attempt++ {
 		if d := projectBoardFetchBackoff(attempt); d > 0 {
 			time.Sleep(d)
 		}
@@ -198,15 +213,34 @@ func retryOnEmpty[T any](opLabel string, fetch func(attempt int) (result T, rawC
 		}
 		lastResult = result
 		if (totalCount > 0 && rawCount >= totalCount) || rawCount > 0 {
+			if attempt > 1 {
+				logf(0, "warn",
+					"%s recovered %d items after %d attempts (indexer hiccup)\n",
+					opLabel, rawCount, attempt)
+			}
 			return result, nil
-		}
-		if attempt < projectBoardFetchAttempts {
-			logf(0, "warn",
-				"%s returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
-				opLabel, rawCount, totalCount, attempt, projectBoardFetchAttempts)
 		}
 	}
 	return lastResult, nil
+}
+
+// boardAttempts returns the retry bound for the board fetch and probe: one
+// attempt while the engine has asked for quiet mode (SetBoardRetryQuiet),
+// otherwise projectBoardFetchAttempts.
+func (c *Client) boardAttempts() int {
+	if c.boardRetryQuiet.Load() {
+		return 1
+	}
+	return projectBoardFetchAttempts
+}
+
+// SetBoardRetryQuiet switches the board fetch and probe between the full
+// empty-result retry policy (false, the default) and a single attempt with no
+// backoff (true). The engine turns it on once it has concluded that the board
+// is genuinely empty (#1894) so an idle poll costs one round trip instead of
+// three plus 3 s of sleep, and turns it off again the moment items appear.
+func (c *Client) SetBoardRetryQuiet(quiet bool) {
+	c.boardRetryQuiet.Store(quiet)
 }
 
 // paginateGraphQL accumulates all nodes across a cursor-paginated GraphQL
@@ -242,7 +276,7 @@ func paginateGraphQL[T any](opLabel string, fetchPage func(cursor string) (nodes
 }
 
 func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
-	return retryOnEmpty("project board fetch", func(attempt int) (*ProjectBoard, int, int, error) {
+	return retryOnEmptyN("project board fetch", c.boardAttempts(), func(attempt int) (*ProjectBoard, int, int, error) {
 		return c.fetchProjectBoardOnce(owner, repo, projectNum, ownerType)
 	})
 }
@@ -571,7 +605,7 @@ type probeBoardResult struct {
 }
 
 func (c *Client) probeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, error) {
-	result, err := retryOnEmpty("project board probe", func(attempt int) (probeBoardResult, int, int, error) {
+	result, err := retryOnEmptyN("project board probe", c.boardAttempts(), func(attempt int) (probeBoardResult, int, int, error) {
 		items, projectID, rawNodeCount, totalCount, err := c.probeProjectBoardOnce(owner, repo, projectNum, ownerType)
 		return probeBoardResult{Items: items, ProjectID: projectID}, rawNodeCount, totalCount, err
 	})

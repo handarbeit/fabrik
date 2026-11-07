@@ -8,17 +8,21 @@ post_to_pr: true
 wait_for_reviews: true
 # expected_reviewers declares unrequested reviewers (e.g. self-submitting review
 # bots like Pruefer, Gemini, CodeRabbit) expected to review PRs from this stage
-# without ever appearing in GitHub's requested-reviewer list. Declaring this
-# activates the bot re-prompt ladder and lets the gate advance immediately when
-# nothing is requested and nothing is expected, instead of waiting the full
-# timeout. Left undeclared here since which bots run is repo-specific — a
-# generic template can't guess it. See docs/USER_GUIDE.md.
+# without ever appearing in GitHub's requested-reviewer list.
+#
+# Shipped as `[]`: "no unrequested reviewer is expected". A fresh install has no
+# review bot, so the gate advances as soon as nothing is requested instead of
+# waiting out the full timeout, and a fresh install raises no "no
+# expected_reviewers declaration" notice. If you add a review bot, declare it so
+# the gate waits for it and the bot re-prompt ladder engages (a `[]` stage stops
+# waiting for it):
 #
 # expected_reviewers:
 #   - my-review-bot     # bare handle only: no leading "@", no trailing "[bot]"
 #
-# Or, if no unrequested reviewer runs on this repo:
-# expected_reviewers: []
+# Deleting the key restores the undeclared behaviour (wait the full timeout) and
+# the startup notice. See docs/USER_GUIDE.md and ADR 1894.
+expected_reviewers: []
 wait_for_ci: true
 # resume_session: resume | fresh | auto — see implement.yaml and
 # docs/USER_GUIDE.md. Default resume; auto is worth considering for long stages.

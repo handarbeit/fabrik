@@ -42,6 +42,10 @@ type Client struct {
 
 	mergeStrategy string
 
+	// boardRetryQuiet makes the board fetch/probe a single attempt (#1894).
+	// See SetBoardRetryQuiet.
+	boardRetryQuiet atomic.Bool
+
 	// statusLineField is the name of the display-only status-line text field
 	// (#2048); "" means the feature is off. Read by the board and probe
 	// queries so the field's own updatedAt can be discounted. See

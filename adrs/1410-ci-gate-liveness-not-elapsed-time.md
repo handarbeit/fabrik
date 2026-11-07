@@ -1,7 +1,7 @@
 # ADR 1410: CI Gate — Liveness, Not Elapsed Time
 
 **Date**: 2026-08-08
-**Status**: Accepted
+**Status**: Accepted — the one-time startup notice (R8) was retired by [ADR 1894](1894-first-run-polish.md)
 **Issue**: #1410 — `CIWaitTimeout` paused a healthy, progressing CI suite purely because it ran
 longer than a fixed constant
 
