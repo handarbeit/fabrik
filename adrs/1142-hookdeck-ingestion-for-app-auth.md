@@ -1,7 +1,7 @@
 # ADR 1142: Hookdeck as an App-Auth-Only Ingestion Transport, Kept Structurally Apart from `--webhooks`
 
 **Date**: 2026-09-16
-**Status**: Accepted
+**Status**: Superseded by [ADR 2477](2477-remove-hookdeck.md) (Hookdeck removed in v0.0.92). Its App-installation coverage check and its separation from `--webhooks` live on in ADR 2142 and ADR 2351.
 **Issue**: #1142 — multi-repo webhook subscription silently covers only one repo
 
 ## Context
