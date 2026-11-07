@@ -1773,3 +1773,39 @@ func TestRunInit_CreateBoardClosingLinesUnchanged(t *testing.T) {
 		t.Errorf("--create-board closing lines changed; expected block:\n%s", want)
 	}
 }
+
+// #1894 FR-008/FR-010: the `fabrik init` closing output says nothing about
+// review expectations, and the stages it extracts declare their own, so the
+// output and the shipped defaults cannot disagree.
+func TestInit_ClosingOutputAgreesWithShippedReviewDefaults(t *testing.T) {
+	dir := t.TempDir()
+	entries, err := stages.DefaultStages.ReadDir("examples")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := stages.DefaultStages.ReadFile("examples/" + e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf strings.Builder
+	if err := printBoardColumnGuidance(&buf, dir, boardGuidanceInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "expected_reviewers") {
+		t.Errorf("init output mentions expected_reviewers: %q", buf.String())
+	}
+	loaded, err := stages.LoadAll(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range loaded {
+		if s.WaitForReviews != nil && *s.WaitForReviews && s.ExpectedReviewers == nil {
+			t.Errorf("shipped stage %s waits for reviews but declares no expected_reviewers", s.Name)
+		}
+	}
+}
