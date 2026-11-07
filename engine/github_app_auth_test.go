@@ -299,7 +299,7 @@ func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
 }
 
 func TestResolveGitHubAppAuth_Unconfigured_ReturnsNilNilNilForPATMode(t *testing.T) {
-	client, reconciler, err := resolveGitHubAppAuth(context.Background(), Config{}, t.TempDir(), "")
+	client, reconciler, err := resolveGitHubAppAuth(context.Background(), Config{}, t.TempDir(), "", true)
 	if err != nil {
 		t.Fatalf("resolveGitHubAppAuth(unconfigured): %v", err)
 	}
@@ -312,7 +312,7 @@ func TestResolveGitHubAppAuth_PartialConfig_FailsBeforeAnyNetworkCall(t *testing
 	// No httptest server at all — a network attempt here would fail with a
 	// connection error, not the config-validation error this test expects.
 	cfg := Config{GitHubAppID: 1}
-	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, t.TempDir(), "http://127.0.0.1:1")
+	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, t.TempDir(), "http://127.0.0.1:1", true)
 	if err == nil {
 		t.Fatal("expected a config-validation error for a partial GitHub App config")
 	}
@@ -328,7 +328,7 @@ func TestResolveGitHubAppAuth_GHESCombination_Refused(t *testing.T) {
 		Owner: "handarbeit", GHESHost: "github.example.com",
 		GitHubAppID: 1, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 2,
 	}
-	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, dir, "http://127.0.0.1:1")
+	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, dir, "http://127.0.0.1:1", true)
 	if err == nil {
 		t.Fatal("expected GHES + GitHub App auth combination to be refused")
 	}
@@ -344,7 +344,7 @@ func TestResolveGitHubAppAuth_WebhooksCombination_Refused(t *testing.T) {
 		Owner: "handarbeit", Webhooks: true,
 		GitHubAppID: 1, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 2,
 	}
-	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, dir, "http://127.0.0.1:1")
+	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, dir, "http://127.0.0.1:1", true)
 	if err == nil {
 		t.Fatal("expected --webhooks + GitHub App auth combination to be refused")
 	}
@@ -362,7 +362,7 @@ func TestSetUpGitHubAppAuth_Success_WiresClientAndReconciler(t *testing.T) {
 		Owner: "handarbeit", Repo: "fabrik",
 		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
 	}
-	client, reconciler, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	client, reconciler, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	if err != nil {
 		t.Fatalf("setUpGitHubAppAuth: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestResolveGitHubAppAuth_BothConfigured_AppAuthWinsAndLogsPrecedence(t *tes
 	var reconciler *githubauth.Reconciler
 	var err error
 	output := captureStdout(func() {
-		client, reconciler, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+		client, reconciler, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	})
 	if err != nil {
 		t.Fatalf("resolveGitHubAppAuth: %v", err)
@@ -430,7 +430,7 @@ func TestResolveGitHubAppAuth_NoPAT_NoPrecedenceLogLine(t *testing.T) {
 
 	var err error
 	output := captureStdout(func() {
-		_, _, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+		_, _, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	})
 	if err != nil {
 		t.Fatalf("resolveGitHubAppAuth: %v", err)
@@ -449,7 +449,7 @@ func TestSetUpGitHubAppAuth_UserOwnedBoard_RefusedExplicitly(t *testing.T) {
 		Owner: "someuser", Repo: "fabrik",
 		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
 	}
-	_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	if err == nil {
 		t.Fatal("expected an explicit refusal for a user-owned board under App auth")
 	}
@@ -471,7 +471,7 @@ func TestSetUpGitHubAppAuth_GrantShortfall_NamesEachMissingPermission(t *testing
 		Owner: "handarbeit", Repo: "fabrik",
 		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
 	}
-	_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	if err == nil {
 		t.Fatal("expected a grant-shortfall error")
 	}
@@ -621,7 +621,7 @@ func runActionsSetUp(t *testing.T, perms map[string]string) (string, error) {
 	}
 	var err error
 	out := captureStdout(func() {
-		_, _, err = setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+		_, _, err = setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL, true)
 	})
 	return out, err
 }
