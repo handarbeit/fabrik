@@ -287,6 +287,7 @@ func (e *Engine) Run() error {
 	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
 	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
+	clearRetiredHookdeckWarnings(startupW)
 	logCIWaitTimeoutSemantics(startupW)
 	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
 	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)

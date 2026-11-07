@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -98,4 +99,20 @@ func (e *Engine) checkAppInstallationCoverage(hm appCoverageTransport, spec appC
 		e.logf(0, spec.Tag, "clearing %s warning: %v\n", spec.PanelType, err)
 	}
 	hm.setInstallationCoverageNote(missing, truncated)
+}
+
+// retiredHookdeckCoverageWarningType is the warnings-panel type the removed
+// Hookdeck coverage check persisted in .fabrik/warnings.json (ADR 2477).
+const retiredHookdeckCoverageWarningType = "hookdeck_coverage"
+
+// clearRetiredHookdeckWarnings removes any hookdeck_coverage entry an earlier
+// version left in the panel. Nothing re-checks that condition any more, so
+// without this an operator who migrated to direct or tailscale would keep a
+// stale "installation does not cover N managed repo(s)" warning forever.
+// Sunset together with the other legacy Hookdeck handling (ADR 2477). A
+// failure is logged and ignored: it only leaves the stale entry in place.
+func clearRetiredHookdeckWarnings(w io.Writer) {
+	if err := warnings.Reconcile(w, retiredHookdeckCoverageWarningType, nil); err != nil {
+		fmt.Fprintf(w, "[startup] notice: clearing retired %s warnings: %v\n", retiredHookdeckCoverageWarningType, err)
+	}
 }

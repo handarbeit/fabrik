@@ -22,7 +22,7 @@ Removal is a breaking change for any operator still configured for it. The failu
 4. **The leftover-settings reader is one deletable surface.** `config/legacy_hookdeck.go` (`LoadLegacyHookdeck`), `cmd/legacy_hookdeck.go` (`collectLegacyHookdeck`, `legacyHookdeckNotice`) and `pruefer/legacy_hookdeck.go` hold the legacy handling; `ProjectConfig` and `engine.Config` carry no Hookdeck fields.
 5. **What is deliberately kept:**
    - `events.SigDrift` and `events.SignatureDriftThreshold` (shared with the direct and tailscale receivers, ADR 2142);
-   - `checkAppInstallationCoverage` and its helpers, moved verbatim to `engine/app_coverage.go` (the direct and tailscale transports call it; only the Hookdeck wrapper and its `hookdeck_coverage` panel type are gone);
+   - `checkAppInstallationCoverage` and its helpers, moved verbatim to `engine/app_coverage.go` (the direct and tailscale transports call it; only the Hookdeck wrapper and its `hookdeck_coverage` panel type are gone; `clearRetiredHookdeckWarnings` sweeps any `hookdeck_coverage` entry an earlier version left in `.fabrik/warnings.json` once at each startup, so a migrated operator is not left with a stale warning nothing re-checks, and is sunset with the other legacy handling);
    - `FABRIK_GITHUB_WEBHOOK_SECRET`, still scrubbed and still the default `app_webhook_secret_env`;
    - the `worker_env:hookdeck_dropped` warnings-panel key, kept so existing dismissals stay valid; its text now reads "leftover secret-variable names not scrubbed";
    - the generic drop accounting and health handlers in `pruefer/daemon.go` (`recordDrop`, `HealthHandler`, `SignatureDriftHandler`), which the direct and tailscale sources use.

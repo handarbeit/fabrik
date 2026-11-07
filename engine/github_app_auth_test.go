@@ -284,6 +284,20 @@ func TestRefuseHookdeckEventSource(t *testing.T) {
 	}
 }
 
+func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
+	shortfalls := []githubauth.RequiredPermissionShortfall{
+		{Permission: "issues", Required: "write", Granted: "read"},
+		{Permission: "organization_projects", Required: "write", Granted: ""},
+	}
+	msg := FormatPermissionShortfalls(shortfalls)
+	if !strings.Contains(msg, "issues") || !strings.Contains(msg, `required "write"`) || !strings.Contains(msg, `granted "read"`) {
+		t.Errorf("message %q missing issues shortfall detail", msg)
+	}
+	if !strings.Contains(msg, "organization_projects") || !strings.Contains(msg, `granted "none"`) {
+		t.Errorf("message %q missing organization_projects shortfall detail (want granted \"none\" for an absent permission)", msg)
+	}
+}
+
 func TestResolveGitHubAppAuth_Unconfigured_ReturnsNilNilNilForPATMode(t *testing.T) {
 	client, reconciler, err := resolveGitHubAppAuth(context.Background(), Config{}, t.TempDir(), "")
 	if err != nil {
