@@ -287,6 +287,7 @@ func (e *Engine) Run() error {
 	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
 	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
+	clearRetiredHookdeckWarnings(startupW)
 	logCIWaitTimeoutSemantics(startupW)
 	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
 	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
@@ -480,7 +481,7 @@ func (e *Engine) Run() error {
 	unregisterObservers := e.RegisterObservers()
 	defer unregisterObservers()
 
-	// Start the event-ingestion transports (gh webhook forward, Hookdeck, …) that
+	// Start the event-ingestion transports (gh webhook forward, direct, tailscale) that
 	// are configured, behind one transport-neutral intake (#2351). Failures are
 	// non-fatal: the engine continues in polling-only mode.
 	defer e.setUpIngestion(ctx, cacheImpl)()

@@ -10,8 +10,7 @@ import (
 // VerifySignature checks the HMAC-SHA256 signature on a GitHub webhook
 // payload. sig is the value of the X-Hub-Signature-256 header (format:
 // "sha256=<hex>"). Required on every received event regardless of
-// transport — a forwarding gateway's own transport auth (e.g. Hookdeck's
-// API-key-scoped session) is not a substitute for verifying the payload
+// transport — a forwarding gateway's own transport auth is not a substitute for verifying the payload
 // actually came from GitHub.
 //
 // Historical note: before #1142's extraction, this logic was independently

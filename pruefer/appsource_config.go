@@ -19,7 +19,7 @@ import (
 // validEventSource reports whether s is a recognised event_source value.
 func validEventSource(s string) bool {
 	switch s {
-	case EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourceTailscale:
+	case EventSourcePoll, EventSourceDirect, EventSourceTailscale:
 		return true
 	}
 	return false
@@ -33,7 +33,7 @@ func isAppWebhookSource(s string) bool {
 
 // validateAppSourceStatic is the part of the refusal rules that needs no
 // environment: it runs at config load, so a bad config fails before any
-// network or filesystem work. A poll or hookdeck config is never touched.
+// network or filesystem work. A poll config is never touched.
 func validateAppSourceStatic(cfg Config) error {
 	if !isAppWebhookSource(cfg.EventSource) {
 		return nil

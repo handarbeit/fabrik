@@ -8,7 +8,6 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // reconnectEngine builds an engine whose reconcileLoop's ticker never fires
@@ -105,30 +104,5 @@ func TestRequestReconcile_NeverBlocks(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("requestReconcile blocked with no reconcile loop running")
-	}
-}
-
-// Hookdeck: the first connect is not a reconnect; a connect after a disconnect is.
-func TestHookdeckManager_ReconnectFiresCatchUpOnlyAfterFirstConnect(t *testing.T) {
-	hm, _ := newTestHookdeckManager(t)
-	var fired atomic.Int32
-	hm.SetReconnectHandler(func() { fired.Add(1) })
-
-	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
-	if fired.Load() != 0 {
-		t.Fatalf("first connect fired %d catch-ups, want 0", fired.Load())
-	}
-	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting})
-	if fired.Load() != 0 {
-		t.Fatalf("a disconnect fired %d catch-ups, want 0 (the catch-up is on reconnect)", fired.Load())
-	}
-	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
-	if fired.Load() != 1 {
-		t.Fatalf("reconnect fired %d catch-ups, want 1", fired.Load())
-	}
-	hm.handleHealth(events.HealthEvent{State: events.HealthReconnecting})
-	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
-	if fired.Load() != 2 {
-		t.Fatalf("second reconnect: %d catch-ups total, want 2", fired.Load())
 	}
 }

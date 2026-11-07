@@ -1,7 +1,7 @@
 # ADR 1254: Event-Driven Webhook Ingestion via Hookdeck, with Pruefer as the Fabrik Test Bed
 
 **Date**: 2026-07-30
-**Status**: Accepted
+**Status**: Superseded by [ADR 2477](2477-remove-hookdeck.md) (Hookdeck removed in v0.0.92)
 **Issue**: #1254 — webhook event ingestion via Hookdeck (`EventSource`; test bed for fabrik)
 
 ## Context

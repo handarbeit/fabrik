@@ -158,6 +158,39 @@ func TestBuildClaudeEnv_FabrikSecretScrub_OptIn(t *testing.T) {
 	})
 }
 
+// TestBuildClaudeEnv_LeftoverHookdeckSecretsNeverReachAWorker pins ADR 2477 end
+// to end through the config path: Hookdeck is gone, but a leftover
+// HOOKDECK_API_KEY, and a custom-named key variable declared by a leftover
+// hookdeck_api_key_env (carried in Config.LegacyScrubEnvNames), must still be
+// removed from the worker environment.
+func TestBuildClaudeEnv_LeftoverHookdeckSecretsNeverReachAWorker(t *testing.T) {
+	resetWorkerEnv(t)
+	base := append(daemonEnv(), "HOOKDECK_API_KEY=hd", "MY_HD_KEY=k", "MY_HD_SECRET=s", "OTHER=o")
+
+	// Default name only: no leftover setting at all.
+	claudeWorkerEnv = workerenv.Resolve(workerSecretEnvNames(Config{}), "")
+	got := constructedEnv(base, InvokeOptions{})
+	if hasKey(got, "HOOKDECK_API_KEY") {
+		t.Error("HOOKDECK_API_KEY reached the worker")
+	}
+	if !hasKey(got, "MY_HD_KEY") {
+		t.Error("without a leftover setting naming it, MY_HD_KEY is an ordinary variable")
+	}
+
+	// Custom names declared by leftover settings.
+	cfg := Config{LegacyScrubEnvNames: []string{"MY_HD_KEY", "MY_HD_SECRET"}}
+	claudeWorkerEnv = workerenv.Resolve(workerSecretEnvNames(cfg), "")
+	got = constructedEnv(base, InvokeOptions{})
+	for _, k := range []string{"HOOKDECK_API_KEY", "MY_HD_KEY", "MY_HD_SECRET", "FABRIK_HOOKDECK_API_KEY_ENV", "FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV"} {
+		if hasKey(got, k) {
+			t.Errorf("%s (leftover Hookdeck secret) reached the worker", k)
+		}
+	}
+	if !containsExact(got, "OTHER=o") {
+		t.Error("unrelated variable must survive")
+	}
+}
+
 func TestBuildClaudeEnv_FabrikSecretScrub_HookdeckNames(t *testing.T) {
 	resetWorkerEnv(t)
 	base := append(daemonEnv(), "MY_HD_KEY=k", "MY_HD_SECRET=s", "OTHER=o")

@@ -96,7 +96,7 @@ func TestDaemonEventSink_InstallationEventBurst_CoalescesReconciliationPolls(t *
 	d := newTestDaemonForEvents(client)
 	sink := &daemonEventSink{daemon: d}
 
-	// Fire a burst of installation events, as a real Hookdeck delivery burst
+	// Fire a burst of installation events, as a real delivery burst
 	// (e.g. an app install across many repos) would — each a distinct
 	// delivery, so dedupe wouldn't collapse them at the transport layer.
 	// triggerReconciliationPoll's CompareAndSwap runs synchronously within
@@ -131,9 +131,8 @@ func TestDaemonEventSink_UnknownOwner_DropsWithoutPanic(t *testing.T) {
 
 // TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview guards against
 // reviewing repos an owner's installation token can reach but that were
-// never configured in watched_repos — a real scenario since the Hookdeck
-// adapter's session covers every connection visible to its API key (see
-// hookdeck/client.go's createSession), not just watched repos.
+// never configured in watched_repos — a real scenario since an App webhook is
+// delivered for every repository the installation covers, not just watched repos.
 func TestDaemonEventSink_UnwatchedRepo_DropsWithoutReview(t *testing.T) {
 	client := newFakeLister()
 	client.prsByRepo["owner/other-repo"] = []gh.PRDetails{{Number: 1, Author: "alice", HeadSHA: "sha1", State: "open"}}
@@ -275,8 +274,8 @@ func TestDaemonEventSink_DuplicateDeliverySameSHA_OnlyOneSubmit(t *testing.T) {
 
 // TestDaemonEventSink_Handle_ReturnsPromptlyUnderSemaphoreSaturation guards
 // against a regression where Handle blocked synchronously acquiring
-// reviewOne's semaphore slot. Handle is called inline from hookdeck.Source's
-// WebSocket read loop (see source.go's handleFrame/ack): blocking there would
+// reviewOne's semaphore slot. Handle is called inline from the receiver's
+// request goroutine: blocking there would
 // delay acking the current webhook and stall reading every subsequent one,
 // exactly what the issue's "ack the webhook promptly ... never run a review
 // synchronously in the webhook receiver" requirement forbids.

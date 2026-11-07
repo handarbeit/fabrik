@@ -903,9 +903,9 @@ func logWorkerEnvOptIn(r workerenv.Resolved, w io.Writer) {
 		list := strings.Join(r.Dropped, ", ")
 		conds = append(conds, warnings.Condition{
 			Subject: "hookdeck_dropped",
-			Title:   "Hookdeck env-var names not scrubbed from workers",
+			Title:   "Leftover secret-variable names not scrubbed from workers",
 			Detail:  fmt.Sprintf("These protected names are not removed from the worker environment: %s", list),
-			LogLine: fmt.Sprintf("Hookdeck env-var names not scrubbed from workers (protected): %s", list),
+			LogLine: fmt.Sprintf("leftover secret-variable names not scrubbed from workers (protected): %s", list),
 		})
 	}
 	if err := warnings.Reconcile(w, "worker_env", conds); err != nil {

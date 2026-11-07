@@ -96,9 +96,7 @@ type Config struct {
 	Webhooks                   bool
 	WebhookPort                int
 	WebhookEvents              string // comma-separated; empty means default event set
-	EventSource                string // "" or "poll" (default), or "hookdeck" — see engine.Config.EventSource
-	HookdeckAPIKeyEnv          string // env var name holding the Hookdeck API key; "" = use default
-	HookdeckWebhookSecretEnv   string // env var name holding the GitHub App webhook secret; "" = use default
+	EventSource                string // "" or "poll" (default), "direct" or "tailscale" — see engine.Config.EventSource
 	DirectListen               string // host:port the direct App webhook transport listens on (event_source: direct); required then
 	AppWebhookPath             string // URL path the direct transport serves; "" = /webhook
 	AppWebhookSecretEnv        string // env var name holding the App webhook secret for event_source: direct; "" = FABRIK_GITHUB_WEBHOOK_SECRET
@@ -265,9 +263,12 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
-	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default), 'hookdeck', 'direct' or 'tailscale'. hookdeck, direct and tailscale require GitHub App auth (also FABRIK_EVENT_SOURCE; #1142, #2142, #2143)")
-	flag.StringVar(&cfg.HookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Name of the environment variable holding the Hookdeck API key (only used when --event-source=hookdeck; default HOOKDECK_API_KEY; also FABRIK_HOOKDECK_API_KEY_ENV)")
-	flag.StringVar(&cfg.HookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=hookdeck; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV)")
+	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default), 'direct' or 'tailscale'. direct and tailscale require GitHub App auth. 'hookdeck' was removed in v0.0.92 and is refused (also FABRIK_EVENT_SOURCE; #2142, #2143, ADR 2477)")
+	// Removed (ADR 2477): still accepted so a stale invocation does not fail
+	// flag parsing, but ignored with a startup notice.
+	var legacyHookdeckAPIKeyEnv, legacyHookdeckWebhookSecretEnv string
+	flag.StringVar(&legacyHookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Removed in v0.0.92 (Hookdeck was removed); ignored")
+	flag.StringVar(&legacyHookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Removed in v0.0.92 (Hookdeck was removed); ignored")
 	flag.StringVar(&cfg.DirectListen, "direct-listen", "", "host:port the direct App webhook transport listens on (plain HTTP; bind loopback and let your tunnel or proxy terminate TLS). Required with --event-source=direct (also FABRIK_DIRECT_LISTEN; #2142)")
 	flag.StringVar(&cfg.AppWebhookPath, "app-webhook-path", "", "URL path the direct App webhook transport serves (default /webhook; also FABRIK_APP_WEBHOOK_PATH; #2142)")
 	flag.StringVar(&cfg.TailscaleHostname, "tailscale-hostname", "", "Tailnet hostname of the embedded Funnel node. Required with --event-source=tailscale (also FABRIK_TAILSCALE_HOSTNAME; #2143)")
@@ -938,19 +939,22 @@ func Execute() error {
 			cfg.EventSource = pc.EventSource
 		}
 	}
-	if !explicitFlags["hookdeck-api-key-env"] {
-		if v := os.Getenv("FABRIK_HOOKDECK_API_KEY_ENV"); v != "" {
-			cfg.HookdeckAPIKeyEnv = v
-		} else if pc.HookdeckAPIKeyEnv != "" {
-			cfg.HookdeckAPIKeyEnv = pc.HookdeckAPIKeyEnv
-		}
+	// event_source: hookdeck was removed (ADR 2477). Refuse it as soon as the
+	// value is resolved from flag, FABRIK_EVENT_SOURCE or config.yaml, before any
+	// token or GitHub App work, so the migration message is never masked.
+	if err := engine.RefuseHookdeckEventSource(cfg.EventSource); err != nil {
+		return err
 	}
-	if !explicitFlags["hookdeck-webhook-secret-env"] {
-		if v := os.Getenv("FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV"); v != "" {
-			cfg.HookdeckWebhookSecretEnv = v
-		} else if pc.HookdeckWebhookSecretEnv != "" {
-			cfg.HookdeckWebhookSecretEnv = pc.HookdeckWebhookSecretEnv
-		}
+	// Leftover Hookdeck settings: one notice per process start, and the
+	// variable names they point at keep being scrubbed from worker environments.
+	legacyHookdeckYAML, err := config.LoadLegacyHookdeck()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	legacyScrubEnvNames, legacyIgnored := collectLegacyHookdeck(
+		legacyHookdeckAPIKeyEnv, legacyHookdeckWebhookSecretEnv, explicitFlags, os.Environ(), legacyHookdeckYAML)
+	if notice := legacyHookdeckNotice(legacyIgnored); notice != "" {
+		fmt.Print(notice)
 	}
 	if !explicitFlags["direct-listen"] {
 		if v := os.Getenv("FABRIK_DIRECT_LISTEN"); v != "" {
@@ -1194,8 +1198,7 @@ func Execute() error {
 		WebhookPort:                cfg.WebhookPort,
 		WebhookEvents:              webhookEvents,
 		EventSource:                cfg.EventSource,
-		HookdeckAPIKeyEnv:          cfg.HookdeckAPIKeyEnv,
-		HookdeckWebhookSecretEnv:   cfg.HookdeckWebhookSecretEnv,
+		LegacyScrubEnvNames:        legacyScrubEnvNames,
 		DirectListen:               cfg.DirectListen,
 		AppWebhookPath:             cfg.AppWebhookPath,
 		AppWebhookSecretEnv:        cfg.AppWebhookSecretEnv,

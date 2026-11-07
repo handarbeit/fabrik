@@ -40,7 +40,7 @@ type FooterComponent struct {
 	// distinct from webhookState/connectivity: a stream can be reported
 	// healthy while covering only a fraction of the managed repos (gh
 	// webhook forward's singular --repo flag, or an App installation
-	// missing granted repos under the Hookdeck transport). Rendered next to
+	// missing granted repos under an App receiver). Rendered next to
 	// the health indicator so this never goes silent in the TUI the way
 	// #1142 was originally filed about — see docs/USER_GUIDE.md's "Never
 	// silent about coverage gaps" framing.

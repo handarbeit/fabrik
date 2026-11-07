@@ -166,3 +166,23 @@ func TestEveryFabrikLiteralIsClassified(t *testing.T) {
 		}
 	}
 }
+
+// TestLegacyHookdeckNamesRetainedWithReason pins ADR 2477: the leftover
+// Hookdeck secret names stay scrubbed for at least v0.0.92, each with a
+// recorded reason naming the sunset.
+func TestLegacyHookdeckNamesRetainedWithReason(t *testing.T) {
+	for _, n := range []string{"FABRIK_HOOKDECK_API_KEY_ENV", "FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV", LegacyHookdeckAPIKeyEnv} {
+		var found *Var
+		for i := range Scrubbed {
+			if Scrubbed[i].Name == n {
+				found = &Scrubbed[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("%s is not on the scrub list", n)
+		}
+		if found.Group != GroupLegacy || !strings.Contains(found.Reason, "ADR 2477") {
+			t.Errorf("%s: group %q reason %q; want legacy group and an ADR 2477 reason", n, found.Group, found.Reason)
+		}
+	}
+}

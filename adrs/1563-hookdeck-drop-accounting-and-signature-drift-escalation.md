@@ -1,6 +1,6 @@
 # ADR 1563: Hookdeck Drop Accounting and Signature-Drift Escalation
 
-**Status:** Accepted
+**Status:** Superseded by [ADR 2477](2477-remove-hookdeck.md) (Hookdeck removed in v0.0.92). The drop accounting and signature-drift escalation live on for the App receivers.
 **Date:** 2026-08-12
 **Issue:** [#1563](https://github.com/handarbeit/fabrik/issues/1563)
 

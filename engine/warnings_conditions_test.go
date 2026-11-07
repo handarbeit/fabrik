@@ -321,7 +321,13 @@ func TestCheckWebhookHookCoverage_OnlyLookupErrorsRecordsNothing(t *testing.T) {
 	}
 }
 
-func TestCheckHookdeckInstallationCoverage_PanelRecordsAndClears(t *testing.T) {
+// fakeCoverageTransport is a minimal appCoverageTransport.
+type fakeCoverageTransport struct{ repos []string }
+
+func (f *fakeCoverageTransport) ManagedRepos() []string                     { return f.repos }
+func (f *fakeCoverageTransport) setInstallationCoverageNote([]string, bool) {}
+
+func TestCheckAppInstallationCoverage_PanelRecordsAndClears(t *testing.T) {
 	isolateWarnings(t)
 	orig := fetchInstallationRepositoriesFn
 	defer func() { fetchInstallationRepositoriesFn = orig }()
@@ -329,16 +335,16 @@ func TestCheckHookdeckInstallationCoverage_PanelRecordsAndClears(t *testing.T) {
 	fetchInstallationRepositoriesFn = func(baseURL, token string) ([]string, bool, error) {
 		return granted, false, nil
 	}
-	hm, _ := newTestHookdeckManager(t)
-	hm.UpdateRepos(map[string]bool{"a/one": true, "b/two": true})
+	hm := &fakeCoverageTransport{repos: []string{"a/one", "b/two"}}
+	spec := appCoverageSpec{Tag: "direct", PanelType: "direct_coverage", Ref: "#2142"}
 	e := &Engine{hostClient: gh.NewClient("fake-installation-token")}
 
-	e.checkHookdeckInstallationCoverage(hm)
-	if k := warningKeys(t); len(k) != 1 || !k["hookdeck_coverage:repos"] {
+	e.checkAppInstallationCoverage(hm, spec)
+	if k := warningKeys(t); len(k) != 1 || !k["direct_coverage:repos"] {
 		t.Fatalf("keys = %v", k)
 	}
 	granted = []string{"a/one", "b/two"}
-	e.checkHookdeckInstallationCoverage(hm)
+	e.checkAppInstallationCoverage(hm, spec)
 	if k := warningKeys(t); len(k) != 0 {
 		t.Errorf("not cleared: %v", k)
 	}

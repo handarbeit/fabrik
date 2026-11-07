@@ -85,7 +85,7 @@ const (
 )
 
 // Parse validates a requested event source. Empty is Poll; anything other than
-// the two sources is an error (direct and hookdeck are not bed transports).
+// the two sources is an error (direct and the removed hookdeck are not bed transports).
 func Parse(v string) (string, error) {
 	switch s := strings.ToLower(strings.TrimSpace(v)); s {
 	case "", Poll:

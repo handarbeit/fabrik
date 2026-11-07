@@ -13,7 +13,6 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/appwebhook"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
-	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
@@ -181,33 +180,9 @@ func Execute() error {
 	defer waitRefreshLoops()
 	daemon.preAcquiredLock = lockFile
 
-	if cfg.EventSource == EventSourceHookdeck {
-		apiKey := os.Getenv(cfg.HookdeckAPIKeyEnv)
-		if apiKey == "" {
-			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.api_key_env)", cfg.HookdeckAPIKeyEnv)
-		}
-		webhookSecret := os.Getenv(cfg.HookdeckWebhookSecretEnv)
-		if webhookSecret == "" {
-			return fmt.Errorf("event_source: hookdeck requires %s to be set (see hookdeck.webhook_secret_env)", cfg.HookdeckWebhookSecretEnv)
-		}
-		// Route hookdeck's package-level log hook through pruefer's own —
-		// hookdeck can't import pruefer (pruefer imports hookdeck), so
-		// without this its logs would write straight to os.Stderr
-		// unconditionally, bypassing whatever pruefer.Logf is ever wired to
-		// (e.g. a future TUI-safe sink) and diverging from every other
-		// pruefer log line's routing.
-		hookdeck.SetLogf(func(format string, args ...any) {
-			logf(0, "hookdeck", format, args...)
-		})
-		daemon.EventSource = hookdeck.NewSource(hookdeck.Config{
-			APIKey:           apiKey,
-			WebhookSecret:    webhookSecret,
-			OnHealth:         daemon.HealthHandler(ctx),
-			OnDrop:           daemon.recordDrop,
-			OnSignatureDrift: daemon.SignatureDriftHandler(),
-		})
-		logf(0, "poll", "event_source: hookdeck — Hookdeck API key from $%s, webhook secret from $%s\n",
-			cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv)
+	// Leftover Hookdeck settings are ignored; report them once (ADR 2477).
+	if notice := legacyHookdeckNotice(cfg.LegacyHookdeck); notice != "" {
+		logf(0, "startup", "%s", notice)
 	}
 
 	// event_source: direct / tailscale (#2476, ADR 2476): the App's own webhook,

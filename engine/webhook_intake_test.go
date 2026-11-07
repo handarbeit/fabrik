@@ -10,9 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/handarbeit/fabrik/internal/events"
-	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 )
 
 // The gh-forward handler hands the delivery to the engine sink and acknowledges
@@ -144,21 +141,10 @@ func TestHandleWebhook_BodyCap(t *testing.T) {
 	})
 }
 
-// The Hookdeck source's frame cap and the gh-forward body cap are the same figure.
-func TestHookdeckFrameCapMatchesWebhookBodyCap(t *testing.T) {
-	if got := int64(hookdeck.MaxFrameBytes); got != webhookMaxBodyBytes {
-		t.Fatalf("hookdeck frame cap = %d, gh-forward body cap = %d: they must both be GitHub's 25 MiB", got, webhookMaxBodyBytes)
-	}
-}
-
-// Hookdeck hands the delivery ID through to the sink (it used to drop it).
-func TestHookdeckManager_HandlePassesDeliveryID(t *testing.T) {
-	hm, _ := newTestHookdeckManager(t)
-	var got delivery
-	hm.SetSink(func(d delivery) { got = d })
-	hm.Handle(context.Background(), events.GitHubEvent{DeliveryID: "hd-9", EventType: "issues", Payload: []byte(`{"a":1}`)})
-	if got.ID != "hd-9" || got.EventType != "issues" || got.Transport != "hookdeck" || string(got.Payload) != `{"a":1}` {
-		t.Fatalf("delivery = %+v", got)
+// The webhook body cap is GitHub's 25 MiB payload limit.
+func TestWebhookBodyCapIsGitHubsPayloadLimit(t *testing.T) {
+	if webhookMaxBodyBytes != 25<<20 {
+		t.Fatalf("webhook body cap = %d, want GitHub's 25 MiB", webhookMaxBodyBytes)
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
@@ -173,15 +172,14 @@ func TestTransportSet_AggregatesAreAnyHealthyAndAllDisabled(t *testing.T) {
 func TestTransportSet_SingleTransportMatchesItsOwnValues(t *testing.T) {
 	// FR-014: with one transport every aggregate equals that transport's own
 	// value, so single-transport behaviour is unchanged.
-	hm, _ := newTestHookdeckManager(t)
+	ft := newFakeTransport("one")
 	set := &transportSet{}
-	set.Add(hm)
-	if set.Healthy() != hm.IsHealthyOrStartingUp() || set.Disabled() != hm.IsDisabled() {
+	set.Add(ft)
+	if set.Healthy() != ft.IsHealthyOrStartingUp() || set.Disabled() != ft.IsDisabled() {
 		t.Fatal("single-transport set diverges from the transport")
 	}
-	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
 	if !set.Healthy() || set.Mode() != "healthy" {
-		t.Fatalf("connected hookdeck: mode=%q", set.Mode())
+		t.Fatalf("healthy transport: mode=%q", set.Mode())
 	}
 }
 
@@ -246,22 +244,6 @@ func TestSetUpIngestion_NoTransportConfiguredIsPollOnly(t *testing.T) {
 	}
 	if eng.echo != nil || eng.intake != nil {
 		t.Fatal("poll-only engine must have no echo registry and no intake")
-	}
-}
-
-func TestSetUpIngestion_HookdeckWithoutCredentialsIsPollOnly(t *testing.T) {
-	t.Setenv(DefaultHookdeckAPIKeyEnv, "")
-	t.Setenv(DefaultHookdeckWebhookSecretEnv, "")
-	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.EventSource = EventSourceHookdeck
-	eng.fabrikDir = t.TempDir()
-	cleanup := eng.setUpIngestion(context.Background(), nil)
-	defer cleanup()
-	if !eng.transports.Empty() {
-		t.Fatal("a transport that could not start must not be attached")
-	}
-	if eng.echo != nil || eng.intake != nil {
-		t.Fatal("with no transport attached the echo registry and intake must be dropped")
 	}
 }
 

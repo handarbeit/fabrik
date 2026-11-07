@@ -11,10 +11,10 @@ import (
 // The delivery path of the direct and tailscale event sources (#2476,
 // ADR 2476). The shared receiver (internal/appwebhook) has already verified the
 // method, path, size, signature and JSON; what arrives here is a Delivery. It is
-// converted to the same normalized events.GitHubEvent a Hookdeck delivery
+// converted to the same normalized events.GitHubEvent any other delivery
 // becomes and handed to the same daemonEventSink, so the dispatch (a review for
 // a pull_request action in reviewTriggerActions, a re-derivation for an
-// installation event) is exactly the one Hookdeck deliveries already take.
+// installation event) is the one every delivery takes.
 //
 // Between conversion and the sink sit two checks, in this order:
 //
@@ -22,7 +22,7 @@ import (
 //     points at this daemon. It runs first so a foreign delivery is never
 //     recorded as seen by the dedupe, and it runs after the receiver's HMAC
 //     check, so it is never counted as a signature failure.
-//  2. The delivery-ID dedupe (FR-005), the same events.Dedupe type Hookdeck's
+//  2. The delivery-ID dedupe (FR-005), the same events.Dedupe type every
 //     source uses.
 //
 // Deliver runs on the receiver's HTTP goroutine, before the 200 is written, so

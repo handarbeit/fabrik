@@ -269,23 +269,50 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 		"GitHub App config to use --webhooks with a personal access token (FABRIK_TOKEN)")
 }
 
-// RefuseUnknownEventSource refuses any Config.EventSource value other than
-// the empty string (unset, defaults to poll), EventSourcePoll, or
-// EventSourceHookdeck (#1142 PR review finding). Without this check, a typo
-// like "Hookdeck" or "hook-deck" would silently fail every equality check
-// this package and setUpIngestion (engine/intake_wire.go) make against the
-// exact string EventSourceHookdeck — RefuseHookdeckWithoutGitHubApp would
-// treat it as compatible (since that refusal does not fire for a value that
-// isn't EventSourceHookdeck), and setUpIngestion's `wantHookdeck` check would
-// silently start no Hookdeck transport — an operator who explicitly opted
-// into event-driven ingestion would get no error and no log message, only
-// silent poll-only delivery.
-func RefuseUnknownEventSource(eventSource string) error {
-	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck || eventSource == EventSourceDirect || eventSource == EventSourceTailscale {
+// removedEventSourceHookdeck is the event_source value Hookdeck used. The
+// transport was removed in v0.0.92 (ADR 2477); the value is refused with a
+// migration message by RefuseHookdeckEventSource.
+const removedEventSourceHookdeck = "hookdeck"
+
+// HookdeckMigrationMessage is the one migration message both the engine and
+// (by convention, Pruefer cannot import the engine) Pruefer print when
+// event_source: hookdeck is configured. It names the replacements and the
+// User Guide section.
+const HookdeckMigrationMessage = "event_source: hookdeck was removed in v0.0.92 (ADR 2477) — " +
+	"use event_source: tailscale (embedded Tailscale Funnel receiver) or event_source: direct " +
+	"(your own tunnel or proxy), repoint the GitHub App webhook URL and secret, and delete the " +
+	"Hookdeck settings. See \"Migrating from Hookdeck\" in docs/USER_GUIDE.md"
+
+// RefuseHookdeckEventSource refuses event_source: hookdeck (ADR 2477). It is
+// independent of GitHub App configuration, so New() and cmd call it before
+// any other validation: a partial-App error must never mask the migration
+// message. Only the exact value "hookdeck" is handled here; any other
+// unrecognised value reaches RefuseUnknownEventSource.
+func RefuseHookdeckEventSource(eventSource string) error {
+	if eventSource != removedEventSourceHookdeck {
 		return nil
 	}
-	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, %q, %q, or "+
-		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourceTailscale, EventSourcePoll)
+	return fmt.Errorf("%s", HookdeckMigrationMessage)
+}
+
+// RefuseUnknownEventSource refuses any Config.EventSource value other than
+// the empty string (unset, defaults to poll), EventSourcePoll,
+// EventSourceDirect or EventSourceTailscale. Without this check, a typo like
+// "Tailscale" would silently fail every equality check this package and
+// setUpIngestion (engine/intake_wire.go) make against the exact value — an
+// operator who explicitly opted into event-driven ingestion would get no
+// error and no log message, only silent poll-only delivery. The removed
+// value "hookdeck" is refused here too (with the migration message), so the
+// function is safe to call on its own.
+func RefuseUnknownEventSource(eventSource string) error {
+	if err := RefuseHookdeckEventSource(eventSource); err != nil {
+		return err
+	}
+	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceDirect || eventSource == EventSourceTailscale {
+		return nil
+	}
+	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, %q, or "+
+		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceDirect, EventSourceTailscale, EventSourcePoll)
 }
 
 // appWebhookSecretEnvName is the name of the variable holding the App webhook
@@ -299,12 +326,13 @@ func appWebhookSecretEnvName(cfg Config) string {
 }
 
 // workerSecretEnvNames lists the operator-chosen variable names that hold
-// transport secrets (Hookdeck's API key and webhook secret, the direct
-// transport's webhook secret, the Tailscale auth key). They are fed to workerenv.Resolve so a
-// non-default name is scrubbed from the worker environment like the defaults
-// (ADR 2027, ADR 2142).
+// transport secrets (the direct transport's webhook secret, the Tailscale auth
+// key, and the variables named by leftover Hookdeck settings, ADR 2477). They
+// are fed to workerenv.Resolve so a non-default name is scrubbed from the
+// worker environment like the defaults (ADR 2027, ADR 2142).
 func workerSecretEnvNames(cfg Config) []string {
-	return []string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv, cfg.AppWebhookSecretEnv, cfg.TailscaleAuthKeyEnv}
+	names := []string{cfg.AppWebhookSecretEnv, cfg.TailscaleAuthKeyEnv}
+	return append(names, cfg.LegacyScrubEnvNames...)
 }
 
 // appWebhookPath is the URL path the direct transport serves.
@@ -416,28 +444,6 @@ func RefuseTailscaleMisconfigured(cfg Config, appAuthConfigured bool, secretValu
 			tailscaleAuthKeyEnvName(cfg))
 	}
 	return nil
-}
-
-// RefuseHookdeckWithoutGitHubApp refuses event_source: hookdeck (#1142)
-// configured without GitHub App auth. Unlike gh webhook forward, Hookdeck
-// ingestion has no PAT-mode analogue at all: it consumes a GitHub App's own
-// webhook (App-manifest-level, one URL/secret for every granted repo — see
-// #1722), which does not exist for a PAT-mode installation. There is no
-// "remove event_source to fall back to a PAT-compatible transport" story
-// here beyond falling back to --webhooks or plain polling, which this error
-// names explicitly. A structurally separate config axis from Webhooks
-// (see Config.EventSource's doc comment) — deliberately never checked
-// inside RefuseWebhooksWithGitHubApp above, so #1752's refusal and this
-// issue's new mode can never collide (adrs/1142-hookdeck-ingestion-for-app-auth.md).
-func RefuseHookdeckWithoutGitHubApp(eventSource string, appAuthConfigured bool) error {
-	if eventSource != EventSourceHookdeck || appAuthConfigured {
-		return nil
-	}
-	return fmt.Errorf("event_source: hookdeck (FABRIK_EVENT_SOURCE) requires GitHub App authentication — " +
-		"Hookdeck ingestion consumes a GitHub App's own webhook (one URL/secret covering every granted repo), " +
-		"which has no PAT-mode equivalent. Configure github_app_id/github_app_private_key_path/" +
-		"github_app_installation_id to use event_source: hookdeck, or remove event_source (default: poll) to " +
-		"use PAT-mode --webhooks or plain polling instead")
 }
 
 // FormatPermissionShortfalls renders R3's "name each missing permission"

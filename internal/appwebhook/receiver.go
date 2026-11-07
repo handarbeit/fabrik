@@ -611,7 +611,7 @@ func (t *Receiver) CheckCoverage() {
 }
 
 // setInstallationCoverageNote records the installation-coverage result and
-// re-emits the current state, mirroring hookdeckManager.
+// re-emits the current state, mirroring the other ingest transports.
 func (t *Receiver) SetInstallationCoverageNote(missing []string, truncated bool) {
 	var note string
 	if len(missing) > 0 {

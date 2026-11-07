@@ -175,7 +175,7 @@ func (DerivedRepoSetEvent) tuiEvent() {}
 
 // SignatureDriftEvent reports a transition in whether an event source's
 // signature verification is currently failing on every delivery over a
-// sustained window — see hookdeck.Config.OnSignatureDrift and ADR-1563.
+// sustained window — see ADR-1563.
 // Active=true means the drift is ongoing (a misconfigured webhook secret,
 // or a wire-format change — not a transient blip); Active=false reports
 // recovery, fired once on the next successful verification after an

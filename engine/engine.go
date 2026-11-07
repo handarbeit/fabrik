@@ -93,23 +93,18 @@ type Config struct {
 	WebhookPort                int
 	WebhookEvents              []string
 	// EventSource selects the ingestion transport: EventSourcePoll (default,
-	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
-	// separate axis from Webhooks above — event_source: hookdeck is an
-	// App-auth-only opt-in that cannot be used without App auth (refused by
-	// RefuseHookdeckWithoutGitHubApp). Webhooks cannot run under App auth either
-	// (#1752's RefuseWebhooksWithGitHubApp, ADR 1752), which is why the two
-	// existing transports cannot be combined in practice; the engine itself
-	// supports several transports at once (ingestTransport, #2351). See
-	// engine/github_app_auth.go and adrs/1142-hookdeck-ingestion-for-app-auth.md.
+	// "" or "poll"), EventSourceDirect or EventSourceTailscale (both App-auth
+	// only). Deliberately a separate axis from Webhooks above. "hookdeck" was
+	// removed in v0.0.92 and is refused (RefuseHookdeckEventSource, ADR 2477).
+	// The engine itself supports several transports at once (ingestTransport,
+	// #2351). See engine/github_app_auth.go.
 	EventSource string
-	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
-	// variable holding the actual secret — indirection, not the secret
-	// itself — mirroring pruefer/config.go's hookdeck.api_key_env /
-	// hookdeck.webhook_secret_env convention. Only consulted when
-	// EventSource == EventSourceHookdeck; empty means use
-	// DefaultHookdeckAPIKeyEnv / DefaultHookdeckWebhookSecretEnv.
-	HookdeckAPIKeyEnv        string
-	HookdeckWebhookSecretEnv string
+	// LegacyScrubEnvNames are the variable names a leftover Hookdeck setting
+	// (hookdeck_api_key_env / hookdeck_webhook_secret_env, FABRIK_HOOKDECK_*_ENV,
+	// the removed --hookdeck-*-env flags) points at. Hookdeck itself is gone
+	// (ADR 2477); the names are only fed to workerenv.Resolve so a custom-named
+	// leftover secret is still scrubbed from worker environments.
+	LegacyScrubEnvNames []string
 	// DirectListen is the host:port the direct App webhook transport binds
 	// (EventSource == EventSourceDirect; required then). The daemon speaks
 	// plain HTTP: bind loopback and let the fronting tunnel or proxy terminate
@@ -186,30 +181,19 @@ type Config struct {
 	TestFaults string
 }
 
-// EventSource values and defaults for the Hookdeck (App-auth-only) ingestion
-// transport (#1142). Mirrors pruefer/config.go's own EventSourcePoll/
-// EventSourceHookdeck/Default* constants by name and shape — the same
-// indirection (a config field naming an env var, not holding the secret
-// itself) — so an operator already running Pruefer with Hookdeck recognizes
-// this immediately. DefaultHookdeckWebhookSecretEnv is FABRIK_-prefixed,
-// since it names Fabrik's own GitHub App webhook secret, not a value
-// Pruefer's process also reads; DefaultHookdeckAPIKeyEnv reuses Hookdeck's
-// own conventional env var name unprefixed, matching Pruefer's own
-// default — see adrs/1142-hookdeck-ingestion-for-app-auth.md.
+// EventSource values and defaults for the App-auth-only ingestion transports.
+// "hookdeck" was removed in v0.0.92 (ADR 2477) and is refused at startup.
 const (
-	EventSourcePoll     = "poll"
-	EventSourceHookdeck = "hookdeck"
-	EventSourceDirect   = "direct"
+	EventSourcePoll   = "poll"
+	EventSourceDirect = "direct"
 	// EventSourceTailscale is the embedded Tailscale Funnel receiver (#2143).
 	EventSourceTailscale = "tailscale"
 
-	DefaultEventSource              = EventSourcePoll
-	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
-	DefaultHookdeckWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+	DefaultEventSource = EventSourcePoll
 
 	// DefaultAppWebhookPath / DefaultAppWebhookSecretEnv are event_source:
-	// direct's defaults (#2142). The secret variable name equals Hookdeck's
-	// (one App, one webhook secret) but is a separate constant so the two
+	// direct's defaults (#2142). The secret variable name is the one App
+	// webhook secret but is a separate constant so the two
 	// transports' keys stay uncoupled.
 	DefaultAppWebhookPath      = "/webhook"
 	DefaultAppWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
@@ -243,7 +227,7 @@ type Engine struct {
 	cfg                                Config
 	client                             GitHubClient
 	releaseClient                      GitHubClient                                    // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient                         *gh.Client                                      // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	hostClient                         *gh.Client                                      // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkAppInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	appIdent                           *appIdentity                                    // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
 	replayAPIOverride                  appwebhook.HookDeliveryAPI                      // test seam: stands in for ghAppAuth as the delivery-log API (#2144); set only by SetReplayAPIForTest.
 	livenessWaitOverride               func(ctx context.Context, d time.Duration) bool // test seam: stands in for the route-liveness controller's sleep (#2452); set only by SetLivenessWaitForTest.
@@ -748,37 +732,22 @@ func New(cfg Config) (*Engine, error) {
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 
-	// validateGitHubAppConfig runs first, ahead of the event_source:
-	// hookdeck checks below: it is the more specific diagnosis for a
-	// partially-configured GitHub App (e.g. github_app_id set with no
-	// private key), naming exactly which field is missing. Without this
-	// ordering, a partial App config combined with event_source: hookdeck
-	// would instead fail on RefuseHookdeckWithoutGitHubApp's coarser
-	// "requires GitHub App authentication" message — technically correct
-	// (gitHubAppAuthConfigured requires all three fields) but less
-	// actionable than naming the specific missing field (PR review
-	// finding). resolveGitHubAppAuth calls validateGitHubAppConfig again
-	// itself a few lines below; calling it here too is intentionally
-	// redundant — cheap, local, and returns the identical error, so the
-	// only user-visible effect is which of the two checks reports first.
+	// event_source: hookdeck was removed (ADR 2477). Its refusal is
+	// independent of GitHub App configuration, so it runs first: a partial-App
+	// error must never mask the migration message.
+	if err := RefuseHookdeckEventSource(cfg.EventSource); err != nil {
+		return nil, err
+	}
 	if err := validateGitHubAppConfig(cfg); err != nil {
 		return nil, err
 	}
 
-	// event_source: hookdeck (#1142) validation runs here, alongside (not
-	// inside) resolveGitHubAppAuth's own App-auth-specific checks below —
-	// deliberately a separate call so RefuseWebhooksWithGitHubApp (#1752)
-	// never has to know EventSource exists, and vice versa. Both refusals
-	// are cheap, local config checks, so they run before any network call.
-	// RefuseUnknownEventSource runs first: a typo'd value must fail loud
-	// here rather than silently comparing unequal to EventSourceHookdeck in
-	// every check below and in poll.go's dispatch, which would otherwise
-	// degrade to plain polling with no error and no log message (PR review
-	// finding).
+	// RefuseUnknownEventSource: a typo'd value must fail loud here rather
+	// than silently comparing unequal in every check below and in poll.go's
+	// dispatch, which would degrade to plain polling with no error and no log
+	// message. These are cheap, local config checks, so they run before any
+	// network call.
 	if err := RefuseUnknownEventSource(cfg.EventSource); err != nil {
-		return nil, err
-	}
-	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
 		return nil, err
 	}
 	if err := RefuseDirectMisconfigured(cfg, gitHubAppAuthConfigured(cfg), os.Getenv(appWebhookSecretEnvName(cfg))); err != nil {

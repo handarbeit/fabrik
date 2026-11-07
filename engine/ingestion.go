@@ -9,8 +9,7 @@ import (
 
 // ingestTransport is the surface every webhook delivery source implements
 // (#2351, ADR 2351; amends ADR 1142 Decision #3). The existing gh-webhook-forward
-// manager (*webhookManager), the Hookdeck manager (*hookdeckManager) and any
-// future source (the Funnel receiver, #2143) plug into the engine through it, so
+// manager (*webhookManager) and the App receivers (direct, tailscale) plug into the engine through it, so
 // health transitions, reconcile coverage, repo updates and reconnect catch-up
 // work for any transport with no concrete-type switch anywhere.
 //
@@ -35,8 +34,8 @@ type ingestTransport interface {
 	UpdateRepos(repos map[string]bool)
 	// TransitionHealth applies a reconcile-derived health signal: healthy when
 	// the light reconcile found no drift (or repaired it), unhealthy on drift. A
-	// transport with independently tracked conditions (Hookdeck's signature
-	// drift) must not let a healthy hint mask them.
+	// transport with independently tracked conditions (an App receiver's
+	// signature drift) must not let a healthy hint mask them.
 	TransitionHealth(healthy bool, reason string)
 	// CheckCoverage runs the transport's periodic best-effort coverage
 	// re-check (a deleted hook, a changed installation). A transport with
@@ -199,7 +198,4 @@ func (s *transportSet) SubscribesTo(eventType string) bool {
 	return false
 }
 
-var (
-	_ ingestTransport = (*webhookManager)(nil)
-	_ ingestTransport = (*hookdeckManager)(nil)
-)
+var _ ingestTransport = (*webhookManager)(nil)

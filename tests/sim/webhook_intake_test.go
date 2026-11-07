@@ -47,7 +47,7 @@ func TestWebhookIntake_DuplicateAppliesOnce(t *testing.T) {
 	// The engine (or a human) removes the label; the same delivery then arrives
 	// again, from the same transport and from another.
 	env.BoardCache.ApplyLabelRemoved(key, label)
-	for _, transport := range []string{"webhook", "hookdeck"} {
+	for _, transport := range []string{"webhook", "direct"} {
 		if env.Engine.SubmitDeliveryForTest(transport, "D1", "issues", labelDelivery(env, num, "labeled", label)) {
 			t.Fatalf("a redelivery of D1 via %s was queued", transport)
 		}
@@ -73,7 +73,7 @@ func TestWebhookIntake_DuplicateAppliesOnceAcrossRestart(t *testing.T) {
 	env.Engine.EnableDeliveryIntakeForTest(dir)
 	const label = "intake-label"
 
-	env.Engine.SubmitDeliveryForTest("hookdeck", "D1", "issues", labelDelivery(env, num, "labeled", label))
+	env.Engine.SubmitDeliveryForTest("direct", "D1", "issues", labelDelivery(env, num, "labeled", label))
 	env.Engine.DrainDeliveriesForTest()
 	env.Engine.CloseDeliveryIntakeForTest() // shutdown flushes the ledger
 

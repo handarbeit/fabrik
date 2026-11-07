@@ -9,7 +9,7 @@ import (
 
 func TestTransportHealth_ReplayMarshal(t *testing.T) {
 	// Omitted when replay does not apply.
-	b, err := json.Marshal(TransportHealth{Name: "hookdeck", State: "healthy"})
+	b, err := json.Marshal(TransportHealth{Name: "direct", State: "healthy"})
 	if err != nil {
 		t.Fatal(err)
 	}
