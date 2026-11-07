@@ -736,7 +736,7 @@ granted read) (contents:write is required because git runs over HTTPS as the ins
 alternatively set git_ssh: true so git uses your SSH key instead) — grant these permissions ...
 ```
 
-Fix by granting `Contents: Read and write` on the App (App settings → Permissions & events), then accepting the updated permissions on the installation — or set `git_ssh: true` (or `--ssh`), or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite. With either SSH route, git uses your SSH key, no helper is injected, and `contents: read` suffices. PAT mode is unaffected. See [ADR-1846](../adrs/1846-app-auth-https-git-credential-helper.md).
+Fix by granting `Contents: Read and write` on the App (App settings → Permissions & events), then accepting the updated permissions on the installation — or set `git_ssh: true` (or `--ssh`), or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite. With either SSH route, git uses your SSH key, no helper is injected, and `contents: read` suffices. PAT mode is unaffected. Whether git runs over HTTPS is decided once, at startup, and used for both the permission check and the helper injection; a later change to your git config takes effect on the next restart. See [ADR-1846](../adrs/1846-app-auth-https-git-credential-helper.md) and [ADR-1860](../adrs/1860-app-auth-git-https-decision-made-once.md).
 
 #### Event-Driven Ingestion under App Auth
 
