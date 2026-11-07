@@ -1437,7 +1437,7 @@ Three App-leg-only scenarios (files `self_recognition_test.go`, `app_identity.go
 
 | Scenario | Asserts | Claude cost | Wall-clock |
 |---|---|---|---|
-| `TestAppSelfRecognitionBotCommentNeverResumes` (A1) | A plain, marker-free bot comment on a paused item never resumes it: after the engine's `none human-authored` evaluation line, 3+ polls with the pause labels intact, no `unpause`/`unblock` line, no 👀/🚀 on the comment; then a human comment resumes it (control) | 1 comment-processing invocation | ~6–10 min |
+| `TestAppSelfRecognitionBotCommentNeverResumes` (A1) | A plain, marker-free bot comment on a paused item never resumes it: after a probe deep fetch of the item that starts once the comment exists (the engine logs nothing about a non-opted-in bot comment since #2552), 3+ polls with the pause labels intact, no `unpause`/`unblock` line, no 👀/🚀 on the comment; then a human comment resumes it (control) | 1 comment-processing invocation | ~6–10 min |
 | `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` (A2) | After the dependency set changes ({B1} → {B1,B2}) the one blocked comment (same id, bot-authored) is edited in place: its parsed dependency set equals the new set | none | ~12–25 min (waits out the `dep-blocked` cooldown, `PollSeconds*10`) |
 | `TestAppSelfRecognitionDurableReviewSuppression` (A3) | A `review-ids-addressed` marker comment authored by the bot suppresses redelivery of that review (`durablyAddressedReviewIDs`); the same marker authored by the harness account does not (control) | 1 review-reinvoke (control arm) | ~8–15 min |
 
