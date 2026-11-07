@@ -312,7 +312,7 @@ func TestSetUpGitHubAppAuth_HTTPSGitRequiresContentsWrite(t *testing.T) {
 				Owner: "handarbeit", Repo: "fabrik", GitSSH: tt.gitSSH,
 				GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
 			}
-			_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+			_, _, err := setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL, AppGitUsesHTTPS(tt.gitSSH))
 			if !tt.wantErr {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

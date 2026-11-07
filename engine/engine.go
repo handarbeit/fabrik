@@ -236,6 +236,7 @@ type Engine struct {
 	replayBuilt                        func(*appwebhook.Replayer)                      // test seam: called with every replayer newDeliveryReplayer builds, so a test guard can await its goroutines (#2447); nil in production.
 	replayer                           *appwebhook.Replayer                            // App webhook receiver delivery replay (#2144, ADR 2144; direct and tailscale); nil unless Config.ReplayFailedDeliveries and App auth. Set in startDirectTransport / startTailscaleTransport before the transport can signal a reconnect.
 	ghAppAuth                          *githubauth.Reconciler                          // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	appGitHTTPS                        *bool                                           // the HTTPS-vs-SSH git decision made once in New() under App auth (#1860, ADR 1860); feeds both the grant requirement and Run()'s credential injection. nil = not decided (engines built outside New()), which is NOT "SSH": appGitUsesHTTPS() falls back to one live read.
 	skillResolver                      *skillResolver                                  // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
 	readClient                         boardcache.ReadClient                           // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                             ClaudeInvoker
@@ -766,7 +767,11 @@ func New(cfg Config) (*Engine, error) {
 	// wrapping a stale PAT-based client. Only the resulting Reconciler's
 	// refresh-loop goroutines need a real, cancellable ctx; that part is
 	// started later, from Run(). See engine/github_app_auth.go.
-	ghAppClient, ghAppReconciler, err := resolveGitHubAppAuth(context.Background(), cfg, fabrikDir, "")
+	// The HTTPS-vs-SSH git decision is made exactly once, here (#1860, ADR
+	// 1860): it feeds the grant requirement below and is stored on the Engine
+	// for Run()'s credential injection, so they cannot diverge.
+	appGitHTTPS := decideAppGitHTTPS(cfg)
+	ghAppClient, ghAppReconciler, err := resolveGitHubAppAuth(context.Background(), cfg, fabrikDir, "", appGitHTTPS != nil && *appGitHTTPS)
 	if err != nil {
 		return nil, err
 	}
@@ -823,6 +828,7 @@ func New(cfg Config) (*Engine, error) {
 		releaseClient:             releaseClient,
 		hostClient:                ghClient,
 		ghAppAuth:                 ghAppReconciler,
+		appGitHTTPS:               appGitHTTPS,
 		appIdent:                  appIdent,
 		skillResolver:             newSkillResolver(pluginDirs),
 		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},

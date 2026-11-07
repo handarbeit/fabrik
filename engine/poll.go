@@ -419,19 +419,19 @@ func (e *Engine) Run() error {
 		return err
 	}
 
-	// Detect URL rewrites first so both the advisory HTTPS credential helper
-	// warning below and the hard App-auth-git refusal (#1756) can use the
-	// same computed value — HTTPS GitHub URLs transparently rewritten to SSH
-	// by the user's git config need neither.
+	// Detect URL rewrites for the advisory HTTPS credential helper warning
+	// below only. This read is independent of the App-auth injection decision
+	// (#1860): that one is fixed at construction.
 	httpsToSSH := e.checkURLRewrite()
 
 	// HTTPS git under App auth (#1846, superseding #1756's refusal):
 	// inject a credential helper so engine and worker git authenticate as
 	// the installation, never via whatever helper the host has configured.
 	// setUpGitHubAppAuth has already required contents:write for this
-	// combination. Always called, so a previous exec's injected helper is
-	// stripped in PAT mode or under SSH.
-	if err := e.setUpAppGitCredential(ctx, !e.cfg.GitSSH && !httpsToSSH); err != nil {
+	// combination, from the same decision New() stored (#1860, ADR 1860) —
+	// git config is not re-read here. Always called, so a previous exec's
+	// injected helper is stripped in PAT mode or under SSH.
+	if err := e.setUpAppGitCredential(ctx, e.appGitUsesHTTPS()); err != nil {
 		return err
 	}
 

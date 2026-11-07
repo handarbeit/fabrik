@@ -171,6 +171,37 @@ func AppGitUsesHTTPS(gitSSH bool) bool {
 	return !gitSSH && !gitHTTPSRewrittenToSSH()
 }
 
+// decideAppGitHTTPS is the single computation of the HTTPS-vs-SSH git decision
+// under GitHub App auth (#1860, ADR 1860). New() calls it exactly once; the
+// result feeds the grant requirement (setUpGitHubAppAuth's httpsGit parameter)
+// and is stored on the Engine for Run()'s credential injection, so the two can
+// never disagree. Returns nil ("not decided") when App auth is not configured,
+// so PAT mode makes no git subprocess call.
+func decideAppGitHTTPS(cfg Config) *bool {
+	if !gitHubAppAuthConfigured(cfg) {
+		return nil
+	}
+	https := AppGitUsesHTTPS(cfg.GitSSH)
+	return &https
+}
+
+// appGitUsesHTTPS is what Run() consults to decide whether to inject the
+// installation credential helper. It returns the decision fixed at
+// construction (decideAppGitHTTPS). A nil stored decision means "not decided",
+// never "SSH": an engine built outside New() (testEngine, NewWithDeps,
+// SetGitHubAppModeForTest) ran no grant check, so it falls back to one live
+// AppGitUsesHTTPS read, which cannot diverge from anything. Without App auth
+// the value is irrelevant (setUpAppGitCredential strips and returns) and false.
+func (e *Engine) appGitUsesHTTPS() bool {
+	if e.ghAppAuth == nil {
+		return false
+	}
+	if e.appGitHTTPS != nil {
+		return *e.appGitHTTPS
+	}
+	return AppGitUsesHTTPS(e.cfg.GitSSH)
+}
+
 // gitHubAppFieldsSet reports which of the three GitHub App compat-mode
 // config fields are non-empty, for the all-or-nothing check below (R5).
 func gitHubAppFieldsSet(cfg Config) (id, key, inst bool) {
@@ -517,13 +548,15 @@ func init() {
 // New() runs (cmd/root.go requires it), and it is always the login that
 // owns the project board — including in multi-repo mode, where cfg.Repo may
 // be empty but cfg.Owner names the board's own organization.
-func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
+//
+// httpsGit is the HTTPS-vs-SSH git decision made once by New()
+// (decideAppGitHTTPS, #1860); this function never reads git config itself.
+func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string, httpsGit bool) (*gh.Client, *githubauth.Reconciler, error) {
 	// HTTPS git (#1846): engine and workers push over HTTPS with the
 	// installation token (setUpAppGitCredential), so the installation must
 	// grant contents:write. Not needed when git goes over SSH — git_ssh, or
 	// a global HTTPS→SSH insteadOf rewrite — where the token never reaches
 	// git at all.
-	httpsGit := AppGitUsesHTTPS(cfg.GitSSH)
 	required := RequiredGitHubAppPermissionsForGit(cfg.Webhooks, httpsGit)
 
 	// Options.RequiredPermissions is deliberately left unset here (rather
@@ -683,8 +716,9 @@ func resolveAppAccessibleRepos(reconciler *githubauth.Reconciler, installationID
 // construction. Returns (nil, nil, nil) for PAT mode (the unconfigured
 // case), which New() interprets as "build the client from cfg.Token exactly
 // as before" (R1/AC2). baseURL is "" in production (github.com); tests pass
-// an httptest server URL to exercise this without a real GitHub App.
-func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
+// an httptest server URL to exercise this without a real GitHub App. httpsGit
+// is the single HTTPS-vs-SSH decision from decideAppGitHTTPS (#1860).
+func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string, httpsGit bool) (*gh.Client, *githubauth.Reconciler, error) {
 	if err := validateGitHubAppConfig(cfg); err != nil {
 		return nil, nil, err
 	}
@@ -715,5 +749,5 @@ func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL st
 			"HTTPS git (engine and workers — see ADR-1846); with git_ssh or an SSH rewrite, git uses your SSH " +
 			"key instead. The PAT is not used\n")
 	}
-	return setUpGitHubAppAuth(ctx, cfg, fabrikDir, baseURL)
+	return setUpGitHubAppAuth(ctx, cfg, fabrikDir, baseURL, httpsGit)
 }
