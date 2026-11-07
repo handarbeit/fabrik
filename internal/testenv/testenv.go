@@ -37,7 +37,7 @@ var fixedNames = []string{
 func Names(environ []string) []string {
 	names := append([]string{}, fixedNames...)
 	names = append(names, workerenv.ScrubbedNames()...)
-	names = append(names, workerenv.DefaultHookdeckAPIKeyEnv, workerenv.DefaultHookdeckWebhookSecretEnv)
+	names = append(names, workerenv.LegacyHookdeckAPIKeyEnv)
 	for _, kv := range environ {
 		i := strings.IndexByte(kv, '=')
 		if i <= 0 {

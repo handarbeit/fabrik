@@ -32,7 +32,8 @@ type Group string
 
 const (
 	GroupCredential Group = "credential"
-	GroupHookdeck   Group = "hookdeck"
+	GroupSecretName Group = "secret-name"
+	GroupLegacy     Group = "legacy"
 	GroupIdentity   Group = "identity"
 	GroupTuning     Group = "tuning"
 	GroupReexec     Group = "reexec"
@@ -49,14 +50,14 @@ type Var struct {
 // scrubbed names a worker is allowed to inherit. It is itself scrubbed.
 const OptInVar = "FABRIK_WORKER_ENV_PASSTHROUGH"
 
-// DefaultHookdeckAPIKeyEnv / DefaultHookdeckWebhookSecretEnv mirror the
-// engine's defaults (engine.DefaultHookdeck*). They are scrubbed
-// unconditionally so a stale .env entry never reaches a worker whatever
-// event_source is configured.
-const (
-	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
-	DefaultHookdeckWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
-)
+// LegacyHookdeckAPIKeyEnv is the default variable that held the Hookdeck API
+// key before Hookdeck was removed (ADR 2477). It is scrubbed unconditionally so
+// a leftover .env entry never reaches a worker.
+const LegacyHookdeckAPIKeyEnv = "HOOKDECK_API_KEY"
+
+// legacyReason is the recorded reason for the retained Hookdeck names (ADR
+// 2477): leftover-secret protection, kept for at least v0.0.92.
+const legacyReason = "leftover Hookdeck secret protection (Hookdeck removed, ADR 2477); retained through v0.0.92, sunset per ADR 2477"
 
 func cred(name, reason string) Var { return Var{name, GroupCredential, reason} }
 func ident(name string) Var {
@@ -77,12 +78,12 @@ var Scrubbed = []Var{
 	cred("FABRIK_ANTHROPIC_API_KEY", "ADR-1346 opt-in source; translated by the engine, never forwarded"),
 	cred("FABRIK_ANTHROPIC_ENV_PASSTHROUGH", "ADR-1346 control variable"),
 	cred(OptInVar, "the #2027 opt-in itself is never forwarded"),
-	{"FABRIK_HOOKDECK_API_KEY_ENV", GroupHookdeck, "names the variable holding the Hookdeck API key"},
-	{"FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the webhook secret"},
-	{"FABRIK_APP_WEBHOOK_SECRET_ENV", GroupHookdeck, "names the variable holding the App webhook secret (event_source: direct)"},
-	{"FABRIK_TAILSCALE_AUTH_KEY_ENV", GroupHookdeck, "names the variable holding the Tailscale auth key (event_source: tailscale)"},
+	{"FABRIK_HOOKDECK_API_KEY_ENV", GroupLegacy, "names the variable holding a leftover Hookdeck API key; " + legacyReason},
+	{"FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV", GroupLegacy, "names the variable holding a leftover Hookdeck webhook secret; " + legacyReason},
+	{"FABRIK_APP_WEBHOOK_SECRET_ENV", GroupSecretName, "names the variable holding the App webhook secret (event_source: direct)"},
+	{"FABRIK_TAILSCALE_AUTH_KEY_ENV", GroupSecretName, "names the variable holding the Tailscale auth key (event_source: tailscale)"},
 	cred("FABRIK_TS_AUTHKEY", "default Tailscale auth key variable; lets a worker join the tailnet as a tagged node"),
-	{DefaultHookdeckAPIKeyEnv, GroupHookdeck, "default Hookdeck API key variable (not FABRIK_-prefixed)"},
+	{LegacyHookdeckAPIKeyEnv, GroupLegacy, "default leftover Hookdeck API key variable (not FABRIK_-prefixed); " + legacyReason},
 
 	ident("FABRIK_OWNER"), ident("FABRIK_PROJECT_NUMBER"), ident("FABRIK_USER"),
 	ident("FABRIK_STAGES"), ident("FABRIK_YOLO"), ident("FABRIK_GIT_SSH"),
@@ -146,7 +147,7 @@ var NotEnv = []string{
 }
 
 // Protected names may never be scrubbed or admitted by an operator-supplied
-// name (Hookdeck indirection, the opt-in): they carry the worker's sanctioned
+// name (secret-name indirection, the opt-in): they carry the worker's sanctioned
 // GitHub access (R2) or are essential to the process.
 func Protected(name string) bool {
 	switch name {
@@ -219,10 +220,10 @@ func ParseNames(raw string) []string {
 }
 
 // Resolved is the per-engine result of resolving the dynamic parts of the
-// scrub: operator-chosen Hookdeck variable names and the opt-in.
+// scrub: operator-chosen legacy secret variable names and the opt-in.
 type Resolved struct {
-	// Extra are additional names to scrub (the Hookdeck variables named by
-	// the effective config), already filtered through Protected.
+	// Extra are additional names to scrub (the variables named by a leftover
+	// Hookdeck setting), already filtered through Protected.
 	Extra []string
 	// Admitted are scrubbed names the operator explicitly opted back in.
 	Admitted []string
@@ -240,12 +241,13 @@ func neverAdmitted(n string) bool {
 	return n == OptInVar || n == "FABRIK_ANTHROPIC_API_KEY" || n == "FABRIK_ANTHROPIC_ENV_PASSTHROUGH"
 }
 
-// Resolve computes the dynamic scrub inputs. hookdeckNames are the effective
-// FABRIK_HOOKDECK_*_ENV values; optIn is the raw OptInVar value.
-func Resolve(hookdeckNames []string, optIn string) Resolved {
+// Resolve computes the dynamic scrub inputs. secretNames are operator-chosen
+// secret variable names (the variables named by leftover Hookdeck settings and
+// by the direct/tailscale pointers); optIn is the raw OptInVar value.
+func Resolve(secretNames []string, optIn string) Resolved {
 	var r Resolved
 	extraSet := map[string]bool{}
-	for _, n := range hookdeckNames {
+	for _, n := range secretNames {
 		n = strings.TrimSpace(n)
 		if n == "" {
 			continue
@@ -270,7 +272,7 @@ func Resolve(hookdeckNames []string, optIn string) Resolved {
 }
 
 // Sentinels returns bare mergeEnv removal-sentinel entries (a key with no "=")
-// for every scrubbed name — the fixed list, the Hookdeck defaults and r.Extra —
+// for every scrubbed name — the fixed list, and r.Extra —
 // except those the operator admitted. Emitted unconditionally, regardless of
 // presence in the base env: a sentinel for an absent key is a harmless no-op.
 func Sentinels(r Resolved) []string {
@@ -290,7 +292,6 @@ func Sentinels(r Resolved) []string {
 	for _, v := range Scrubbed {
 		add(v.Name)
 	}
-	add(DefaultHookdeckWebhookSecretEnv)
 	for _, n := range r.Extra {
 		add(n)
 	}
