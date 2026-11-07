@@ -357,6 +357,9 @@ type Engine struct {
 	// per-poll rate-limit stats lines) into one emission per throttle window
 	// instead of one per poll cycle. Zero-value ready.
 	logThrottle logThrottleState
+	// emptyBoard is the empty-board verdict (#1894, empty_board.go): retry cost
+	// and logging only, never the Store. Zero-value ready.
+	emptyBoard emptyBoardState
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.

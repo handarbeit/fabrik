@@ -3024,6 +3024,7 @@ func (e *Engine) refreshCacheForPoll(c *boardcache.CacheImpl) {
 		// that as bootstrapped skipped BootstrapFromProbe for good, so every item
 		// was deep-fetched one by one as the probe discovered it. With an empty
 		// Store, BootstrapFromProbe (Store.Reset) has nothing to wipe.
+		e.noteBoardItems()
 		e.setPollStep("probe and deep fetch")
 		e.runProbeAndDeepFetch(c)
 	default:
@@ -3032,14 +3033,20 @@ func (e *Engine) refreshCacheForPoll(c *boardcache.CacheImpl) {
 		if refreshErr != nil {
 			e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
 		} else if projectID != "" && len(probeItems) > 0 {
+			e.noteBoardItems()
 			c.BootstrapFromProbe(probeItems, projectID)
 			e.seedTerminalFromProbeItems(probeItems)
 		} else if projectID != "" {
-			// Probe succeeded but returned 0 items — possible transient indexer hiccup.
-			// Leave cache virgin and retry on the next poll rather than bootstrapping
-			// with an empty store (which would cause every real item to be treated as
-			// "new" and deep-fetched on the next cycle).
-			e.logfThrottled("cache-bootstrap-deferred", 0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
+			// Probe succeeded but returned 0 items. Leave the cache virgin and probe
+			// again next poll rather than bootstrapping with an empty store (which
+			// would cause every real item to be treated as "new" and deep-fetched on
+			// the next cycle). Whether the zero is a genuinely empty board or a
+			// transient indexer fault is decided by observeZeroItemPoll (#1894): a
+			// never-populated board that stays empty is concluded empty with one
+			// log line; a board that held items before keeps the warning.
+			if e.observeZeroItemPoll() {
+				e.logfThrottled("cache-bootstrap-deferred", 0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
+			}
 		}
 	}
 }

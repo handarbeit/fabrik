@@ -102,11 +102,12 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 		if probeErr != nil {
 			e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
 		} else if projectID != "" && len(probeItems) > 0 {
+			e.noteBoardItems()
 			cacheImpl.BootstrapFromProbe(probeItems, projectID)
 			e.seedTerminalFromProbeItems(probeItems)
-		} else if projectID != "" {
-			e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
 		}
+		// A zero-item startup probe stays silent: the first poll's virgin branch
+		// decides whether the board is empty (#1894).
 	}
 
 	var initialRepos map[string]bool
