@@ -42,15 +42,18 @@ import (
 // transient human classification that a refetch corrects and that is not
 // live-observable. A1 guards filterHuman/gh.IsBotLogin on the real wire shape
 // and the ADR-1813 resume path against regression. Its failing evidence is a
-// resume line ("[#N unpause]"/"[#N unblock]", engine/item.go), a
-// missing "none human-authored" skip line, a dropped pause label, or a 👀/🚀 on
-// the bot's comment.
+// resume line ("[#N unpause]"/"[#N unblock]", engine/item.go), a dropped pause
+// label, or a 👀/🚀 on the bot's comment.
 //
-// Admission of a paused item is event-driven (a new comment bumps updatedAt), so
-// only the first evaluation is guaranteed to log. The scenario therefore waits
-// for that evaluation line FIRST — proof the engine looked at the comment — and
+// The scenario first waits for proof that the engine has read the comment, and
 // only then holds for three poll intervals asserting nothing changed. A bare
-// "nothing happened for 3 polls" would be vacuous.
+// "nothing happened for 3 polls" would be vacuous. Since #2552 (ADR 2552), a
+// comment from a bot that is not opted in is dropped before it counts as new,
+// so the engine logs nothing about it and the old "none human-authored" skip
+// line no longer appears. The proof is therefore a probe deep fetch of the item
+// that starts at or after the comment was posted (deepFetchLineSince), since a
+// deep fetch reads the item's comments. The skip line is still accepted if an
+// engine logs it.
 //
 // Cost: one comment-processing Claude invocation (the positive control).
 // Wall-clock: ~6-10 min.
@@ -76,16 +79,19 @@ func TestAppSelfRecognitionBotCommentNeverResumes(t *testing.T) {
 
 	bot := postBotComment(t, leg, repo, num,
 		"e2e self-recognition probe (#1877): a plain comment authored by the App identity. No Fabrik markers.")
+	postedAt := time.Now()
 	t.Logf("posted bot comment %d on %s#%d as %s", bot.ID, repo, num, bot.Login)
 	logCommentAuthorShapes(t, env, repo, num, bot.ID)
 
-	// Positive first: the engine must have evaluated the comment and kept the pause.
+	// Positive first: the engine must have read the comment and kept the pause.
 	// A resume line is watched in the same loop: if the bot comment is read as
-	// human the engine unpauses and never logs the skip line, and waiting only
-	// for the skip line would sit out the whole budget hiding that regression.
+	// human the engine unpauses, and the loop stops on that line instead of
+	// sitting out the whole budget.
 	evalLine := waitForLogLineWhere(t, env, fmt.Sprintf("[#%d ", num),
-		func(l string) bool { return noHumanSkipLine(l, num) || resumeLine(l, num) }, off, 15*time.Minute,
-		fmt.Sprintf("the engine to evaluate the bot comment on #%d and report it non-human", num))
+		func(l string) bool {
+			return resumeLine(l, num) || noHumanSkipLine(l, num) || deepFetchLineSince(l, num, postedAt)
+		}, off, 15*time.Minute,
+		fmt.Sprintf("the engine to read #%d after the bot comment was posted", num))
 	if resumeLine(evalLine, num) {
 		t.Fatalf("engine resumed #%d on a bot-authored comment: %s — the bot comment was treated as human input; see the logged author shapes", num, evalLine)
 	}

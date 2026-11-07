@@ -91,6 +91,35 @@ func resumeLine(line string, n int) bool {
 		strings.Contains(line, fmt.Sprintf("[#%d unblock] user comment received", n))
 }
 
+// deepFetchLineSince matches the probe loop's deep-fetch line for issue n
+// (engine/terminal.go: "new item discovered" or "stale") logged at or after
+// since. A deep fetch reads the item's comments, so one that starts after a
+// comment was posted proves the engine has read that comment.
+//
+// Needed since #2552 (ADR 2552): a comment from a bot that is not opted in is
+// dropped before it counts as a new comment, so the engine logs nothing about
+// it. The "none human-authored" skip line no longer appears for it.
+//
+// Log timestamps have second resolution and the comparison is inclusive. A
+// fetch logged in the same second as since may have started just before the
+// comment existed. That window is under a second, and the hold that follows
+// still asserts the pause survives several polls.
+func deepFetchLineSince(line string, n int, since time.Time) bool {
+	if !strings.Contains(line, fmt.Sprintf("[#%d cache] probe: new item discovered — deep-fetching", n)) &&
+		!strings.Contains(line, fmt.Sprintf("[#%d cache] probe: stale — deep-fetching", n)) {
+		return false
+	}
+	sp := strings.IndexByte(line, ' ')
+	if sp < 0 {
+		return false
+	}
+	ts, err := time.Parse(time.RFC3339, line[:sp])
+	if err != nil {
+		return false
+	}
+	return !ts.Before(since.UTC().Truncate(time.Second))
+}
+
 // blockedLogPrefix is the engine's "waiting for" line for issue n
 // (engine/dependencies.go's checkDependencies).
 func blockedLogPrefix(n int) string {

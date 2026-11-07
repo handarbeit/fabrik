@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // engineSource reads a file under engine/ so the string constants and format
@@ -125,6 +126,23 @@ func TestResumeLine(t *testing.T) {
 	} {
 		if got := resumeLine(line, 7); got != want {
 			t.Errorf("resumeLine(%q, 7) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+func TestDeepFetchLineSince(t *testing.T) {
+	since := time.Date(2026, 11, 7, 20, 7, 5, 600_000_000, time.UTC)
+	for line, want := range map[string]bool{
+		"2026-11-07T20:07:15Z [#7 cache] probe: new item discovered — deep-fetching": true,
+		"2026-11-07T20:07:15Z [#7 cache] probe: stale — deep-fetching":               true,
+		"2026-11-07T20:07:05Z [#7 cache] probe: stale — deep-fetching":               true,  // same second: inclusive
+		"2026-11-07T20:07:04Z [#7 cache] probe: stale — deep-fetching":               false, // before the comment
+		"2026-11-07T20:07:15Z [#17 cache] probe: stale — deep-fetching":              false,
+		"2026-11-07T20:07:15Z [#7 poll] skipping dispatch: worker in flight":         false,
+		"not-a-time [#7 cache] probe: stale — deep-fetching":                         false,
+	} {
+		if got := deepFetchLineSince(line, 7, since); got != want {
+			t.Errorf("deepFetchLineSince(%q, 7) = %v, want %v", line, got, want)
 		}
 	}
 }
