@@ -144,6 +144,9 @@ var NotEnv = []string{
 	"FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END",
 	"FABRIK_PR_CREATE_BEGIN", "FABRIK_PR_CREATE_END",
 	"FABRIK_SPAWN_CHILD_BEGIN", "FABRIK_SPAWN_CHILD_END",
+	// A prefix, not a variable: cmd matches it to report leftover
+	// FABRIK_HOOKDECK_* settings as ignored (ADR 2477).
+	"FABRIK_HOOKDECK_",
 }
 
 // Protected names may never be scrubbed or admitted by an operator-supplied
