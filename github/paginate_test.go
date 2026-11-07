@@ -2,7 +2,10 @@ package github
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPaginateGraphQL_SinglePage(t *testing.T) {
@@ -165,5 +168,80 @@ func TestRetryOnEmpty_NonZeroRawCountAcceptedEvenWithZeroTotalCount(t *testing.T
 	}
 	if result != "legacy-shape" {
 		t.Errorf("result = %q, want legacy-shape", result)
+	}
+}
+
+// captureGHLogs routes the package logger to a slice for the test.
+func captureGHLogs(t *testing.T) *[]string {
+	t.Helper()
+	var lines []string
+	old := Logf
+	Logf = func(_ int, _, format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { Logf = old })
+	return &lines
+}
+
+// A zero that exhausts every attempt is silent: only the caller can say
+// whether it is a plausible empty board (#1894).
+func TestRetryOnEmpty_ExhaustedZeroIsSilent(t *testing.T) {
+	lines := captureGHLogs(t)
+	_, err := retryOnEmptyN("test op", 2, func(attempt int) (string, int, int, error) {
+		return "", 0, 0, nil
+	})
+	if err != nil {
+		t.Fatalf("retryOnEmptyN: %v", err)
+	}
+	if len(*lines) != 0 {
+		t.Errorf("exhausted zero logged %v, want nothing", *lines)
+	}
+}
+
+// A retry that recovers items logs exactly one line.
+func TestRetryOnEmpty_RecoveryLogsOneLine(t *testing.T) {
+	lines := captureGHLogs(t)
+	_, err := retryOnEmptyN("test op", 3, func(attempt int) (string, int, int, error) {
+		if attempt < 2 {
+			return "", 0, 0, nil
+		}
+		return "ok", 4, 4, nil
+	})
+	if err != nil {
+		t.Fatalf("retryOnEmptyN: %v", err)
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "recovered 4 items after 2 attempts") {
+		t.Errorf("lines = %v, want one recovery line", *lines)
+	}
+}
+
+// A first-attempt success logs nothing.
+func TestRetryOnEmpty_FirstAttemptSuccessIsSilent(t *testing.T) {
+	lines := captureGHLogs(t)
+	if _, err := retryOnEmptyN("test op", 3, func(int) (string, int, int, error) { return "ok", 1, 1, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(*lines) != 0 {
+		t.Errorf("lines = %v, want none", *lines)
+	}
+}
+
+func TestRetryOnEmptyN_SingleAttemptMakesOneCall(t *testing.T) {
+	for _, attempts := range []int{1, 0, -3} {
+		calls := 0
+		start := time.Now()
+		_, err := retryOnEmptyN("test op", attempts, func(int) (string, int, int, error) {
+			calls++
+			return "", 0, 0, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Errorf("attempts=%d: calls = %d, want 1", attempts, calls)
+		}
+		if time.Since(start) > 500*time.Millisecond {
+			t.Errorf("attempts=%d: single attempt slept", attempts)
+		}
 	}
 }
