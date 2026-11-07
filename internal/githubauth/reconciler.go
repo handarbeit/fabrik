@@ -355,7 +355,7 @@ func (r *Reconciler) ClientForRepo(ctx context.Context, owner, repo string) (*gh
 		if mintErr, ok := r.mintErrors[strings.ToLower(owner)]; ok {
 			return nil, fmt.Errorf("owner %q has an App installation, but minting a token for it failed during the last reconciliation: %w — this is not a missing-installation problem; retry Reconcile (e.g. restart Pruefer)", owner, mintErr)
 		}
-		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — install the App on %q (Reconcile logs the guided-install URL at startup, or on the next re-derivation if it's still missing); this is picked up automatically within repo_rederivation_interval, or immediately on the next installation webhook event in event_source: hookdeck mode — no watched_repos entry or restart needed, unless github_app_installation_id is pinned, in which case add %q's repos to watched_repos instead", owner, owner, owner)
+		return nil, fmt.Errorf("no authorized GitHub App installation for owner %q — install the App on %q (Reconcile logs the guided-install URL at startup, or on the next re-derivation if it's still missing); this is picked up automatically within repo_rederivation_interval, or immediately on the next installation webhook event in event_source: direct or tailscale mode — no watched_repos entry or restart needed, unless github_app_installation_id is pinned, in which case add %q's repos to watched_repos instead", owner, owner, owner)
 	}
 	return client, nil
 }

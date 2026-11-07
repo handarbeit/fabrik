@@ -18,7 +18,7 @@ func appCfg(src string) Config {
 }
 
 func TestValidateAppSourceStatic(t *testing.T) {
-	for _, src := range []string{EventSourcePoll, EventSourceHookdeck} {
+	for _, src := range []string{EventSourcePoll} {
 		c := Config{EventSource: src} // everything else empty: must not matter
 		if err := validateAppSourceStatic(c); err != nil {
 			t.Errorf("%s: %v", src, err)
@@ -56,7 +56,7 @@ func TestValidateAppSourceStatic(t *testing.T) {
 }
 
 func TestRefuseAppSourceMisconfigured(t *testing.T) {
-	if err := RefuseAppSourceMisconfigured(Config{EventSource: EventSourceHookdeck}, "", "", false); err != nil {
+	if err := RefuseAppSourceMisconfigured(Config{EventSource: EventSourcePoll}, "", "", false); err != nil {
 		t.Errorf("non-app source refused: %v", err)
 	}
 	if err := RefuseAppSourceMisconfigured(appCfg(EventSourceDirect), "sec", "", false); err != nil {

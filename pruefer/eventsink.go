@@ -135,7 +135,7 @@ var installEventTypes = map[string]bool{
 
 // daemonEventSink implements events.EventSink by dispatching normalized
 // GitHub events to a Daemon's existing review machinery. It never touches
-// ReviewPR/select.go directly, nor any transport-specific (e.g. Hookdeck)
+// ReviewPR/select.go directly, nor any transport-specific
 // concept — the events.GitHubEvent it receives is already transport-agnostic.
 type daemonEventSink struct {
 	daemon *Daemon
@@ -143,14 +143,13 @@ type daemonEventSink struct {
 
 // Handle implements events.EventSink. Event types and pull_request actions
 // Pruefer has no opinion on are silently no-ops, not an error condition —
-// GitHub (and Hookdeck's forwarding scope) can deliver many event types
+// GitHub can deliver many event types
 // this sink never needs to act on.
 //
 // Handle itself always returns immediately, regardless of whether the
 // daemon's shared semaphore (ReviewFromEvent) or an in-flight poll cycle's
 // wg.Wait() (poll) is currently blocked on other work. Handle is called
-// synchronously from the hookdeck.Source read loop (see source.go's
-// handleFrame/ack) — blocking here would delay acking the current webhook
+// synchronously from the receiver's request goroutine — blocking here would delay acking the current webhook
 // and stall reading every subsequent one, exactly what the issue's "ack the
 // webhook promptly ... never run a review synchronously in the webhook
 // receiver" requirement forbids.
@@ -171,7 +170,7 @@ type daemonEventSink struct {
 // deliberately rather than bounding with a dispatch queue: none of these
 // goroutines can leak (ReviewFromEvent always returns, releasing its
 // goroutine), Go goroutines are cheap relative to the concurrency-capped
-// work behind the semaphore, and Hookdeck's dedupe plus GitHub's own event
+// work behind the semaphore, and the delivery-ID dedupe plus GitHub's own event
 // volume make an unbounded burst an edge case, not the steady state a
 // bounded queue would need to justify its own added complexity.
 func (s *daemonEventSink) Handle(ctx context.Context, ev events.GitHubEvent) {

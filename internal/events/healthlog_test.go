@@ -15,8 +15,8 @@ func reconnecting(err string, at time.Time) HealthEvent {
 
 func TestHealthErrorLog_FirstErrorLogs(t *testing.T) {
 	var l HealthErrorLog
-	line, ok := l.Observe(reconnecting("dial tcp: lookup api.hookdeck.com: no such host", t0))
-	if !ok || line != "connection error: dial tcp: lookup api.hookdeck.com: no such host" {
+	line, ok := l.Observe(reconnecting("dial tcp: lookup api.example.invalid: no such host", t0))
+	if !ok || line != "connection error: dial tcp: lookup api.example.invalid: no such host" {
 		t.Fatalf("got %q, %v", line, ok)
 	}
 }

@@ -244,9 +244,9 @@ func TestHealthHandler_LogsReconnectCauseAndCoalescesRepeats(t *testing.T) {
 	handler := d.HealthHandler(context.Background())
 	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
-	handler(events.HealthEvent{State: events.HealthReconnecting, At: t0, Err: "dial tcp: lookup ws.hookdeck.com: no such host"})
+	handler(events.HealthEvent{State: events.HealthReconnecting, At: t0, Err: "dial tcp: lookup example.invalid: no such host"})
 	for i := 1; i <= 10; i++ {
-		handler(events.HealthEvent{State: events.HealthReconnecting, At: t0.Add(time.Duration(i) * time.Second), Err: "dial tcp: lookup ws.hookdeck.com: no such host"})
+		handler(events.HealthEvent{State: events.HealthReconnecting, At: t0.Add(time.Duration(i) * time.Second), Err: "dial tcp: lookup example.invalid: no such host"})
 	}
 	if n := strings.Count(out(), "no such host"); n != 1 {
 		t.Fatalf("identical error logged %d times, want 1:\n%s", n, out())

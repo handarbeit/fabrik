@@ -7,6 +7,7 @@
 package pruefer
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -65,26 +66,21 @@ const (
 	DefaultTranscriptDir = ".pruefer/transcripts"
 )
 
-// Defaults for the event-driven (Hookdeck) ingestion surface, justified in
-// adrs/1254-*.md. EventSourcePoll is the default: with it selected,
-// Pruefer's behavior is byte-for-byte unchanged from before this surface
-// existed.
+// Defaults for the event-driven ingestion surface. EventSourcePoll is the
+// default: with it selected, Pruefer's behavior is byte-for-byte unchanged
+// from before this surface existed. "hookdeck" was removed in v0.0.92
+// (ADR 2477) and is refused at config load (hookdeckMigrationMessage).
 const (
-	EventSourcePoll     = "poll"
-	EventSourceHookdeck = "hookdeck"
+	EventSourcePoll = "poll"
 	// EventSourceDirect and EventSourceTailscale are the App-webhook receivers
 	// built on internal/appwebhook (#2476, ADR 2476): a plain listener, and an
 	// embedded Tailscale Funnel node. Both need a dedicated GitHub App.
 	EventSourceDirect    = "direct"
 	EventSourceTailscale = "tailscale"
 
-	DefaultEventSource              = EventSourcePoll
-	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
-	DefaultHookdeckWebhookSecretEnv = "PRUEFER_GITHUB_WEBHOOK_SECRET"
-	DefaultReconciliationStartup    = true
+	DefaultEventSource           = EventSourcePoll
+	DefaultReconciliationStartup = true
 	// Defaults for the direct and tailscale App-webhook receivers (#2476).
-	// DefaultAppWebhookSecretEnv deliberately equals the Hookdeck default: a
-	// daemon uses exactly one event source, so the two never both read it.
 	DefaultAppWebhookPath                 = "/webhook"
 	DefaultAppWebhookSecretEnv            = "PRUEFER_GITHUB_WEBHOOK_SECRET"
 	DefaultTailscaleAuthKeyEnv            = "PRUEFER_TS_AUTHKEY"
@@ -359,7 +355,7 @@ type Config struct {
 	// override to it would be unreachable for exactly the deployments #1641
 	// was designed to make simplest (no explicit repo enumeration needed).
 	// YAML-only (no flag/env) — a structured, occasional-use setting,
-	// mirroring hookdeck.*/reconciliation.*'s own YAML-only convention.
+	// mirroring reconciliation.*'s own YAML-only convention.
 	// Absent/nil means no repo has an override. See
 	// adrs/1610-pruefer-review-cadence.md.
 	RepoCadence map[string]string `reload:"live"`
@@ -452,30 +448,20 @@ type Config struct {
 
 	// EventSource selects Pruefer's event ingestion mode: EventSourcePoll
 	// (default — behavior is byte-for-byte unchanged from before this
-	// field existed), or an event-driven mode — EventSourceDirect,
-	// EventSourceTailscale (#2476, ADR 2476) or the deprecated
-	// EventSourceHookdeck — with poll demoted to a low-frequency
-	// reconciliation fallback (see the Reconciliation* fields below).
-	// See adrs/1254-*.md. Restart-only:
-	// switching modes means constructing (or tearing down) a whole
-	// events.EventSource, including its Hookdeck WebSocket session and
-	// dedupe ring — out of scope for a live reload.
+	// field existed), or an event-driven mode — EventSourceDirect or
+	// EventSourceTailscale (#2476, ADR 2476) — with poll demoted to a
+	// low-frequency reconciliation fallback (see the Reconciliation*
+	// fields below). Restart-only: switching modes means constructing (or
+	// tearing down) a whole events.EventSource, including its dedupe ring
+	// — out of scope for a live reload. "hookdeck" was removed in v0.0.92
+	// and is refused at config load (ADR 2477).
 	EventSource string `reload:"restart"`
 
-	// HookdeckAPIKeyEnv names the environment variable holding the
-	// Hookdeck API key. Only consulted when EventSource ==
-	// EventSourceHookdeck. Restart-only: read once in Execute to resolve a
-	// concrete secret value baked into the already-constructed
-	// hookdeck.Config; changing which env var to read requires
-	// reconstructing the EventSource.
-	HookdeckAPIKeyEnv string `reload:"restart"`
-	// HookdeckWebhookSecretEnv names the environment variable holding the
-	// GitHub App's webhook secret, used to verify every forwarded
-	// delivery's signature — required regardless of Hookdeck's own
-	// transport auth. Only consulted when EventSource ==
-	// EventSourceHookdeck. Restart-only, for the same reason as
-	// HookdeckAPIKeyEnv above.
-	HookdeckWebhookSecretEnv string `reload:"restart"`
+	// LegacyHookdeck lists the removed Hookdeck settings (hookdeck.* YAML
+	// keys, -hookdeck-*-env flags, PRUEFER_HOOKDECK_* variables) that were
+	// present, names only, de-duplicated and sorted. They are ignored;
+	// Execute reports them once at startup (ADR 2477).
+	LegacyHookdeck []string `reload:"restart"`
 
 	// DirectListen is the address (host:port) the direct receiver binds.
 	// Required for EventSource == EventSourceDirect; ignored otherwise.
@@ -590,7 +576,9 @@ type yamlConfig struct {
 	RepoRederivationInterval string `yaml:"repo_rederivation_interval"`
 
 	EventSource string `yaml:"event_source"`
-	Hookdeck    *struct {
+	// Hookdeck is the removed hookdeck: block (ADR 2477). It is still parsed,
+	// only so a leftover block can be reported once as ignored.
+	Hookdeck *struct {
 		APIKeyEnv        string `yaml:"api_key_env"`
 		WebhookSecretEnv string `yaml:"webhook_secret_env"`
 	} `yaml:"hookdeck"`
@@ -669,8 +657,8 @@ type flagValues struct {
 	versionRequested        bool
 
 	eventSource                    string
-	hookdeckAPIKeyEnv              string
-	hookdeckWebhookSecretEnv       string
+	hookdeckAPIKeyEnv              string // removed (ADR 2477); accepted and ignored
+	hookdeckWebhookSecretEnv       string // removed (ADR 2477); accepted and ignored
 	directListen                   string
 	appWebhookPath                 string
 	appWebhookSecretEnv            string
@@ -740,9 +728,9 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs.StringVar(&fv.logFile, "log-file", "", "Path to write daemon log lines to (empty disables file logging; default .pruefer/pruefer.log)")
 	fs.BoolVar(&fv.autoUpgrade, "auto-upgrade", false, "At each poll boundary (never mid-review), check GitHub Releases for a newer version and self-upgrade; dev builds (built from the fabrik source checkout) rebuild from origin/main instead")
 	fs.BoolVar(&fv.versionRequested, "version", false, "Print the pruefer version and exit")
-	fs.StringVar(&fv.eventSource, "event-source", "", "Event ingestion mode: poll (default), hookdeck, direct or tailscale")
-	fs.StringVar(&fv.hookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Environment variable name holding the Hookdeck API key")
-	fs.StringVar(&fv.hookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Environment variable name holding the GitHub App's webhook secret")
+	fs.StringVar(&fv.eventSource, "event-source", "", "Event ingestion mode: poll (default), direct or tailscale (hookdeck was removed in v0.0.92)")
+	fs.StringVar(&fv.hookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Removed in v0.0.92 (Hookdeck was removed); ignored")
+	fs.StringVar(&fv.hookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Removed in v0.0.92 (Hookdeck was removed); ignored")
 	fs.StringVar(&fv.directListen, "direct-listen", "", "Address (host:port) the direct event source listens on")
 	fs.StringVar(&fv.appWebhookPath, "app-webhook-path", "", "Absolute URL path the direct/tailscale event sources serve (default /webhook)")
 	fs.StringVar(&fv.appWebhookSecretEnv, "app-webhook-secret-env", "", "Environment variable name holding the App's webhook secret (direct/tailscale)")
@@ -811,8 +799,6 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		RepoRederivationInterval: DefaultRepoRederivationInterval,
 
 		EventSource:                    DefaultEventSource,
-		HookdeckAPIKeyEnv:              DefaultHookdeckAPIKeyEnv,
-		HookdeckWebhookSecretEnv:       DefaultHookdeckWebhookSecretEnv,
 		AppWebhookPath:                 DefaultAppWebhookPath,
 		AppWebhookSecretEnv:            DefaultAppWebhookSecretEnv,
 		TailscaleAuthKeyEnv:            DefaultTailscaleAuthKeyEnv,
@@ -937,11 +923,18 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		cfg.EventSource = yc.EventSource
 	}
 	if yc.Hookdeck != nil {
+		// Removed (ADR 2477): reported, never applied.
+		noted := false
 		if yc.Hookdeck.APIKeyEnv != "" {
-			cfg.HookdeckAPIKeyEnv = yc.Hookdeck.APIKeyEnv
+			cfg.noteLegacyHookdeck("hookdeck.api_key_env")
+			noted = true
 		}
 		if yc.Hookdeck.WebhookSecretEnv != "" {
-			cfg.HookdeckWebhookSecretEnv = yc.Hookdeck.WebhookSecretEnv
+			cfg.noteLegacyHookdeck("hookdeck.webhook_secret_env")
+			noted = true
+		}
+		if !noted {
+			cfg.noteLegacyHookdeck("hookdeck")
 		}
 	}
 	if yc.DirectListen != "" {
@@ -1128,16 +1121,10 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		cfg.EventSource = fv.eventSource
 	}
 	if explicit["hookdeck-api-key-env"] {
-		if fv.hookdeckAPIKeyEnv == "" {
-			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("-hookdeck-api-key-env cannot be empty")
-		}
-		cfg.HookdeckAPIKeyEnv = fv.hookdeckAPIKeyEnv
+		cfg.noteLegacyHookdeck("-hookdeck-api-key-env")
 	}
 	if explicit["hookdeck-webhook-secret-env"] {
-		if fv.hookdeckWebhookSecretEnv == "" {
-			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("-hookdeck-webhook-secret-env cannot be empty")
-		}
-		cfg.HookdeckWebhookSecretEnv = fv.hookdeckWebhookSecretEnv
+		cfg.noteLegacyHookdeck("-hookdeck-webhook-secret-env")
 	}
 	for _, f := range []struct {
 		flag string
@@ -1171,8 +1158,11 @@ func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 		cfg.ReconciliationFallbackInterval = d
 	}
 
+	if cfg.EventSource == removedEventSourceHookdeck {
+		return Config{}, claudeprofile.Resolution{}, errors.New(hookdeckMigrationMessage)
+	}
 	if !validEventSource(cfg.EventSource) {
-		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("invalid event_source %q: must be %q, %q, %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck, EventSourceDirect, EventSourceTailscale)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("invalid event_source %q: must be %q, %q or %q", cfg.EventSource, EventSourcePoll, EventSourceDirect, EventSourceTailscale)
 	}
 	if err := validateAppSourceStatic(cfg); err != nil {
 		return Config{}, claudeprofile.Resolution{}, err
@@ -1404,11 +1394,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_EVENT_SOURCE"); v != "" {
 		cfg.EventSource = v
 	}
-	if v := os.Getenv("PRUEFER_HOOKDECK_API_KEY_ENV"); v != "" {
-		cfg.HookdeckAPIKeyEnv = v
-	}
-	if v := os.Getenv("PRUEFER_HOOKDECK_WEBHOOK_SECRET_ENV"); v != "" {
-		cfg.HookdeckWebhookSecretEnv = v
+	// Removed (ADR 2477): any PRUEFER_HOOKDECK_* variable is reported, never applied.
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, legacyHookdeckEnvPrefix) {
+			cfg.noteLegacyHookdeck(k)
+		}
 	}
 	for _, e := range []struct {
 		name string

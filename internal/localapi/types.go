@@ -556,7 +556,7 @@ type IntakeHealth struct {
 // TransportHealth is one event transport's own health row. Whatever a
 // transport cannot report is unknown (marshals as "unknown").
 type TransportHealth struct {
-	// Name identifies the transport ("webhook", "hookdeck", "direct", ...).
+	// Name identifies the transport ("webhook", "direct", "tailscale", ...).
 	Name string `json:"name"`
 	// State is the transport's own state: "listening", "not listening" or
 	// "signature drift" for the direct transport (the tailscale transport adds

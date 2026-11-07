@@ -64,11 +64,8 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.EventSource != DefaultEventSource {
 		t.Errorf("EventSource = %q, want %q", cfg.EventSource, DefaultEventSource)
 	}
-	if cfg.HookdeckAPIKeyEnv != DefaultHookdeckAPIKeyEnv {
-		t.Errorf("HookdeckAPIKeyEnv = %q, want %q", cfg.HookdeckAPIKeyEnv, DefaultHookdeckAPIKeyEnv)
-	}
-	if cfg.HookdeckWebhookSecretEnv != DefaultHookdeckWebhookSecretEnv {
-		t.Errorf("HookdeckWebhookSecretEnv = %q, want %q", cfg.HookdeckWebhookSecretEnv, DefaultHookdeckWebhookSecretEnv)
+	if len(cfg.LegacyHookdeck) != 0 {
+		t.Errorf("LegacyHookdeck = %v, want none by default", cfg.LegacyHookdeck)
 	}
 	if cfg.ReconciliationStartup != DefaultReconciliationStartup {
 		t.Errorf("ReconciliationStartup = %v, want %v", cfg.ReconciliationStartup, DefaultReconciliationStartup)
@@ -161,7 +158,7 @@ func TestLoadConfig_LogFileFlagExplicitEmptyDisables(t *testing.T) {
 
 // TestLoadConfig_EventSourceSurfaceUnchangedWhenUnset is the issue's
 // "byte-for-byte unchanged" regression guard: loading a config with none of
-// the new event_source/hookdeck/reconciliation keys set must produce
+// the new event_source/reconciliation keys set must produce
 // exactly the same values as before this surface existed for every
 // pre-existing field, plus the documented defaults for the new ones.
 func TestLoadConfig_EventSourceSurfaceUnchangedWhenUnset(t *testing.T) {
@@ -197,86 +194,104 @@ func TestLoadConfig_EventSourceValidation(t *testing.T) {
 
 func TestLoadConfig_EventSourceYAML(t *testing.T) {
 	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `event_source: hookdeck`)
-	cfg, err := LoadConfig([]string{"-config", path})
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EventSource != EventSourceHookdeck {
-		t.Errorf("EventSource = %q, want %q", cfg.EventSource, EventSourceHookdeck)
-	}
-}
-
-func TestLoadConfig_EventSourcePrecedence(t *testing.T) {
-	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `event_source: hookdeck`)
-
-	// Env overrides YAML.
-	t.Setenv("PRUEFER_EVENT_SOURCE", "poll")
+	path := writeYAMLConfig(t, dir, `event_source: poll`)
 	cfg, err := LoadConfig([]string{"-config", path})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	if cfg.EventSource != EventSourcePoll {
-		t.Errorf("EventSource = %q, want %q (env should override YAML)", cfg.EventSource, EventSourcePoll)
-	}
-
-	// Flag overrides env.
-	cfg, err = LoadConfig([]string{"-config", path, "-event-source", "hookdeck"})
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.EventSource != EventSourceHookdeck {
-		t.Errorf("EventSource = %q, want %q (flag should override env)", cfg.EventSource, EventSourceHookdeck)
+		t.Errorf("EventSource = %q, want %q", cfg.EventSource, EventSourcePoll)
 	}
 }
 
-func TestLoadConfig_HookdeckYAML(t *testing.T) {
+func TestLoadConfig_EventSourcePrecedence(t *testing.T) {
 	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `
-event_source: hookdeck
+	path := writeYAMLConfig(t, dir, `event_source: poll`)
+
+	// Env overrides YAML.
+	t.Setenv("PRUEFER_EVENT_SOURCE", "direct")
+	t.Setenv("PRUEFER_DIRECT_LISTEN", "127.0.0.1:8787")
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourceDirect {
+		t.Errorf("EventSource = %q, want %q (env should override YAML)", cfg.EventSource, EventSourceDirect)
+	}
+
+	// Flag overrides env.
+	cfg, err = LoadConfig([]string{"-config", path, "-event-source", "poll"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.EventSource != EventSourcePoll {
+		t.Errorf("EventSource = %q, want %q (flag should override env)", cfg.EventSource, EventSourcePoll)
+	}
+}
+
+// TestLoadConfig_HookdeckEventSourceRefused pins ADR 2477: event_source:
+// hookdeck is refused at config load by every route, with a message naming
+// the replacements and the documentation section.
+func TestLoadConfig_HookdeckEventSourceRefused(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := writeYAMLConfig(t, dir, `event_source: hookdeck`)
+	emptyPath := writeYAMLConfig(t, t.TempDir(), ``)
+
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected a refusal for event_source: hookdeck")
+		}
+		for _, want := range []string{"tailscale", "direct", "Migrating from Hookdeck"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q lacks %q", err.Error(), want)
+			}
+		}
+	}
+	t.Run("yaml", func(t *testing.T) {
+		_, err := LoadConfig([]string{"-config", yamlPath})
+		check(t, err)
+	})
+	t.Run("flag", func(t *testing.T) {
+		_, err := LoadConfig([]string{"-config", emptyPath, "-event-source", "hookdeck"})
+		check(t, err)
+	})
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("PRUEFER_EVENT_SOURCE", "hookdeck")
+		_, err := LoadConfig([]string{"-config", emptyPath})
+		check(t, err)
+	})
+}
+
+// TestLoadConfig_LeftoverHookdeckSettingsAreIgnoredAndReported pins ADR 2477:
+// leftover hookdeck.* keys, -hookdeck-*-env flags and PRUEFER_HOOKDECK_*
+// variables never fail startup; they are collected, names only, once each.
+func TestLoadConfig_LeftoverHookdeckSettingsAreIgnoredAndReported(t *testing.T) {
+	path := writeYAMLConfig(t, t.TempDir(), `
 hookdeck:
   api_key_env: MY_HOOKDECK_KEY
   webhook_secret_env: MY_WEBHOOK_SECRET
 `)
-	cfg, err := LoadConfig([]string{"-config", path})
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.HookdeckAPIKeyEnv != "MY_HOOKDECK_KEY" {
-		t.Errorf("HookdeckAPIKeyEnv = %q, want MY_HOOKDECK_KEY", cfg.HookdeckAPIKeyEnv)
-	}
-	if cfg.HookdeckWebhookSecretEnv != "MY_WEBHOOK_SECRET" {
-		t.Errorf("HookdeckWebhookSecretEnv = %q, want MY_WEBHOOK_SECRET", cfg.HookdeckWebhookSecretEnv)
-	}
-}
-
-func TestLoadConfig_HookdeckEnvOverridesYAML(t *testing.T) {
-	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, `
-hookdeck:
-  api_key_env: FROM_YAML
-`)
 	t.Setenv("PRUEFER_HOOKDECK_API_KEY_ENV", "FROM_ENV")
-
-	cfg, err := LoadConfig([]string{"-config", path})
+	cfg, err := LoadConfig([]string{"-config", path, "-hookdeck-api-key-env", "FROM_FLAG", "-hookdeck-webhook-secret-env="})
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.HookdeckAPIKeyEnv != "FROM_ENV" {
-		t.Errorf("HookdeckAPIKeyEnv = %q, want FROM_ENV (env should override YAML)", cfg.HookdeckAPIKeyEnv)
+	want := []string{"-hookdeck-api-key-env", "-hookdeck-webhook-secret-env", "PRUEFER_HOOKDECK_API_KEY_ENV", "hookdeck.api_key_env", "hookdeck.webhook_secret_env"}
+	if !reflect.DeepEqual(cfg.LegacyHookdeck, want) {
+		t.Errorf("LegacyHookdeck = %v, want %v", cfg.LegacyHookdeck, want)
 	}
-}
-
-func TestLoadConfig_HookdeckEnvFlagsEmptyRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := writeYAMLConfig(t, dir, ``)
-
-	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-api-key-env="}); err == nil {
-		t.Fatal("expected an error for an empty -hookdeck-api-key-env value")
+	n := legacyHookdeckNotice(cfg.LegacyHookdeck)
+	if strings.Count(n, "\n") != 1 {
+		t.Errorf("notice must be one line, got %q", n)
 	}
-	if _, err := LoadConfig([]string{"-config", path, "-hookdeck-webhook-secret-env="}); err == nil {
-		t.Fatal("expected an error for an empty -hookdeck-webhook-secret-env value")
+	for _, leaked := range []string{"MY_HOOKDECK_KEY", "MY_WEBHOOK_SECRET", "FROM_ENV", "FROM_FLAG"} {
+		if strings.Contains(n, leaked) {
+			t.Errorf("notice leaks %q: %q", leaked, n)
+		}
+	}
+	if legacyHookdeckNotice(nil) != "" {
+		t.Error("no leftover settings must produce no notice")
 	}
 }
 
@@ -900,7 +915,7 @@ func TestLoadConfig_CadenceRejectsUnrecognizedValue(t *testing.T) {
 }
 
 // TestLoadConfig_RepoCadenceYAMLOnly pins that repo_cadence is a structured,
-// YAML-only setting (no flag/env), mirroring hookdeck.*/reconciliation.*'s
+// YAML-only setting (no flag/env), mirroring reconciliation.*'s
 // own convention, and that it resolves per exact "owner/repo" key.
 func TestLoadConfig_RepoCadenceYAMLOnly(t *testing.T) {
 	dir := t.TempDir()

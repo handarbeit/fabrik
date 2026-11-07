@@ -214,7 +214,7 @@ type Daemon struct {
 	// dropMu guards dropCounts — unlike source.go's counters (single-writer,
 	// off one WebSocket read loop), drops recorded here can originate from
 	// eventsink.go's uncapped per-event goroutines (ReviewFromEvent) as well
-	// as hookdeck.Source's OnDrop callback (invoked from its own read loop),
+	// as an EventSource's OnDrop callback (invoked from its own read loop),
 	// so concurrent writers are the normal case, not an edge case.
 	dropMu     sync.Mutex
 	dropCounts map[events.DropReason]int
@@ -748,7 +748,7 @@ func (d *Daemon) reconciliationFallbackInterval() time.Duration {
 }
 
 // runEventDriven runs Pruefer in an event-driven mode (event_source: direct,
-// tailscale or the deprecated hookdeck): EventSource delivers events to a daemonEventSink in the background, while poll() is
+// or tailscale): EventSource delivers events to a daemonEventSink in the background, while poll() is
 // demoted to a low-frequency safety net — an optional pass at startup, then
 // one every reconciliationFallbackInterval() for the lifetime of the run.
 // EventSource.Run is trusted to retry transport failures internally and
@@ -809,7 +809,7 @@ func (d *Daemon) runEventDriven(ctx context.Context) error {
 }
 
 // HealthHandler returns a callback suitable for wiring into an
-// EventSource's transport-health hook (e.g. hookdeck.Config.OnHealth),
+// EventSource's transport-health hook (an App receiver's health callback),
 // bound to ctx — execute.go constructs the EventSource (and this callback)
 // before Run/runEventDriven starts, so ctx is threaded through explicitly
 // rather than stored on Daemon. A transition into events.HealthConnected
@@ -843,7 +843,7 @@ func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 
 // recordDrop increments reason's cumulative count and emits a TUI
 // DropEvent carrying the new total — see events.DropReason and ADR-1563.
-// The sole entry point for drop accounting: hookdeck.Source's OnDrop
+// The sole entry point for drop accounting: an EventSource's OnDrop
 // callback (wired in execute.go) and eventsink.go's own four drop points
 // both call this directly, since eventsink.go already lives in this
 // package and needs no callback indirection.
@@ -857,7 +857,7 @@ func (d *Daemon) HealthHandler(ctx context.Context) func(events.HealthEvent) {
 //
 // The emit happens while dropMu is still held, not after release: this
 // package's four eventsink.go drop points fan out across an uncapped number
-// of concurrent per-event goroutines (unlike hookdeck.Source's own reasons,
+// of concurrent per-event goroutines (unlike a transport source's own reasons,
 // which originate from its single-threaded read loop), so two concurrent
 // callers racing between their own unlock and their own emit could
 // otherwise deliver DropEvents to the TUI out of order (e.g. Total=2
@@ -946,12 +946,12 @@ func (d *Daemon) DropCounts() map[events.DropReason]int {
 }
 
 // SignatureDriftHandler returns a callback suitable for wiring into an
-// EventSource's signature-drift hook (e.g. hookdeck.Config.OnSignatureDrift)
+// EventSource's signature-drift hook (e.g. an App receiver's signature-drift callback)
 // — see ADR-1563. active=true means signature verification has just failed
 // on SignatureDriftThreshold consecutive deliveries with no interleaved
 // success: not a transient blip, but a misconfigured webhook secret or a
 // wire-format change in whatever transport EventSource speaks. This is
-// deliberately transport-agnostic (no "hookdeck" in the message) — the same
+// deliberately transport-agnostic (no transport name in the message) — the same
 // convention HealthHandler above already follows — since Daemon has no
 // business knowing which EventSource implementation is in play.
 //
@@ -993,7 +993,7 @@ func (d *Daemon) effectiveConcurrencyLocked() int {
 // triggerReconciliationPoll starts one poll cycle in its own goroutine,
 // coalescing concurrent requests: a burst of installation/repo-selection
 // events (e.g. an app install across many repos, each a distinct delivery
-// so dedupe doesn't collapse them), or a flapping Hookdeck connection
+// so dedupe doesn't collapse them), or a flapping transport connection
 // achieving HealthConnected repeatedly in quick succession (see
 // HealthHandler), would otherwise spawn one redundant full ListOpenPRs
 // sweep per trigger. Only one poll runs at a time; a trigger that arrives
@@ -1528,9 +1528,8 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 // check explicitly: Daemon.Clients is owner-keyed, not repo-keyed, and an
 // owner's installation token can plausibly cover repos beyond the derived
 // (filtered/capped) set Pruefer is actually reviewing. In particular, the
-// Hookdeck adapter creates its session with webhook_ids: [] (see
-// hookdeck/client.go's createSession) — "every connection visible to this
-// API key," not scoped to the derived set — so a webhook event for a
+// App webhook is delivered for every repository the installation
+// is granted, not scoped to the derived set — so a webhook event for a
 // covered-but-unreviewed repo under a watched owner is a plausible real
 // delivery, not just a hypothetical one.
 // Matching is case-insensitive: GitHub treats owner and repository names as

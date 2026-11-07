@@ -7,8 +7,8 @@ import "sync"
 // signature drift — see ADR-1563. Chosen as a plain count rather than a
 // time-based rolling rate: deterministic to test (a count crosses its
 // threshold on exactly one delivery) and a healthy mix never triggers it for
-// any interleaving. Shared by the Hookdeck source and the direct App webhook
-// transport (ADR 2142).
+// any interleaving. Shared by the App webhook receivers (direct and tailscale; ADR 2142,
+// ADR 2475). Originally extracted from the removed Hookdeck source (ADR 2477).
 const SignatureDriftThreshold = 20
 
 // SigDrift counts consecutive signature-verification failures and reports the

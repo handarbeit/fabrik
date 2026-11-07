@@ -3,7 +3,7 @@
 // type, the EventSource/EventSink interfaces, and shared per-webhook
 // mechanics (signature verification, delivery-ID dedupe) that any
 // GitHub-webhook-forwarding transport can reuse. No transport-specific
-// concept (e.g. Hookdeck) may appear here or leak into a caller's own
+// concept may appear here or leak into a caller's own
 // review/domain code — see adrs/1254-*.md.
 //
 // Originally built inside pruefer/events as a Pruefer-only package (per
@@ -82,11 +82,11 @@ type HealthEvent struct {
 // existing classification into something a caller can count and report,
 // instead of it terminating at a rate-limited or unthrottled log line.
 //
-// The values split into two origins: the first six are raised by
-// hookdeck.Source (a malformed outer frame, a malformed attempt body, a
+// The values split into two origins: the first six are raised by a
+// transport source (a malformed outer frame, a malformed attempt body, a
 // missing or invalid GitHub signature, a normalization failure, or a
-// delivery-ID dedupe hit) and reach a caller via hookdeck.Config.OnDrop,
-// since hookdeck cannot import pruefer to call back in directly. The last
+// delivery-ID dedupe hit) and reach a caller via a drop callback, since a
+// source cannot import pruefer to call back in directly. The last
 // four are raised by Daemon.ReviewFromEvent (pruefer/eventsink.go) — an
 // unrecognized owner, a repo outside watched_repos, a PR already under
 // review, or a PR no longer open — and are recorded in-package via
@@ -95,12 +95,12 @@ type DropReason string
 
 const (
 	// DropSignatureMissing means the forwarded request carried no
-	// X-Hub-Signature-256 header at all — a Hookdeck-side forwarding
+	// X-Hub-Signature-256 header at all — a forwarding
 	// problem (or source misconfiguration), not a wrong secret.
 	DropSignatureMissing DropReason = "signature_missing"
 	// DropSignatureInvalid means a X-Hub-Signature-256 header was present
 	// but did not verify against the configured webhook secret — either a
-	// misconfigured secret or a change in the byte-exact body Hookdeck
+	// misconfigured secret or a change in the byte-exact body a relay
 	// forwards (see adrs/1254-*.md's byte-exactness dependency).
 	DropSignatureInvalid DropReason = "signature_invalid"
 	// DropMalformedEnvelope means the outer WebSocket frame itself failed
