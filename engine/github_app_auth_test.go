@@ -226,7 +226,7 @@ func TestRefuseWebhooksWithGitHubApp(t *testing.T) {
 
 // TestRefuseUnknownEventSource is the direct regression test for the PR
 // review finding (#1142): before this fix, an EventSource typo (e.g.
-// "Hookdeck", "hook-deck") silently compared unequal to EventSourceHookdeck
+// "Tailscale", "hook-deck") silently compared unequal to the exact value
 // everywhere and degraded to plain polling with no error and no log
 // message, even though the operator explicitly opted into event-driven
 // ingestion.
@@ -238,8 +238,10 @@ func TestRefuseUnknownEventSource(t *testing.T) {
 	}{
 		{name: "empty (unset): allowed", eventSource: "", wantErr: false},
 		{name: "poll: allowed", eventSource: EventSourcePoll, wantErr: false},
-		{name: "hookdeck: allowed", eventSource: EventSourceHookdeck, wantErr: false},
-		{name: "wrong case: refused", eventSource: "Hookdeck", wantErr: true},
+		{name: "direct: allowed", eventSource: EventSourceDirect, wantErr: false},
+		{name: "tailscale: allowed", eventSource: EventSourceTailscale, wantErr: false},
+		{name: "hookdeck: refused (removed)", eventSource: "hookdeck", wantErr: true},
+		{name: "wrong case: refused", eventSource: "Tailscale", wantErr: true},
 		{name: "typo: refused", eventSource: "hook-deck", wantErr: true},
 		{name: "garbage: refused", eventSource: "webhook", wantErr: true},
 	}
@@ -259,46 +261,26 @@ func TestRefuseUnknownEventSource(t *testing.T) {
 	}
 }
 
-func TestRefuseHookdeckWithoutGitHubApp(t *testing.T) {
-	tests := []struct {
-		name              string
-		eventSource       string
-		appAuthConfigured bool
-		wantErr           bool
-	}{
-		{name: "poll, no app auth: allowed", eventSource: EventSourcePoll, appAuthConfigured: false, wantErr: false},
-		{name: "empty, no app auth: allowed", eventSource: "", appAuthConfigured: false, wantErr: false},
-		{name: "hookdeck, app auth configured: allowed", eventSource: EventSourceHookdeck, appAuthConfigured: true, wantErr: false},
-		{name: "hookdeck, no app auth: refused", eventSource: EventSourceHookdeck, appAuthConfigured: false, wantErr: true},
-		{name: "poll, app auth configured: allowed", eventSource: EventSourcePoll, appAuthConfigured: true, wantErr: false},
+// TestRefuseHookdeckEventSource pins ADR 2477: exactly "hookdeck" is refused,
+// the message names both replacements and the User Guide section, and every
+// other value is left to RefuseUnknownEventSource.
+func TestRefuseHookdeckEventSource(t *testing.T) {
+	err := RefuseHookdeckEventSource("hookdeck")
+	if err == nil {
+		t.Fatal("expected a refusal for event_source: hookdeck")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := RefuseHookdeckWithoutGitHubApp(tt.eventSource, tt.appAuthConfigured)
-			if tt.wantErr && err == nil {
-				t.Fatal("expected an error refusing event_source: hookdeck without GitHub App auth")
-			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("RefuseHookdeckWithoutGitHubApp(%q, %v) = %v, want nil", tt.eventSource, tt.appAuthConfigured, err)
-			}
-			if tt.wantErr && !strings.Contains(err.Error(), "hookdeck") {
-				t.Errorf("error %q does not name event_source: hookdeck", err.Error())
-			}
-		})
+	for _, want := range []string{"tailscale", "direct", "docs/USER_GUIDE.md", "Migrating from Hookdeck"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
 	}
-}
-
-func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
-	shortfalls := []githubauth.RequiredPermissionShortfall{
-		{Permission: "issues", Required: "write", Granted: "read"},
-		{Permission: "organization_projects", Required: "write", Granted: ""},
+	for _, ok := range []string{"", EventSourcePoll, EventSourceDirect, EventSourceTailscale, "Hookdeck", "bogus"} {
+		if err := RefuseHookdeckEventSource(ok); err != nil {
+			t.Errorf("RefuseHookdeckEventSource(%q) = %v, want nil", ok, err)
+		}
 	}
-	msg := FormatPermissionShortfalls(shortfalls)
-	if !strings.Contains(msg, "issues") || !strings.Contains(msg, `required "write"`) || !strings.Contains(msg, `granted "read"`) {
-		t.Errorf("message %q missing issues shortfall detail", msg)
-	}
-	if !strings.Contains(msg, "organization_projects") || !strings.Contains(msg, `granted "none"`) {
-		t.Errorf("message %q missing organization_projects shortfall detail (want granted \"none\" for an absent permission)", msg)
+	if RefuseUnknownEventSource("hookdeck") == nil {
+		t.Error("RefuseUnknownEventSource must refuse hookdeck too")
 	}
 }
 
@@ -721,7 +703,6 @@ func TestRefuseDirectMisconfigured(t *testing.T) {
 		wantErr string // substring naming the fix; "" = accepted
 	}{
 		{"not direct: ignored", Config{EventSource: EventSourcePoll}, false, "", ""},
-		{"hookdeck: ignored", Config{EventSource: EventSourceHookdeck}, false, "", ""},
 		{"happy path", good, true, "s3cret", ""},
 		{"happy path with path", Config{EventSource: EventSourceDirect, DirectListen: ":1", AppWebhookPath: "/fabrik-x"}, true, "zz-secret-value", ""},
 		{"PAT auth", good, false, "s3cret", "requires GitHub App authentication"},

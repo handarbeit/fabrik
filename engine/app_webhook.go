@@ -14,7 +14,7 @@ import (
 // delivery to the engine's intake sink; dedupe, the fast ack, echo attribution,
 // reconnect catch-up and ordering all belong to the intake and are reused, not
 // repeated. This type adds only what needs engine types: the engine's delivery
-// struct on SetSink and the Hookdeck-shared installation-coverage surface.
+// struct on SetSink and the shared installation-coverage surface.
 type appWebhookTransport struct {
 	*appwebhook.Receiver
 }

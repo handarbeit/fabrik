@@ -10,7 +10,7 @@ import (
 // amends ADR 042). When Fabrik writes to GitHub it remembers the write so the
 // webhook that echoes it back can be recognised as Fabrik's own rather than an
 // external change. The registry used to live inside *webhookManager, so it
-// worked for one transport only and Hookdeck had no-op stubs. It now belongs to
+// worked for one transport only and the others had no-op stubs. It now belongs to
 // the Engine, is wired into the board cache once, and serves every transport.
 //
 // Two properties differ from the old per-manager registry:

@@ -553,12 +553,13 @@ var claudeAnthropicAPIKey string
 var claudeAnthropicEnvPassthrough []string
 
 // claudeWorkerEnv is the engine's resolved dynamic part of the Fabrik-secret
-// scrub (#2027, ADR-2027): the operator-chosen Hookdeck variable names
-// (cfg.HookdeckAPIKeyEnv / HookdeckWebhookSecretEnv — the names are free-form,
-// so a fixed list alone cannot cover the secrets they point at) and the
+// scrub (#2027, ADR-2027): the operator-chosen secret variable names
+// (the direct/tailscale pointers and, since Hookdeck's removal, the variables a
+// leftover Hookdeck setting names, cfg.LegacyScrubEnvNames — the names are
+// free-form, so a fixed list alone cannot cover the secrets they point at) and the
 // FABRIK_WORKER_ENV_PASSTHROUGH opt-in. Set once by Engine.New, mirroring
 // claudeAnthropicEnvPassthrough. The zero value still scrubs the whole fixed
-// list (workerenv.Scrubbed plus the Hookdeck defaults).
+// list (workerenv.Scrubbed, which keeps the leftover Hookdeck defaults, ADR 2477).
 var claudeWorkerEnv workerenv.Resolved
 
 // killReasonCtxKey is the context key for kill reason annotation.

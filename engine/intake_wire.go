@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -48,10 +47,9 @@ func (e *Engine) applyDelivery(cache *boardcache.CacheImpl, eventType string, pa
 // intake, no echo registry, and the cleanup is a no-op.
 func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.CacheImpl) func() {
 	wantWebhooks := e.cfg.Webhooks
-	wantHookdeck := e.cfg.EventSource == EventSourceHookdeck
 	wantDirect := e.cfg.EventSource == EventSourceDirect
 	wantTailscale := e.cfg.EventSource == EventSourceTailscale
-	if !wantWebhooks && !wantHookdeck && !wantDirect && !wantTailscale && len(e.extraTransports) == 0 {
+	if !wantWebhooks && !wantDirect && !wantTailscale && len(e.extraTransports) == 0 {
 		return func() {}
 	}
 
@@ -118,9 +116,6 @@ func (e *Engine) setUpIngestion(ctx context.Context, cacheImpl *boardcache.Cache
 
 	if wantWebhooks {
 		e.startWebhookTransport(ctx, set, sink, initialRepos, bootstrap)
-	}
-	if wantHookdeck {
-		e.startHookdeckTransport(ctx, set, sink, initialRepos, bootstrap)
 	}
 	if wantDirect {
 		e.startDirectTransport(ctx, set, sink, initialRepos, bootstrap)
@@ -214,51 +209,6 @@ func (e *Engine) startWebhookTransport(ctx context.Context, set *transportSet, s
 	// covers single-repo boards; the periodic reconcileLoop check re-runs it once
 	// the full managed set is known and on every tick thereafter.
 	e.checkWebhookHookCoverage(wm)
-}
-
-// startHookdeckTransport starts the Hookdeck transport (event_source: hookdeck,
-// App auth). A missing credential falls back to polling for this transport.
-func (e *Engine) startHookdeckTransport(ctx context.Context, set *transportSet, sink func(delivery), initialRepos map[string]bool, bootstrap func()) {
-	// apiKeyEnvName/secretEnvName hold the *names* of the environment
-	// variables, never their values: the secrets themselves (apiKey,
-	// webhookSecret below) go only to newHookdeckManager and are never
-	// logged. The explicit "...Name" suffix keeps that distinction plain
-	// to readers, and to CodeQL, whose clear-text-logging heuristic read
-	// the earlier apiKeyEnv/secretEnv spellings as sensitive values
-	// flowing into the log call below - a false positive, since what is
-	// logged is the variable name (e.g. "$HOOKDECK_API_KEY").
-	apiKeyEnvName := e.cfg.HookdeckAPIKeyEnv
-	if apiKeyEnvName == "" {
-		apiKeyEnvName = DefaultHookdeckAPIKeyEnv
-	}
-	secretEnvName := e.cfg.HookdeckWebhookSecretEnv
-	if secretEnvName == "" {
-		secretEnvName = DefaultHookdeckWebhookSecretEnv
-	}
-	apiKey := os.Getenv(apiKeyEnvName)
-	webhookSecret := os.Getenv(secretEnvName)
-	if apiKey == "" || webhookSecret == "" {
-		var missing []string
-		if apiKey == "" {
-			missing = append(missing, apiKeyEnvName)
-		}
-		if webhookSecret == "" {
-			missing = append(missing, secretEnvName)
-		}
-		e.logf(0, "hookdeck", "event_source: hookdeck requires %s to be set — falling back to polling only\n",
-			strings.Join(missing, " and "))
-		return
-	}
-	hm := newHookdeckManager(e.logf, e.emit, initialRepos, nil, apiKey, webhookSecret)
-	hm.SetCoverageCheck(func() { e.checkHookdeckInstallationCoverage(hm) })
-	if !e.attachTransport(ctx, set, hm, sink, bootstrap) {
-		return
-	}
-	e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnvName, secretEnvName)
-	// R5 startup assertion (#1142): verify the App installation's granted-repo set
-	// covers every managed repo, warning (never failing startup) on any gap — the
-	// App-mode analogue of checkWebhookHookCoverage.
-	e.checkHookdeckInstallationCoverage(hm)
 }
 
 // startDirectTransport starts the direct App webhook transport (event_source:

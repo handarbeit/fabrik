@@ -145,11 +145,10 @@ func TestEchoRegistry_ReserveIfSubscribedConsultsTransports(t *testing.T) {
 		t.Fatal("reserved projects_v2_item though the only transport dropped it")
 	}
 
-	// Hookdeck receives everything.
-	hm, _ := newTestHookdeckManager(t)
-	set.Add(hm)
+	// A transport that receives everything (an App receiver).
+	set.Add(newFakeTransport("all"))
 	if r.ReserveIfSubscribed("projects_v2_item", "edited", "PVTI_1") == nil || r.len() != 1 {
-		t.Fatal("did not reserve projects_v2_item though hookdeck receives it")
+		t.Fatal("did not reserve projects_v2_item though a transport receives it")
 	}
 }
 

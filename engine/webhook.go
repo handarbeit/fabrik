@@ -1218,8 +1218,8 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 // records the misses in a rolling window and transitions to Unhealthy when the
 // threshold is reached. Misses while the subprocess is starting up are ignored:
 // entries reserved just before a restart would otherwise fire as false misses
-// during the grace period. Only this manager registers for misses — Hookdeck
-// reports genuine connectivity through its own OnHealth callback.
+// during the grace period. Only this manager registers for misses — the App
+// receivers report connectivity directly.
 func (wm *webhookManager) noteEchoMisses(registeredAt []time.Time) {
 	now := time.Now()
 	wm.mu.Lock()
@@ -1510,7 +1510,7 @@ func minWebhookDuration(a, b time.Duration) time.Duration {
 }
 
 // webhookMaxBodyBytes is the largest delivery body the listener accepts: GitHub's
-// documented maximum webhook payload (25 MB), matching Hookdeck's frame cap. A
+// documented maximum webhook payload (25 MB). A
 // larger body is rejected with 413 without being buffered past the cap+1 read.
 const webhookMaxBodyBytes = 25 << 20
 

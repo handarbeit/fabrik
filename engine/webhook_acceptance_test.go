@@ -38,14 +38,14 @@ func intakeEngine(t *testing.T) (*Engine, *intake, *[]itemstate.Change, *sync.Mu
 
 const labeledPayload = `{"action":"labeled","repository":{"full_name":"owner/repo"},"issue":{"number":1},"label":{"name":"fabrik:paused"},"sender":{"login":"bot[bot]"}}`
 
-// FR-008: echo matching works for a Hookdeck delivery, which used to be a no-op.
-func TestIntake_HookdeckDeliveryEchoIsAttributedToTheEngine(t *testing.T) {
+// FR-008: echo matching works for an App-receiver delivery, which used to be a no-op.
+func TestIntake_AppDeliveryEchoIsAttributedToTheEngine(t *testing.T) {
 	eng, in, got, mu := intakeEngine(t)
 
 	// The engine reserves before it writes ...
 	eng.reserveLabelAdd(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:paused", "")
-	// ... and the echo arrives over Hookdeck.
-	in.Submit(delivery{ID: "hd-echo", EventType: "issues", Payload: []byte(labeledPayload), Transport: "hookdeck"})
+	// ... and the echo arrives over an App receiver.
+	in.Submit(delivery{ID: "hd-echo", EventType: "issues", Payload: []byte(labeledPayload), Transport: "direct"})
 	in.Drain()
 
 	mu.Lock()
@@ -57,7 +57,7 @@ func TestIntake_HookdeckDeliveryEchoIsAttributedToTheEngine(t *testing.T) {
 		}
 	}
 	if found == nil || !found.EchoOfEngine {
-		t.Fatalf("hookdeck-delivered echo was not attributed to the engine: %+v", found)
+		t.Fatalf("App-delivered echo was not attributed to the engine: %+v", found)
 	}
 	if eng.echo.len() != 0 {
 		t.Fatal("the matched echo was left pending")

@@ -32,7 +32,7 @@ func (e *Engine) requestReconcile() {
 // It periodically runs LightReconcile (a fresh shallow board fetch + drift compare)
 // and, on drift, reconciles the cache — re-syncing shallow fields including the
 // fabrik-managed label set. It MUST run whether or not an event-ingestion
-// transport started (#955): a webhook-less/hookdeck-less (or failed) deployment
+// transport started (#955): a webhook-less (or failed) deployment
 // must still self-heal, so this loop is launched unconditionally rather than
 // nested in any transport's start path. ts may be nil or empty (no transport is
 // active or it failed to start); coverage checks and health-state transitions

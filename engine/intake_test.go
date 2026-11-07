@@ -80,7 +80,7 @@ func TestIntake_DuplicateAppliesOnce(t *testing.T) {
 	if in.Submit(delivery{ID: "X", EventType: "issues", Payload: p, Transport: "webhook"}) {
 		t.Fatal("same-transport redelivery was queued")
 	}
-	if in.Submit(delivery{ID: "X", EventType: "issues", Payload: p, Transport: "hookdeck"}) {
+	if in.Submit(delivery{ID: "X", EventType: "issues", Payload: p, Transport: "direct"}) {
 		t.Fatal("cross-transport duplicate was queued")
 	}
 	in.Drain()
@@ -102,7 +102,7 @@ func TestIntake_DuplicateAppliesOnceAcrossRestart(t *testing.T) {
 
 	// The engine restarts: a fresh intake reloads the persisted record.
 	second := newIntake(newDeliveryLedger(path, time.Now(), nil), rec.apply, nil, time.Now)
-	if second.Submit(delivery{ID: "X", EventType: "issues", Payload: p, Transport: "hookdeck"}) {
+	if second.Submit(delivery{ID: "X", EventType: "issues", Payload: p, Transport: "direct"}) {
 		t.Fatal("a delivery applied before the restart was queued again after it")
 	}
 	second.Submit(delivery{ID: "Y", EventType: "issues", Payload: p})

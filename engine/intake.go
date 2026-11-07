@@ -17,7 +17,7 @@ type delivery struct {
 	ID        string
 	EventType string
 	Payload   []byte
-	// Transport names the carrier ("webhook", "hookdeck", …), for logs.
+	// Transport names the carrier ("webhook", "direct", …), for logs.
 	Transport string
 	// ReceivedAt is when the intake received the delivery, stamped by Submit
 	// before the ledger check. The apply function orders a delivery that carries

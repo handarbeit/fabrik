@@ -277,35 +277,33 @@ func TestNew_RoutesClaudeLogToLogFile(t *testing.T) {
 	}
 }
 
-// TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError verifies
-// the ordering PR review flagged on #1142: validateGitHubAppConfig must run
-// before RefuseHookdeckWithoutGitHubApp, so a partially-configured GitHub
-// App (here, github_app_id set with no private key or installation ID)
-// combined with event_source: hookdeck fails with validateGitHubAppConfig's
-// specific "missing X" diagnosis rather than RefuseHookdeckWithoutGitHubApp's
-// coarser "requires GitHub App authentication" message — both are correct
-// (gitHubAppAuthConfigured requires all three fields), but only one names
-// the actual fix.
-func TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError(t *testing.T) {
+// TestNew_HookdeckEventSourceIsRefusedWithMigrationMessage pins ADR 2477:
+// event_source: hookdeck is refused by New() before any other validation, so
+// even a partially-configured GitHub App (which would otherwise fail first
+// with its own "partially configured" diagnosis) gets the migration message.
+func TestNew_HookdeckEventSourceIsRefusedWithMigrationMessage(t *testing.T) {
 	preserveClaudeLogf(t)
 	skipIfNoGit(t)
 	origSupported := claudeNameFlagSupported
 	defer func() { claudeNameFlagSupported = origSupported }()
 	t.Setenv("PATH", t.TempDir())
 
-	cfg := Config{
-		Owner:       "o",
-		Repo:        "r",
-		Token:       "tok",
-		EventSource: EventSourceHookdeck,
-		GitHubAppID: 123, // private key path and installation ID deliberately left unset
-	}
-	_, err := New(cfg)
-	if err == nil {
-		t.Fatal("New: want error for partial GitHub App config, got nil")
-	}
-	if !strings.Contains(err.Error(), "partially configured") {
-		t.Errorf("New err = %q, want validateGitHubAppConfig's specific diagnosis (\"partially configured\") to win over RefuseHookdeckWithoutGitHubApp's coarser message", err.Error())
+	for name, cfg := range map[string]Config{
+		"no other config": {Owner: "o", Repo: "r", Token: "tok", EventSource: "hookdeck"},
+		"partial app config": {Owner: "o", Repo: "r", Token: "tok", EventSource: "hookdeck",
+			GitHubAppID: 123}, // private key path and installation ID deliberately left unset
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := New(cfg)
+			if err == nil {
+				t.Fatal("New: want a refusal for event_source: hookdeck, got nil")
+			}
+			for _, want := range []string{"tailscale", "direct", "Migrating from Hookdeck"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("New err = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+		})
 	}
 }
 
