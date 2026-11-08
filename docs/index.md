@@ -50,9 +50,9 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.91: review gates that read the reviewer, not the clock. Each reviewer is judged at the PR's current head, a clean review from an expected reviewer starts no worker, and every engine pause now says why with a <code>fabrik:pause:&lt;cause&gt;</code> label, with clean-stop pauses resuming on the next start. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate">Pending Reviewer Gate</a>. (v0.0.90 added
-      <a href="{{ '/USER_GUIDE' | relative_url }}#direct-app-webhook-receiver-event_source-direct">webhooks without a relay</a>.)
+      New in v0.0.92: Hookdeck is removed in favour of relay-free webhooks (<code>event_source: tailscale</code> or <code>direct</code>, both on GitHub App auth); see
+      <a href="{{ '/USER_GUIDE' | relative_url }}#migrating-from-hookdeck">Migrating from Hookdeck</a>. Pruefer can now receive webhooks the same way, and lock and label state holds up better: orphaned locks are reclaimed, lost label writes are confirmed and re-applied, and a merge-train trial's CI verdict is acted on within one poll. (v0.0.91 added
+      <a href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate">review gates that read the reviewer, not the clock</a>.)
     </p>
 
     <div class="hero-diagram">
