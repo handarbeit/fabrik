@@ -42,6 +42,8 @@ func TestFindFixtures(t *testing.T) {
 		{"only the first target after a keyword", "multi_target.md", Options{}, []string{"handarbeit/fabrik#1", "handarbeit/fabrik#3"}},
 		{"case, italics, newline and link variants", "variants.md", Options{},
 			[]string{"handarbeit/fabrik#21", "handarbeit/fabrik#22", "handarbeit/fabrik#23", "handarbeit/fabrik#24", "handarbeit/fabrik#25"}},
+		// UNVERIFIED against GitHub: GH-N is an issue-reference form; matched to stay safe.
+		{"GH-N reference form (UNVERIFIED)", "gh_style.md", Options{}, []string{"handarbeit/fabrik#2497", "handarbeit/fabrik#2498"}},
 		// UNVERIFIED against GitHub: code is treated as a match (see testdata/README.md).
 		{"code span matches by default (UNVERIFIED)", "code_span.md", Options{}, []string{"handarbeit/fabrik#61"}},
 		{"fenced block matches by default (UNVERIFIED)", "fenced_block.md", Options{}, []string{"handarbeit/fabrik#62"}},
@@ -127,5 +129,16 @@ func TestSorted(t *testing.T) {
 	in := []Ref{{Repo: "b/x", Number: 1}, {Repo: "a/x", Number: 9}, {Repo: "a/x", Number: 2}}
 	if got, want := keys(Sorted(in)), []string{"a/x#2", "a/x#9", "b/x#1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// The PR title can land in a merge or squash commit message, so it is scanned too (ADR 2576).
+func TestFindTextsScansTitleWithLocation(t *testing.T) {
+	refs := FindTexts(self, Options{},
+		Text{Where: "PR title", Body: "fix: handle X (closes #2497)"},
+		Text{Where: "PR body", Body: "Closes #2497"})
+	if len(refs) != 1 || refs[0].Number != 2497 || len(refs[0].Locations) != 2 ||
+		refs[0].Locations[0].Where != "PR title" || refs[0].Locations[1].Where != "PR body" {
+		t.Fatalf("got %+v", refs)
 	}
 }

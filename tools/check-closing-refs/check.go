@@ -16,6 +16,8 @@ const commitCap = 250
 
 // PRSource reads the text GitHub would scan for closing keywords.
 type PRSource interface {
+	// Title returns the live PR title: it becomes the subject of a merge or squash commit.
+	Title(ctx context.Context) (string, error)
 	// Body returns the live PR description.
 	Body(ctx context.Context) (string, error)
 	// Commits returns every commit message on the PR, in order.
@@ -84,6 +86,10 @@ func runInner(ctx context.Context, cfg config, src PRSource, board BoardReader, 
 		return exitFail
 	}
 
+	title, err := src.Title(ctx)
+	if err != nil {
+		return unverified("cannot read the PR: " + err.Error())
+	}
 	body, err := src.Body(ctx)
 	if err != nil {
 		return unverified("cannot read the PR: " + err.Error())
@@ -96,9 +102,13 @@ func runInner(ctx context.Context, cfg config, src PRSource, board BoardReader, 
 		return unverified(fmt.Sprintf("the PR has %d or more commits, which is the most GitHub's API returns, so the list may be incomplete", limit))
 	}
 
-	refs := closingrefs.Sorted(closingrefs.Find(body, commits, cfg.Repo, closingrefs.Options{ExemptCode: cfg.CodeExempt}))
+	texts := []closingrefs.Text{{Where: "PR title", Body: title}, {Where: "PR body", Body: body}}
+	for _, c := range commits {
+		texts = append(texts, closingrefs.Text{Where: "commit " + c.SHA, Body: c.Message})
+	}
+	refs := closingrefs.Sorted(closingrefs.FindTexts(cfg.Repo, closingrefs.Options{ExemptCode: cfg.CodeExempt}, texts...))
 	if len(refs) == 0 {
-		fmt.Fprintf(out, "OK: no closing keyword in the PR body or its %d commit message(s); %s was not consulted.\n", len(commits), cfg.BoardLabel)
+		fmt.Fprintf(out, "OK: no closing keyword in the PR title, body or its %d commit message(s); %s was not consulted.\n", len(commits), cfg.BoardLabel)
 		return exitOK
 	}
 

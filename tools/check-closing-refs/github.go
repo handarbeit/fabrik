@@ -26,6 +26,9 @@ type ghClient struct {
 	pr          int
 	boardOwner  string
 	boardNumber int
+
+	pulled          bool
+	prTitle, prBody string
 }
 
 var errNoBoardToken = errors.New("no board token is configured (set the CLOSING_REFS_BOARD_TOKEN or ADD_TO_PROJECT_PAT repository secret)")
@@ -81,17 +84,36 @@ func (c *ghClient) do(ctx context.Context, method, url, token string, body []byt
 	return json.Unmarshal(data, v)
 }
 
-func (c *ghClient) Body(ctx context.Context) (string, error) {
+// pull reads the PR once; Title and Body share the result.
+func (c *ghClient) pull(ctx context.Context) (title, body string, err error) {
+	if c.pulled {
+		return c.prTitle, c.prBody, nil
+	}
 	var pr struct {
-		Body *string `json:"body"`
+		Title *string `json:"title"`
+		Body  *string `json:"body"`
 	}
 	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/pulls/%d", c.restBase, c.repo, c.pr), c.restToken, nil, &pr); err != nil {
-		return "", err
+		return "", "", err
 	}
-	if pr.Body == nil {
-		return "", nil
+	if pr.Title != nil {
+		c.prTitle = *pr.Title
 	}
-	return *pr.Body, nil
+	if pr.Body != nil {
+		c.prBody = *pr.Body
+	}
+	c.pulled = true
+	return c.prTitle, c.prBody, nil
+}
+
+func (c *ghClient) Title(ctx context.Context) (string, error) {
+	t, _, err := c.pull(ctx)
+	return t, err
+}
+
+func (c *ghClient) Body(ctx context.Context) (string, error) {
+	_, b, err := c.pull(ctx)
+	return b, err
 }
 
 func (c *ghClient) Commits(ctx context.Context) ([]closingrefs.Commit, error) {

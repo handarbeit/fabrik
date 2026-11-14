@@ -18,12 +18,14 @@ import (
 const repo = "handarbeit/fabrik"
 
 type fakePR struct {
+	title   string
 	body    string
 	commits []closingrefs.Commit
 	bodyErr error
 	comErr  error
 }
 
+func (f fakePR) Title(context.Context) (string, error)                 { return f.title, f.bodyErr }
 func (f fakePR) Body(context.Context) (string, error)                  { return f.body, f.bodyErr }
 func (f fakePR) Commits(context.Context) ([]closingrefs.Commit, error) { return f.commits, f.comErr }
 
@@ -68,6 +70,16 @@ func TestNegatedBodyOnBoardFails(t *testing.T) {
 }
 
 // A merge-train integration or catch-up PR carries member commits; one member's keyword counts.
+// A title can become the subject of a merge/squash commit, so a keyword there counts.
+func TestTitleKeywordFails(t *testing.T) {
+	code, out, _ := runCheck(t, fakePR{title: "fix: handle X (closes #2497)", body: "clean"},
+		&fakeBoard{members: map[string]bool{repo + "#2497": true}})
+	if code != exitFail {
+		t.Fatalf("code = %d\n%s", code, out)
+	}
+	mustContain(t, out, "#2497", "PR title")
+}
+
 func TestMemberCommitKeywordFails(t *testing.T) {
 	b := &fakeBoard{members: map[string]bool{"handarbeit/fabrik#2497": true}}
 	pr := fakePR{
@@ -194,6 +206,7 @@ func TestSecretsAreRedacted(t *testing.T) {
 
 type fakeAPI struct {
 	t             *testing.T
+	title         string
 	body          string
 	commitCount   int
 	boardVisible  bool

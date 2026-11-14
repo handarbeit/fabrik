@@ -62,6 +62,7 @@ const (
 	ident     = `[A-Za-z0-9_.-]+`
 	target    = `(?:https?://github\.com/(` + ident + `)/(` + ident + `)/issues/(\d+)` +
 		`|(` + ident + `)/(` + ident + `)#(\d+)` +
+		`|(?i:GH-)(\d+)` +
 		`|#(\d+))`
 )
 
@@ -69,9 +70,29 @@ const (
 // tail of a longer word, but an underscore (italics) or asterisk before it is fine.
 var closingRE = regexp.MustCompile(`(^|[^A-Za-z0-9])(` + keyword + `)` + separator + target)
 
+// Text is one piece of PR text to scan, labelled with where it came from.
+type Text struct {
+	// Where is shown in messages, e.g. "PR title".
+	Where string
+	Body  string
+}
+
 // Find returns every issue that body and commits would close, deduplicated by repository and
 // number. selfRepo ("owner/repo") resolves a bare #N.
 func Find(body string, commits []Commit, selfRepo string, opts Options) []Ref {
+	return FindTexts(selfRepo, opts, joinTexts([]Text{{Where: "PR body", Body: body}}, commits)...)
+}
+
+func joinTexts(texts []Text, commits []Commit) []Text {
+	for _, c := range commits {
+		texts = append(texts, Text{Where: "commit " + c.SHA, Body: c.Message})
+	}
+	return texts
+}
+
+// FindTexts is Find over arbitrary labelled texts, scanned in order. selfRepo resolves a bare
+// #N or GH-N.
+func FindTexts(selfRepo string, opts Options, texts ...Text) []Ref {
 	self := strings.ToLower(selfRepo)
 	var order []string
 	byKey := map[string]*Ref{}
@@ -99,9 +120,8 @@ func Find(body string, commits []Commit, selfRepo string, opts Options) []Ref {
 		}
 	}
 
-	scan(body, "PR body")
-	for _, c := range commits {
-		scan(c.Message, "commit "+c.SHA)
+	for _, t := range texts {
+		scan(t.Body, t.Where)
 	}
 
 	out := make([]Ref, 0, len(order))
@@ -120,7 +140,7 @@ func hasLocation(ls []Location, l Location) bool {
 	return false
 }
 
-// resolveTarget reads the target groups of a closingRE match (groups 3..9).
+// resolveTarget reads the target groups of a closingRE match (groups 3..10).
 func resolveTarget(m []string, self string) (repo string, num int, text string) {
 	switch {
 	case m[3] != "": // issue URL
@@ -129,9 +149,12 @@ func resolveTarget(m []string, self string) (repo string, num int, text string) 
 	case m[6] != "": // owner/repo#N
 		n, _ := strconv.Atoi(m[8])
 		return strings.ToLower(m[6] + "/" + m[7]), n, m[6] + "/" + m[7] + "#" + m[8]
-	case m[9] != "": // bare #N
+	case m[9] != "": // GH-N
 		n, _ := strconv.Atoi(m[9])
-		return self, n, "#" + m[9]
+		return self, n, "GH-" + m[9]
+	case m[10] != "": // bare #N
+		n, _ := strconv.Atoi(m[10])
+		return self, n, "#" + m[10]
 	}
 	return "", 0, ""
 }

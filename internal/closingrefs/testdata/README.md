@@ -30,3 +30,7 @@ Use a scratch repository you own, never this one:
 - `Closes #1, #2`: GitHub requires a keyword per issue, so only #1 matches.
 - A keyword with no number (the PR template's bare `Closes #`) never matches.
 - `fix(engine): ... (#2498)` never matches: `(` is not a separator.
+- `GH-N` (GitHub's alternative issue-reference form) matches after a keyword. UNVERIFIED against
+  GitHub (`gh_style.md`): matching is the safe side. Probe it with the recipe above if it matters.
+- The PR title is scanned by the tool (`closingrefs.FindTexts`), also UNVERIFIED: it becomes the
+  subject of a merge or squash commit message, and over-matching costs one reworded title.

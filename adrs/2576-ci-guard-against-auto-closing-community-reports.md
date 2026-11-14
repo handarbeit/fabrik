@@ -24,14 +24,16 @@ check assumes nothing about whether GitHub currently applies keywords.
 1. **A pure matcher, `internal/closingrefs`.** `Find(body, commits, selfRepo, opts)` returns one
    `Ref{Repo, Number, Locations}` per issue. It recognises the nine keywords case-insensitively,
    separated from the target by whitespace (including newlines), a colon and Markdown emphasis or
-   link openers, with a target of `#N`, `owner/repo#N` or an issue URL. Negation is irrelevant by
+   link openers, with a target of `#N`, `GH-N`, `owner/repo#N` or an issue URL (`GH-N` is GitHub's
+   alternative issue-reference form; whether it closes is unverified, so it matches to stay safe). Negation is irrelevant by
    construction. A keyword with no number (the PR template's bare `Closes #`) never matches;
    only the first target after a keyword matches (`Closes #1, #2` yields #1, as GitHub requires a
    keyword per issue); `fix(engine): ... (#2498)` never matches. The matcher is biased to
    over-match: a missed match reopens the incident, an extra one costs a reworded sentence.
    `deps_test.go` pins it free of network and process imports.
-2. **A runner, `tools/check-closing-refs`,** reads the live PR body and every commit message
-   through the API (stdlib `net/http`), calls the matcher, and resolves board membership behind a
+2. **A runner, `tools/check-closing-refs`,** reads the live PR title, PR body and every commit message
+   through the API (the title is scanned, although unverified, because it becomes the subject of a
+   merge commit, and a squash commit if squash merging is ever enabled; the repository currently allows merge commits only) (stdlib `net/http`), calls the matcher, and resolves board membership behind a
    `BoardReader` interface, so every test runs offline.
 3. **Board membership is the only signal** (not author, not `author_association`): an issue is a
    community report iff it is an item of project #3 of `handarbeit`, read live by GraphQL
@@ -78,7 +80,7 @@ check assumes nothing about whether GitHub currently applies keywords.
   `.github/workflows/closing-refs.yml` (a plain `cp` and commit); nothing else changes.
 
 - A PR that would close a community report fails with the issue, the matched phrase, where it was
-  found (PR body or commit SHA) and the safe wordings `mentioned for context: #N` and
+  found (PR title, PR body or commit SHA) and the safe wordings `mentioned for context: #N` and
   `#N is out of scope here`.
 - A maintainer must mark the check "Guard community reports" required in branch protection (a
   repository setting) and, ideally, add the read-only `CLOSING_REFS_BOARD_TOKEN` secret.
