@@ -1644,6 +1644,19 @@ its write stamp (the `Date` header analogue). Real GitHub behaves this way
 sim could not reproduce the redundant completion-label re-add of the CI gate
 and the light-reconcile drift it caused.
 
+### `FetchItemDetails` leaves the caller's `UpdatedAt` and freshness evidence alone — **Modelled** (#2573)
+
+The real deep fetch (`github.Client.FetchItemDetails`) fills title, body, labels,
+comments, blocked-by and linked-PR fields on the caller's item but never reads or
+rewrites its `UpdatedAt`, `IssueLayerUpdatedAt`, `LinkedPRUpdatedAt` or comment
+total: those come from the board and probe queries. The sim used to replace the
+whole item (`*item = *full`), so a board copy the cache had served with `UpdatedAt`
+raised to a webhook receipt time came back with GitHub's value, and the receipt
+time never reached the Store through the deep-fetch apply. `FetchItemDetails` now
+keeps the caller's non-zero values (a bare item, as built from a
+`projects_v2_item.created` webhook, is still filled from the card). Without it the
+sim could not reproduce the awaiting-CI light-reconcile drift loop.
+
 ### A label write that returns success but does not stick — **Modelled** (#2551)
 
 `Sim.DropLabelWrite(kind, label, times)` makes the next `times` calls of
