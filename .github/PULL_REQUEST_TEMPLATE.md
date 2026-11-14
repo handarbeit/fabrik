@@ -4,6 +4,8 @@
 
 Closes #
 
+<!-- To mention a community report, write "mentioned for context: #N". Never put a closing keyword next to its number, even in a negation. -->
+
 ## Changes
 
 <!-- Bullet list of what's actually different. Keep it concrete. -->
