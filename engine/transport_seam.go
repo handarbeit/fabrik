@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
@@ -115,4 +116,15 @@ func (e *Engine) AttachStubTransportForTest(t *StubTransport) {
 // previous snapshot and returns the new one (tests of the FR-007 revert).
 func (e *Engine) HealthWatchTickForTest(prev map[string]bool) map[string]bool {
 	return e.healthWatchTick(prev)
+}
+
+// EarliestLongCooldownForTest returns the earliest long admission cooldown the idle
+// cap would count right now (zero if none), as PollWithBackoff reads it.
+func (e *Engine) EarliestLongCooldownForTest() time.Time { return e.earliestLongCooldown(e.now()) }
+
+// EarliestTimerDeadlineForTest returns the earliest unexpired deadline in the timer
+// registry (zero if none), as PollWithBackoff reads it, and the engine's clock.
+func (e *Engine) EarliestTimerDeadlineForTest() (due, now time.Time) {
+	now = e.now()
+	return e.earliestTimerDeadline(now), now
 }
