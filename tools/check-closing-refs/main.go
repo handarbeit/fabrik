@@ -53,7 +53,12 @@ func realMain(getenv func(string) string, stdout io.Writer) int {
 	var summary io.Writer
 	if p := getenv("GITHUB_STEP_SUMMARY"); p != "" {
 		if f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600); err == nil {
-			defer f.Close()
+			defer func() {
+				// The step summary is optional, so a failed close is reported, not fatal.
+				if err := f.Close(); err != nil {
+					fmt.Fprintf(stdout, "check-closing-refs: warning: could not close the step summary: %v\n", err)
+				}
+			}()
 			summary = f
 		}
 	}
