@@ -133,7 +133,7 @@ func (e *Engine) repairDispatcherBlindness(item gh.ProjectItem, gap []gh.Comment
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   repo,
 		Number: item.Number,
-		Reason: "feedback-dispatcher-gap",
+		Reason: reasonFeedbackDispatchGap,
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
 	})
 }

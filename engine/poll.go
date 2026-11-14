@@ -1487,18 +1487,18 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 		// terminal-only guard is removed here: LastAttemptAt (not CooldownAt) now carries
 		// dispatch suppression, so refreshing CooldownAt for ALL non-advanced
 		// deepFetchCandidates is safe regardless of completion state (#504 structural fix).
-		cooldown := e.githubRecheckInterval()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if advancedItems[iKey] || slotDeferred[iKey] {
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
+				repo := itemOwnerRepoString(item, e.defaultRepo())
 				e.store.Apply(itemstate.CooldownRecorded{
-					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+					Repo:   repo,
 					Number: item.Number,
-					Reason: "periodic-re-eval",
-					Until:  e.now().Add(cooldown),
+					Reason: reasonPeriodicReEval,
+					Until:  e.periodicReEvalDue(repo), // #2532: the safety-net interval while ingestion is reliable
 				})
 			}
 		}
@@ -2354,7 +2354,7 @@ func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 		Number: item.Number,
-		Reason: "sentinel-live",
+		Reason: reasonSentinelLive,
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
 	})
 }
@@ -2393,11 +2393,12 @@ func (e *Engine) recordLockWriteCooldown(item gh.ProjectItem) {
 // it. Without this the item would have no cooldown entry and nothing would ever
 // re-admit it (ADR 2096, R4).
 func (e *Engine) rearmPeriodicReEval(item gh.ProjectItem) {
+	repo := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.CooldownRecorded{
-		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Repo:   repo,
 		Number: item.Number,
-		Reason: "periodic-re-eval",
-		Until:  e.now().Add(e.githubRecheckInterval()),
+		Reason: reasonPeriodicReEval,
+		Until:  e.periodicReEvalDue(repo),
 	})
 }
 
