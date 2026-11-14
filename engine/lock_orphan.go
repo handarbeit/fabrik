@@ -199,6 +199,18 @@ func (e *Engine) settleOrphanedLocks() {
 		return
 	}
 	grace := e.lockOrphanGrace()
+	// #2532: the grace has no event; wake a poll when it runs out.
+	noted := map[string]bool{}
+	for _, ob := range observed {
+		k := lockOrphanKey(ob.repo, ob.number, "")
+		if noted[k] {
+			continue
+		}
+		noted[k] = true
+		if en, ok := e.lockOrphans.oldest(ob.repo, ob.number); ok && now.Sub(en.since) < grace {
+			e.noteTimerDeadline(ob.repo, ob.number, timerLockOrphan, grace-now.Sub(en.since))
+		}
+	}
 	for i, en := range e.lockOrphans.due(now, grace) {
 		if i >= lockOrphanMaxPerPoll {
 			break

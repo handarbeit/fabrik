@@ -429,6 +429,7 @@ type Engine struct {
 	longCooldownCapOff atomic.Bool
 	// Test seams of #2532 (ADR 2532): the event-replaceable stretch, the timer
 	// registry's wakes and the health-dependent safety-net stamp.
+	timers            timerRegistry // deadline timer registry (#2532)
 	eventStretchOff   atomic.Bool
 	timerWakeOff      atomic.Bool
 	safetyNetStampOff atomic.Bool
