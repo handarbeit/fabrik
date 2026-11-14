@@ -309,6 +309,18 @@ func TestGitHubClientMissingIssueIsNotAnOffender(t *testing.T) {
 	}
 }
 
+// A repository the token cannot read answers NOT_FOUND like a missing one; it must not pass.
+func TestGitHubClientUnreadableRepositoryFailsClosed(t *testing.T) {
+	api := &fakeAPI{boardVisible: true, body: "Closes someone/private-repo#5",
+		issueErr: `{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository"}]}`}
+	cl := api.client(t, "board-token")
+	var out bytes.Buffer
+	if code := run(context.Background(), config{Repo: repo, BoardLabel: "board #3"}, cl, cl, &out, nil); code != exitFail {
+		t.Fatalf("code = %d\n%s", code, out.String())
+	}
+	mustContain(t, out.String(), "could not verify board #3", "someone/private-repo", "not readable")
+}
+
 func TestGitHubClientOtherGraphQLErrorFailsClosed(t *testing.T) {
 	api := &fakeAPI{boardVisible: true, body: "Closes #5",
 		issueErr: `{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`}

@@ -40,7 +40,9 @@ check assumes nothing about whether GitHub currently applies keywords.
    `could not verify board #3: <reason>`. `projectItems` silently omits projects the token cannot
    see, so a token without project access would return an empty list and pass every PR; the runner
    therefore first proves visibility of the board itself (`organization.projectV2` must be
-   non-null) and a `NOT_FOUND` error is the only error read as "not a report". `hasNextPage` on an
+   non-null) and a `NOT_FOUND` on the *issue* inside a readable repository is the only error read as
+   "not a report". A `NOT_FOUND` on the *repository* fails closed: GraphQL answers it identically
+   for a repository the token cannot read, which could hold a board #3 issue. `hasNextPage` on an
    issue's projects, a missing token, a PR read error and a commit list at the API's 250-commit
    cap also fail closed. With no closing reference at all the check passes without consulting the
    board.

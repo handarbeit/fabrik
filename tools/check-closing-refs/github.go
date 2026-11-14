@@ -209,7 +209,13 @@ func (c *ghClient) OnBoard(ctx context.Context, repo string, number int) (bool, 
 			return false, fmt.Errorf("unreadable response: %w", err)
 		}
 	}
-	if d.Repository == nil || d.Repository.Issue == nil {
+	if d.Repository == nil {
+		// GraphQL answers NOT_FOUND for a repository the token cannot read, exactly as it does
+		// for one that does not exist, so a hidden repository could hold a board #3 issue.
+		// Only a missing issue inside a readable repository is "not a report".
+		return false, fmt.Errorf("repository %s is not readable with the configured token, so board membership of #%d cannot be verified", repo, number)
+	}
+	if d.Repository.Issue == nil {
 		if len(r.Errors) == 0 {
 			// No NOT_FOUND error yet no issue: refuse to treat silence as "not a report".
 			return false, errors.New("the response held neither an issue nor an error")
