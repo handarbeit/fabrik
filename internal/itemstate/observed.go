@@ -352,15 +352,14 @@ func (s *Store) applyPartialOpened(item *ItemState, v IssueOpened) ChangeFlags {
 func (s *Store) applyDeepFetchedOrdered(item *ItemState, fresh gh.ProjectItem) ChangeFlags {
 	grace := s.graceLocked()
 	var st deepStale
+	st.receiptApply = s.receiptTimeApply.Load()
 	var auth time.Time
 	if s.ordering() && fresh.DeepFetchLive {
 		auth = authorityOf(fresh.DeepFetchStartedAt, true, grace)
-		st = deepStale{
-			blockedBy: observedStale(item, observedBlockedByKey, auth),
-			milestone: observedStale(item, observedMilestoneKey, auth),
-			linkedPR:  observedStale(item, observedLinkedPRKey, auth),
-			reviews:   observedStale(item, observedReviewsKey, auth),
-		}
+		st.blockedBy = observedStale(item, observedBlockedByKey, auth)
+		st.milestone = observedStale(item, observedMilestoneKey, auth)
+		st.linkedPR = observedStale(item, observedLinkedPRKey, auth)
+		st.reviews = observedStale(item, observedReviewsKey, auth)
 	}
 	if !auth.IsZero() && !st.reviews && item.LinkedPR != nil {
 		fresh.LinkedPRReviews = keepNewerReviews(item, fresh.LinkedPRReviews, auth)
