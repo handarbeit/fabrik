@@ -396,7 +396,7 @@ func (a *overseerActor) nudgeRelease(t *overseerTarget) bool {
 	if !ok || !hasLabelStr(snap.State().Labels, "fabrik:blocked") {
 		return false
 	}
-	a.e.store.Apply(itemstate.CooldownRecorded{Repo: t.st.Repo, Number: t.st.Number, Reason: "dep-blocked", Until: a.e.now()})
+	a.e.store.Apply(itemstate.CooldownRecorded{Repo: t.st.Repo, Number: t.st.Number, Reason: reasonDepBlocked, Until: a.e.now()})
 	return true
 }
 

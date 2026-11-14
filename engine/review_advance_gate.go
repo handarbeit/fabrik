@@ -46,7 +46,7 @@ func (e *Engine) reviewGateHoldsAdvance(item gh.ProjectItem, stage *stages.Stage
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 		Number: item.Number,
-		Reason: "review-blocked",
+		Reason: reasonReviewBlocked,
 		Until:  e.now().Add(e.githubRecheckInterval()),
 	})
 	return true

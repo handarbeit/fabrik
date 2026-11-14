@@ -76,6 +76,7 @@ type Config struct {
 	MaxTrainRebaseCycles       int    // 0 means use default (3)
 	MaxTrainAutoRepairAttempts int    // per member per base SHA; default 1; 0 disables red-singleton auto-repair (#2045)
 	FixRoundSlots              int    // reserved worker slots for review/CI-fix/rebase rounds, on top of MaxConcurrent; 0 disables (#2490)
+	PeriodicReEvalInterval     int    // minutes; safety-net interval for the periodic re-evaluation while webhook ingestion is reliable; 0 = auto (30) (#2532)
 	MaxStageDispatches         int    // per item, per stage episode; default 25; 0 disables the dispatch bound (#2395)
 	MaxTrainTrialsPerWindow    int    // 0 means use default (20)
 	TrainTrialWindowMinutes    int    // 0 means use default (60)
@@ -219,6 +220,7 @@ func Execute() error {
 	flag.IntVar(&cfg.RetryBackoffSeconds, "retry-backoff", defaultRetryBackoffSeconds, "Seconds to wait before re-dispatching a stage after an incomplete attempt. Independent of --poll, which governs GitHub API cadence (#1831). Minimum 1. Also FABRIK_RETRY_BACKOFF / retry_backoff.")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.PeriodicReEvalInterval, "periodic-reeval-interval", 0, "Minutes between periodic re-evaluations of an in-pipeline item while webhook ingestion is reliable for its repo; the safety net behind event-driven admission (0 = auto, 30; minimum 1; also FABRIK_PERIODIC_REEVAL_INTERVAL; #2532)")
 	flag.IntVar(&cfg.FixRoundSlots, "fix-round-slots", 0, "Reserved worker slots, on top of --max-concurrent, usable only by review, CI-fix and rebase rounds (0 = disabled, the default; also FABRIK_FIX_ROUND_SLOTS; #2490)")
 	flag.IntVar(&cfg.MaxStageDispatches, "max-stage-dispatches", defaultMaxStageDispatches, "Maximum number of times one stage of one item is dispatched in a single episode (every dispatch counts, whatever its outcome) before the item is paused for a human (0 = disable the bound; default 25; also FABRIK_MAX_STAGE_DISPATCHES; #2395)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
@@ -660,6 +662,24 @@ func Execute() error {
 			cfg.MaxStageDispatches = *pc.MaxStageDispatches
 		}
 	}
+	if explicitFlags["periodic-reeval-interval"] {
+		if cfg.PeriodicReEvalInterval < 0 {
+			return fmt.Errorf("--periodic-reeval-interval=%d is invalid (must be a non-negative integer of minutes; 0 = auto)", cfg.PeriodicReEvalInterval)
+		}
+	} else {
+		if v := os.Getenv("FABRIK_PERIODIC_REEVAL_INTERVAL"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return fmt.Errorf("FABRIK_PERIODIC_REEVAL_INTERVAL=%q is invalid (must be a non-negative integer of minutes; 0 = auto)", v)
+			}
+			cfg.PeriodicReEvalInterval = n
+		} else if pc.PeriodicReEvalInterval != nil {
+			if *pc.PeriodicReEvalInterval < 0 {
+				return fmt.Errorf("config.yaml periodic_reeval_interval=%d is invalid (must be a non-negative integer of minutes; 0 = auto)", *pc.PeriodicReEvalInterval)
+			}
+			cfg.PeriodicReEvalInterval = *pc.PeriodicReEvalInterval
+		}
+	}
 	if explicitFlags["fix-round-slots"] {
 		if cfg.FixRoundSlots < 0 {
 			return fmt.Errorf("--fix-round-slots=%d is invalid (must be a non-negative integer; 0 disables)", cfg.FixRoundSlots)
@@ -1095,6 +1115,11 @@ func Execute() error {
 		} else {
 			fmt.Printf("  max-stage-dispatches: %d\n", cfg.MaxStageDispatches)
 		}
+		if cfg.PeriodicReEvalInterval == 0 {
+			fmt.Printf("  periodic-reeval-interval: auto (30m while ingestion is reliable)\n")
+		} else {
+			fmt.Printf("  periodic-reeval-interval: %dm\n", cfg.PeriodicReEvalInterval)
+		}
 		fmt.Printf("  max-resume-failures: %d\n", maxResumeFailures(cfg.MaxResumeFailures))
 		fmt.Printf("  max-tools-denied-retries: %d\n", maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries))
 	}
@@ -1146,6 +1171,7 @@ func Execute() error {
 		MaxRetries:                 cfg.MaxRetries,
 		MaxSliceRetries:            maxSliceRetries(cfg.MaxSliceRetries),
 		FixRoundSlots:              cfg.FixRoundSlots,
+		PeriodicReEvalInterval:     time.Duration(cfg.PeriodicReEvalInterval) * time.Minute,
 		MaxStageDispatches:         cfg.MaxStageDispatches, // 0 = bound disabled; default 25 applied by the flag (#2395)
 		MaxResumeFailures:          maxResumeFailures(cfg.MaxResumeFailures),
 		MaxToolsDeniedRetries:      maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),

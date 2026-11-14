@@ -142,11 +142,22 @@ func (e *Engine) commitTime(owner, repo, sha string, issueNumber int, now time.T
 // only when the label-only timeout would otherwise fire, so an idle wait pays
 // nothing.
 func (e *Engine) headRestartsWait(owner, repo string, item gh.ProjectItem, prNumber int, labelAt time.Time, timeout time.Duration) bool {
+	restart, _ := e.headRestartRemaining(owner, repo, item, prNumber, labelAt, timeout)
+	return restart
+}
+
+// headRestartRemaining is headRestartsWait plus the time left in the restarted
+// window, so the deadline timer (#2532) can wake at it. The decision is the same.
+func (e *Engine) headRestartRemaining(owner, repo string, item gh.ProjectItem, prNumber int, labelAt time.Time, timeout time.Duration) (bool, time.Duration) {
 	headAt, ok := e.headArrivalTime(owner, repo, item, prNumber, true)
 	if !ok || !headAt.After(labelAt) {
-		return false
+		return false, 0
 	}
-	return time.Since(headAt) < timeout
+	since := time.Since(headAt)
+	if since >= timeout {
+		return false, 0
+	}
+	return true, timeout - since
 }
 
 // resetLadderOnNewHead ends the bot re-prompt ladder's current cycle when the

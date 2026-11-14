@@ -107,15 +107,18 @@ func (e *Engine) checkUnknownMergeBound(pctx *phase1Ctx, settle PRSettleResult) 
 	}
 	bound := e.mergeStateUnknownTimeout()
 	elapsed := e.now().Sub(clock.since)
+	repo := itemOwnerRepoString(pctx.item, e.defaultRepo())
 	if elapsed < bound {
+		// #2532: the bound has no event; wake a poll at its deadline.
+		e.noteTimerDeadline(repo, pctx.item.Number, timerUnknownMerge, bound-elapsed)
 		return false
 	}
-	repo := itemOwnerRepoString(pctx.item, e.defaultRepo())
 	if stageName, inFlight := e.ciBackstopWorkerInFlight(repo, pctx.item.Number); inFlight {
 		// ADR 2059 R3: never race a running worker with a pause; the next poll
 		// re-evaluates once it has exited.
 		e.logf(pctx.item.Number, "merge-gate", "mergeability unknown for %s (bound %s) but a worker is in flight (stage=%s) — escalation deferred to a later poll\n",
 			elapsed.Round(time.Second), bound, stageName)
+		e.noteTimerDeadline(repo, pctx.item.Number, timerUnknownMerge, 0)
 		return false
 	}
 	e.logf(pctx.item.Number, "merge-gate", "mergeability unknown for PR #%d at %s for %s (bound %s) — escalating\n",

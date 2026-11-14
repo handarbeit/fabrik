@@ -71,6 +71,7 @@ type Config struct {
 	MaxBisectValidations       int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
 	MaxTrainRebaseCycles       int                 // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
 	FixRoundSlots              int                 // Reserved worker slots, on top of MaxConcurrent, usable only by review/CI-fix/rebase reinvokes (0 = disabled; #2490, ADR 2490)
+	PeriodicReEvalInterval     time.Duration       // Safety-net (periodic-re-eval) interval while webhook ingestion is reliable for the repo; 0 = auto (30m) (#2532, ADR 2532)
 	MaxStageDispatches         int                 // Max dispatches of one stage of one item per episode before pausing (0 = disabled; cmd applies the default of 25; #2395, ADR 2395)
 	MaxTrainAutoRepairAttempts int                 // Red-singleton auto-repair attempts per member per base SHA (0 = disabled, pause as before; cmd applies the default of 1; #2045, ADR-2045)
 	MaxTrainTrialsPerWindow    int                 // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
@@ -426,6 +427,12 @@ type Engine struct {
 	// the idle-interval cap on long cooldowns, and a hook run after a Status write.
 	postRunAdvanceOff  atomic.Bool
 	longCooldownCapOff atomic.Bool
+	// Test seams of #2532 (ADR 2532): the event-replaceable stretch, the timer
+	// registry's wakes and the health-dependent safety-net stamp.
+	timers            timerRegistry // deadline timer registry (#2532)
+	eventStretchOff   atomic.Bool
+	timerWakeOff      atomic.Bool
+	safetyNetStampOff atomic.Bool
 	// Test seams of #2542 (ADR 2542): the open-trial idle cap and the trial-PR wake.
 	openTrialCapOff  atomic.Bool
 	trialWakeOff     atomic.Bool

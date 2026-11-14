@@ -487,6 +487,20 @@ func (e *Engine) Run() error {
 	if cacheImpl != nil {
 		go e.reconcileLoop(ctx, cacheImpl, e.transports)
 	}
+	// #2532: restore the full re-check cadence within about one poll when webhook
+	// ingestion stops being reliable. Tracked: stopped and joined on return.
+	{
+		hwCtx, hwCancel := context.WithCancel(ctx)
+		hwDone := make(chan struct{})
+		go func() {
+			defer close(hwDone)
+			e.runHealthWatch(hwCtx, e.healthWatchInterval())
+		}()
+		defer func() {
+			hwCancel()
+			<-hwDone
+		}()
+	}
 	if e.events != nil {
 		go e.runWorkerSlotsPublisher(ctx, workerSlotsSampleInterval) // #2115: display-only slot readout
 		go e.runWaitingPublisher(ctx, waitingSampleInterval)         // #2238: display-only waiting rows
@@ -1190,6 +1204,16 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		// backstop for missed admissions, so an idle backoff must not push it out
 		// either. Capped at due + one configured interval so dues stamped by
 		// different polls coalesce into one poll instead of one each.
+		// #2532: a deadline timer (review wait, CI backstop, ...) wakes the poll
+		// at its exact due, not at the next generic re-admission.
+		if !e.timerWakeOff.Load() {
+			if due := e.earliestTimerDeadline(now); !due.IsZero() {
+				if capped := capIntervalToDue(effectiveInterval, due, now, minDueWakeInterval); capped < effectiveInterval {
+					e.logf(0, "poll", "next poll capped to %v: deadline timer due\n", capped)
+					effectiveInterval = capped
+				}
+			}
+		}
 		if !e.longCooldownCapOff.Load() {
 			if due := e.earliestLongCooldown(now); !due.IsZero() {
 				if capped := capIntervalToDue(effectiveInterval, due.Add(configuredInterval), now, minDueWakeInterval); capped < effectiveInterval {
@@ -1487,18 +1511,18 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 		// terminal-only guard is removed here: LastAttemptAt (not CooldownAt) now carries
 		// dispatch suppression, so refreshing CooldownAt for ALL non-advanced
 		// deepFetchCandidates is safe regardless of completion state (#504 structural fix).
-		cooldown := e.githubRecheckInterval()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if advancedItems[iKey] || slotDeferred[iKey] {
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
+				repo := itemOwnerRepoString(item, e.defaultRepo())
 				e.store.Apply(itemstate.CooldownRecorded{
-					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+					Repo:   repo,
 					Number: item.Number,
-					Reason: "periodic-re-eval",
-					Until:  e.now().Add(cooldown),
+					Reason: reasonPeriodicReEval,
+					Until:  e.periodicReEvalDue(repo), // #2532: the safety-net interval while ingestion is reliable
 				})
 			}
 		}
@@ -1587,6 +1611,13 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 		e.mayNeedWork = make(map[string]bool)
 		return s
 	}()
+
+	// Deadline timers that came due (#2532): re-admit their items through the
+	// same mayNeedWork route the cycle set uses, so the gate is evaluated again
+	// even when the item holds no bypass label.
+	for _, k := range e.consumeDueTimers(e.now()) {
+		cycleSet[k] = true
+	}
 
 	// Startup resume of daemon clean-stop pauses (#2486, ADR 2486): one-shot
 	// capture on the first populated board, then bounded evaluation per poll.
@@ -2354,7 +2385,7 @@ func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 		Number: item.Number,
-		Reason: "sentinel-live",
+		Reason: reasonSentinelLive,
 		Until:  e.now().Add(e.mergeGateRecheckInterval()),
 	})
 }
@@ -2393,11 +2424,12 @@ func (e *Engine) recordLockWriteCooldown(item gh.ProjectItem) {
 // it. Without this the item would have no cooldown entry and nothing would ever
 // re-admit it (ADR 2096, R4).
 func (e *Engine) rearmPeriodicReEval(item gh.ProjectItem) {
+	repo := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.CooldownRecorded{
-		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Repo:   repo,
 		Number: item.Number,
-		Reason: "periodic-re-eval",
-		Until:  e.now().Add(e.githubRecheckInterval()),
+		Reason: reasonPeriodicReEval,
+		Until:  e.periodicReEvalDue(repo),
 	})
 }
 

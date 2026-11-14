@@ -330,10 +330,14 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 	}
 	e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
 
-	if stalledSince, ok := e.ciProgressStalledSince(owner, repo, item); ok && time.Since(stalledSince) >= e.ciWaitTimeout() {
-		e.logf(item.Number, "warn", "CI progress stalled for %s (no check-run change since); pausing issue — checks: %s\n", e.ciWaitTimeout(), strings.Join(names, ", "))
-		e.removeAwaitingCILabel(owner, repo, item)
-		return false, false, true
+	if stalledSince, ok := e.ciProgressStalledSince(owner, repo, item); ok {
+		if time.Since(stalledSince) >= e.ciWaitTimeout() {
+			e.logf(item.Number, "warn", "CI progress stalled for %s (no check-run change since); pausing issue — checks: %s\n", e.ciWaitTimeout(), strings.Join(names, ", "))
+			e.removeAwaitingCILabel(owner, repo, item)
+			return false, false, true
+		}
+		// #2532: wake a poll at the liveness-stall deadline.
+		e.noteTimerDeadline(owner+"/"+repo, item.Number, timerCIWait, e.ciWaitTimeout()-time.Since(stalledSince))
 	}
 
 	return true, false, false
@@ -389,11 +393,18 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() &&
-				time.Since(e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout never-checked dwell", appliedAt, e.ciWaitTimeout())) >= e.ciWaitTimeout() {
-				e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
-				e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
-				return false, false, false, true
+			} else if !appliedAt.IsZero() {
+				anchor := appliedAt
+				if time.Since(appliedAt) >= e.ciWaitTimeout() {
+					anchor = e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout never-checked dwell", appliedAt, e.ciWaitTimeout())
+				}
+				if time.Since(anchor) >= e.ciWaitTimeout() {
+					e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
+					e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
+					return false, false, false, true
+				}
+				// #2532: wake a poll at the dwell's deadline.
+				e.noteTimerDeadline(itemOwnerRepoString(item, e.defaultRepo()), item.Number, timerCIWait, e.ciWaitTimeout()-time.Since(anchor))
 			}
 		}
 		e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", prNum)
@@ -405,11 +416,18 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() &&
-				time.Since(e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout mergeable-state dwell", appliedAt, e.ciWaitTimeout())) >= e.ciWaitTimeout() {
-				e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
-				e.removeAwaitingCILabel(owner, repo, item)
-				return false, false, true, false
+			} else if !appliedAt.IsZero() {
+				anchor := appliedAt
+				if time.Since(appliedAt) >= e.ciWaitTimeout() {
+					anchor = e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout mergeable-state dwell", appliedAt, e.ciWaitTimeout())
+				}
+				if time.Since(anchor) >= e.ciWaitTimeout() {
+					e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
+					e.removeAwaitingCILabel(owner, repo, item)
+					return false, false, true, false
+				}
+				// #2532: wake a poll at the dwell's deadline.
+				e.noteTimerDeadline(itemOwnerRepoString(item, e.defaultRepo()), item.Number, timerCIWait, e.ciWaitTimeout()-time.Since(anchor))
 			}
 		}
 		e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
