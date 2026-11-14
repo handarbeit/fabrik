@@ -69,7 +69,6 @@ func TestNegatedBodyOnBoardFails(t *testing.T) {
 	mustContain(t, sum, "handarbeit/fabrik#2497")
 }
 
-// A merge-train integration or catch-up PR carries member commits; one member's keyword counts.
 // A title can become the subject of a merge/squash commit, so a keyword there counts.
 func TestTitleKeywordFails(t *testing.T) {
 	code, out, _ := runCheck(t, fakePR{title: "fix: handle X (closes #2497)", body: "clean"},
@@ -80,6 +79,7 @@ func TestTitleKeywordFails(t *testing.T) {
 	mustContain(t, out, "#2497", "PR title")
 }
 
+// A merge-train integration or catch-up PR carries member commits; one member's keyword counts.
 func TestMemberCommitKeywordFails(t *testing.T) {
 	b := &fakeBoard{members: map[string]bool{"handarbeit/fabrik#2497": true}}
 	pr := fakePR{
