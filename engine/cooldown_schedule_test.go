@@ -206,7 +206,13 @@ func TestTimerRegistry(t *testing.T) {
 	if got := eng.earliestTimerDeadline(start); !got.Equal(start.Add(5 * time.Minute)) {
 		t.Fatalf("deadline = %v", got)
 	}
-	// A re-note replaces the entry; a due of "now" is floored, so a gate that
+	// A later re-note of the same kind never pushes the deadline out (two sites
+	// of one gate can note it in one admission).
+	eng.noteTimerDeadline(cooldownTestRepo, 1, timerReviewWait, time.Hour)
+	if got := eng.earliestTimerDeadline(start); !got.Equal(start.Add(5 * time.Minute)) {
+		t.Fatalf("a later re-note must keep the earlier deadline, got %v", got)
+	}
+	// An earlier re-note replaces it; a due of "now" is floored, so a gate that
 	// still says not-yet cannot hot-loop the poll.
 	eng.noteTimerDeadline(cooldownTestRepo, 1, timerReviewWait, 0)
 	if got := eng.earliestTimerDeadline(start); !got.Equal(start.Add(eng.mergeGateRecheckInterval())) {
@@ -283,5 +289,29 @@ func TestHealthWatchTick_RevertsStretchedEntries(t *testing.T) {
 	case <-wake:
 		t.Fatal("no second wake without a new transition")
 	default:
+	}
+}
+
+// A repo that is already unreliable at the watcher's first observation (no
+// previous snapshot, so no transition) still gets its stretched periodic-re-eval
+// entries pulled back and the poll woken.
+func TestHealthWatchTick_ReclampsWithoutPriorSnapshot(t *testing.T) {
+	eng, start, ft := scheduleEngine(t)
+	wake := make(chan struct{}, 1)
+	eng.SetWakeCh(wake)
+	openAt(eng, 1, "Research")
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 1, Reason: reasonPeriodicReEval, Until: start.Add(autoSafetyNetInterval)})
+	ft.mu.Lock()
+	ft.healthy = false
+	ft.mu.Unlock()
+	_ = eng.HealthWatchTickForTest(nil)
+	snap, _ := eng.store.Peek(cooldownTestRepo, 1)
+	if got := snap.CooldownAt(reasonPeriodicReEval); !got.Equal(start.Add(eng.githubRecheckInterval())) {
+		t.Fatalf("periodic-re-eval = %v, want start+%v", got, eng.githubRecheckInterval())
+	}
+	select {
+	case <-wake:
+	default:
+		t.Fatal("pulling an entry back must wake the poll")
 	}
 }

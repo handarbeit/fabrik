@@ -71,15 +71,16 @@ func (e *Engine) noteTimerDeadline(repo string, number int, kind string, remaini
 	if len(r.due) >= timerRegistryLimit {
 		return // bounded; periodic-re-eval still covers the item
 	}
-	r.due[timerKey{repo, number, kind}] = due
-}
-
-// clearTimer forgets a deadline whose gate no longer applies.
-func (e *Engine) clearTimer(repo string, number int, kind string) {
-	r := &e.timers
-	r.mu.Lock()
-	delete(r.due, timerKey{repo, number, kind})
-	r.mu.Unlock()
+	k := timerKey{repo, number, kind}
+	// Several sites of one gate can note the same kind in one admission (the review
+	// Phase 2 deadline is noted by checkBotPhase2Timeout and by
+	// checkAwaitingReviewTimeout). Keep the earlier unconsumed due: an early wake
+	// only makes the gate re-evaluate and re-note, a lost earlier deadline would
+	// make it late.
+	if cur, ok := r.due[k]; ok && cur.Before(due) {
+		return
+	}
+	r.due[k] = due
 }
 
 // consumeDueTimers removes every entry due at or before now and returns the

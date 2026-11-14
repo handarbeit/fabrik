@@ -114,12 +114,18 @@ func TestCooldownClasses_UnhealthyTransportKeepsTodaysCadence(t *testing.T) {
 	})
 	t.Run("unsubscribed-event", func(t *testing.T) {
 		t.Parallel()
-		env, stub, _, _ := stubbedDependent(t, true, nil)
+		env, stub, dependent, _ := stubbedDependent(t, true, nil)
+		st, _ := env.Engine.StoreItemForTest(env.OwnerRepo, dependent)
+		depDue := st.CooldownAt["dep-blocked"]
+		// periodic-re-eval is stamped the safety-net interval ahead (healthy), so
+		// the earliest long cooldown is the dep-blocked due only when dep-blocked
+		// counts toward the idle cap, i.e. when it is not stretched.
+		if got := env.Engine.EarliestLongCooldownForTest(); got.Equal(depDue) {
+			t.Fatal("precondition: with issue_dependencies delivered, dep-blocked must be stretched")
+		}
 		stub.SetSubscribed("issue_comment") // issue_dependencies is not delivered
-		// The entries were already stamped at the safety-net interval, so what is
-		// observable here is the dep-blocked cap: it is not stretched.
-		if got := env.Engine.EarliestLongCooldownForTest(); got.IsZero() {
-			t.Fatal("dep-blocked must count toward the idle cap when its event is not subscribed")
+		if got := env.Engine.EarliestLongCooldownForTest(); !got.Equal(depDue) {
+			t.Fatalf("dep-blocked must count toward the idle cap when its event is not subscribed: earliest = %v, dep-blocked due = %v", got, depDue)
 		}
 	})
 	t.Run("poll-only", func(t *testing.T) {

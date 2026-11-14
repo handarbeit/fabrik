@@ -44,8 +44,13 @@ func (e *Engine) runHealthWatch(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// healthWatchTick snapshots per-repo reliability, re-clamps and wakes for every
-// repo that was reliable and no longer is, and returns the new snapshot.
+// healthWatchTick snapshots per-repo reliability and returns the new snapshot.
+// It re-clamps every repo that is not reliable right now, not only those seen to
+// transition: a repo can degrade before its first snapshot (daemon start, a newly
+// appearing repo) while its periodic-re-eval entries were stamped the safety-net
+// interval ahead. The re-clamp is shorten-only and idempotent, so repeating it
+// each tick is cheap. The poll is woken on a reliable-to-unreliable transition or
+// whenever an entry was actually pulled back.
 func (e *Engine) healthWatchTick(prev map[string]bool) map[string]bool {
 	repos := map[string]bool{}
 	e.store.Scan(func(st *itemstate.ItemState) {
@@ -55,18 +60,22 @@ func (e *Engine) healthWatchTick(prev map[string]bool) map[string]bool {
 	})
 	next := make(map[string]bool, len(repos))
 	var lost []string
+	unreliable := map[string]bool{}
 	for repo := range repos {
 		ok := e.reliableFor(repo, "")
 		next[repo] = ok
-		if prev[repo] && !ok {
-			lost = append(lost, repo)
+		if !ok {
+			unreliable[repo] = true
+			if prev[repo] {
+				lost = append(lost, repo)
+			}
 		}
 	}
-	for _, repo := range lost {
-		e.reclampPeriodicReEval(repo)
-	}
-	if len(lost) > 0 {
-		e.logf(0, "poll", "webhook ingestion no longer reliable for %v — restoring the full re-check cadence\n", lost)
+	clamped := e.reclampPeriodicReEval(unreliable)
+	if len(lost) > 0 || clamped > 0 {
+		if len(lost) > 0 {
+			e.logf(0, "poll", "webhook ingestion no longer reliable for %v — restoring the full re-check cadence\n", lost)
+		}
 		if e.wakeCh != nil {
 			select {
 			case e.wakeCh <- struct{}{}:
@@ -77,24 +86,35 @@ func (e *Engine) healthWatchTick(prev map[string]bool) map[string]bool {
 	return next
 }
 
-// reclampPeriodicReEval moves every periodic-re-eval entry of repo that lies
-// beyond today's interval back to now + periodicReEvalInterval(repo) (which is
-// githubRecheckInterval while ingestion is not reliable). It only ever shortens.
-func (e *Engine) reclampPeriodicReEval(repo string) {
-	limit := e.periodicReEvalDue(repo)
+// reclampPeriodicReEval moves every periodic-re-eval entry of the given repos
+// that lies beyond today's interval back to now + periodicReEvalInterval(repo)
+// (githubRecheckInterval while ingestion is not reliable) and returns how many
+// entries it moved. It only ever shortens.
+func (e *Engine) reclampPeriodicReEval(repos map[string]bool) int {
+	if len(repos) == 0 {
+		return 0
+	}
 	type target struct {
+		repo   string
 		number int
+		limit  time.Time
+	}
+	limits := make(map[string]time.Time, len(repos))
+	for repo := range repos {
+		limits[repo] = e.periodicReEvalDue(repo)
 	}
 	var targets []target
 	e.store.Scan(func(st *itemstate.ItemState) {
-		if st.Repo != repo || st.IsClosed {
+		limit, ok := limits[st.Repo]
+		if !ok || st.IsClosed {
 			return
 		}
 		if t, ok := st.CooldownAt[reasonPeriodicReEval]; ok && t.After(limit) {
-			targets = append(targets, target{st.Number})
+			targets = append(targets, target{st.Repo, st.Number, limit})
 		}
 	})
 	for _, tg := range targets {
-		e.store.Apply(itemstate.CooldownRecorded{Repo: repo, Number: tg.number, Reason: reasonPeriodicReEval, Until: limit})
+		e.store.Apply(itemstate.CooldownRecorded{Repo: tg.repo, Number: tg.number, Reason: reasonPeriodicReEval, Until: tg.limit})
 	}
+	return len(targets)
 }
