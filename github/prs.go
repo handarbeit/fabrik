@@ -69,15 +69,17 @@ func ParseClosingIssues(body string) []int {
 // review) could outlive a later dismissal of their actual current review and falsely
 // satisfy the review-gate's hasReviews check.
 //
-// A COMMENTED submission never supersedes a prior formal verdict (APPROVED,
-// CHANGES_REQUESTED, or DISMISSED) from the same author — GitHub's own
-// reviewDecision computation treats COMMENTED as informational, not a state
-// transition, so a reviewer who requests changes and later leaves a comment-only
-// follow-up (without re-approving or dismissing) still has an active
-// CHANGES_REQUESTED verdict. Only when an author's *stored* entry is itself
-// COMMENTED (no verdict established yet) does a later COMMENTED submission
-// supersede it — so a comment-only reviewer's collapsed entry tracks their
-// latest submission, not just their first. States outside COMMENTED and the
+// A COMMENTED submission never supersedes a prior standing verdict (APPROVED or
+// CHANGES_REQUESTED) from the same author — GitHub's own reviewDecision
+// computation treats COMMENTED as informational, not a state transition, so a
+// reviewer who requests changes and later leaves a comment-only follow-up
+// (without re-approving or dismissing) still has an active CHANGES_REQUESTED
+// verdict. A DISMISSED entry is not a standing verdict: a dismissal ends the
+// verdict it dismissed, so a later COMMENTED from the same author is that
+// author's current state and supersedes it (#2588, ADR 2582). Only when an
+// author's *stored* entry is DISMISSED or itself COMMENTED does a later
+// COMMENTED submission supersede it — so a comment-only reviewer's collapsed
+// entry tracks their latest submission, not just their first. States outside COMMENTED and the
 // three formal verdicts (e.g. PENDING, which is visible only to the token
 // that created it and may reflect an incomplete submission) are enumerated
 // explicitly as never eligible to establish or overwrite a collapsed entry —
@@ -94,9 +96,10 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		stored, seen := latestByAuthor[review.Author]
 		if !seen {
 			order = append(order, review.Author)
-		} else if review.State == "COMMENTED" && isFormalReviewVerdict(stored.State) {
+		} else if review.State == "COMMENTED" && isStandingReviewVerdict(stored.State) {
 			// A comment-only follow-up does not overwrite the author's
-			// existing formal verdict.
+			// standing verdict (APPROVED or CHANGES_REQUESTED). It does
+			// overwrite a DISMISSED entry: a dismissal ends a verdict.
 			continue
 		}
 		latestByAuthor[review.Author] = review
@@ -118,8 +121,10 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 // This is the read the authoritative review gate's no-branch-protection fallback
 // decides on: FetchPRReviews' sticky collapse drops a COMMENTED that follows a
 // formal verdict, which is exactly the evidence a declared bot's clean re-review
-// of the head consists of. FetchPRReviews itself is the collapse of this list,
-// byte-for-byte unchanged, so Pruefer and the feedback paths are unaffected.
+// of the head consists of. FetchPRReviews itself is the collapse of this list;
+// since #2588 (ADR 2582) it no longer treats DISMISSED as sticky, so a later
+// COMMENTED from the same author is kept (the Pruefer and feedback-path audit is
+// in that ADR).
 // Paginated (#1539). Returns nil, nil on 404.
 func (c *Client) FetchPRReviewHistory(owner, repo string, prNumber int) ([]PRReview, error) {
 	type rawReview struct {
@@ -176,9 +181,18 @@ func (c *Client) FetchPRReviewHistory(owner, repo string, prNumber int) ([]PRRev
 	return out, nil
 }
 
+// isStandingReviewVerdict reports whether state is a verdict a later COMMENTED
+// follow-up must never overwrite in FetchPRReviews' collapse: APPROVED and
+// CHANGES_REQUESTED. DISMISSED is deliberately not one (#2588, ADR 2582) — a
+// dismissal ends a verdict, it is not one.
+func isStandingReviewVerdict(state string) bool {
+	return state == "APPROVED" || state == "CHANGES_REQUESTED"
+}
+
 // isFormalReviewVerdict reports whether state is one of GitHub's three
-// formal review verdicts — the states a COMMENTED follow-up must never
-// overwrite.
+// formal review verdicts. It decides history eligibility only (see
+// canEstablishOrSupersedeReview); the collapse's stickiness uses
+// isStandingReviewVerdict.
 func isFormalReviewVerdict(state string) bool {
 	switch state {
 	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
