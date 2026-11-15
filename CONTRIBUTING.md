@@ -39,6 +39,7 @@ The `docs-drift` workflow will fail the PR otherwise.
 
 - Branch off `main`. Small, focused PRs are easier to review.
 - Every PR linked to an issue should include `Closes #N` in the body so the engine can discover the link.
+- Never put a closing keyword (`Closes`/`Fixes`/`Resolves`) next to the number of a community report, even in a sentence saying the PR does not close it: GitHub matches the adjacency, and a CI check (`Guard community reports`) fails the PR. Write "mentioned for context: #N" instead.
 - Match the existing commit-message style (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 - Code style: standard Go conventions (`gofmt`), `MixedCaps` naming, stdlib-first.
 - Engine-behavior changes must update the corresponding as-built doc (`docs/state-machine.md` or `docs/stage-lifecycle.md`) in the same PR — these are authoritative specs, not afterthought notes.
