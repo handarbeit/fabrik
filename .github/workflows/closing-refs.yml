@@ -1,0 +1,73 @@
+# INSTALL: copy this file to .github/workflows/closing-refs.yml. The Fabrik GitHub App lacks the
+# `workflows` permission, so it could not push it there itself (#2576).
+name: Closing references
+
+# Fails a PR that would auto-close an issue on the public community-report board (project #3)
+# when it merges (#2576, ADR 2576). GitHub closes an issue when a PR body or commit message
+# puts a closing keyword (close/fix/resolve and their forms) next to its number, and it
+# matches word adjacency, not grammar: "this PR does not close #N" still closes #N. Community
+# reports are closed by hand after a release ships.
+#
+# Required check name for branch protection: "Guard community reports".
+#
+# ---------------------------------------------------------------------------
+# Why pull_request_target, and the rules that make it safe (do not relax them)
+# ---------------------------------------------------------------------------
+# Under `pull_request`, a fork PR gets no secrets, so the board (an org Projects v2 board that
+# GITHUB_TOKEN cannot read) could not be checked and the check could only fail closed. Under
+# `pull_request_target` the workflow file and its secrets come from the DEFAULT branch, so
+# fork PRs get a real answer. That is only safe while all of these hold:
+#   1. The PR head is NEVER checked out. The checkout below pins the default branch.
+#   2. No PR-supplied code is executed. The tool is built from the default branch.
+#   3. PR text (body, commit messages) is read only through the API, inside the tool, and is
+#      never interpolated into a shell command or a `${{ }}` expression.
+#   4. The board token is passed to the one step that runs the trusted tool, as an env var.
+#
+# Consequence: this workflow does not run on the PR that introduces or edits it; its changes
+# take effect after merge. `workflow_dispatch` (pr_number) checks any PR by hand.
+#
+# Token: CLOSING_REFS_BOARD_TOKEN if set (preferred: a fine-grained token with organization
+# Projects: read-only), else the existing ADD_TO_PROJECT_PAT (write scope; used read-only here).
+# Neither is ever printed. If neither can read board #3 the check FAILS ("could not verify").
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to check
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# A PR edit re-runs the check; the newest run for a PR wins.
+concurrency:
+  group: closing-refs-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Guard community reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the default branch (never the PR head)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check closing references
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BOARD_TOKEN: ${{ secrets.CLOSING_REFS_BOARD_TOKEN || secrets.ADD_TO_PROJECT_PAT }}
+        run: go run ./tools/check-closing-refs
