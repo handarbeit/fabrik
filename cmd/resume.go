@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/handarbeit/fabrik/engine"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -27,6 +28,7 @@ func runResume(args []string) error {
 	stageName := fset.String("stage", "", "Stage name to resume (required until #109 lands)")
 	stagesDir := fset.String("stages", ".fabrik/stages", "Directory containing stage YAML configs")
 	pluginDir := fset.String("plugin-dir", "", "Path to Fabrik plugin directory")
+	workspaceRoot := fset.String("workspace-root", "", "Workspace root holding worktrees and sessions (also FABRIK_WORKSPACE_ROOT, config.yaml workspace_root; default <dir>/.fabrik)")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik resume <issue-number> [--stage <name>] [flags]\n\n")
@@ -86,7 +88,12 @@ func runResume(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resume: getting working directory: %w", err)
 	}
-	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
+	ws, err := workspace.Load(cwd, *workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
+	worktreeRoot := ws.Dir(workspace.Worktrees)
+	worktreeDir := findWorktreeDir(worktreeRoot, issueNumber)
 	if _, err := os.Stat(worktreeDir); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("resume: worktree for issue #%d not found at %s\n"+
@@ -117,12 +124,11 @@ func runResume(args []string) error {
 	}
 
 	// Determine the repo for namespaced session lookup by scanning the worktree root.
-	worktreeRoot := filepath.Join(cwd, ".fabrik", "worktrees")
 	repo := findRepoForIssue(worktreeRoot, issueNumber)
 
 	// Build the claude args
 	claudeArgs := []string{"claude"}
-	sessionID := engine.ReadSessionID(repo, issueNumber, *stageName)
+	sessionID := engine.ReadSessionID(ws, repo, issueNumber, *stageName)
 	if sessionID != "" {
 		claudeArgs = append(claudeArgs, "--resume", sessionID)
 	}
@@ -145,6 +151,32 @@ func runResume(args []string) error {
 // findRepoForIssue scans worktreeRoot for a directory named issue-N (either
 // directly or one level deep in a per-repo subdir), reads its git remote, and
 // returns "owner/repo". Returns "" if the worktree or remote cannot be found.
+// findWorktreeDir returns the worktree directory of an issue under worktreeRoot:
+// the flat <root>/issue-N when it exists, else <root>/<owner>-<repo>/issue-N for
+// the first per-repo directory that has one. When none exists it returns the
+// flat path, so the "not found" message names a concrete location. Fabrik has
+// namespaced worktrees by repo for a long time; the flat-only lookup this
+// replaces never found them (#2470).
+func findWorktreeDir(worktreeRoot string, issueNumber int) string {
+	name := fmt.Sprintf("issue-%d", issueNumber)
+	flat := filepath.Join(worktreeRoot, name)
+	if _, err := os.Stat(flat); err == nil {
+		return flat
+	}
+	if entries, err := os.ReadDir(worktreeRoot); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			cand := filepath.Join(worktreeRoot, e.Name(), name)
+			if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+				return cand
+			}
+		}
+	}
+	return flat
+}
+
 func findRepoForIssue(worktreeRoot string, issueNumber int) string {
 	issueDirName := fmt.Sprintf("issue-%d", issueNumber)
 

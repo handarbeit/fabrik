@@ -19,8 +19,10 @@ func (l Layout) markerPath() string {
 
 // Establish makes the layout usable: it refuses a root change that would
 // orphan live worktrees (CheckMigration, R6), prepares the directories
-// (Prepare, FR-011) and records the root. It is called once, from engine.New,
-// before anything is migrated or created under the new root.
+// (Prepare, FR-011) and records the root (Record). The engine runs the first
+// two from New, before anything is migrated or created under the new root, and
+// Record from Run once it holds the instance lock, so a second instance that
+// loses the lock never rewrites the marker.
 func (l Layout) Establish() error {
 	if err := l.CheckMigration(); err != nil {
 		return err
@@ -28,7 +30,7 @@ func (l Layout) Establish() error {
 	if err := l.Prepare(); err != nil {
 		return err
 	}
-	return l.recordRoot()
+	return l.Record()
 }
 
 // Prepare creates the moved subdirectories under a configured root. The root
@@ -151,10 +153,10 @@ func (l Layout) CheckMigration() error {
 		prev, l.root(), len(live), strings.Join(list, "\n  "), more, prev, filepath.Join(prev, Repos))
 }
 
-// recordRoot writes the marker the next start compares against. The default
+// Record writes the marker the next start compares against. The default
 // root records nothing, and removes a marker left by an earlier configured
 // root, so a bed that never used the setting gains no new file.
-func (l Layout) recordRoot() error {
+func (l Layout) Record() error {
 	if l.IsDefault() {
 		if err := os.Remove(l.markerPath()); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("clearing workspace root marker: %w", err)

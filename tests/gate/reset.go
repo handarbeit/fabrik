@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"fmt"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,10 +204,16 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 				}
 			}
 		}
-		if err := os.RemoveAll(filepath.Join(bed, ".fabrik", "worktrees")); err != nil {
+		// The bed may keep its worktrees and clones under a configured workspace
+		// root (#2470); the lock below always stays in the bed.
+		ws, wsErr := workspace.Load(bed, "")
+		if wsErr != nil {
+			return exitErr(1, "reset: %v", wsErr)
+		}
+		if err := os.RemoveAll(ws.Dir(workspace.Worktrees)); err != nil {
 			return exitErr(1, "reset: %v", err)
 		}
-		if err := os.RemoveAll(filepath.Join(bed, ".fabrik", "repos")); err != nil {
+		if err := os.RemoveAll(ws.Dir(workspace.Repos)); err != nil {
 			return exitErr(1, "reset: %v", err)
 		}
 		_ = os.Remove(filepath.Join(bed, ".fabrik", "fabrik.lock"))

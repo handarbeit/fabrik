@@ -99,6 +99,18 @@ func expandHome(p string) (string, error) {
 	return filepath.Join(home, p[1:]), nil
 }
 
+// Pick returns the winning raw value of the precedence flag > env > yaml, or ""
+// when all three are blank. Resolve and the daemon's flag plumbing share it so
+// the order is stated once.
+func Pick(flag, env, yaml string) string {
+	for _, v := range []string{flag, env, yaml} {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // Resolve applies the precedence flag > env > yaml > default and returns the
 // bed's layout. A relative value is resolved against the bed (never the
 // process's working directory) and a leading ~ is expanded. The path need not
@@ -108,13 +120,7 @@ func Resolve(bed, flag, env, yaml string) (Layout, error) {
 	if err != nil {
 		return Layout{}, fmt.Errorf("resolving bed directory %q: %w", bed, err)
 	}
-	val := ""
-	for _, v := range []string{flag, env, yaml} {
-		if s := strings.TrimSpace(v); s != "" {
-			val = s
-			break
-		}
-	}
+	val := Pick(flag, env, yaml)
 	if val == "" {
 		return Default(absBed), nil
 	}

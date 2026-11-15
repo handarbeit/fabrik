@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/workspace"
 )
 
 // Instance locks (#2097, ADR 2097).
@@ -246,11 +248,13 @@ func parseLockPID(b []byte) (int, error) {
 	return strconv.Atoi(s)
 }
 
-// checkNotInWorktree is R2: refuse to run from inside a Fabrik issue worktree
+// checkNotInWorktreeIn is R2: refuse to run from inside a Fabrik issue worktree
 // (".fabrik/worktrees/..."), which carries a full copy of the board config. A
 // pure function over the path; symlinks are resolved first so a symlinked entry
-// into a worktree is still caught.
-func checkNotInWorktree(dir string) error {
+// into a worktree is still caught. A worktree under a relocated workspace root
+// (#2470) has no ".fabrik/worktrees" segment, so dir is also compared against
+// the layout's worktrees directory (resolved, R5).
+func checkNotInWorktreeIn(dir string, ws workspace.Layout) error {
 	resolved := dir
 	if r, err := filepath.EvalSymlinks(dir); err == nil {
 		resolved = r
@@ -258,12 +262,20 @@ func checkNotInWorktree(dir string) error {
 	for _, p := range []string{dir, resolved} {
 		parts := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
 		for i := 0; i+1 < len(parts); i++ {
-			if parts[i] == ".fabrik" && parts[i+1] == "worktrees" {
-				return fmt.Errorf("refusing to start in %s: it is inside a .fabrik/worktrees/ directory, i.e. another Fabrik instance's issue worktree; start Fabrik from the project directory instead", dir)
+			if parts[i] == ".fabrik" && parts[i+1] == workspace.Worktrees {
+				return fmt.Errorf("refusing to start in %s: it is inside a .fabrik/%s/ directory, i.e. another Fabrik instance's issue worktree; start Fabrik from the project directory instead", dir, workspace.Worktrees)
 			}
 		}
 	}
+	if wt := ws.Dir(workspace.Worktrees); workspace.Within(wt, dir) {
+		return fmt.Errorf("refusing to start in %s: it is inside the workspace worktrees directory %s, i.e. an issue worktree; start Fabrik from the project directory instead", dir, wt)
+	}
 	return nil
+}
+
+// checkNotInWorktree is checkNotInWorktreeIn for the in-bed default layout.
+func checkNotInWorktree(dir string) error {
+	return checkNotInWorktreeIn(dir, workspace.Default(dir))
 }
 
 // acquireDirLock takes the per-directory flock. The file keeps its legacy
@@ -393,7 +405,13 @@ func describeBoardOwner(path string) string {
 // acquireInstanceLocks runs the startup lock sequence: R2 refusal, directory
 // lock, board lock. On any failure nothing stays held.
 func acquireInstanceLocks(cfg Config, fabrikDir string) (*instanceLocks, error) {
-	if err := checkNotInWorktree(fabrikDir); err != nil {
+	return acquireInstanceLocksIn(cfg, fabrikDir, workspace.Default(fabrikDir))
+}
+
+// acquireInstanceLocksIn is acquireInstanceLocks with the engine's workspace
+// layout, so a relocated worktrees root is refused as a start directory too.
+func acquireInstanceLocksIn(cfg Config, fabrikDir string, ws workspace.Layout) (*instanceLocks, error) {
+	if err := checkNotInWorktreeIn(fabrikDir, ws); err != nil {
 		return nil, err
 	}
 	dir, err := acquireDirLock(fabrikDir)

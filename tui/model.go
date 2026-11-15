@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/warnings"
 )
 
@@ -95,6 +96,9 @@ const (
 
 // ProjectInfo holds display metadata about the monitored project shown in the footer.
 type ProjectInfo struct {
+	// Workspace is the resolved workspace layout (#2470). The zero value means
+	// the in-bed default under the working directory.
+	Workspace     workspace.Layout
 	CWD           string // display-ready CWD (home-relative or absolute)
 	BoardTitle    string // GitHub Project board title; empty until startup board fetch succeeds
 	BoardURL      string // https://github.com/{orgs|users}/{owner}/projects/{num}
@@ -139,6 +143,7 @@ type Model struct {
 
 	// plugin directory
 	pluginDir string
+	ws        workspace.Layout // where worktrees, sessions and logs live (#2470); zero = in-bed default under the working directory
 
 	// wake channel — TUI sends to wake the engine poll loop
 	wakeCh chan<- struct{}
@@ -206,7 +211,19 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 		defaultRepo:    info.Repo,
 	}
 
+	// A zero layout falls back to the working directory's in-bed workspace, so
+	// callers that never set ProjectInfo.Workspace keep today's paths.
+	ws := info.Workspace
+	if ws.Bed == "" {
+		cwd, _ := os.Getwd()
+		ws = workspace.Default(cwd)
+	}
+	active.ws = ws
+	history := NewHistoryPaneComponent(info.Repo)
+	history.ws = ws
+
 	return Model{
+		ws:        ws,
 		focusPane: paneActive,
 		pluginDir: pluginDir,
 		wakeCh:    wakeCh,
@@ -221,7 +238,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 		alert:      AlertBannerComponent{now: now},
 		usageLimit: ClaudeUsageLimitBannerComponent{now: now},
 		active:     active,
-		history:    NewHistoryPaneComponent(info.Repo),
+		history:    history,
 		warnings:   NewWarningsPaneComponent(),
 		footer: FooterComponent{
 			projectInfo: info,
@@ -476,13 +493,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.header.SetStatusMsg("stage in progress — use l to watch")
 					return m, nil
 				}
-				cwd, _ := os.Getwd()
-				worktreePath := worktreePathForIssue(cwd, entry.Repo, entry.IssueNumber)
+				worktreePath := worktreePathForIssue(m.ws, entry.Repo, entry.IssueNumber)
 				if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
 					m.header.SetStatusMsg(fmt.Sprintf("no worktree for #%d", entry.IssueNumber))
 					return m, nil
 				}
-				return m, openResumeInlineCmd(m.pluginDir, entry.Repo, entry.IssueNumber, entry.StageName, entry.StageModel, worktreePath)
+				return m, openResumeInlineCmd(m.ws, m.pluginDir, entry.Repo, entry.IssueNumber, entry.StageName, entry.StageModel, worktreePath)
 			}
 			return m, nil
 

@@ -10,6 +10,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -411,7 +412,7 @@ func (e *Engine) didNotRunPauseNote(repoStr string, number int, stageName string
 			"(an API error such as a 429 session limit, or a usage limit), so this is most likely a Claude "+
 			"availability problem rather than a reviewer or CI that keeps failing. Real cycles take minutes each; "+
 			"a burst of them within seconds means the invocations never ran. Check the `is_error`/`api_error` "+
-			"result lines in `.fabrik/logs/<repo>/issue-%d/`.", n, number), true
+			"result lines in `%s/<repo>/issue-%d/`.", n, e.layout().Dir(workspace.Logs), number), true
 	default:
 		return fmt.Sprintf("Note: %d re-invocation(s) for this stage never ran (Claude API error or usage limit) "+
 			"and were not counted toward this limit.", n), false

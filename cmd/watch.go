@@ -10,6 +10,7 @@ import (
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/watch"
 )
 
@@ -20,6 +21,7 @@ func runWatch(args []string) error {
 	repo := fs.String("repo", "", "GitHub repository name (or FABRIK_REPO)")
 	token := fs.String("token", "", "GitHub token (or FABRIK_TOKEN / GITHUB_TOKEN)")
 	pluginDir := fs.String("plugin-dir", "", "Path to Fabrik plugin directory (or FABRIK_PLUGIN_DIR)")
+	workspaceRoot := fs.String("workspace-root", "", "Workspace root holding worktrees, sessions and logs (or FABRIK_WORKSPACE_ROOT, config.yaml workspace_root; default <dir>/.fabrik)")
 	ghesHost := fs.String("ghes-host", "", "GitHub Enterprise Server hostname (or FABRIK_GHES_HOST; default: unset, meaning github.com)")
 
 	fs.Usage = func() {
@@ -108,7 +110,16 @@ func runWatch(args []string) error {
 		fmt.Fprintf(os.Stderr, "[warn] --owner/--repo not set; GitHub metadata will not be fetched\n")
 	}
 
+	cwd, cwdErr := os.Getwd()
+	if cwdErr != nil {
+		return fmt.Errorf("getting working directory: %w", cwdErr)
+	}
+	ws, wsErr := workspace.Load(cwd, *workspaceRoot)
+	if wsErr != nil {
+		return wsErr
+	}
 	opts := watch.GitHubOptions{
+		Workspace:    ws,
 		Owner:        *owner,
 		Repo:         *repo,
 		Client:       client,
