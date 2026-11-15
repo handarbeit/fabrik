@@ -38,16 +38,27 @@ const catchUpTrailerKey = "Fabrik-Train-Catch-Up"
 
 // catchUpMarkerRe matches the machine-readable marker the engine posts on the member's
 // PR after a catch-up push.
-var catchUpMarkerRe = regexp.MustCompile(`<!-- fabrik:train-catch-up head=([0-9a-f]{7,64}) base=([0-9a-f]{7,64}) pure=(true|false) -->`)
+//
+// The optional trailing `kind=writeback` token (#2572, ADR 2572) marks a resolved base
+// merge written back to a member's own branch from a multi-member trial; markers without
+// it (every plain catch-up, including all posted before #2572) have an empty Kind.
+var catchUpMarkerRe = regexp.MustCompile(`<!-- fabrik:train-catch-up head=([0-9a-f]{7,64}) base=([0-9a-f]{7,64}) pure=(true|false)(?: kind=(writeback))? -->`)
+
+// catchUpKindWriteBack is the Kind of a trial-assembly write-back marker (#2572).
+const catchUpKindWriteBack = "writeback"
 
 // catchUpMarker is one parsed marker comment.
 type catchUpMarker struct {
 	Head string // the catch-up merge commit's SHA — the head the push produced
 	Base string // the pinned base SHA that was merged in
 	Pure bool   // true: no conflict-resolution edits
+	Kind string // "" for a singleton catch-up; catchUpKindWriteBack for a trial write-back (#2572)
 }
 
 func formatCatchUpMarker(m catchUpMarker) string {
+	if m.Kind != "" {
+		return fmt.Sprintf("<!-- fabrik:train-catch-up head=%s base=%s pure=%t kind=%s -->", m.Head, m.Base, m.Pure, m.Kind)
+	}
 	return fmt.Sprintf("<!-- fabrik:train-catch-up head=%s base=%s pure=%t -->", m.Head, m.Base, m.Pure)
 }
 
@@ -55,7 +66,7 @@ func formatCatchUpMarker(m catchUpMarker) string {
 func parseCatchUpMarkers(body string) []catchUpMarker {
 	var out []catchUpMarker
 	for _, sm := range catchUpMarkerRe.FindAllStringSubmatch(body, -1) {
-		out = append(out, catchUpMarker{Head: sm[1], Base: sm[2], Pure: sm[3] == "true"})
+		out = append(out, catchUpMarker{Head: sm[1], Base: sm[2], Pure: sm[3] == "true", Kind: sm[4]})
 	}
 	return out
 }
