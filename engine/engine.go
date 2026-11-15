@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -511,6 +512,7 @@ type Engine struct {
 	logFile                               *os.File                                  // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                                // serializes concurrent writes to logFile
 	logSink                               atomic.Pointer[LogSink]                   // optional per-Engine plain-text sink (#2247); nil: print to stdout
+	logLineEndingOff                      atomic.Bool                               // test seam (#2583): write stdout/file lines without normalising the line ending
 	transports                            *transportSet                             // attached event-ingestion transports; nil/empty when none is active (#1142, #2351)
 	echo                                  *echoRegistry                             // engine-level mutation-echo registry; nil when no transport is attached (#2351)
 	intake                                *intake                                   // transport-neutral delivery dedupe/order/ack stage; nil when no transport is attached (#2351)
@@ -1334,8 +1336,17 @@ func (e *Engine) logfRepo(repoKey string, tag, format string, args ...any) {
 }
 
 // logEvent is the shared implementation behind logf and logfRepo.
+//
+// Callers need not end their format with "\n": the byte-stream outputs (plain
+// stdout and the log file) get exactly one line ending, added only when the
+// message does not already end in one (#2583). The sink and the TUI receive
+// msg exactly as formatted.
 func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	line := msg
+	if !e.logLineEndingOff.Load() && !strings.HasSuffix(line, "\n") {
+		line += "\n"
+	}
 	if sink := e.logSink.Load(); sink != nil && e.events == nil {
 		// A per-Engine sink (the sim bed, #2247) replaces the shared stdout. It is
 		// a branch ahead of the TUI and stdout paths, not nested inside the stdout
@@ -1350,9 +1361,9 @@ func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any
 		// Plain-text mode: clear any transient status line before printing.
 		pollStatusClear()
 		if issueNumber == 0 {
-			fmt.Printf("[%s] %s", tag, msg)
+			fmt.Printf("[%s] %s", tag, line)
 		} else {
-			fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
+			fmt.Printf("[#%d %s] %s", issueNumber, tag, line)
 		}
 	}
 	// Write to persistent log file in both TUI and plain-text modes.
@@ -1360,9 +1371,9 @@ func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any
 	if e.logFile != nil {
 		ts := time.Now().UTC().Format(time.RFC3339)
 		if issueNumber == 0 {
-			fmt.Fprintf(e.logFile, "%s [%s] %s", ts, tag, msg)
+			fmt.Fprintf(e.logFile, "%s [%s] %s", ts, tag, line)
 		} else {
-			fmt.Fprintf(e.logFile, "%s [#%d %s] %s", ts, issueNumber, tag, msg)
+			fmt.Fprintf(e.logFile, "%s [#%d %s] %s", ts, issueNumber, tag, line)
 		}
 	}
 	e.logMu.Unlock()
