@@ -196,11 +196,24 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem, grace time.Duration, n
 		flags |= StatusChanged
 	}
 
-	// UpdatedAt is a listing fact: only ever move it forward.
-	if pi.UpdatedAt.After(item.UpdatedAt) {
-		item.UpdatedAt = pi.UpdatedAt
+	// UpdatedAt and the layer evidence are listing facts: the probe, listing and
+	// reconcile applies write them from GitHub. A deep-fetch copy is the served
+	// board, whose UpdatedAt/IssueLayerUpdatedAt the cache raised to a webhook
+	// receipt time (a local clock reading, always later than GitHub's own), so
+	// writing it back would make the next LightReconcile report drift against
+	// GitHub's listing for ever. They are therefore written only as a first
+	// population, when the Store holds nothing to contradict (#2573, ADR 2573).
+	// The comment total is GitHub's own count and is always written.
+	if st.receiptApply || item.UpdatedAt.IsZero() {
+		if pi.UpdatedAt.After(item.UpdatedAt) {
+			item.UpdatedAt = pi.UpdatedAt
+		}
 	}
-	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
+	if st.receiptApply || item.IssueLayerUpdatedAt.IsZero() {
+		applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
+	} else {
+		applyLayerEvidence(item, time.Time{}, time.Time{}, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
+	}
 
 	if pi.MilestoneKnown && !st.milestone {
 		flags |= applyMilestone(item, pi.Milestone, true)
@@ -261,6 +274,9 @@ func deepFetchLiveView(item *ItemState, pi gh.ProjectItem, grace time.Duration, 
 // record of them and must be left alone (#2348, FR-011).
 type deepStale struct {
 	blockedBy, milestone, linkedPR, reviews bool
+	// receiptApply restores the pre-#2573 unconditional UpdatedAt and layer
+	// evidence write (test seam only).
+	receiptApply bool
 }
 
 // applyLinkedPRFields syncs the LinkedPR fields from pi into item and returns
