@@ -41,6 +41,12 @@ func (e *Engine) applyDeepFetched(repo string, item *gh.ProjectItem) {
 // only (tests/sim); production never calls this.
 func (e *Engine) SetLegacyDeepFetchApplyForTest(on bool) { e.store.SetLegacyDeepFetchApplyForTest(on) }
 
+// SetReceiptTimeApplyForTest restores the pre-#2573 deep-fetch write of UpdatedAt
+// and the layer evidence from a served copy (webhook-receipt-inflated), so a
+// scenario can show the reconcile drift it caused. Test seam only; production
+// never calls this.
+func (e *Engine) SetReceiptTimeApplyForTest(on bool) { e.store.SetReceiptTimeApplyForTest(on) }
+
 // SetLegacyLocalClockSelfWriteForTest restores the pre-#1945 SelfWriteObserved
 // apply (the baseline becomes the daemon's time.Now() instead of the GitHub
 // stamp of the write) so a scenario can show its clock-skew assertions bite.

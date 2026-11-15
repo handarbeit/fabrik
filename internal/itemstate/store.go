@@ -42,6 +42,11 @@ type Store struct {
 	// freshness baselines). Test seam only (SetLegacyDeepFetchApplyForTest).
 	legacyDeepFetchApply atomic.Bool
 
+	// receiptTimeApply restores the pre-#2573 deep-fetch apply of UpdatedAt and
+	// the layer evidence from a served (receipt-inflated) copy. Test seam only
+	// (SetReceiptTimeApplyForTest).
+	receiptTimeApply atomic.Bool
+
 	// legacyLocalClockSelfWrite restores the pre-#1945 SelfWriteObserved apply
 	// (baseline = the daemon's time.Now()). Test seam only
 	// (SetLegacyLocalClockSelfWriteForTest) — the non-vacuity switch.
@@ -2024,6 +2029,14 @@ func (s *Store) SetLegacyLabelBaselineForTest(on bool) {
 // not vacuous; production never calls this.
 func (s *Store) SetLegacyDeepFetchApplyForTest(on bool) {
 	s.legacyDeepFetchApply.Store(on)
+}
+
+// SetReceiptTimeApplyForTest restores the pre-#2573 ItemDeepFetched write of
+// UpdatedAt and the layer evidence from a served copy, whose values the cache
+// raised to a webhook receipt time. Test seam only, used to show the drift tests
+// are not vacuous; production never calls this.
+func (s *Store) SetReceiptTimeApplyForTest(on bool) {
+	s.receiptTimeApply.Store(on)
 }
 
 func prFactsEqual(a, b PRFacts) bool {

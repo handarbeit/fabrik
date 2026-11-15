@@ -474,9 +474,25 @@ func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
 	// stays. Mirror that so a Status that moved after the listing is not
 	// silently refreshed through the deep fetch (#2344).
 	listingStatus := item.Status
+	// Nor does it read the listing's UpdatedAt or the freshness evidence derived
+	// from it: the caller's values stay, which for a served board copy means a
+	// webhook receipt time the cache raised them to (#2573). A bare item (zero
+	// values) is filled from the card.
+	listingUpdatedAt, listingIssueLayer, listingPRAt := item.UpdatedAt, item.IssueLayerUpdatedAt, item.LinkedPRUpdatedAt
+	listingCommentTotal, listingCommentKnown := item.IssueCommentTotal, item.IssueCommentTotalKnown
 	*item = *full
 	if listingStatus != "" {
 		item.Status = listingStatus
+	}
+	if !listingUpdatedAt.IsZero() {
+		item.UpdatedAt = listingUpdatedAt
+	}
+	if !listingIssueLayer.IsZero() {
+		item.IssueLayerUpdatedAt = listingIssueLayer
+		item.LinkedPRUpdatedAt = listingPRAt
+	}
+	if listingCommentKnown {
+		item.IssueCommentTotal, item.IssueCommentTotalKnown = listingCommentTotal, true
 	}
 	item.DeepFetchLive = true
 	item.DeepFetchStartedAt = startedAt

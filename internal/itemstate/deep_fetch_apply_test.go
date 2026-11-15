@@ -319,3 +319,61 @@ func TestDeepFetchApply_LiveFetchWritesLabelsAndClosedButNotStatus(t *testing.T)
 		t.Errorf("a deep fetch must not write Status; got %q", got.Status)
 	}
 }
+
+// A deep-fetch copy is the served board, whose UpdatedAt and issue-layer time
+// the cache raised to a webhook receipt time. It must not reach the Store as if
+// GitHub had reported it, or the next LightReconcile reports drift (#2573).
+func TestDeepFetchApply_ReceiptTimeNotWrittenBack(t *testing.T) {
+	ghTime := time.Unix(2000, 0)
+	receipt := ghTime.Add(3 * time.Second)
+	for _, restore := range []bool{false, true} {
+		s := newStoreWithItem(t, testRepo, 1)
+		s.SetReceiptTimeApplyForTest(restore)
+		base := testProjectItem(testRepo, 1)
+		base.UpdatedAt = ghTime
+		base.IssueLayerUpdatedAt = ghTime
+		base.LinkedPRUpdatedAt = ghTime
+		s.Apply(ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: gh.BoardProbeItem{EffectiveUpdatedAt: ghTime}})
+		s.Apply(ShallowBoardItemUpdated{Repo: testRepo, Number: 1, Item: base})
+		s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: base})
+		before := getItem(t, s, testRepo, 1)
+
+		served := base
+		served.UpdatedAt = receipt
+		served.IssueLayerUpdatedAt = receipt
+		served.IssueCommentTotal = 7
+		served.IssueCommentTotalKnown = true
+		s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: served})
+
+		got := getItem(t, s, testRepo, 1)
+		moved := got.UpdatedAt.Equal(receipt)
+		if moved != restore {
+			t.Errorf("restore=%v: UpdatedAt = %v (before %v)", restore, got.UpdatedAt, before.UpdatedAt)
+		}
+		if (got.IssueLayerUpdatedAt.Equal(receipt)) != restore {
+			t.Errorf("restore=%v: IssueLayerUpdatedAt = %v", restore, got.IssueLayerUpdatedAt)
+		}
+		// The baseline keeps absorbing the stamp: one check event costs one deep fetch.
+		if !got.LastSeenSourceUpdatedAt.Equal(receipt) {
+			t.Errorf("restore=%v: baseline = %v, want %v", restore, got.LastSeenSourceUpdatedAt, receipt)
+		}
+		// GitHub's own comment count is always written.
+		if !got.IssueCommentTotalKnown || got.IssueCommentTotal != 7 {
+			t.Errorf("restore=%v: comment total = %d known=%v", restore, got.IssueCommentTotal, got.IssueCommentTotalKnown)
+		}
+	}
+}
+
+// A first population has nothing to contradict, so the deep fetch still writes.
+func TestDeepFetchApply_FirstPopulationWritesUpdatedAtAndLayer(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 5)
+	pi.UpdatedAt = time.Unix(3000, 0)
+	pi.IssueLayerUpdatedAt = time.Unix(3000, 0)
+	pi.LinkedPRUpdatedAt = time.Unix(2900, 0)
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 5, FreshState: pi})
+	got := getItem(t, s, testRepo, 5)
+	if !got.UpdatedAt.Equal(pi.UpdatedAt) || !got.IssueLayerUpdatedAt.Equal(pi.IssueLayerUpdatedAt) || !got.LinkedPRUpdatedAt.Equal(pi.LinkedPRUpdatedAt) {
+		t.Errorf("first population: UpdatedAt=%v layer=%v pr=%v", got.UpdatedAt, got.IssueLayerUpdatedAt, got.LinkedPRUpdatedAt)
+	}
+}
