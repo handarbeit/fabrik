@@ -3447,13 +3447,13 @@ In a project that is not a Fabrik project the server starts quietly and each too
 | `fabrik` skill (qualified: `fabrik:fabrik`) | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. The PM mental model, the attention states, the steering labels a human applies, and how to use the actions and their limits. |
 | `fabrik-setup` skill (qualified: `fabrik:fabrik-setup`) | One-time onboarding walkthrough for setting up Fabrik from scratch in a new project. |
 | `/fabrik:status` command | The board's attention view and daemon health, from the daemon. |
-| Session-start notice | One line if the plugin and the `fabrik` binary versions differ (below). |
+| Session-start notice | One line if the plugin and the `fabrik` binary versions differ, naming the side that is behind (below). |
 
 When no daemon is reachable, Claude says so and tells you to start `fabrik` in your project directory; it does not fall back to reading GitHub.
 
 #### Plugin and binary versions
 
-Each release sets the plugin's version to the binary's and pins the marketplace entry to the release tag (see [Plugin release pinning](#plugin-release-pinning)), so the plugin you install is the one that shipped with a release. At session start a hook compares the plugin's version with `fabrik --version` and shows a one-line notice if they differ. It never blocks the session, and says nothing when `fabrik` is not on `PATH` or a version cannot be read. A development build never equals a released version, so the notice then says it cannot compare rather than suggesting a downgrade. Set `FABRIK_PLUGIN_VERSION_CHECK=off` in your environment to silence it.
+Each release sets the plugin's version to the binary's and pins the marketplace entry to the release tag (see [Plugin release pinning](#plugin-release-pinning)), so the plugin you install is the one that shipped with a release. At session start a hook compares the plugin's version with `fabrik --version` and shows a one-line notice if they differ. When both are release versions (`X.Y.Z`, optional leading `v`) it compares them numerically and tells you to fix only the side that is behind: update the plugin (`/plugin marketplace update fabrik`, then `/plugin update fabrik@fabrik`) when it is older than the binary, which is what happens after a daemon with `--auto-upgrade` moves the binary forward, or run `fabrik upgrade` when the binary is older. Versions it cannot order (a pre-release or build suffix, another number of components) get a message naming both remedies. It never blocks the session, and says nothing when `fabrik` is not on `PATH` or a version cannot be read. A development build never equals a released version, so the notice then says it cannot compare rather than suggesting a downgrade. Set `FABRIK_PLUGIN_VERSION_CHECK=off` in your environment to silence it.
 
 #### Keeping the plugin up to date
 
