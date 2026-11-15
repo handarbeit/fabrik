@@ -562,6 +562,13 @@ type Engine struct {
 	trainCatchUpGitFn func(ctx context.Context, p trialParams, m trainMember) catchUpGitOutcome
 	// catchUp is the singleton catch-up's attempt counter and CI-wait dwells (#2044).
 	trainCatchUp catchUpState
+	// Multi-member trial conflict write-back (#2572, ADR 2572): its attempted-set, the git
+	// half's test injection point (so the decision logic runs under trainValidateFn) and its
+	// two per-Engine neutralisation seams. New never sets the seams.
+	writeBack                            writeBackState
+	trainWriteBackGitFn                  func(ctx context.Context, p trialParams, m trainMember) writeBackOutcome
+	writeBackDisabledForTest             atomic.Bool
+	writeBackSHAExemptionDisabledForTest atomic.Bool
 	// catchUpPolicyMemoSkipDisabledForTest makes the singleton catch-up ignore its per-repo
 	// policy memo (#2065), i.e. exactly the pre-#2065 behavior of attempting the doomed push
 	// on every poll. Exists solely so a test can show the memo skip is non-vacuous; New never

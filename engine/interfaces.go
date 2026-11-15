@@ -176,6 +176,12 @@ type InvokeOptions struct {
 	// own branch head, not a member PR and a trial branch, so the synthetic prompt is
 	// worded accordingly. Empty for every other invocation.
 	CatchUpBaseSHA string
+	// noClaude, set only by the merge-train write-back (#2572), makes
+	// resolveConflictWithClaude refuse before dispatching anything: the write-back
+	// replays a resolution (rerere, generated-file regeneration) and never derives a new
+	// one, so a conflict that still needs Claude ends the attempt with
+	// errWriteBackNeedsClaude. Never read by the Claude invocation itself.
+	noClaude bool
 
 	// trainEpisode, set only by the merge-train conflict-resolution callers, lets
 	// acquireTrainSlot report "waiting for slot" to the train's TUI row (#2050).

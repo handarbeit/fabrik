@@ -465,3 +465,53 @@ func TestSHAInvalidation_DefersCommentBreakerResetWithCycles(t *testing.T) {
 	eng.handleValidateSHAInvalidation(item, "owner", "repo")
 	assertBreakerAndCycles(t, eng, item, true)
 }
+
+// --- #2572: the engine's own merge-train write-back head is not an external push ---
+
+func shaGuardWriteBackComment(author, head string) gh.Comment {
+	return gh.Comment{Author: author, Body: "🏭 **Fabrik merge-train** — conflict resolution written back\n" + formatCatchUpMarker(catchUpMarker{Head: head, Base: "bbbbbbb2222222", Kind: catchUpKindWriteBack})}
+}
+
+func TestSHAInvalidation_WriteBackHeadIsRecorded(t *testing.T) {
+	comments := func(o, r string, n int) ([]gh.Comment, error) {
+		return []gh.Comment{shaGuardWriteBackComment("testuser", shaCUHead)}, nil
+	}
+	eng, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, nil, comments)
+	if len(removed) != 0 {
+		t.Fatalf("write-back head must not invalidate, removed %v", removed)
+	}
+	snap, _ := eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != shaCUHead {
+		t.Errorf("completion SHA = %q, want the write-back head %q", snap.ValidateCompletedSHA(), shaCUHead)
+	}
+}
+
+func TestSHAInvalidation_WriteBackNotRecognisedStillInvalidates(t *testing.T) {
+	tests := map[string]func(string, string, int) ([]gh.Comment, error){
+		"marker from another author": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{shaGuardWriteBackComment("mallory", shaCUHead)}, nil
+		},
+		"marker names a different head": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{shaGuardWriteBackComment("testuser", "ddddddd4444444")}, nil
+		},
+	}
+	for name, comments := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, nil, comments)
+			if len(removed) == 0 {
+				t.Error("expected invalidation, no labels removed")
+			}
+		})
+	}
+}
+
+// Non-vacuity: with the exemption neutralised the same head is invalidated.
+func TestSHAInvalidation_WriteBackExemptionSeamRestoresStrip(t *testing.T) {
+	comments := func(o, r string, n int) ([]gh.Comment, error) {
+		return []gh.Comment{shaGuardWriteBackComment("testuser", shaCUHead)}, nil
+	}
+	_, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, func(e *Engine) { e.SetWriteBackSHAExemptionDisabledForTest(true) }, comments)
+	if len(removed) == 0 {
+		t.Error("with the exemption disabled the write-back head must invalidate")
+	}
+}
