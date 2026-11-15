@@ -384,12 +384,19 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			appliedAt, faErr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 			if faErr != nil {
 				e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at for stall check: %v\n", faErr)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout &&
-				time.Since(e.effectiveAnchor(item, owner, repo, "auto-merge", "the merge-queue stall dwell", appliedAt, e.cfg.CIWaitTimeout)) >= e.cfg.CIWaitTimeout {
-				e.logf(item.Number, "auto-merge", "PR #%d in merge queue past dwell (%s) with no merge-group CI — stall detected\n",
-					pr.Number, e.cfg.CIWaitTimeout)
-				e.pauseForMergeGroupStall(item, pr.Number)
-				return
+			} else if !appliedAt.IsZero() {
+				anchor := appliedAt
+				if time.Since(appliedAt) >= e.cfg.CIWaitTimeout {
+					anchor = e.effectiveAnchor(item, owner, repo, "auto-merge", "the merge-queue stall dwell", appliedAt, e.cfg.CIWaitTimeout)
+				}
+				if time.Since(anchor) >= e.cfg.CIWaitTimeout {
+					e.logf(item.Number, "auto-merge", "PR #%d in merge queue past dwell (%s) with no merge-group CI — stall detected\n",
+						pr.Number, e.cfg.CIWaitTimeout)
+					e.pauseForMergeGroupStall(item, pr.Number)
+					return
+				}
+				// #2532: wake a poll at the stall dwell's deadline.
+				e.noteTimerDeadline(itemOwnerRepoString(item, e.defaultRepo()), item.Number, timerMergeStall, e.cfg.CIWaitTimeout-time.Since(anchor))
 			}
 		}
 		return

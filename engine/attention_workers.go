@@ -107,13 +107,16 @@ func newestPauseMarkerComment(comments []gh.Comment, marker string) (gh.Comment,
 
 // gateCooldowns are the cooldowns that mean a gate, not the dispatcher, is what
 // the item waits on: an item carrying one is not "waiting for dispatch".
-var gateCooldowns = map[string]bool{
-	"feedback-pending":       true,
-	feedbackReadFailedReason: true,
-	"review-blocked":         true,
-	"merge-unsettled":        true,
-	"dep-blocked":            true,
-}
+// Derived from the classification table (cooldown_class.go, #2532).
+var gateCooldowns = func() map[string]bool {
+	m := map[string]bool{}
+	for reason, spec := range cooldownClasses {
+		if spec.Gate {
+			m[reason] = true
+		}
+	}
+	return m
+}()
 
 // dispatchable reports whether the engine would dispatch the item to a worker if
 // a slot were free (#2121 R3): a managed stage that is not complete, open, and

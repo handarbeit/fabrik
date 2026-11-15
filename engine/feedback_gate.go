@@ -127,7 +127,7 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, reason)
 		e.noteGateHold(item, gateFeedback, reason, pendingFeedbackIDs(pf))
 	}
-	reason, wait := "feedback-pending", e.githubRecheckInterval()
+	reason, wait := reasonFeedbackPending, e.githubRecheckInterval()
 	if pf.empty() && !e.feedbackReadFailShortOff.Load() {
 		// #2498: the state is unknown, not pending — retry on the next poll.
 		reason, wait = feedbackReadFailedReason, e.mergeGateRecheckInterval()

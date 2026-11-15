@@ -653,7 +653,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.store.Apply(itemstate.CooldownRecorded{
 			Repo:   repoStr,
 			Number: item.Number,
-			Reason: "dep-blocked",
+			Reason: reasonDepBlocked,
 			Until:  e.now().Add(cooldown),
 		})
 		return nil
@@ -1062,7 +1062,7 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 		e.store.Apply(itemstate.CooldownRecorded{
 			Repo:   repoStr,
 			Number: item.Number,
-			Reason: "periodic-re-eval",
+			Reason: reasonPeriodicReEval,
 			Until:  e.now().Add(e.githubRecheckInterval()),
 		})
 		return
@@ -1111,7 +1111,7 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   repoStr,
 		Number: item.Number,
-		Reason: "periodic-re-eval",
+		Reason: reasonPeriodicReEval,
 		Until:  e.now().Add(cooldown),
 	})
 	e.store.Apply(itemstate.InvocationRecorded{

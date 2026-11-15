@@ -139,13 +139,13 @@ func TestFeedbackGate_RealFeedbackKeepsLongCooldown(t *testing.T) {
 // #2498: the new reason is registered as short (idle poll cap) and as a gate
 // cooldown (not "waiting for dispatch").
 func TestFeedbackReadFailedReasonIsRegistered(t *testing.T) {
-	if !shortAdmissionCooldownReasons[feedbackReadFailedReason] {
+	if !isShortCooldown(feedbackReadFailedReason) {
 		t.Error("feedback-read-failed must be a short admission cooldown reason")
 	}
 	if !gateCooldowns[feedbackReadFailedReason] {
 		t.Error("feedback-read-failed must be a gate cooldown")
 	}
-	if shortAdmissionCooldownReasons["feedback-pending"] {
+	if isShortCooldown("feedback-pending") {
 		t.Error("feedback-pending must stay long")
 	}
 }

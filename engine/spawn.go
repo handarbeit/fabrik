@@ -490,7 +490,7 @@ func blockedByContainsChild(deps []gh.Dependency, parentOwner, parentRepo, child
 // failure defers to the next poll exactly like recoverMissingPlanComment
 // already does, rather than escalating to a hard pause.
 func (e *Engine) refreshForSpawnResume(item *gh.ProjectItem) error {
-	const cooldownReason = "spawn-resume-deferred"
+	const cooldownReason = reasonSpawnResume
 
 	if snap, err := e.store.Get(item.Repo, item.Number); err == nil {
 		if cooldown := snap.CooldownAt(cooldownReason); !cooldown.IsZero() && e.now().Before(cooldown) {
@@ -617,7 +617,7 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 // failure window (e.g. #971-style rate-limit pressure), mirroring the
 // "dep-blocked" cooldown pattern in engine/item.go.
 func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) (bool, error) {
-	const cooldownReason = "spawn-recovery-deferred"
+	const cooldownReason = reasonSpawnRecovery
 
 	// Mandatory log line: fires unconditionally on every hit of this
 	// inconsistency, regardless of which outcome below is ultimately taken.

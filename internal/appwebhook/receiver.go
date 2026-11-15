@@ -581,6 +581,22 @@ func (t *Receiver) TransitionHealth(healthy bool, reason string) {
 	t.recomputeState(reason)
 }
 
+// HealthyFor is the strict health read behind cooldown scheduling (#2532, ADR
+// 2532): the derived state is healthy, the ADR 2452 route verdict is reachable
+// (unknown is not enough) and the installation-coverage check reports no
+// missing repo. The managed-repo set is the board's, not the installation's, so
+// repo coverage is judged from the installation note: any missing repo makes
+// every repo unreliable. The App-level hook receives every event the App
+// subscribes to, so eventType does not narrow it.
+func (t *Receiver) HealthyFor(repo, eventType string) bool {
+	if t.state() != StateHealthy {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.route != nil && t.route.Liveness == localapi.RouteReachable && t.installNote == ""
+}
+
 // SubscribesTo: an App-level webhook receives every
 // event type the App is subscribed to.
 func (t *Receiver) SubscribesTo(string) bool { return true }

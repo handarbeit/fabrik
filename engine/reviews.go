@@ -1093,7 +1093,9 @@ func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) 
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
-	if time.Since(repromptedAt) < timeout {
+	if since := time.Since(repromptedAt); since < timeout {
+		// #2532: the Phase 2 deadline has no event; wake a poll at it.
+		e.noteTimerDeadline(itemOwnerRepoString(item, e.defaultRepo()), item.Number, timerReviewPhase2, timeout-since)
 		return false, false, false
 	}
 	e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
@@ -1172,13 +1174,24 @@ func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectI
 			e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			return false, false, false
 		}
-		if appliedAt.IsZero() || time.Since(appliedAt) < timeout {
+		repoKey := itemOwnerRepoString(item, e.defaultRepo())
+		timerKind := timerReviewWait
+		if reprompted {
+			timerKind = timerReviewPhase2
+		}
+		if appliedAt.IsZero() {
+			return false, false, false
+		}
+		if since := time.Since(appliedAt); since < timeout {
+			// #2532: the silence deadline has no event; wake a poll at it.
+			e.noteTimerDeadline(repoKey, item.Number, timerKind, timeout-since)
 			return false, false, false
 		}
 		// A head that arrived after the label restarts the wait (#2467): the
 		// reviewer is measured on silence about the commit they were asked to
 		// review, not on how long the fix loop has run.
-		if e.headRestartsWait(owner, repo, item, prNumber, appliedAt, timeout) {
+		if restart, remaining := e.headRestartRemaining(owner, repo, item, prNumber, appliedAt, timeout); restart {
+			e.noteTimerDeadline(repoKey, item.Number, timerKind, remaining)
 			return false, false, false
 		}
 		// 1× timeout elapsed.

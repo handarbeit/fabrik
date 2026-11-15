@@ -73,23 +73,13 @@ func (e *Engine) mergeGateRecheckInterval() time.Duration {
 // until the periodic re-evaluation (10 × PollSeconds) unless the decision to
 // retry also records the instant it falls due.
 
-// shortAdmissionCooldownReasons are the engine-scheduled retries whose due time
-// the poll loop must not sleep past (FR-003): the interval is capped at their
-// exact due. Every other reason (periodic-re-eval, dep-blocked, review-blocked,
-// feedback-pending, spawn-*) is a long cooldown; since #2528 (ADR 2528) the
-// interval is also capped on those, but at due + one configured interval
-// (earliestLongCooldown), so staggered dues coalesce.
-var shortAdmissionCooldownReasons = map[string]bool{
-	"retry-backoff":   true,
-	"sentinel-live":   true,
-	"merge-unsettled": true,
-	// lockWriteRetryReason (#2393): a refused dispatch must be retried on the
-	// next poll, not after an idle back-off.
-	"lock-write-failed": true,
-	// feedbackReadFailedReason (#2498): a feedback-gate hold caused only by a
-	// failed live read is retried on the next poll.
-	feedbackReadFailedReason: true,
-}
+// Admission cooldowns are classified in cooldown_class.go (#2532, ADR 2532):
+// isShortCooldown reports the engine-scheduled retries whose due time the poll
+// loop must not sleep past (FR-003): the interval is capped at their exact due.
+// Every other reason is a long cooldown; since #2528 (ADR 2528) the interval is
+// also capped on those, at due + one configured interval (earliestLongCooldown),
+// so staggered dues coalesce, except that an event-replaceable reason is not
+// counted while ingestion is reliable for its repo (#2532).
 
 // minDueWakeInterval floors the FR-003 cap, matching the retry_backoff minimum.
 const minDueWakeInterval = time.Second
@@ -200,7 +190,7 @@ func (e *Engine) recordStageRetryCooldownUntil(item gh.ProjectItem, until time.T
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
 		Number: item.Number,
-		Reason: "retry-backoff",
+		Reason: reasonRetryBackoff,
 		Until:  until,
 	})
 }
@@ -250,7 +240,7 @@ func (e *Engine) earliestShortCooldown(now time.Time) time.Time {
 			return
 		}
 		for reason, t := range st.CooldownAt {
-			if !shortAdmissionCooldownReasons[reason] || !now.Before(t) {
+			if !isShortCooldown(reason) || !now.Before(t) {
 				continue
 			}
 			if earliest.IsZero() || t.Before(earliest) {
@@ -262,14 +252,28 @@ func (e *Engine) earliestShortCooldown(now time.Time) time.Time {
 }
 
 // earliestLongCooldown returns the earliest unexpired long admission cooldown
-// (any reason that is neither short nor archive-eligible-at) across the store
-// (zero if none), with the same exclusions as earliestShortCooldown (#2528).
-// archive-eligible-at holds an absolute "eligible since" time, not a gate, and
-// would pin the cap. Admission consumes an expired entry and the poll() defer
-// re-stamps it a full githubRecheckInterval later, so counting only unexpired
-// entries cannot loop. In memory only.
+// across the store (zero if none), with the same exclusions as
+// earliestShortCooldown (#2528). Short and exempt reasons (archive-eligible-at
+// holds an absolute "eligible since" time, not a gate) are not counted; an
+// event-replaceable reason is not counted while ingestion is reliable for the
+// item's repo and every replacing event (#2532). Admission consumes an expired
+// entry and the poll() defer re-stamps it a full interval later, so counting
+// only unexpired entries cannot loop. In memory only.
 func (e *Engine) earliestLongCooldown(now time.Time) time.Time {
+	type candidate struct {
+		repo   string
+		number int
+		reason string
+		due    time.Time
+		deps   []gh.Dependency
+	}
 	var earliest time.Time
+	var deferred []candidate
+	consider := func(t time.Time) {
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest = t
+		}
+	}
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsClosed {
 			return
@@ -278,13 +282,88 @@ func (e *Engine) earliestLongCooldown(now time.Time) time.Time {
 			return
 		}
 		for reason, t := range st.CooldownAt {
-			if shortAdmissionCooldownReasons[reason] || reason == itemstate.ArchiveEligibleCooldown || !now.Before(t) {
+			if !now.Before(t) {
 				continue
 			}
-			if earliest.IsZero() || t.Before(earliest) {
-				earliest = t
+			switch cooldownClassOf(reason) {
+			case cooldownShort, cooldownExempt:
+				continue
+			case cooldownEventReplaceable:
+				c := candidate{repo: st.Repo, number: st.Number, reason: reason, due: t}
+				if reason == reasonDepBlocked {
+					c.deps = append([]gh.Dependency(nil), st.BlockedBy...)
+				}
+				deferred = append(deferred, c)
+			default:
+				consider(t)
 			}
 		}
 	})
+	// Stretchability reads the transport set and the Store (Peek), so it runs
+	// outside the Scan visitor, which holds the Store's read lock.
+	for _, c := range deferred {
+		if !e.eventReplaceableStretched(c.repo, c.reason, c.deps) {
+			consider(c.due)
+		}
+	}
 	return earliest
 }
+
+// eventReplaceableStretched reports whether the re-check recorded under reason
+// for an item in repo can be left out of the idle cap: ingestion is strictly
+// healthy for the repo and subscribes to every event that replaces the re-check
+// (#2532, ADR 2532). A dep-blocked item also needs every blocker cached and
+// covered, because DependentRefreshObserver is cache-only: an uncached blocker
+// closing announces nothing. Unknown health is not reliable.
+func (e *Engine) eventReplaceableStretched(repo, reason string, deps []gh.Dependency) bool {
+	spec := cooldownClasses[reason]
+	if spec.Class != cooldownEventReplaceable || e.eventStretchOff.Load() {
+		return false
+	}
+	for _, ev := range spec.Events {
+		if !e.transports.ReliableFor(repo, ev) {
+			return false
+		}
+	}
+	if reason == reasonDepBlocked {
+		if len(deps) == 0 {
+			return false
+		}
+		for _, d := range deps {
+			depRepo := d.Repo
+			if depRepo == "" {
+				depRepo = repo
+			}
+			if _, ok := e.store.Peek(depRepo, d.Number); !ok {
+				return false
+			}
+			if !e.transports.ReliableFor(depRepo, "") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// reliableFor reports strict ingestion health for repo (and eventType when
+// non-empty), the single read the safety-net stamp and the health watcher use.
+func (e *Engine) reliableFor(repo, eventType string) bool {
+	if e.eventStretchOff.Load() {
+		return false
+	}
+	return e.transports.ReliableFor(repo, eventType)
+}
+
+// SetEventReplaceableStretchDisabledForTest neutralises (or restores) the
+// transport-health-dependent scheduling of #2532 on this engine: every
+// event-replaceable re-check and the safety-net stamp revert to today's cadence.
+func (e *Engine) SetEventReplaceableStretchDisabledForTest(off bool) { e.eventStretchOff.Store(off) }
+
+// SetSafetyNetDisabledForTest neutralises (or restores) the safety net's own
+// interval on this engine: periodic-re-eval is stamped effectively never, so a
+// lost delivery is recovered only by whatever poll the idle cap still schedules.
+func (e *Engine) SetSafetyNetDisabledForTest(off bool) { e.safetyNetStampOff.Store(off) }
+
+// SetTimerWakeDisabledForTest neutralises (or restores) the deadline timer
+// registry on this engine (#2532): no timer wakes the idle poll.
+func (e *Engine) SetTimerWakeDisabledForTest(off bool) { e.timerWakeOff.Store(off) }

@@ -39,6 +39,23 @@ func newFakeTransport(name string) *fakeTransport {
 }
 
 func (f *fakeTransport) Name() string { return f.name }
+
+// HealthyFor implements ingestTransport: the fake's strict health is its healthy
+// flag, when it covers the repo (an empty repos set covers all) and subscribes.
+func (f *fakeTransport) HealthyFor(repo, eventType string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.healthy || f.disabled {
+		return false
+	}
+	if repo != "" && len(f.repos) > 0 && !f.repos[repo] {
+		return false
+	}
+	if eventType != "" && f.sub != nil && !f.sub(eventType) {
+		return false
+	}
+	return true
+}
 func (f *fakeTransport) Start(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

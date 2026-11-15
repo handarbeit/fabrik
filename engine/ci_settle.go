@@ -243,6 +243,10 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
 		if appliedAt, err := e.labelAppliedAt(item, owner, repoName, "fabrik:awaiting-ci"); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIBackstopTimeout backstop: %v\n", err)
+		} else if !appliedAt.IsZero() && time.Since(appliedAt) < e.ciBackstopTimeout() {
+			// #2532: not yet; wake a poll at the deadline instead of waiting for a
+			// generic re-admission. The gate's own decision below is unchanged.
+			e.noteTimerDeadline(repo, item.Number, timerCIBackstop, e.ciBackstopTimeout()-time.Since(appliedAt))
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciBackstopTimeout() {
 			if hasCIGatePauseComment(item, stage) {
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but a pause comment already exists for this episode — deferring to the live-data-informed handler chain instead of re-escalating blind\n", e.ciBackstopTimeout())
@@ -253,15 +257,18 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 				// does would land under a pause that never lifts on its own. The next
 				// poll re-evaluates once the worker has exited.
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but a worker is in flight (stage=%s) — backstop deferred to a later poll\n", e.ciBackstopTimeout(), stageName)
+				e.noteTimerDeadline(repo, item.Number, timerCIBackstop, 0)
 			} else if _, seen := e.ciBackstopLiveEvaluated.Load(ciBackstopKey(repo, item.Number)); !seen {
 				// #2059 R2: first evaluation since this daemon started. Downtime is
 				// not evidence CI is stuck, so the live-data handler chain below runs
 				// before the backstop may escalate; it applies from the next poll.
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but this is the first evaluation since daemon start — running the live-data handler chain first\n", e.ciBackstopTimeout())
+				e.noteTimerDeadline(repo, item.Number, timerCIBackstop, 0)
 			} else if anchor := e.effectiveAnchor(item, owner, repoName, "awaiting-ci-settle", "the CIBackstopTimeout backstop", appliedAt, e.ciBackstopTimeout()); time.Since(anchor) < e.ciBackstopTimeout() {
 				// #2059 R1: the item was resumed from a pause recently enough that it
 				// has not had the full timeout to progress; paused time does not count.
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) since it was applied, but the item was resumed %s ago — backstop skipped\n", e.ciBackstopTimeout(), time.Since(anchor).Round(time.Second))
+				e.noteTimerDeadline(repo, item.Number, timerCIBackstop, e.ciBackstopTimeout()-time.Since(anchor))
 			} else {
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) while never reaching the CI gate — escalating\n", e.ciBackstopTimeout())
 				e.pauseForCIBackstop(board, item, stage, appliedAt)

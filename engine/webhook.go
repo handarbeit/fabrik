@@ -762,6 +762,21 @@ func (wm *webhookManager) IsHealthyOrStartingUp() bool {
 	return wm.state == WebhookStreamStartingUp || wm.state == WebhookStreamHealthy
 }
 
+// HealthyFor implements ingestTransport: strictly healthy (not merely starting
+// up), enabled, subscribing to repo (managed and not quarantined) and to
+// eventType (#2532).
+func (wm *webhookManager) HealthyFor(repo, eventType string) bool {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if wm.disabled || wm.state != WebhookStreamHealthy {
+		return false
+	}
+	if repo != "" && (!wm.repos[repo] || wm.unsubscribableRepos[repo]) {
+		return false
+	}
+	return eventType == "" || containsEvent(wm.events, eventType)
+}
+
 // ManagedRepos returns a sorted snapshot of the currently non-quarantined
 // managed-repo set (i.e. wm.repos — the set UpdateRepos is actively trying
 // to subscribe, excluding repos already known-unsubscribable this session),

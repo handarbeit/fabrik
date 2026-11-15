@@ -55,6 +55,13 @@ type ingestTransport interface {
 	// unknown. Required of every transport, so a new one cannot silently report
 	// nothing.
 	HealthRow() localapi.TransportHealth
+	// HealthyFor is the strict health read behind cooldown scheduling (#2532,
+	// ADR 2532): true only when the transport is connected and past start-up, not
+	// disabled, shows no tracked drift or unreachable route, is known to cover
+	// repo, and (when eventType is non-empty) receives eventType. Unknown health
+	// is false, unlike IsHealthyOrStartingUp. It adds no new health signal; it
+	// reads the existing state more strictly.
+	HealthyFor(repo, eventType string) bool
 }
 
 // transportSet is the engine's collection of attached transports. Every method
@@ -119,6 +126,18 @@ func (s *transportSet) StopAll() {
 func (s *transportSet) Healthy() bool {
 	for _, t := range s.snapshot() {
 		if t.IsHealthyOrStartingUp() {
+			return true
+		}
+	}
+	return false
+}
+
+// ReliableFor reports whether any attached transport is strictly healthy for repo
+// and (when eventType is non-empty) subscribes to eventType. False for a nil or
+// empty set (poll-only) and for unknown health (#2532).
+func (s *transportSet) ReliableFor(repo, eventType string) bool {
+	for _, t := range s.snapshot() {
+		if t.HealthyFor(repo, eventType) {
 			return true
 		}
 	}
