@@ -24,7 +24,7 @@ The `fabrik` binary must be on your `PATH` (the plugin starts `fabrik mcp`), and
 
 **Auto-update** is off by default for third-party marketplaces. To turn it on, open `/plugin`, go to **Marketplaces**, select `fabrik` and enable auto-update. Without it, run `/plugin marketplace update fabrik` after you upgrade the binary.
 
-**Version notice.** At session start the plugin compares its version with `fabrik --version` and shows one line if they differ (a development build says it cannot be compared). It never blocks the session and is silent if `fabrik` is not installed. Set `FABRIK_PLUGIN_VERSION_CHECK=off` in your environment to silence it.
+**Version notice.** At session start the plugin compares its version with `fabrik --version` and shows one line if they differ. For release versions it names only the side that is behind: update the plugin (`/plugin marketplace update fabrik`, then `/plugin update fabrik@fabrik`) or run `fabrik upgrade`. Versions it cannot order get a message naming both remedies, and a development build says it cannot be compared. It never blocks the session and is silent if `fabrik` is not installed. Set `FABRIK_PLUGIN_VERSION_CHECK=off` in your environment to silence it.
 
 For local testing: `claude --plugin-dir /path/to/fabrik/plugin/fabrik`.
 
