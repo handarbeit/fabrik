@@ -1430,13 +1430,18 @@ func TestFetchPRReviews_SecondCommentedSupersedesFirst(t *testing.T) {
 	}
 }
 
-// TestFetchPRReviews_CommentedNeverSupersedesVerdict pins AC2 in all three
-// verdict directions — a COMMENTED follow-up must not overwrite APPROVED,
-// CHANGES_REQUESTED, or DISMISSED. The pre-existing suite only covered
-// CHANGES_REQUESTED; this closes the other two so a "latest always wins"
-// implementation (AC6) cannot pass here by accident.
+// TestFetchPRReviews_CommentedNeverSupersedesVerdict pins AC2 in the two
+// standing-verdict directions — a COMMENTED follow-up must not overwrite
+// APPROVED or CHANGES_REQUESTED, so a "latest always wins" implementation (AC6)
+// cannot pass here by accident.
+//
+// Changed for #2588 (ADR 2582): the DISMISSED subtest used to expect the
+// COMMENTED follow-up NOT to overwrite DISMISSED. That was the bug — a dismissal
+// ends the verdict it dismissed, so it is not a standing verdict, and a later
+// COMMENTED from the same author is that author's current state. DISMISSED then
+// COMMENTED now collapses to COMMENTED (see TestFetchPRReviews_CollapseShapes).
 func TestFetchPRReviews_CommentedNeverSupersedesVerdict(t *testing.T) {
-	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED", "DISMISSED"} {
+	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
 		t.Run(verdict, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -1460,6 +1465,52 @@ func TestFetchPRReviews_CommentedNeverSupersedesVerdict(t *testing.T) {
 			}
 			if got := reviews[0].DatabaseID; got != 1 {
 				t.Errorf("collapsed review DatabaseID = %d, want 1 (the %s submission)", got, verdict)
+			}
+		})
+	}
+}
+
+// TestFetchPRReviews_CollapseShapes pins the collapse for every history shape
+// that involves a dismissal (#2588, ADR 2582): only APPROVED and
+// CHANGES_REQUESTED are sticky against a later COMMENTED; DISMISSED ends a
+// verdict and a later COMMENTED is the author's current state.
+func TestFetchPRReviews_CollapseShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		history []string
+		want    string
+		wantID  int
+	}{
+		{"dismissed then commented", []string{"DISMISSED", "COMMENTED"}, "COMMENTED", 2},
+		{"changes requested then commented", []string{"CHANGES_REQUESTED", "COMMENTED"}, "CHANGES_REQUESTED", 1},
+		{"approved then commented", []string{"APPROVED", "COMMENTED"}, "APPROVED", 1},
+		{"dismissed, commented, then changes requested", []string{"DISMISSED", "COMMENTED", "CHANGES_REQUESTED"}, "CHANGES_REQUESTED", 3},
+		{"changes requested, dismissed, then commented", []string{"CHANGES_REQUESTED", "DISMISSED", "COMMENTED"}, "COMMENTED", 3},
+		{"commented then dismissed", []string{"COMMENTED", "DISMISSED"}, "DISMISSED", 2},
+		{"lone dismissed", []string{"DISMISSED"}, "DISMISSED", 1},
+		{"dismissed then approved", []string{"DISMISSED", "APPROVED"}, "APPROVED", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var resp []map[string]interface{}
+				for i, st := range tc.history {
+					resp = append(resp, map[string]interface{}{"id": i + 1, "user": map[string]string{"login": "bot[bot]"}, "state": st})
+				}
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer srv.Close()
+			c := NewClientWithBaseURL("token", srv.URL)
+			reviews, err := c.FetchPRReviews("owner", "repo", 42)
+			if err != nil {
+				t.Fatalf("FetchPRReviews: %v", err)
+			}
+			if len(reviews) != 1 {
+				t.Fatalf("expected 1 collapsed review, got %d: %+v", len(reviews), reviews)
+			}
+			if reviews[0].State != tc.want || reviews[0].DatabaseID != tc.wantID {
+				t.Errorf("collapsed = %s (id %d), want %s (id %d)", reviews[0].State, reviews[0].DatabaseID, tc.want, tc.wantID)
 			}
 		})
 	}
@@ -1730,7 +1781,7 @@ func TestFetchCommit(t *testing.T) {
 // COMMENTED that follows a formal verdict is kept (it is the evidence a declared
 // bot's clean re-review of the head consists of), DISMISSED is kept, PENDING is
 // not, and the commit and time ride along. FetchPRReviews over the same response
-// still collapses to the sticky verdict.
+// still collapses a standing verdict (CHANGES_REQUESTED) sticky; only DISMISSED stopped being sticky (#2588).
 func TestFetchPRReviewHistory_KeepsEverythingEligible(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1766,7 +1817,7 @@ func TestFetchPRReviewHistory_KeepsEverythingEligible(t *testing.T) {
 	}
 	for _, r := range collapsed {
 		if r.Author == "bot[bot]" && r.State != "CHANGES_REQUESTED" {
-			t.Errorf("collapsed bot review = %s, want the sticky CHANGES_REQUESTED (FetchPRReviews is unchanged)", r.State)
+			t.Errorf("collapsed bot review = %s, want the sticky CHANGES_REQUESTED (a standing verdict stays sticky)", r.State)
 		}
 	}
 }

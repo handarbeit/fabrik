@@ -197,7 +197,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		// Collapsed for the same reason FetchPRReviews collapses: production
 		// sources this field from GraphQL's latestReviews, which is one entry
 		// per author by definition. The two reads must agree.
-		item.LinkedPRReviews = latestReviewsByAuthor(linked.reviews)
+		item.LinkedPRReviews = latestReviewsByAuthor(linked.reviews, s.stickyDismissed)
 		item.LinkedPRReviewRequests = append([]gh.ReviewRequest(nil), linked.reviewRequests...)
 		item.LinkedPRResolvedThreadCount = linked.resolvedThreads
 		item.LinkedPRIsMergeQueueEnabled = r.mergeQueueEnabled
