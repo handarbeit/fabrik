@@ -160,7 +160,13 @@ func (e *Engine) tryWriteBackAndContinue(ctx context.Context, p trialParams, bat
 	}
 	e.logWriteBack(p, m, fmt.Sprintf("written back (member head %s -> %s); trial keeps the original resolution (%s)", shortSHA(m.headSHA), shortSHA(out.newHead), why))
 	// The trial still contains the member's original head, so that is the head the
-	// survivor keeps: the trial's content and the recorded head stay consistent.
+	// survivor keeps: the recorded head describes the trial's content. The member's live PR
+	// head is now newHead, so the recorded head is stale against it. That is the fail-closed
+	// direction everywhere it is compared: the singleton fast path refuses a head differing
+	// from its snapshot (singletonFastPathEligible), restart adoption discards a run whose
+	// member head moved (adoptTrainRun, to the existing reconstruct routes, uncharged), and
+	// the prefix cache is keyed on heads so a later trial misses naturally. Landing is by the
+	// trial's integration PR, never by the member's own head.
 	return m, false
 }
 
