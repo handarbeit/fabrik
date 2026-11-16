@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
@@ -1016,5 +1017,51 @@ func TestRunGitHubAppSetup_ActionsGranted_Succeeds(t *testing.T) {
 	}
 	if strings.Contains(out, "missing required permissions") {
 		t.Errorf("unexpected permission shortfall output:\n%s", out)
+	}
+}
+
+// The review-status tier (#2471): init verifies exactly what the engine's
+// startup check does, so an installation init accepts is one the engine starts
+// with. Off, statuses stays read; on, it is write in both verify and manifest.
+func TestGitHubAppSetupPermissions_ReviewStatusTier(t *testing.T) {
+	isolateCmdGitConfig(t, "")
+	for _, enabled := range []bool{false, true} {
+		want := "read"
+		if enabled {
+			want = "write"
+		}
+		for _, appID := range []int64{0, 42} {
+			verify, manifest, httpsGit := githubAppSetupPermissions(githubAppSetupOptions{AppID: appID, ReviewStatus: enabled})
+			if verify["statuses"] != want || manifest["statuses"] != want {
+				t.Errorf("enabled=%v appID=%d: verify=%q manifest=%q, want %q", enabled, appID, verify["statuses"], manifest["statuses"], want)
+			}
+			engineSet := engine.RequiredGitHubAppPermissionsWithReviewStatus(false, httpsGit, enabled)
+			for k, v := range engineSet {
+				if verify[k] != v {
+					t.Errorf("enabled=%v: init verify[%s]=%q disagrees with the engine's %q", enabled, k, verify[k], v)
+				}
+			}
+		}
+	}
+}
+
+func TestReviewStatusOnDisk(t *testing.T) {
+	chdirTemp := t.TempDir()
+	t.Chdir(chdirTemp)
+	if reviewStatusOnDisk(config.ProjectConfig{}) {
+		t.Error("no config and no stages on disk: want not enabled")
+	}
+	if !reviewStatusOnDisk(config.ProjectConfig{ReviewStatus: true}) {
+		t.Error("repo-wide key: want enabled")
+	}
+	if err := os.MkdirAll(filepath.Join(chdirTemp, ".fabrik", "stages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage := "name: Review\nprompt: x\nwait_for_reviews: true\nreview_status: true\n"
+	if err := os.WriteFile(filepath.Join(chdirTemp, ".fabrik", "stages", "review.yaml"), []byte(stage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !reviewStatusOnDisk(config.ProjectConfig{}) {
+		t.Error("stage with review_status: true on disk: want enabled")
 	}
 }

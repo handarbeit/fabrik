@@ -650,6 +650,7 @@ func runInit(args []string) error {
 			InstallationID: *githubAppInstallationIDFlag,
 			Webhooks:       *webhooksFlag,
 			GitSSH:         resolveBool("FABRIK_GIT_SSH", pc.GitSSH),
+			ReviewStatus:   reviewStatusOnDisk(pc),
 			NoBrowser:      noBrowser,
 			// A first run creates the App and opens its install page; on an
 			// interactive terminal, wait for the install rather than exiting
@@ -1038,4 +1039,14 @@ func writeGitExclude() error {
 		fmt.Printf("  git exclude: %d entries added to .git/info/exclude\n", added)
 	}
 	return nil
+}
+
+// reviewStatusOnDisk reports whether the fabrik/review commit status (#2471) is
+// enabled by the config already on disk: the repo-wide review_status key or any
+// stage in the stages directory with review_status: true. Stage files that do
+// not exist yet (init runs before they are extracted) or do not load count as
+// "not enabled" — the engine's startup refusal is authoritative either way.
+func reviewStatusOnDisk(pc config.ProjectConfig) bool {
+	stgs, _ := stages.LoadAll("./.fabrik/stages")
+	return engine.ReviewStatusEnabled(pc.ReviewStatus, stgs)
 }
