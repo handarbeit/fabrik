@@ -288,11 +288,23 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 	if err := e.client.CreateCommitStatus(owner, repo, head, res.State, gh.ReviewStatusContext, res.Description); err != nil {
 		e.logf(item.Number, "review-status", "writing %s=%s on %s failed: %v\n", gh.ReviewStatusContext, res.State, standingSHA(head), err)
 		e.reportReviewStatusWriteFailure(item, owner, repo, err)
-		// The record is not advanced (retried on a later poll) and any earlier one is
-		// dropped: it described a state the verdict has left, so it must not keep
-		// suppressing the CI timers or rewording the backstop comment as a review wait.
+		// The write is retried on a later poll, so the record is not advanced to the
+		// new state. An earlier record for this PR and head still describes how long
+		// the review wait lasted, so it is kept as an unwritten record (empty state):
+		// it no longer reads as pending — it must not keep suppressing the CI timers
+		// or rewording the backstop as a review wait once the verdict has left
+		// pending — but it carries the moment the wait ended, so a later successful
+		// write does not lose it. A record for another PR or head is dropped.
 		e.reviewStatus.mu.Lock()
-		delete(e.reviewStatus.records, key)
+		if rec != nil && rec.pr == pr && rec.head == head {
+			ended := rec.endedAt
+			if rec.state == reviewStatusPending && res.State != reviewStatusPending {
+				ended = time.Now()
+			}
+			e.reviewStatus.records[key] = &reviewStatusRecord{pr: pr, head: head, endedAt: ended}
+		} else {
+			delete(e.reviewStatus.records, key)
+		}
 		e.reviewStatus.mu.Unlock()
 		return
 	}

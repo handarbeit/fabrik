@@ -387,10 +387,14 @@ func TestReviewStatusScan_RecordDroppedWhenItemLeavesStage(t *testing.T) {
 	}
 }
 
-// A failed write drops the earlier record: a stale pending record must not keep
-// suppressing the CI timers or rewording the backstop as a review wait once the
-// review it was waiting for has arrived.
-func TestReviewWaitFloor_FailedWriteDropsStalePendingRecord(t *testing.T) {
+// A failed write must not leave the earlier pending record in place: a stale
+// pending record would keep suppressing the CI timers and rewording the backstop
+// as a review wait once the review it was waiting for has arrived. But the wait
+// did last until that moment, so the end of the wait is kept (not dropped with
+// the record): a later successful write must still move the CI dwell anchors
+// past the review wait, or an item that waited hours for review could be paused
+// as a CI stall straight away.
+func TestReviewWaitFloor_FailedWriteKeepsTheEndOfTheWaitNotThePendingState(t *testing.T) {
 	f := newReviewStatusFixture(t, nil)
 	f.scan() // pending written
 	if f.eng.reviewWaitFloor(f.item).IsZero() {
@@ -401,11 +405,26 @@ func TestReviewWaitFloor_FailedWriteDropsStalePendingRecord(t *testing.T) {
 	}
 	f.history = []gh.PRReview{rv(1, prBot, "COMMENTED", commitA, 1)}
 	f.client.createCommitStatusFn = func(o, r, sha, st, c, d string) error { return gh.ErrForbidden }
+	before := time.Now()
 	f.scan() // success write refused
-	if !f.eng.reviewWaitFloor(f.item).IsZero() {
-		t.Error("a refused write left the stale pending floor in place")
-	}
 	if _, waiting := f.eng.reviewWaitPending(f.item); waiting {
 		t.Error("a refused write left the stale pending record in place")
+	}
+	ended := f.eng.reviewWaitFloor(f.item)
+	if ended.IsZero() || ended.Before(before) || ended.After(time.Now()) {
+		t.Fatalf("a refused write must keep the moment the wait ended; floor = %v", ended)
+	}
+	// Retried scans keep failing, then succeed: the end of the wait is unchanged.
+	f.scan()
+	if got := f.eng.reviewWaitFloor(f.item); !got.Equal(ended) {
+		t.Errorf("repeated failures moved the end of the wait: %v -> %v", ended, got)
+	}
+	f.client.createCommitStatusFn = nil
+	f.scan()
+	if got := f.eng.reviewWaitFloor(f.item); !got.Equal(ended) {
+		t.Errorf("a successful write after a failed one lost the end of the wait: %v -> %v", ended, got)
+	}
+	if _, waiting := f.eng.reviewWaitPending(f.item); waiting {
+		t.Error("the settled status must not read as pending")
 	}
 }
