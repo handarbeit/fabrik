@@ -108,7 +108,6 @@ func gitInSimRepo(t *testing.T, env *Env, args ...string) string {
 }
 
 func testWriteBackLandsResolutionOnMemberBranch(t *testing.T, async bool) {
-	t.Parallel()
 	env := mergeTrainEnv(t, writeBackEnvOptions(async, nil))
 	s := setupWriteBackScenario(t, env)
 
@@ -145,10 +144,12 @@ func testWriteBackLandsResolutionOnMemberBranch(t *testing.T, async bool) {
 }
 
 func TestMergeTrainWriteBack_ResolutionOutlivesTheAbandonedTrial_Sync(t *testing.T) {
+	t.Parallel()
 	testWriteBackLandsResolutionOnMemberBranch(t, false)
 }
 
 func TestMergeTrainWriteBack_ResolutionOutlivesTheAbandonedTrial_Async(t *testing.T) {
+	t.Parallel()
 	testWriteBackLandsResolutionOnMemberBranch(t, true)
 }
 
