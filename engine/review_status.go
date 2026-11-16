@@ -44,6 +44,10 @@ const (
 type reviewStatusResult struct {
 	State       string
 	Description string
+	// Outstanding names the declared reviewers that keep the status pending (no
+	// review of the head yet, an older head, or open findings); empty otherwise.
+	// The review-wait pause comment names exactly these.
+	Outstanding []string
 }
 
 // reviewStatusVerdict is the fabrik/review status for head, derived from the
@@ -102,7 +106,7 @@ func reviewStatusVerdict(standings []reviewerStanding, declared []string, head s
 	sha := standingSHA(head)
 	switch {
 	case len(failed) > 0:
-		return reviewStatusResult{reviewStatusFailure, fitStatusDescription("Changes requested on " + sha + " by " + strings.Join(failed, ", "))}, true
+		return reviewStatusResult{State: reviewStatusFailure, Description: fitStatusDescription("Changes requested on " + sha + " by " + strings.Join(failed, ", "))}, true
 	case len(pending) > 0 || len(findings) > 0:
 		desc := ""
 		if len(pending) > 0 {
@@ -114,9 +118,10 @@ func reviewStatusVerdict(standings []reviewerStanding, declared []string, head s
 			}
 			desc += "open findings on " + sha + " from " + strings.Join(findings, ", ")
 		}
-		return reviewStatusResult{reviewStatusPending, fitStatusDescription(desc)}, true
+		outstanding := append(append([]string{}, pending...), findings...)
+		return reviewStatusResult{State: reviewStatusPending, Description: fitStatusDescription(desc), Outstanding: outstanding}, true
 	default:
-		return reviewStatusResult{reviewStatusSuccess, fitStatusDescription("Reviewed " + sha + ": no changes requested by " + strings.Join(clean, ", "))}, true
+		return reviewStatusResult{State: reviewStatusSuccess, Description: fitStatusDescription("Reviewed " + sha + ": no changes requested by " + strings.Join(clean, ", "))}, true
 	}
 }
 
@@ -155,6 +160,9 @@ type reviewStatusRecord struct {
 	pr    int
 	head  string
 	state string
+	// outstanding is the declared reviewers that kept the status pending at the
+	// last evaluation (refreshed on every scan, even when the state is unchanged).
+	outstanding []string
 	// endedAt is when the record last left pending for its head (zero while it is
 	// pending or never was): the review wait's end, which the CI dwell anchors
 	// resume from.
@@ -269,6 +277,9 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 	}
 	rec := e.reviewStatus.records[key]
 	unchanged := rec != nil && rec.pr == pr && rec.head == head && rec.state == res.State
+	if unchanged {
+		rec.outstanding = res.Outstanding
+	}
 	e.reviewStatus.mu.Unlock()
 	if unchanged {
 		return
@@ -290,7 +301,7 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 
 	now := time.Now()
 	e.reviewStatus.mu.Lock()
-	next := &reviewStatusRecord{pr: pr, head: head, state: res.State}
+	next := &reviewStatusRecord{pr: pr, head: head, state: res.State, outstanding: res.Outstanding}
 	if rec != nil && rec.pr == pr && rec.head == head && rec.state == reviewStatusPending && res.State != reviewStatusPending {
 		next.endedAt = now
 	} else if rec != nil && rec.pr == pr && rec.head == head && res.State != reviewStatusPending {
@@ -456,6 +467,18 @@ func (e *Engine) reportReviewStatusConfig() {
 	e.reviewStatus.configDone = true
 }
 
+// reviewStatusOutstanding is the declared reviewers that kept the item's
+// fabrik/review status pending at its last evaluation (nil when unknown).
+func (e *Engine) reviewStatusOutstanding(item gh.ProjectItem) []string {
+	e.reviewStatus.mu.Lock()
+	defer e.reviewStatus.mu.Unlock()
+	rec := e.reviewStatus.records[issueKey(item, e.defaultRepo())]
+	if rec == nil || rec.pr != item.LinkedPRNumber {
+		return nil
+	}
+	return append([]string(nil), rec.outstanding...)
+}
+
 // pauseForReviewWaitBackstop is pauseForCIBackstop's branch for an item whose
 // fabrik/review status is pending (#2471, R3, FR-006): the CIBackstopTimeout
 // bound is unchanged, but the comment says the item was waiting for the review
@@ -463,8 +486,8 @@ func (e *Engine) reportReviewStatusConfig() {
 func (e *Engine) pauseForReviewWaitBackstop(item gh.ProjectItem, stage *stages.Stage, appliedAt time.Time, head string) bool {
 	e.logf(item.Number, "ci-timeout", "CIBackstopTimeout elapsed while the fabrik/review status is pending — pausing as a review wait, not a CI stall\n")
 	who := "an expected reviewer"
-	if declared := e.effectiveExpectedReviewers(item, stage); declared != nil && len(*declared) > 0 {
-		who = "the expected reviewer(s) " + strings.Join(*declared, ", ")
+	if out := e.reviewStatusOutstanding(item); len(out) > 0 {
+		who = "the expected reviewer(s) " + strings.Join(out, ", ")
 	}
 	total := ""
 	if !appliedAt.IsZero() {

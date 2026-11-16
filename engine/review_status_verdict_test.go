@@ -144,3 +144,21 @@ func TestReviewStatusVerdict_FindingsDescription(t *testing.T) {
 		t.Fatalf("got %+v ok=%v, want pending naming open findings", got, ok)
 	}
 }
+
+// The review-wait pause comment names Outstanding, so it must list only the
+// declared reviewers that keep the status pending — never one that already
+// cleared the head, and nothing at all for a non-pending verdict.
+func TestReviewStatusVerdict_OutstandingNamesOnlyPendingReviewers(t *testing.T) {
+	standings := []reviewerStanding{{Author: "gemini", Kind: standingClean}}
+	got, ok := reviewStatusVerdict(standings, []string{"gemini", "pruefer"}, commitB)
+	if !ok || got.State != reviewStatusPending {
+		t.Fatalf("got %+v ok=%v, want pending", got, ok)
+	}
+	if len(got.Outstanding) != 1 || got.Outstanding[0] != "pruefer" {
+		t.Errorf("Outstanding = %v, want [pruefer]", got.Outstanding)
+	}
+	done, _ := reviewStatusVerdict(standings, []string{"gemini"}, commitB)
+	if done.State != reviewStatusSuccess || len(done.Outstanding) != 0 {
+		t.Errorf("success verdict = %+v, want no Outstanding", done)
+	}
+}

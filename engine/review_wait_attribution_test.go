@@ -132,8 +132,9 @@ func TestCIWaitLivenessDwell_ReviewWaitIsNotCITime(t *testing.T) {
 func TestPauseForCIBackstop_ReviewWaitWording(t *testing.T) {
 	eng, client, item, stage := backstopMsgFixture(t, nGreenRuns(3))
 	item.LinkedPRNumber = 9
-	stage.ExpectedReviewers = &[]string{"pruefer"}
-	setReviewRecord(eng, item, reviewStatusRecord{pr: 9, head: "abcdef0123456789", state: reviewStatusPending})
+	// Two declared reviewers; only pruefer is still outstanding, so only it is named.
+	stage.ExpectedReviewers = &[]string{"pruefer", "gemini"}
+	setReviewRecord(eng, item, reviewStatusRecord{pr: 9, head: "abcdef0123456789", state: reviewStatusPending, outstanding: []string{"pruefer"}})
 
 	if !eng.pauseForCIBackstop(&gh.ProjectBoard{}, item, stage, time.Now().Add(-4*time.Hour)) {
 		t.Fatal("want a fresh pause (the CIBackstopTimeout bound is unchanged)")
@@ -154,6 +155,9 @@ func TestPauseForCIBackstop_ReviewWaitWording(t *testing.T) {
 	}
 	if strings.Contains(body, "awaiting-CI wait timeout") || strings.Contains(body, "CI gate itself was never reached") {
 		t.Errorf("a review wait must not be worded as a CI stall:\n%s", body)
+	}
+	if strings.Contains(body, "gemini") {
+		t.Errorf("a reviewer that has already cleared the head must not be named as outstanding:\n%s", body)
 	}
 
 	// The same episode is recognised on the next poll, so it is reapplied, not reposted.
