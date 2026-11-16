@@ -1190,6 +1190,7 @@ func Execute() error {
 		ItemWedgedThreshold:        minutesOrDefault(cfg.ItemWedgedThreshold, 10),
 		CacheDivergenceWindow:      minutesOrDefault(cfg.CacheDivergenceWindow, 5),
 		ChannelHeldMax:             cfg.ChannelHeldMax,
+		ReviewStatus:               pc.ReviewStatus,
 		RequiredStatusContexts:     pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:              postPushDwell(cfg.PostPushDwell),
 		WorkerStaleTimeout:         workerStaleTimeout(cfg.WorkerStaleMins),

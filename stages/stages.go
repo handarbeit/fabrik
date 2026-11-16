@@ -158,6 +158,16 @@ type Stage struct {
 	// identity form as expected_reviewers (bare handle, no "@", no "[bot]").
 	FeedbackBots []string `yaml:"feedback_bots,omitempty"`
 
+	// ReviewStatus enables Fabrik's own `fabrik/review` commit status on the PR
+	// head (#2471, ADR 2471): pending while an expected reviewer's review of
+	// the head is outstanding, success when every expected reviewer's review of
+	// the head asks for no changes, failure when one requests changes. Needs
+	// wait_for_reviews: true and a non-empty effective expected_reviewers.
+	//   - nil: inherit the repo-wide review_status config key (default off)
+	//   - true: on for this stage
+	//   - false: off for this stage, whatever the config key says
+	ReviewStatus *bool `yaml:"review_status,omitempty"`
+
 	// CIFixSkill names the plugin skill to invoke for CI-fix re-invocations.
 	// When absent, falls back to CommentSkill.
 	CIFixSkill string `yaml:"ci_fix_skill,omitempty"`

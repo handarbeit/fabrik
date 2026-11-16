@@ -1142,3 +1142,30 @@ func TestLoadAll_FeedbackBots_Rejects(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAll_ReviewStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want *bool
+	}{
+		{"absent", "name: Review\nprompt: \"x\"\n", nil},
+		{"true", "name: Review\nprompt: \"x\"\nreview_status: true\n", boolPtrForTest(true)},
+		{"false", "name: Review\nprompt: \"x\"\nreview_status: false\n", boolPtrForTest(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "stage.yaml", tc.yaml)
+			got, err := LoadAll(dir)
+			if err != nil {
+				t.Fatalf("LoadAll: %v", err)
+			}
+			g := got[0].ReviewStatus
+			if (g == nil) != (tc.want == nil) || (g != nil && *g != *tc.want) {
+				t.Errorf("ReviewStatus = %v, want %v", g, tc.want)
+			}
+		})
+	}
+}
+
+func boolPtrForTest(b bool) *bool { return &b }
