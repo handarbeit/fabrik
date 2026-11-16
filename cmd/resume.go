@@ -148,9 +148,6 @@ func runResume(args []string) error {
 	return execFn(claudeBin, claudeArgs, os.Environ())
 }
 
-// findRepoForIssue scans worktreeRoot for a directory named issue-N (either
-// directly or one level deep in a per-repo subdir), reads its git remote, and
-// returns "owner/repo". Returns "" if the worktree or remote cannot be found.
 // findWorktreeDir returns the worktree directory of an issue under worktreeRoot:
 // the flat <root>/issue-N when it exists, else <root>/<owner>-<repo>/issue-N for
 // the first per-repo directory that has one. When none exists it returns the
@@ -177,6 +174,9 @@ func findWorktreeDir(worktreeRoot string, issueNumber int) string {
 	return flat
 }
 
+// findRepoForIssue scans worktreeRoot for a directory named issue-N (either
+// directly or one level deep in a per-repo subdir), reads its git remote, and
+// returns "owner/repo". Returns "" if the worktree or remote cannot be found.
 func findRepoForIssue(worktreeRoot string, issueNumber int) string {
 	issueDirName := fmt.Sprintf("issue-%d", issueNumber)
 

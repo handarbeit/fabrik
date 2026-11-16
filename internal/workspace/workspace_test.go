@@ -313,6 +313,38 @@ func TestCheckMigration(t *testing.T) {
 			t.Error("a corrupt marker must still catch live work in the default root")
 		}
 	})
+	t.Run("previous root on an unmounted volume refuses", func(t *testing.T) {
+		bed := t.TempDir()
+		gone := filepath.Join(t.TempDir(), "Volumes", "X", "fabrik") // neither it nor its parent exists
+		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		if err := os.MkdirAll(l.StateDir(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(l.markerPath(), []byte(gone+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := l.Establish()
+		if err == nil || !strings.Contains(err.Error(), gone) || !strings.Contains(err.Error(), "mounted") {
+			t.Fatalf("want refusal naming %s and the mount, got %v", gone, err)
+		}
+		if _, serr := os.Stat(l.Root); !os.IsNotExist(serr) {
+			t.Error("nothing may be created under the new root on refusal")
+		}
+	})
+	t.Run("previous root removed but its parent present is accepted", func(t *testing.T) {
+		bed := t.TempDir()
+		gone := filepath.Join(t.TempDir(), "old") // parent exists, root removed after cleanup
+		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		if err := os.MkdirAll(l.StateDir(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(l.markerPath(), []byte(gone+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Establish(); err != nil {
+			t.Fatalf("a cleaned-up previous root must not block: %v", err)
+		}
+	})
 	t.Run("symlinked spelling of the same root is not a change", func(t *testing.T) {
 		bed := t.TempDir()
 		base := t.TempDir()

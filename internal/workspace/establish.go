@@ -93,12 +93,27 @@ func (l Layout) previousRoot() string {
 }
 
 // liveWorktrees lists issue worktree directories under root, both the
-// per-repo layout (<owner>-<repo>/issue-N) and the legacy flat one.
-func liveWorktrees(root string) []string {
+// per-repo layout (<owner>-<repo>/issue-N) and the legacy flat one. It returns
+// an error when the root cannot be inspected, so the caller can refuse rather
+// than treat "unknown" as "empty": a root on an unmounted volume must not read
+// as having no worktrees.
+func liveWorktrees(root string) ([]string, error) {
 	wt := filepath.Join(root, Worktrees)
 	entries, err := os.ReadDir(wt)
 	if err != nil {
-		return nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading %s: %w", wt, err)
+		}
+		// Not there. A root that was never used, or one the operator removed
+		// after cleaning up, has an existing parent. A missing parent too means
+		// the volume holding it may simply not be mounted.
+		if _, serr := os.Stat(root); serr == nil {
+			return nil, nil
+		}
+		if pfi, perr := os.Stat(filepath.Dir(root)); perr != nil || !pfi.IsDir() {
+			return nil, fmt.Errorf("%s and its parent %s do not exist (is the volume mounted?)", root, filepath.Dir(root))
+		}
+		return nil, nil
 	}
 	var out []string
 	for _, e := range entries {
@@ -112,7 +127,7 @@ func liveWorktrees(root string) []string {
 		}
 		subs, err := os.ReadDir(p)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("reading %s: %w", p, err)
 		}
 		for _, s := range subs {
 			if s.IsDir() && issueDirRE.MatchString(s.Name()) {
@@ -121,7 +136,7 @@ func liveWorktrees(root string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // CheckMigration refuses to continue when the workspace root changed since
@@ -130,13 +145,19 @@ func liveWorktrees(root string) []string {
 // refusal is lossless and reversible. "Active" means any issue-N directory:
 // whether the janitor would reap one needs GitHub and the item Store, neither
 // of which exists yet at startup. A missing or unreadable marker means the
-// in-bed default, which still catches live work there.
+// in-bed default, which still catches live work there. A previous root that
+// cannot be inspected (an unmounted volume) refuses too: unknown is not empty.
 func (l Layout) CheckMigration() error {
 	prev := l.previousRoot()
 	if Same(prev, l.root()) {
 		return nil
 	}
-	live := liveWorktrees(prev)
+	live, err := liveWorktrees(prev)
+	if err != nil {
+		return fmt.Errorf("workspace_root changed from %s to %s, but the old root cannot be inspected: %w\n"+
+			"Fabrik will not assume it is empty. Make the old root reachable (mount the volume) and restart, or set workspace_root back to %s",
+			prev, l.root(), err, prev)
+	}
 	if len(live) == 0 {
 		return nil
 	}
