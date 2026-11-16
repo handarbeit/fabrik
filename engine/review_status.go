@@ -1,9 +1,17 @@
 package engine
 
 import (
+	"errors"
+	"fmt"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // ReviewStatusEnabled reports whether the `fabrik/review` commit status (#2471,
@@ -102,4 +110,324 @@ func fitStatusDescription(s string) string {
 		return string(r[:139]) + "…"
 	}
 	return s
+}
+
+// ---------------------------------------------------------------------------
+// The producer: settleReviewStatusScan (#2471, ADR 2471; docs/state-machine.md
+// §6.6.7).
+//
+// A per-poll settle scan sourced from board.Items (independent of admission,
+// like settlePRReadyScan). For each item whose stage has the feature enabled it
+// reads the PR's review history and head live, derives the verdict through
+// reviewStatusVerdict and writes the `fabrik/review` commit status only when
+// (PR, head, state) differs from the last successful write. A push therefore
+// produces a pending write for the new head within one poll, an unchanged state
+// writes nothing, and a restart costs at most one redundant write per item.
+//
+// The status is display and CI-coordination only: a failed write is logged,
+// reported once on the warnings panel and retried; it never pauses an item and
+// never blocks a gate.
+// ---------------------------------------------------------------------------
+
+const (
+	reviewStatusWriteWarnType  = "review_status_write"
+	reviewStatusConfigWarnType = "review_status_config"
+)
+
+// reviewStatusRecord is the last successfully written status of one item.
+type reviewStatusRecord struct {
+	pr    int
+	head  string
+	state string
+	// endedAt is when the record last left pending for its head (zero while it is
+	// pending or never was): the review wait's end, which the CI dwell anchors
+	// resume from.
+	endedAt time.Time
+}
+
+// reviewStatusState is the engine's fabrik/review state (zero value ready).
+type reviewStatusState struct {
+	mu      sync.Mutex
+	records map[string]*reviewStatusRecord // by issueKey
+
+	warnMu      sync.Mutex
+	writeWarned bool   // a review_status_write entry is currently recorded
+	configSig   string // last review_status_config set reconciled
+	configDone  bool   // configSig is meaningful (a reconcile has completed)
+
+	off            atomic.Bool // SetReviewStatusDisabledForTest: write nothing
+	headBlind      atomic.Bool // SetReviewStatusHeadBlindForTest: verdict ignores the head
+	attributionOff atomic.Bool // SetReviewWaitAttributionDisabledForTest
+}
+
+// reviewStatusStageEnabled reports whether stage publishes the status: a stage
+// that waits for reviews, with its own review_status key (when set) or else the
+// repo-wide config key.
+func (e *Engine) reviewStatusStageEnabled(stage *stages.Stage) bool {
+	if stage == nil || stage.WaitForReviews == nil || !*stage.WaitForReviews {
+		return false
+	}
+	if stage.ReviewStatus != nil {
+		return *stage.ReviewStatus
+	}
+	return e.cfg.ReviewStatus
+}
+
+// settleReviewStatusScan is the per-poll scan; see the section comment above.
+func (e *Engine) settleReviewStatusScan(board *gh.ProjectBoard) {
+	if e.reviewStatus.off.Load() {
+		return
+	}
+	e.reportReviewStatusConfig()
+	if !ReviewStatusEnabled(e.cfg.ReviewStatus, e.cfg.Stages) {
+		return
+	}
+	if e.forgeHeld() || e.isDraining() {
+		return // retried next poll; nothing is lost
+	}
+	seen := map[string]bool{}
+	for _, item := range board.Items {
+		if item.IsPR || item.IsClosed || item.LinkedPRNumber == 0 {
+			continue
+		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		if !e.reviewStatusStageEnabled(stage) {
+			continue
+		}
+		declared := e.effectiveExpectedReviewers(item, stage)
+		if declared == nil || len(*declared) == 0 {
+			continue // nothing to wait on; reported as a config problem
+		}
+		key := issueKey(item, e.defaultRepo())
+		seen[key] = true
+		e.settleReviewStatus(item, key, *declared)
+	}
+	// An item that left an enabling stage (or closed) loses its record, so no
+	// stale attribution survives it.
+	e.reviewStatus.mu.Lock()
+	for k := range e.reviewStatus.records {
+		if !seen[k] {
+			delete(e.reviewStatus.records, k)
+		}
+	}
+	e.reviewStatus.mu.Unlock()
+}
+
+func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []string) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	pr := item.LinkedPRNumber
+
+	// live-read-audited: the status must follow the PR's head and state as GitHub has them now; a failed read writes nothing
+	details, err := e.client.FetchPRDetails(owner, repo, pr)
+	if err != nil {
+		e.logf(item.Number, "review-status", "could not read PR #%d: %v\n", pr, err)
+		return
+	}
+	if details == nil || details.HeadSHA == "" || details.State != "open" || details.Merged {
+		return // closed, merged or no head: no status
+	}
+	head := details.HeadSHA
+	// live-read-audited: the verdict is derived from the uncollapsed history at the head just read; the Store is not a decision input here
+	history, err := e.readClient.FetchPRReviewHistory(owner, repo, pr)
+	if err != nil {
+		e.logf(item.Number, "review-status", "could not read PR #%d review history: %v\n", pr, err)
+		return // never success on an unreadable history
+	}
+	if e.reviewStatus.headBlind.Load() {
+		// Non-vacuity seam: pretend every review is of the current head.
+		blind := make([]gh.PRReview, len(history))
+		copy(blind, history)
+		for i := range blind {
+			blind[i].CommitID = head
+		}
+		history = blind
+	}
+	res, ok := reviewStatusVerdict(reviewerStandings(history, head, declared), declared, head)
+	if !ok {
+		return
+	}
+
+	e.reviewStatus.mu.Lock()
+	if e.reviewStatus.records == nil {
+		e.reviewStatus.records = map[string]*reviewStatusRecord{}
+	}
+	rec := e.reviewStatus.records[key]
+	unchanged := rec != nil && rec.pr == pr && rec.head == head && rec.state == res.State
+	e.reviewStatus.mu.Unlock()
+	if unchanged {
+		return
+	}
+
+	if err := e.client.CreateCommitStatus(owner, repo, head, res.State, gh.ReviewStatusContext, res.Description); err != nil {
+		e.logf(item.Number, "review-status", "writing %s=%s on %s failed: %v\n", gh.ReviewStatusContext, res.State, standingSHA(head), err)
+		e.reportReviewStatusWriteFailure(item, owner, repo, err)
+		return // the record is not advanced: retried on a later poll
+	}
+	e.resolveReviewStatusWriteFailure()
+	e.logf(item.Number, "review-status", "%s = %s on %s: %s\n", gh.ReviewStatusContext, res.State, standingSHA(head), res.Description)
+
+	now := e.now()
+	e.reviewStatus.mu.Lock()
+	next := &reviewStatusRecord{pr: pr, head: head, state: res.State}
+	if rec != nil && rec.pr == pr && rec.head == head && rec.state == reviewStatusPending && res.State != reviewStatusPending {
+		next.endedAt = now
+	} else if rec != nil && rec.pr == pr && rec.head == head && res.State != reviewStatusPending {
+		next.endedAt = rec.endedAt
+	}
+	e.reviewStatus.records[key] = next
+	e.reviewStatus.mu.Unlock()
+}
+
+// reviewWaitFloor is the latest instant the item's review wait is known to have
+// lasted until (#2471, R3): "now" while the status last written for its PR is
+// pending, the moment it left pending afterwards, zero when there is no record.
+// The CI wait timers measure a CI stall from max(anchor, floor), so time spent
+// waiting for a reviewer never counts as CI time. Memory-only: after a restart
+// the first scan re-establishes it.
+func (e *Engine) reviewWaitFloor(item gh.ProjectItem) time.Time {
+	if e.reviewStatus.attributionOff.Load() || e.reviewStatus.off.Load() || item.LinkedPRNumber == 0 {
+		return time.Time{}
+	}
+	e.reviewStatus.mu.Lock()
+	defer e.reviewStatus.mu.Unlock()
+	rec := e.reviewStatus.records[issueKey(item, e.defaultRepo())]
+	if rec == nil || rec.pr != item.LinkedPRNumber {
+		return time.Time{}
+	}
+	if rec.state == reviewStatusPending {
+		return e.now()
+	}
+	return rec.endedAt
+}
+
+// reviewWaitPending reports whether the item's fabrik/review status is
+// currently pending, and the reviewers/head it names (for pause wording).
+func (e *Engine) reviewWaitPending(item gh.ProjectItem) (head string, ok bool) {
+	if e.reviewStatus.attributionOff.Load() || e.reviewStatus.off.Load() || item.LinkedPRNumber == 0 {
+		return "", false
+	}
+	e.reviewStatus.mu.Lock()
+	defer e.reviewStatus.mu.Unlock()
+	rec := e.reviewStatus.records[issueKey(item, e.defaultRepo())]
+	if rec == nil || rec.pr != item.LinkedPRNumber || rec.state != reviewStatusPending {
+		return "", false
+	}
+	return rec.head, true
+}
+
+// anchorAfterReviewWait returns anchor moved forward to the end of the item's
+// review wait, when that is later.
+func (e *Engine) anchorAfterReviewWait(item gh.ProjectItem, anchor time.Time) time.Time {
+	if floor := e.reviewWaitFloor(item); floor.After(anchor) {
+		return floor
+	}
+	return anchor
+}
+
+// isReviewStatusPermissionError reports a refusal that points at a missing
+// statuses grant or scope.
+func isReviewStatusPermissionError(err error) bool {
+	return errors.Is(err, gh.ErrForbidden) || errors.Is(err, gh.ErrNotFound)
+}
+
+func (e *Engine) reportReviewStatusWriteFailure(item gh.ProjectItem, owner, repo string, err error) {
+	if gh.IsTransportError(err) {
+		return // an outage is the forge hold's business, not a configuration condition
+	}
+	e.reviewStatus.warnMu.Lock()
+	defer e.reviewStatus.warnMu.Unlock()
+	if e.reviewStatus.writeWarned {
+		return
+	}
+	detail := fmt.Sprintf("Writing the `%s` commit status on %s/%s failed: %v\n\n", gh.ReviewStatusContext, owner, repo, err)
+	if isReviewStatusPermissionError(err) {
+		detail += "GitHub refused the write. Under GitHub App auth the installation needs `statuses: write`; with a personal access token it needs `repo` scope " +
+			"(or fine-grained commit statuses: write). "
+	}
+	detail += "No item is paused and no gate is blocked; the write is retried every poll. To stop writing the status, remove `review_status` from the config and stages."
+	c := warnings.Condition{
+		Type:        reviewStatusWriteWarnType,
+		Subject:     "write",
+		Title:       "Cannot write the fabrik/review commit status",
+		Detail:      detail,
+		Fingerprint: "review-status-write",
+	}
+	if rerr := warnings.Report(e.warnWriter("review-status"), c); rerr != nil {
+		e.logf(item.Number, "review-status", "recording warning: %v\n", rerr)
+		return
+	}
+	e.reviewStatus.writeWarned = true
+}
+
+func (e *Engine) resolveReviewStatusWriteFailure() {
+	e.reviewStatus.warnMu.Lock()
+	defer e.reviewStatus.warnMu.Unlock()
+	if !e.reviewStatus.writeWarned {
+		return
+	}
+	if err := warnings.Resolve(reviewStatusWriteWarnType + ":write"); err != nil {
+		return
+	}
+	e.reviewStatus.writeWarned = false
+}
+
+// reportReviewStatusConfig reconciles the review_status_config panel entries:
+// a stage that enables the status but cannot publish it. Reconciled only when
+// the set changed, so a poll that changes nothing does no panel I/O.
+func (e *Engine) reportReviewStatusConfig() {
+	var conds []warnings.Condition
+	anyQualifies := false
+	for _, s := range e.cfg.Stages {
+		if s == nil {
+			continue
+		}
+		explicit := s.ReviewStatus != nil && *s.ReviewStatus
+		waits := s.WaitForReviews != nil && *s.WaitForReviews
+		switch {
+		case explicit && !waits:
+			conds = append(conds, warnings.Condition{
+				Subject: "stage:" + s.Name,
+				Title:   fmt.Sprintf("Stage %q sets review_status but not wait_for_reviews", s.Name),
+				Detail: fmt.Sprintf("Stage %q sets review_status: true, but the fabrik/review status is only written for stages with wait_for_reviews: true, so nothing is written for it.\n\n"+
+					"Fix: set wait_for_reviews: true on the stage, or remove review_status.", s.Name),
+				Fingerprint: "stage:" + s.Name + ":no-wait-for-reviews",
+			})
+		case waits && e.reviewStatusStageEnabled(s) && (s.ExpectedReviewers == nil || len(*s.ExpectedReviewers) == 0):
+			conds = append(conds, warnings.Condition{
+				Subject: "stage:" + s.Name,
+				Title:   fmt.Sprintf("Stage %q enables the fabrik/review status but declares no expected_reviewers", s.Name),
+				Detail: fmt.Sprintf("Stage %q enables the fabrik/review status, but it declares no expected_reviewers, so there is no review to wait on and no status is written "+
+					"(a workflow waiting on it would otherwise wait for ever).\n\n"+
+					"Fix: declare the review bot in expected_reviewers on the stage (for example `expected_reviewers: [pruefer]`), or remove review_status.", s.Name),
+				Fingerprint: "stage:" + s.Name + ":no-expected-reviewers",
+			})
+		case waits && e.reviewStatusStageEnabled(s):
+			anyQualifies = true
+		}
+	}
+	if e.cfg.ReviewStatus && !anyQualifies && len(conds) == 0 {
+		conds = append(conds, warnings.Condition{
+			Subject:     "repo",
+			Title:       "review_status is on but no stage can publish the fabrik/review status",
+			Detail:      "The repo-wide review_status key is on, but no stage has wait_for_reviews: true.\n\nFix: set wait_for_reviews: true and expected_reviewers on the stage that reviews, or remove review_status.",
+			Fingerprint: "repo:no-stage",
+		})
+	}
+	sig := make([]string, 0, len(conds))
+	for _, c := range conds {
+		sig = append(sig, c.Subject+"="+c.Fingerprint)
+	}
+	sort.Strings(sig)
+	joined := strings.Join(sig, ";")
+	e.reviewStatus.warnMu.Lock()
+	defer e.reviewStatus.warnMu.Unlock()
+	if e.reviewStatus.configDone && joined == e.reviewStatus.configSig {
+		return
+	}
+	if err := warnings.Reconcile(e.warnWriter("review-status"), reviewStatusConfigWarnType, conds); err != nil {
+		e.logf(0, "review-status", "recording configuration warnings: %v\n", err)
+		return
+	}
+	e.reviewStatus.configSig = joined
+	e.reviewStatus.configDone = true
 }
