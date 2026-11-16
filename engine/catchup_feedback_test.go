@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,5 +292,34 @@ func TestCatchUpMarkerCache_PostingTheMarkerInvalidatesANegativeEntry(t *testing
 	eng.forgetCatchUpMarker("owner", "repo", 10, cuHead)
 	if eng.feedbackGateBlocks(item, true, "landing decision") {
 		t.Fatal("after the marker is posted and the cache entry forgotten, the review must not hold")
+	}
+}
+
+// #2572: the write-back marker carries kind=writeback, plain catch-up markers (including
+// every one posted before #2572) parse with an empty Kind, and a write-back marker never
+// suppresses anything because it is always pure=false.
+func TestCatchUpMarker_WriteBackKind(t *testing.T) {
+	wb := catchUpMarker{Head: cuHead, Base: cuBase, Kind: catchUpKindWriteBack}
+	text := formatCatchUpMarker(wb)
+	if !strings.Contains(text, "pure=false kind=writeback") {
+		t.Fatalf("write-back marker text = %q", text)
+	}
+	got := parseCatchUpMarkers("x " + text + " y")
+	if len(got) != 1 || got[0] != wb {
+		t.Fatalf("round trip = %+v, want [%+v]", got, wb)
+	}
+	plain := catchUpMarker{Head: cuHead, Base: cuBase, Pure: true}
+	if s := formatCatchUpMarker(plain); strings.Contains(s, "kind=") {
+		t.Errorf("plain catch-up marker must stay byte-identical, got %q", s)
+	}
+	old := "<!-- fabrik:train-catch-up head=" + cuHead + " base=" + cuBase + " pure=true -->"
+	if got := parseCatchUpMarkers(old); len(got) != 1 || got[0].Kind != "" || !got[0].Pure {
+		t.Errorf("pre-#2572 marker = %+v", got)
+	}
+	if got := parseCatchUpMarkers("<!-- fabrik:train-catch-up head=" + cuHead + " base=" + cuBase + " pure=false kind=bogus -->"); len(got) != 0 {
+		t.Errorf("unknown kind parsed: %+v", got)
+	}
+	if catchUpSuppresses(wb, cuHead, cuHead, "handarbeit-pruefer", cuIsBot) {
+		t.Error("a write-back marker must suppress nothing")
 	}
 }

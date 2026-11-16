@@ -184,6 +184,18 @@ func (e *Engine) checkValidateSHAInvalidationAt(item gh.ProjectItem, liveHead st
 		e.logf(item.Number, "validate-sha", "head %s is the engine's pure catch-up merge — keeping Validate completion, recording it as the completion SHA\n", lpr.HeadSHA)
 		return false
 	}
+	// #2572: the engine's own write-back of a resolved trial conflict is not an external
+	// push either (it is never pure, so the check above does not cover it).
+	wb, werr := e.headIsTrainWriteBack(owner, repo, lpr)
+	if werr != nil {
+		e.logf(item.Number, "warn", "validate-sha: could not read PR #%d comments for write-back marker: %v — deferring SHA invalidation to next poll\n", lpr.Number, werr)
+		return false
+	}
+	if wb {
+		e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: lpr.HeadSHA})
+		e.logf(item.Number, "validate-sha", "head %s is the engine's merge-train write-back — keeping Validate completion, recording it as the completion SHA\n", lpr.HeadSHA)
+		return false
+	}
 	e.handleValidateSHAInvalidation(item, owner, repo)
 	return true
 }

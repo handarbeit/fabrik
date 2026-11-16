@@ -60,3 +60,23 @@ func (e *Engine) headIsPureCatchUp(owner, repo string, lpr *itemstate.LinkedPRSt
 	}
 	return mk.Pure && mk.Head == lpr.HeadSHA, nil
 }
+
+// headIsTrainWriteBack reports whether the PR's live head is the engine's own write-back
+// of a resolved trial conflict (#2572, ADR 2572): an engine-authored marker with
+// kind=writeback names exactly the live head (the same trust rules as headIsPureCatchUp;
+// the commit trailer is never trusted). The merge is not pure — it carries a resolution —
+// but it is the engine's push, and the trial that contains it validates it, so the scan
+// must not strip the Validate completion of a member that is Queued inside a live trial.
+func (e *Engine) headIsTrainWriteBack(owner, repo string, lpr *itemstate.LinkedPRState) (bool, error) {
+	if e.writeBackSHAExemptionDisabledForTest.Load() {
+		return false, nil
+	}
+	if lpr == nil || lpr.Number == 0 || lpr.HeadSHA == "" {
+		return false, nil
+	}
+	mk, ok, err := e.catchUpMarkerCached(owner, repo, lpr.Number, lpr.HeadSHA)
+	if err != nil || !ok {
+		return false, err
+	}
+	return mk.Kind == catchUpKindWriteBack && mk.Head == lpr.HeadSHA, nil
+}

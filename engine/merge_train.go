@@ -1352,6 +1352,10 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true, trainEpisode: p.episode}
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
+			// #2572: a resolved conflict in a multi-member trial is written back to the
+			// member's own branch (best-effort, uncharged); when it is, the trial continues
+			// from the member's new head and the survivor carries it.
+			member, _ = e.tryWriteBackAndContinue(ctx, p, len(members), member, wtDir, preMergeHEAD)
 			survivors = append(survivors, member)
 			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
 				chainHash = p.prefixCache.record(chainHash, member, sha)
@@ -2644,6 +2648,10 @@ type conflictEjectionDiagnostic struct {
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
+	// #2572: a write-back replays an existing resolution; it never asks Claude for one.
+	if opts.noClaude {
+		return false, nil, errWriteBackNeedsClaude
+	}
 	// #2259: a SIGHUP drain starts no new conflict resolution. This is the same
 	// uncharged "not attempted" outcome as a cancelled slot wait: no ejection, no
 	// recordTrial, no dissolve; the persisted run resumes after the exec.
