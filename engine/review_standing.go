@@ -49,6 +49,12 @@ type reviewerStanding struct {
 	// (#2466) names and quotes the review through them.
 	VerdictID   int
 	VerdictBody string
+	// CommentAtHead is true when the reviewer's latest COMMENTED review (after
+	// any formal verdict) is on the head commit (#2471). It is additive: Kind,
+	// blocks() and every pre-existing consumer ignore it. The fabrik/review
+	// status reads it so a declared bot that only ever comments (Pruefer) can
+	// be told apart from one that has not reviewed the head yet.
+	CommentAtHead bool
 }
 
 // blocks reports whether the standing holds the authoritative gate.
@@ -141,6 +147,7 @@ func reviewerStandings(history []gh.PRReview, head string, declared []string) []
 			}
 		}
 		s := reviewerStanding{Author: g.author, Head: head}
+		s.CommentAtHead = head != "" && c != nil && c.CommitID == head
 		if f == nil || f.State == "DISMISSED" {
 			out = append(out, s)
 			continue
