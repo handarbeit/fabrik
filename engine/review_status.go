@@ -364,9 +364,9 @@ func (e *Engine) reportReviewStatusWriteFailure(item gh.ProjectItem, owner, repo
 func (e *Engine) resolveReviewStatusWriteFailure() {
 	e.reviewStatus.warnMu.Lock()
 	defer e.reviewStatus.warnMu.Unlock()
-	if !e.reviewStatus.writeWarned {
-		return
-	}
+	// Resolve even when this process did not record the entry: it may predate a
+	// restart. Clearing an absent key is a no-op, and a successful write happens
+	// only on a state change, so this is not a per-poll cost.
 	if err := warnings.Resolve(reviewStatusWriteWarnType + ":write"); err != nil {
 		return
 	}
