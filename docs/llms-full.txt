@@ -4884,7 +4884,7 @@ Everything Fabrik writes while it works — a worktree per issue (often with `no
 
 `workspace_root` points Fabrik's runtime churn at a directory you choose. Unset (the default) means `<bed>/.fabrik/`, and every path is exactly what it was before.
 
-**Precedence**, highest first: `--workspace-root`, `FABRIK_WORKSPACE_ROOT` (shell or `.env`), `workspace_root:` in `.fabrik/config.yaml`, the default. A relative value is resolved against the *bed* (the directory Fabrik runs in), never against the process's working directory; a leading `~` is expanded. `fabrik watch` and `fabrik resume` accept the same flag and variable, so they find the same worktrees as the daemon.
+**Precedence**, highest first: `--workspace-root`, `FABRIK_WORKSPACE_ROOT` (shell or `.env`), `workspace_root:` in `.fabrik/config.yaml`, the default. A relative value is resolved against the *bed* (the directory Fabrik runs in), never against the process's working directory; a leading `~` is expanded. `fabrik watch` and `fabrik resume` accept the same flag and variable, so they find the same worktrees as the daemon. Issue numbers are per repository, so when `issue-N` exists under more than one repo, `fabrik resume N` refuses and lists them; pass `--repo owner/repo` to choose.
 
 ```yaml
 # .fabrik/config.yaml
@@ -4898,10 +4898,10 @@ workspace_root: /Volumes/FabrikScratch/fabrik
 **Setting up a separate volume.**
 
 1. Create and mount the volume (for example an APFS volume excluded from Time Machine). Fabrik does not manage it.
-2. Set `workspace_root` to a directory on it. The directory may not exist yet, but its *parent* must: Fabrik creates the root itself and nothing above it. If the volume is not mounted, startup fails naming the path instead of silently recreating the workspace on the system disk.
+2. Create a directory on it and set `workspace_root` to that directory. The root must already exist: Fabrik creates only the `worktrees`, `repos`, `sessions`, `logs` and `debug` directories inside it and never the root itself. If the volume is not mounted, startup fails naming the path instead of silently recreating the workspace on the system disk (a root that is a mount point would otherwise be recreated there).
 3. Give each bed its own root. Two beds sharing one root would collide on `worktrees/<owner>-<repo>/issue-N`; Fabrik does not detect this.
 
-A root that cannot be created, is not a directory or is not writable fails startup with a message naming the path. It never falls back to the in-bed location.
+A root that does not exist, is not a directory or is not writable fails startup with a message naming the path. It never falls back to the in-bed location.
 
 **Changing the root on a bed that already has worktrees is refused.** Fabrik records the root it last ran with in `.fabrik/state/workspace-root`. If the configured root differs and the previous root (or the default `<bed>/.fabrik/` for a bed that never set one) still holds any `issue-N` worktree directory, startup stops with an error naming the old root and the worktrees. Nothing is moved, deleted or rewritten. Fabrik refuses rather than moves because moving live worktrees means git surgery on in-flight branches; refusing is lossless and reversible. To proceed, either set `workspace_root` back to its previous value, or let the work finish and remove the old worktrees (push or discard their changes first, then `git worktree remove <path>` from the matching bare clone, or run Fabrik once with the old setting and let the janitor clean closed issues), then restart. "Active" means *any* `issue-N` directory, including leftovers the janitor has not yet collected: whether one is still needed depends on GitHub and the item state, neither of which exists at startup. The same rule applies when you unset `workspace_root` after using it. If the previous root cannot be inspected (for example its volume is not mounted, so neither it nor its parent exists), startup is refused too, because an unreachable root is not known to be empty: mount the volume and restart, or set `workspace_root` back.
 

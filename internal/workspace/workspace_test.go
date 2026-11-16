@@ -128,8 +128,12 @@ func TestPrepare(t *testing.T) {
 	bed := t.TempDir()
 	vol := t.TempDir()
 
-	t.Run("creates leaf and subdirs", func(t *testing.T) {
-		l := Layout{Bed: bed, Root: filepath.Join(vol, "ws")}
+	t.Run("creates subdirs under an existing root", func(t *testing.T) {
+		root := filepath.Join(vol, "ws")
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		l := Layout{Bed: bed, Root: root}
 		if err := l.Prepare(); err != nil {
 			t.Fatal(err)
 		}
@@ -137,6 +141,19 @@ func TestPrepare(t *testing.T) {
 			if fi, err := os.Stat(l.Dir(n)); err != nil || !fi.IsDir() {
 				t.Errorf("%s not created", n)
 			}
+		}
+	})
+	t.Run("missing root is never created", func(t *testing.T) {
+		// The root's parent exists (a mount point's parent normally does): the
+		// root itself must still not be created.
+		missing := filepath.Join(vol, "fabrik")
+		l := Layout{Bed: bed, Root: missing}
+		err := l.Prepare()
+		if err == nil || !strings.Contains(err.Error(), missing) {
+			t.Fatalf("want error naming the path, got %v", err)
+		}
+		if _, serr := os.Stat(missing); !os.IsNotExist(serr) {
+			t.Error("a missing root must never be created")
 		}
 	})
 	t.Run("missing parent creates nothing", func(t *testing.T) {
@@ -214,12 +231,23 @@ func snapshot(t *testing.T, root string) []string {
 	return out
 }
 
+// mkRoot creates and returns an empty workspace root: Prepare never creates
+// the root itself, so a test that establishes a layout supplies one.
+func mkRoot(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func TestCheckMigration(t *testing.T) {
 	t.Run("pre-feature bed with live worktrees refuses and changes nothing", func(t *testing.T) {
 		bed := t.TempDir()
 		def := Default(bed)
 		wt := mkWorktree(t, def.root(), "o-r", "5")
-		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		l := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		before := snapshot(t, bed)
 		err := l.Establish()
 		if err == nil {
@@ -233,13 +261,13 @@ func TestCheckMigration(t *testing.T) {
 		if after := snapshot(t, bed); strings.Join(before, "\n") != strings.Join(after, "\n") {
 			t.Error("refusal must not modify the bed")
 		}
-		if _, serr := os.Stat(l.Root); !os.IsNotExist(serr) {
-			t.Error("the new root must not be created before the refusal check")
+		if _, serr := os.Stat(l.Dir(Worktrees)); !os.IsNotExist(serr) {
+			t.Error("nothing may be created under the new root before the refusal check")
 		}
 	})
 	t.Run("no worktrees accepts and records", func(t *testing.T) {
 		bed := t.TempDir()
-		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		l := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		if err := l.Establish(); err != nil {
 			t.Fatal(err)
 		}
@@ -254,19 +282,19 @@ func TestCheckMigration(t *testing.T) {
 	})
 	t.Run("external to external change refuses", func(t *testing.T) {
 		bed := t.TempDir()
-		a := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "a")}
+		a := Layout{Bed: bed, Root: mkRoot(t, "a")}
 		if err := a.Establish(); err != nil {
 			t.Fatal(err)
 		}
 		mkWorktree(t, a.Root, "o-r", "9")
-		b := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "b")}
+		b := Layout{Bed: bed, Root: mkRoot(t, "b")}
 		if err := b.Establish(); err == nil || !strings.Contains(err.Error(), a.Root) {
 			t.Fatalf("want refusal naming %s, got %v", a.Root, err)
 		}
 	})
 	t.Run("back to unset refuses while the old root is live, then clears the marker", func(t *testing.T) {
 		bed := t.TempDir()
-		ext := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		ext := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		if err := ext.Establish(); err != nil {
 			t.Fatal(err)
 		}
@@ -296,7 +324,7 @@ func TestCheckMigration(t *testing.T) {
 	})
 	t.Run("corrupt marker is treated as the default root", func(t *testing.T) {
 		bed := t.TempDir()
-		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		l := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		if err := os.MkdirAll(l.StateDir(), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -307,7 +335,7 @@ func TestCheckMigration(t *testing.T) {
 			t.Fatalf("a corrupt marker must not brick a healthy start: %v", err)
 		}
 		mkWorktree(t, Default(bed).root(), "o-r", "1")
-		other := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "w2")}
+		other := Layout{Bed: bed, Root: mkRoot(t, "w2")}
 		_ = os.WriteFile(other.markerPath(), []byte(""), 0o600)
 		if err := other.Establish(); err == nil {
 			t.Error("a corrupt marker must still catch live work in the default root")
@@ -316,7 +344,7 @@ func TestCheckMigration(t *testing.T) {
 	t.Run("previous root on an unmounted volume refuses", func(t *testing.T) {
 		bed := t.TempDir()
 		gone := filepath.Join(t.TempDir(), "Volumes", "X", "fabrik") // neither it nor its parent exists
-		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		l := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		if err := os.MkdirAll(l.StateDir(), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -327,14 +355,14 @@ func TestCheckMigration(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), gone) || !strings.Contains(err.Error(), "mounted") {
 			t.Fatalf("want refusal naming %s and the mount, got %v", gone, err)
 		}
-		if _, serr := os.Stat(l.Root); !os.IsNotExist(serr) {
+		if _, serr := os.Stat(l.Dir(Worktrees)); !os.IsNotExist(serr) {
 			t.Error("nothing may be created under the new root on refusal")
 		}
 	})
 	t.Run("previous root removed but its parent present is accepted", func(t *testing.T) {
 		bed := t.TempDir()
 		gone := filepath.Join(t.TempDir(), "old") // parent exists, root removed after cleanup
-		l := Layout{Bed: bed, Root: filepath.Join(t.TempDir(), "ws")}
+		l := Layout{Bed: bed, Root: mkRoot(t, "ws")}
 		if err := os.MkdirAll(l.StateDir(), 0o755); err != nil {
 			t.Fatal(err)
 		}

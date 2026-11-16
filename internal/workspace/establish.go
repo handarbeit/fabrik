@@ -34,10 +34,11 @@ func (l Layout) Establish() error {
 }
 
 // Prepare creates the moved subdirectories under a configured root. The root
-// must already exist as a directory, or its parent must: only the leaf is
-// created, so an unmounted volume (`/Volumes/X/fabrik` with X missing) fails
-// instead of silently recreating the workspace on the system disk (FR-011).
-// The in-bed default is left to the lazy creation Fabrik always did.
+// itself must already exist as a directory and is never created: a root that is
+// the mount point of a volume (`/mnt/fabrik`) would otherwise be silently
+// recreated on the system disk when the volume is not mounted, and a nested
+// path (`/Volumes/X/fabrik`) has the same failure one level up (FR-011). The
+// in-bed default is left to the lazy creation Fabrik always did.
 func (l Layout) Prepare() error {
 	if l.IsDefault() {
 		return nil
@@ -50,14 +51,7 @@ func (l Layout) Prepare() error {
 			return fmt.Errorf("workspace_root %s is not a directory", root)
 		}
 	case os.IsNotExist(err):
-		parent := filepath.Dir(root)
-		pfi, perr := os.Stat(parent)
-		if perr != nil || !pfi.IsDir() {
-			return fmt.Errorf("workspace_root %s does not exist and neither does its parent %s: is the volume mounted? Create the parent directory first; Fabrik never creates a missing mount path", root, parent)
-		}
-		if err := os.Mkdir(root, 0o755); err != nil {
-			return fmt.Errorf("creating workspace_root %s: %w", root, err)
-		}
+		return fmt.Errorf("workspace_root %s does not exist: is the volume mounted? Create the directory first (on the volume, not under a mount point that may be unmounted); Fabrik never creates the root itself", root)
 	default:
 		return fmt.Errorf("checking workspace_root %s: %w", root, err)
 	}

@@ -290,3 +290,51 @@ func TestFindWorktreeDir(t *testing.T) {
 		t.Errorf("missing = %s, want the flat path %s", got, want)
 	}
 }
+
+// #2470 review: issue numbers collide across repos, so a bare issue number that
+// matches more than one repo's worktree must be reported, not resolved to
+// whichever directory sorts first.
+func TestWorktreeMatches_ReportsEveryRepo(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "worktrees")
+	a := filepath.Join(root, "a-x", "issue-12")
+	b := filepath.Join(root, "b-y", "issue-12")
+	for _, d := range []string{a, b} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := worktreeMatches(root, 12)
+	if len(got) != 2 || got[0] != a || got[1] != b {
+		t.Fatalf("matches = %v, want [%s %s]", got, a, b)
+	}
+	if got := worktreeMatches(root, 13); len(got) != 0 {
+		t.Errorf("no match expected, got %v", got)
+	}
+}
+
+func TestRunResume_AmbiguousRepoIsRefused(t *testing.T) {
+	withExecCapture(t) // never replace the test process if a refusal is missed
+	tmp := t.TempDir()
+	stagesDir := filepath.Join(tmp, "stages")
+	writeStageYAML(t, stagesDir, "Research", "sonnet")
+	for _, d := range []string{"a-x", "b-y"} {
+		if err := os.MkdirAll(filepath.Join(tmp, ".fabrik", "worktrees", d, "issue-12"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	err := runResume([]string{"12", "--stage", "Research", "--stages", stagesDir})
+	if err == nil || !strings.Contains(err.Error(), "--repo") || !strings.Contains(err.Error(), "a-x") || !strings.Contains(err.Error(), "b-y") {
+		t.Fatalf("want an ambiguity error naming both repos and --repo, got %v", err)
+	}
+	// --repo that matches nothing is "not found", not a silent pick.
+	err = runResume([]string{"12", "--stage", "Research", "--stages", stagesDir, "--repo", "c/z"})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want not found for an unmatched --repo, got %v", err)
+	}
+}

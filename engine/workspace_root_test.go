@@ -260,6 +260,9 @@ func TestRealClaudeInvoker_WorkspaceRootKeepsChurnOutOfTheBed(t *testing.T) {
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	root := filepath.Join(t.TempDir(), "ws")
+	if err := os.Mkdir(root, 0o755); err != nil { // Prepare never creates the root itself
+		t.Fatal(err)
+	}
 	ws := workspace.Layout{Bed: bed, Root: root}
 	if err := ws.Prepare(); err != nil {
 		t.Fatal(err)

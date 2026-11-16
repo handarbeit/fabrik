@@ -185,7 +185,7 @@ An operator changes `workspace_root` on a bed that already has active worktrees.
 
 ### Edge Cases
 
-- The configured root does not exist yet: it is created. If it cannot be created or written to, startup fails with a message naming the path.
+- The configured root does not exist: startup fails with a message naming the path. Fabrik never creates the root itself (see the Assumptions); it creates only the subdirectories inside an existing root. If the root is not a directory or is not writable, startup fails the same way.
 - The configured root is a symlink, or lies inside a symlinked directory: behaviour is identical to using the resolved path (see User Story 5).
 - The configured root is a relative path: it is interpreted relative to the bed directory, not the process's current directory.
 - Two beds configured with the same root would collide on `worktrees/<owner>-<repo>/issue-N`. Each bed needs its own root; the documentation says so.
@@ -199,7 +199,7 @@ An operator changes `workspace_root` on a bed that already has active worktrees.
 ### Functional Requirements
 
 - **FR-001**: A `workspace_root` setting is accepted through the same layers as other daemon settings (command-line flag, then environment variable, then `config.yaml`), and the documented precedence applies. When it is unset in all layers, the workspace is `<bed>/.fabrik/` and every path and behaviour is identical to today.
-- **FR-002**: When `workspace_root` is set, the following are located under it: per-issue worktrees, bare repository clones, session files, logs, debug output, and stage state. Worktrees and clones are always kept together under the same root, so `git worktree` operations stay on one filesystem.
+- **FR-002**: When `workspace_root` is set, the following are located under it: per-issue worktrees, bare repository clones, session files, logs, debug output, and the per-issue session sidecars that live beside the sessions. Worktrees and clones are always kept together under the same root, so `git worktree` operations stay on one filesystem.
 - **FR-003**: When `workspace_root` is set, `config.yaml`, `.env`, `fabrik.lock` and the local API socket under `state/` stay in the bed, so the CLI, TUI and tools still find a running daemon through them.
 - **FR-004**: Exactly one resolver decides workspace paths. Every production site that needs a workspace path (the engine, resume, the TUI, the watch view, the session helpers, the log helpers, and any other) obtains it from that resolver.
 - **FR-005**: A test fails if production code builds a workspace path outside the resolver. The test is shown to fail against a deliberate violation and to pass against the compliant tree.
@@ -214,7 +214,7 @@ An operator changes `workspace_root` on a bed that already has active worktrees.
 ### Key Entities
 
 - **Bed**: The directory in which `fabrik` runs and which holds `.fabrik/config.yaml`, `.env`, and the daemon's lock and socket. It always stays where it is.
-- **Workspace root**: The directory under which worktrees, clones, sessions, logs, debug output and stage state live. It defaults to `<bed>/.fabrik/` and may be set elsewhere.
+- **Workspace root**: The directory under which worktrees, clones, sessions (with their sidecars), logs and debug output live. It defaults to `<bed>/.fabrik/` and may be set elsewhere.
 - **Workspace resolver**: The single function that maps a workspace subdirectory name to a path under the workspace root.
 
 ## Success Criteria *(mandatory)*
@@ -233,10 +233,10 @@ An operator changes `workspace_root` on a bed that already has active worktrees.
 
 - Precedence for the setting follows the layering used for other daemon settings: flag, then `FABRIK_`-prefixed environment variable, then `config.yaml`. The flag and variable are named `--workspace-root` and `FABRIK_WORKSPACE_ROOT`.
 - A relative value is resolved against the bed directory, and a leading `~` is expanded.
-- A missing root directory is created (including parents), because requiring operators to pre-create it adds friction. The volume itself must already be mounted.
+- The root directory must already exist; Fabrik never creates it, with or without its parents. Creating it would silently recreate the workspace on the system disk when the volume is not mounted, including when the root is itself the mount point. Fabrik creates only the `worktrees`, `repos`, `sessions`, `logs` and `debug` directories inside it. This supersedes the earlier assumption that a missing root is created (ADR 2470, decision 7).
 - **Migration policy (R6): refuse to start rather than move worktrees.** Refusing is lossless, reversible, and requires no git surgery on in-flight work. An automatic `git worktree move` is more convenient but riskier, since it touches live branches and links. The error message tells the operator how to proceed (let the work finish, or clean up the old worktrees, then restart). Automatic move can be a later feature.
 - "Active worktrees" means worktrees of items still in flight, not leftovers already eligible for the janitor.
-- "Stage state" under the root means the per-issue runtime state the engine keeps beside worktrees and sessions. It does not include decision-state files the daemon itself reads at startup from `state/`, which stay where they are (see Out of Scope).
+- "Stage state" under the root means only the per-issue session sidecars (`.session`, `.session.meta`, `.resumefails`, `.dispatches`) that live in `sessions/`. It does not include decision-state files the daemon itself reads at startup from `state/`, which stay where they are (see Out of Scope).
 - Pruefer is only in scope for how it matches worktree paths. Whether Pruefer gets its own `workspace_root` setting is not part of this issue.
 - Each bed uses its own workspace root. Detecting two beds sharing one root is not required.
 
