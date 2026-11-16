@@ -593,13 +593,19 @@ With a requirement configured, the decision is computed from each reviewer's
 reviews do not participate.
 
 **Simplified:** code-owner requirements, review dismissal on push, and stale-review
-invalidation are **absent**. `DISMISSED` is not a state the model produces.
+invalidation are **absent**. `DISMISSED` is only ever a *seeded* submission (a scenario appends it with `SeedReview`; the model never produces one itself). Real REST rewrites the dismissed review in place rather than appending a dismissal entry; the collapse is order-based and gives the same answer for both orderings, but the sim does not reproduce REST's in-place rewrite.
 
 **Same-author `COMMENTED` supersession (#1953).** `latestReviewsByAuthor` used
 to skip *every* later `COMMENTED` for an author already seen. Production
 (`github.Client.FetchPRReviews`) skips a later `COMMENTED` only when the stored
-entry is a **formal verdict** (`APPROVED`/`CHANGES_REQUESTED`/`DISMISSED`); a
-stored `COMMENTED` is superseded by a newer one. The old sim therefore hid a
+entry is a **standing verdict** (`APPROVED`/`CHANGES_REQUESTED`); a
+stored `COMMENTED` is superseded by a newer one. Since #2588 (ADR 2582) a stored
+`DISMISSED` is superseded too — a dismissal ends a verdict, so a later `COMMENTED`
+is the author's current state. The first revision of this note, and the sim, kept
+`DISMISSED` sticky like production did; both are fixed together
+(`isStandingVerdict` mirrors `github.isStandingReviewVerdict`).
+`Sim.SetStickyDismissedForTest` restores the old rule for one Sim, as the
+non-vacuity control of the `review_dismissed_then_commented_test.go` twin. The old sim therefore hid a
 bot's second body-only review (the #616 shape) from every read — a fidelity bug
 found while porting the scenario, fixed here and in the board projection
 (`buildProjectItem` shares the reduction). Reviews also now carry a GraphQL node
@@ -646,9 +652,9 @@ endpoint that returns every submission and reduces it to one entry per author,
 so its result matches GraphQL's `latestReviews`; the engine's review-gate call
 sites consume it assuming that reduction already happened. The model reproduces
 the rule exactly, including its one exception: a `COMMENTED` follow-up never
-supersedes an author's existing formal verdict (`APPROVED`,
-`CHANGES_REQUESTED`, `DISMISSED`), because GitHub treats a comment as
-informational rather than a state transition. Only an author's *first*
+supersedes an author's existing standing verdict (`APPROVED`,
+`CHANGES_REQUESTED`), because GitHub treats a comment as informational rather
+than a state transition; a `DISMISSED` entry does not resist it (#2588). Only an author's *first*
 submission being `COMMENTED` makes it their entry.
 
 The board projection's `LinkedPRReviews` applies the same reduction, since
@@ -665,7 +671,7 @@ the same filter over the same `pr.reviews` that `FetchPRReviews` collapses, so t
 cannot describe different PRs. The authoritative gate's no-branch-protection fallback
 decides on this read (a declared bot's `COMMENTED` after a `CHANGES_REQUESTED` is only
 visible here). `FetchPRReviews` and `FetchPRReviewDecision` deliberately stay on the
-sticky collapse — the latter models GitHub's own `reviewDecision`, which a non-empty
+collapse (`APPROVED`/`CHANGES_REQUESTED` sticky) — the latter models GitHub's own `reviewDecision`, which a non-empty
 value must keep deciding (R4). A seeded review's `CommitID` is whatever the scenario
 sets; the PR head is the real git head of the seeded branch (`FetchPRDetails`), so
 `SeedCommit` onto the branch is how a scenario "pushes".

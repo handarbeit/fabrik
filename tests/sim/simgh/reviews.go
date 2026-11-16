@@ -27,14 +27,15 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 		return nil, err
 	}
 	s.drainReviews(pr)
-	return latestReviewsByAuthor(pr.reviews), nil
+	return latestReviewsByAuthor(pr.reviews, s.stickyDismissed), nil
 }
 
 // FetchPRReviewHistory returns every eligible submission in submission order,
 // uncollapsed (#2465), reproducing github.Client.FetchPRReviewHistory: PENDING
 // never appears and DISMISSED does (it still ends the verdict it dismissed).
-// FetchPRReviews and FetchPRReviewDecision stay on the sticky collapse of the
-// same raw list — the latter models GitHub's own reviewDecision (R4).
+// FetchPRReviews and FetchPRReviewDecision stay on the collapse of the same raw
+// list (APPROVED and CHANGES_REQUESTED sticky against a later COMMENTED;
+// DISMISSED is not, #2588) — the latter models GitHub's own reviewDecision (R4).
 func (s *Sim) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -58,14 +59,20 @@ func (s *Sim) FetchPRReviewHistory(owner, repo string, prNumber int) ([]gh.PRRev
 //
 //   - the most recent submission wins, and authors keep first-submission order;
 //   - except that a COMMENTED follow-up never supersedes an author's existing
-//     *formal verdict* (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
+//     *standing verdict* (APPROVED, CHANGES_REQUESTED). GitHub treats
 //     COMMENTED as informational, not a state transition, so a reviewer who
 //     requests changes and later comments still has an active
 //     CHANGES_REQUESTED. A stored COMMENTED entry, by contrast, IS superseded
 //     by a newer COMMENTED — the newer body is the author's current review.
 //     (Before #1953 the sim skipped any later COMMENTED, which hid a bot's
-//     second body-only review — the #616 shape — from every read.)
-func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
+//     second body-only review — the #616 shape — from every read.) A stored
+//     DISMISSED is not a standing verdict either (#2588, ADR 2582): a dismissal
+//     ends the verdict, so a later COMMENTED is the author's current state.
+//
+// stickyDismissed restores the pre-#2588 rule (DISMISSED is sticky too); it is
+// the neutralisation seam behind Sim.SetStickyDismissedForTest and is false in
+// every production-faithful run.
+func latestReviewsByAuthor(reviews []gh.PRReview, stickyDismissed bool) []gh.PRReview {
 	latest := make(map[string]gh.PRReview, len(reviews))
 	order := make([]string, 0, len(reviews))
 	for _, rev := range reviews {
@@ -75,7 +82,7 @@ func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
 		stored, seen := latest[rev.Author]
 		if !seen {
 			order = append(order, rev.Author)
-		} else if rev.State == "COMMENTED" && isFormalVerdict(stored.State) {
+		} else if rev.State == "COMMENTED" && (isStandingVerdict(stored.State) || (stickyDismissed && stored.State == "DISMISSED")) {
 			continue
 		}
 		latest[rev.Author] = rev
@@ -207,7 +214,7 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 	// the landing gate to hold would see it clear. Sharing the reduction is what
 	// stops this read and FetchPRReviews describing two different PRs.
 	approvals := 0
-	for _, rev := range latestReviewsByAuthor(pr.reviews) {
+	for _, rev := range latestReviewsByAuthor(pr.reviews, s.stickyDismissed) {
 		// A collapsed entry that is COMMENTED or DISMISSED is that author's
 		// current state and simply carries no verdict.
 		if rev.State == "CHANGES_REQUESTED" {
@@ -223,13 +230,22 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 	return "REVIEW_REQUIRED", nil
 }
 
-// isFormalVerdict mirrors github.isFormalReviewVerdict (unexported there).
-func isFormalVerdict(state string) bool {
-	switch state {
-	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
-		return true
-	}
-	return false
+// isStandingVerdict mirrors github.isStandingReviewVerdict (unexported there):
+// the verdicts a later COMMENTED never overwrites in the collapse. DISMISSED is
+// deliberately absent (#2588).
+func isStandingVerdict(state string) bool {
+	return state == "APPROVED" || state == "CHANGES_REQUESTED"
+}
+
+// SetStickyDismissedForTest restores the pre-#2588 collapse, in which a stored
+// DISMISSED review is sticky against a later COMMENTED from the same author, for
+// this Sim only. It is the neutralisation seam of the dismissed-then-commented
+// twin (tests/sim/review_dismissed_then_commented_test.go): with it set the
+// twin must fail. Per-instance, so sim tests stay t.Parallel()-safe.
+func (s *Sim) SetStickyDismissedForTest(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stickyDismissed = on
 }
 
 // ensureReviewNodeID gives a review a GraphQL node ID when the scenario did not
