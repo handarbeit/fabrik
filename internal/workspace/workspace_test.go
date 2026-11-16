@@ -359,6 +359,33 @@ func TestCheckMigration(t *testing.T) {
 			t.Error("nothing may be created under the new root on refusal")
 		}
 	})
+	t.Run("previous root left empty by an unmounted mount point refuses", func(t *testing.T) {
+		bed := t.TempDir()
+		ext := Layout{Bed: bed, Root: mkRoot(t, "mnt")}
+		if err := ext.Establish(); err != nil {
+			t.Fatal(err)
+		}
+		// The volume goes away: the mount point is an empty directory again,
+		// with no worktrees/ and no sentinel.
+		if err := os.RemoveAll(ext.Root); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(ext.Root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		other := Layout{Bed: bed, Root: mkRoot(t, "other")}
+		err := other.Establish()
+		if err == nil || !strings.Contains(err.Error(), ext.Root) || !strings.Contains(err.Error(), rootSentinel) {
+			t.Fatalf("want a refusal naming %s and %s, got %v", ext.Root, rootSentinel, err)
+		}
+		// The operator confirms the volume is mounted and empty.
+		if err := os.WriteFile(filepath.Join(ext.Root, rootSentinel), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := other.Establish(); err != nil {
+			t.Fatalf("a sentinel confirms the root is a real, empty workspace: %v", err)
+		}
+	})
 	t.Run("previous root removed but its parent present is accepted", func(t *testing.T) {
 		bed := t.TempDir()
 		gone := filepath.Join(t.TempDir(), "old") // parent exists, root removed after cleanup

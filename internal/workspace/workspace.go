@@ -145,6 +145,13 @@ type yamlRoot struct {
 // malformed config.yaml is treated as unset, so a read-only consumer never
 // fails on a file the daemon itself reports.
 func Load(bed, flag string) (Layout, error) {
+	return LoadWithEnv(bed, flag, os.Getenv(EnvVar))
+}
+
+// LoadWithEnv is Load with the environment value supplied by the caller, for a
+// command that must not export the bed's .env into its own environment (`fabrik
+// resume` execs claude with os.Environ()).
+func LoadWithEnv(bed, flag, env string) (Layout, error) {
 	yamlVal := ""
 	if data, err := os.ReadFile(filepath.Join(bed, ".fabrik", "config.yaml")); err == nil {
 		var y yamlRoot
@@ -152,7 +159,7 @@ func Load(bed, flag string) (Layout, error) {
 			yamlVal = y.WorkspaceRoot
 		}
 	}
-	return Resolve(bed, flag, os.Getenv(EnvVar), yamlVal)
+	return Resolve(bed, flag, env, yamlVal)
 }
 
 // evalPath resolves symlinks of the deepest existing ancestor of p and

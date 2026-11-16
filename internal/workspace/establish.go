@@ -11,6 +11,12 @@ import (
 
 const markerName = "workspace-root"
 
+// rootSentinel is written into a configured root by Prepare. A previous root
+// that exists but has neither it nor a worktrees directory is not a workspace
+// Fabrik used: with a mount-point root it is the empty directory left on the
+// system disk while the volume is unmounted (see liveWorktrees).
+const rootSentinel = ".fabrik-workspace"
+
 var issueDirRE = regexp.MustCompile(`^issue-\d+$`)
 
 func (l Layout) markerPath() string {
@@ -60,6 +66,9 @@ func (l Layout) Prepare() error {
 			return fmt.Errorf("creating %s under workspace_root: %w", l.Dir(n), err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(root, rootSentinel), []byte("fabrik workspace root\n"), 0o644); err != nil {
+		return fmt.Errorf("workspace_root %s is not writable: %w", root, err)
+	}
 	probe, err := os.CreateTemp(root, ".fabrik-write-probe-*")
 	if err != nil {
 		return fmt.Errorf("workspace_root %s is not writable: %w", root, err)
@@ -91,7 +100,12 @@ func (l Layout) previousRoot() string {
 // an error when the root cannot be inspected, so the caller can refuse rather
 // than treat "unknown" as "empty": a root on an unmounted volume must not read
 // as having no worktrees.
-func liveWorktrees(root string) ([]string, error) {
+//
+// expectUsed is true for a root a previous run configured (not the in-bed
+// default). Such a root that exists without a worktrees directory must carry
+// the sentinel Prepare wrote, else it cannot be told from a mount point whose
+// volume is not mounted, and is refused rather than read as empty.
+func liveWorktrees(root string, expectUsed bool) ([]string, error) {
 	wt := filepath.Join(root, Worktrees)
 	entries, err := os.ReadDir(wt)
 	if err != nil {
@@ -102,6 +116,11 @@ func liveWorktrees(root string) ([]string, error) {
 		// after cleaning up, has an existing parent. A missing parent too means
 		// the volume holding it may simply not be mounted.
 		if _, serr := os.Stat(root); serr == nil {
+			if expectUsed {
+				if _, ferr := os.Stat(filepath.Join(root, rootSentinel)); ferr != nil {
+					return nil, fmt.Errorf("%s exists but is not a workspace Fabrik prepared (no %s): is the volume mounted?", root, rootSentinel)
+				}
+			}
 			return nil, nil
 		}
 		if pfi, perr := os.Stat(filepath.Dir(root)); perr != nil || !pfi.IsDir() {
@@ -146,11 +165,12 @@ func (l Layout) CheckMigration() error {
 	if Same(prev, l.root()) {
 		return nil
 	}
-	live, err := liveWorktrees(prev)
+	live, err := liveWorktrees(prev, !Same(prev, Default(l.Bed).root()))
 	if err != nil {
 		return fmt.Errorf("workspace_root changed from %s to %s, but the old root cannot be inspected: %w\n"+
-			"Fabrik will not assume it is empty. Make the old root reachable (mount the volume) and restart, or set workspace_root back to %s",
-			prev, l.root(), err, prev)
+			"Fabrik will not assume it is empty. Make the old root reachable (mount the volume) and restart, or set workspace_root back to %s. "+
+			"If the volume is mounted and you know the old root holds no worktrees, create an empty %s file in it",
+			prev, l.root(), err, prev, filepath.Join(prev, rootSentinel))
 	}
 	if len(live) == 0 {
 		return nil

@@ -338,3 +338,52 @@ func TestRunResume_AmbiguousRepoIsRefused(t *testing.T) {
 		t.Fatalf("want not found for an unmatched --repo, got %v", err)
 	}
 }
+
+// #2470 review: a root set only in the bed's .env is honoured by resume (as by
+// the daemon and watch), and is read as data: it is not exported into the
+// environment the exec'd claude inherits.
+func TestRunResume_WorkspaceRootFromDotenv(t *testing.T) {
+	tmp := t.TempDir()
+	stagesDir := filepath.Join(tmp, "stages")
+	writeStageYAML(t, stagesDir, "Plan", "opus")
+	root := filepath.Join(tmp, "ext")
+	wt := filepath.Join(root, "worktrees", "o-r", "issue-12")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, ".env"), []byte("FABRIK_WORKSPACE_ROOT="+root+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeClaude := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+	t.Setenv("PATH", tmp)
+	if v, ok := os.LookupEnv("FABRIK_WORKSPACE_ROOT"); ok { // start with it unset in the shell
+		os.Unsetenv("FABRIK_WORKSPACE_ROOT")
+		t.Cleanup(func() { os.Setenv("FABRIK_WORKSPACE_ROOT", v) })
+	}
+
+	var gotEnv []string
+	origExec := execFn
+	execFn = func(argv0 string, argv []string, envv []string) error { gotEnv = envv; return nil }
+	t.Cleanup(func() { execFn = origExec })
+
+	if err := runResume([]string{"12", "--stage", "Plan", "--stages", stagesDir}); err != nil {
+		t.Fatalf("a root set only in .env must be honoured: %v", err)
+	}
+	cwd, _ := os.Getwd()
+	if got, _ := filepath.EvalSymlinks(cwd); got != func() string { r, _ := filepath.EvalSymlinks(wt); return r }() {
+		t.Errorf("resumed in %s, want %s", got, wt)
+	}
+	for _, e := range gotEnv {
+		if strings.HasPrefix(e, "FABRIK_WORKSPACE_ROOT=") {
+			t.Errorf(".env value leaked into the exec environment: %s", e)
+		}
+	}
+}

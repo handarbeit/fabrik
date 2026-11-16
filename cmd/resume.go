@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
 	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
@@ -89,7 +90,7 @@ func runResume(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resume: getting working directory: %w", err)
 	}
-	ws, err := workspace.Load(cwd, *workspaceRoot)
+	ws, err := workspace.LoadWithEnv(cwd, *workspaceRoot, resumeWorkspaceEnv())
 	if err != nil {
 		return fmt.Errorf("resume: %w", err)
 	}
@@ -246,4 +247,17 @@ func parseOwnerRepoFromURL(remoteURL string) string {
 		return ""
 	}
 	return owner + "/" + repo
+}
+
+// resumeWorkspaceEnv returns FABRIK_WORKSPACE_ROOT as the daemon sees it: the
+// shell value, else the bed's .env. The .env is read as data and never exported,
+// because resume execs claude with os.Environ() and must not hand it a daemon
+// setting (or any other .env value, which resume deliberately does not load).
+// An unreadable or absent .env is "unset", as for `fabrik watch`.
+func resumeWorkspaceEnv() string {
+	if v := os.Getenv(workspace.EnvVar); v != "" {
+		return v
+	}
+	data, _ := config.ReadDotenv()
+	return data[workspace.EnvVar]
 }
