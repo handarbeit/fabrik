@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -112,5 +113,19 @@ func TestSetUpGitHubAppAuth_ReviewStatusEnabledAndPresentStarts(t *testing.T) {
 		if _, err := reviewStatusSetUp(t, perms, Config{ReviewStatus: true}); err != nil {
 			t.Fatalf("statuses:%s: setUpGitHubAppAuth: %v", level, err)
 		}
+	}
+}
+
+// The statuses explanation is only for the conditional write tier: an installation
+// missing the always-required statuses: read must not be told the review status is
+// enabled.
+func TestPermissionShortfallRemedy_StatusesLineOnlyForTheWriteTier(t *testing.T) {
+	read := []githubauth.RequiredPermissionShortfall{{Permission: "statuses", Required: "read", Granted: ""}}
+	if out := PermissionShortfallRemedy(read, "org", "app", 1); strings.Contains(out, "fabrik/review") {
+		t.Errorf("statuses: read shortfall must not mention the review status: %q", out)
+	}
+	write := []githubauth.RequiredPermissionShortfall{{Permission: "statuses", Required: "write", Granted: "read"}}
+	if out := PermissionShortfallRemedy(write, "org", "app", 1); !strings.Contains(out, "`statuses: write` is required") {
+		t.Errorf("statuses: write shortfall should explain the requirement: %q", out)
 	}
 }

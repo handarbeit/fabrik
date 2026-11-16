@@ -58,10 +58,11 @@ type reviewStatusResult struct {
 //	awaiting re-review (verdict on old head) → pending
 //	clean                                   → success
 //	no verdict, COMMENTED at head           → success (how a comment-only bot such
-//	                                          as Pruefer expresses a clean pass; a
-//	                                          review with findings makes Fabrik push
-//	                                          a fix, i.e. a new head and a pending
-//	                                          status)
+//	                                          as Pruefer expresses a clean pass) —
+//	                                          unless the review's findings marker
+//	                                          reports findings: then pending, until
+//	                                          a new head (the fix) or a clean review
+//	no verdict, COMMENTED at head, findings → pending
 //	no verdict, no comment at head          → pending
 //	absent from the history                 → pending
 //
@@ -71,7 +72,7 @@ func reviewStatusVerdict(standings []reviewerStanding, declared []string, head s
 	if head == "" || len(declared) == 0 {
 		return reviewStatusResult{}, false
 	}
-	var failed, pending, clean []string
+	var failed, pending, findings, clean []string
 	for _, d := range declared {
 		var st *reviewerStanding
 		for i := range standings {
@@ -87,6 +88,11 @@ func reviewStatusVerdict(standings []reviewerStanding, declared []string, head s
 			failed = append(failed, d)
 		case st.Kind == standingAwaitingReReview:
 			pending = append(pending, d)
+		case st.CommentAtHead && st.CommentFindings && (st.Kind == standingClean || st.Kind == standingNoVerdict):
+			// A comment-only bot's review at the head that reports findings is not a
+			// clean pass: the status stays pending until the head moves (the fix) or
+			// the reviewer's latest review at the head is clean.
+			findings = append(findings, d)
 		case st.Kind == standingClean, st.Kind == standingNoVerdict && st.CommentAtHead:
 			clean = append(clean, d)
 		default:
@@ -97,8 +103,18 @@ func reviewStatusVerdict(standings []reviewerStanding, declared []string, head s
 	switch {
 	case len(failed) > 0:
 		return reviewStatusResult{reviewStatusFailure, fitStatusDescription("Changes requested on " + sha + " by " + strings.Join(failed, ", "))}, true
-	case len(pending) > 0:
-		return reviewStatusResult{reviewStatusPending, fitStatusDescription("Waiting for review of " + sha + " from " + strings.Join(pending, ", "))}, true
+	case len(pending) > 0 || len(findings) > 0:
+		desc := ""
+		if len(pending) > 0 {
+			desc = "Waiting for review of " + sha + " from " + strings.Join(pending, ", ")
+		}
+		if len(findings) > 0 {
+			if desc != "" {
+				desc += "; "
+			}
+			desc += "open findings on " + sha + " from " + strings.Join(findings, ", ")
+		}
+		return reviewStatusResult{reviewStatusPending, fitStatusDescription(desc)}, true
 	default:
 		return reviewStatusResult{reviewStatusSuccess, fitStatusDescription("Reviewed " + sha + ": no changes requested by " + strings.Join(clean, ", "))}, true
 	}
@@ -261,7 +277,13 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 	if err := e.client.CreateCommitStatus(owner, repo, head, res.State, gh.ReviewStatusContext, res.Description); err != nil {
 		e.logf(item.Number, "review-status", "writing %s=%s on %s failed: %v\n", gh.ReviewStatusContext, res.State, standingSHA(head), err)
 		e.reportReviewStatusWriteFailure(item, owner, repo, err)
-		return // the record is not advanced: retried on a later poll
+		// The record is not advanced (retried on a later poll) and any earlier one is
+		// dropped: it described a state the verdict has left, so it must not keep
+		// suppressing the CI timers or rewording the backstop comment as a review wait.
+		e.reviewStatus.mu.Lock()
+		delete(e.reviewStatus.records, key)
+		e.reviewStatus.mu.Unlock()
+		return
 	}
 	e.resolveReviewStatusWriteFailure()
 	e.logf(item.Number, "review-status", "%s = %s on %s: %s\n", gh.ReviewStatusContext, res.State, standingSHA(head), res.Description)
@@ -450,7 +472,7 @@ func (e *Engine) pauseForReviewWaitBackstop(item gh.ProjectItem, stage *stages.S
 	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — review wait timeout**\n\nThe review wait for stage **%s** timed out. This was a wait for the review of the PR head `%s`, not for CI: "+
-			"the `%s` commit status is `pending` because %s has not yet reviewed that commit, so a CI job that depends on it has not run.%s\n\n"+
+			"the `%s` commit status is `pending` because %s has not yet cleared that commit (it has not reviewed it, or its review still reports findings), so a CI job that depends on it has not run.%s\n\n"+
 			"Fabrik has paused this issue. Check why the review has not arrived (is the review bot running and able to see this PR?), "+
 			"then comment or remove the `fabrik:paused` label to resume.",
 		stage.Name, standingSHA(head), gh.ReviewStatusContext, who, total,

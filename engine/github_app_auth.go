@@ -143,7 +143,7 @@ func PermissionShortfallRemedy(shortfalls []githubauth.RequiredPermissionShortfa
 		}
 	}
 	for _, sf := range shortfalls {
-		if sf.Permission == "statuses" {
+		if sf.Permission == "statuses" && sf.Required == "write" {
 			b.WriteString("\n`statuses: write` is required because the `fabrik/review` commit status is enabled " +
 				"(`review_status` in .fabrik/config.yaml or a stage's `review_status: true`); " +
 				"remove the setting to run without it")

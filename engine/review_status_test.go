@@ -386,3 +386,26 @@ func TestReviewStatusScan_RecordDroppedWhenItemLeavesStage(t *testing.T) {
 		t.Fatal("record must not outlive the item's enabling stage")
 	}
 }
+
+// A failed write drops the earlier record: a stale pending record must not keep
+// suppressing the CI timers or rewording the backstop as a review wait once the
+// review it was waiting for has arrived.
+func TestReviewWaitFloor_FailedWriteDropsStalePendingRecord(t *testing.T) {
+	f := newReviewStatusFixture(t, nil)
+	f.scan() // pending written
+	if f.eng.reviewWaitFloor(f.item).IsZero() {
+		t.Fatal("setup: a written pending status must produce a floor")
+	}
+	if _, waiting := f.eng.reviewWaitPending(f.item); !waiting {
+		t.Fatal("setup: expected a pending review wait")
+	}
+	f.history = []gh.PRReview{rv(1, prBot, "COMMENTED", commitA, 1)}
+	f.client.createCommitStatusFn = func(o, r, sha, st, c, d string) error { return gh.ErrForbidden }
+	f.scan() // success write refused
+	if !f.eng.reviewWaitFloor(f.item).IsZero() {
+		t.Error("a refused write left the stale pending floor in place")
+	}
+	if _, waiting := f.eng.reviewWaitPending(f.item); waiting {
+		t.Error("a refused write left the stale pending record in place")
+	}
+}

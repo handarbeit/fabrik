@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -35,6 +36,13 @@ func TestReviewStatusVerdict_Table(t *testing.T) {
 		{"two reviewers: failure beats pending", []gh.PRReview{rv(1, "carol", "CHANGES_REQUESTED", commitA, 0)}, commitA, two, reviewStatusFailure, true},
 		{"two reviewers both clean → success", []gh.PRReview{rv(1, bot, "COMMENTED", commitA, 0), rv(2, "carol", "APPROVED", commitA, 1)}, commitA, two, reviewStatusSuccess, true},
 		{"undeclared change request never fails the status", []gh.PRReview{rv(1, bot, "COMMENTED", commitA, 0), rv(2, "mallory", "CHANGES_REQUESTED", commitA, 1)}, commitA, declared, reviewStatusSuccess, true},
+		{"COMMENTED at head reporting findings → pending (declined/paused finding never green)", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, markerBody(2, 0))}, commitA, declared, reviewStatusPending, true},
+		{"COMMENTED at head with body findings only → pending", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, markerBody(0, 1))}, commitA, declared, reviewStatusPending, true},
+		{"COMMENTED at head with a zero-findings marker → success", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, markerBody(0, 0))}, commitA, declared, reviewStatusSuccess, true},
+		{"COMMENTED at head with no marker → success (unclassifiable counts as reviewed)", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, "looks fine")}, commitA, declared, reviewStatusSuccess, true},
+		{"findings review then a clean review at the same head → success", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, markerBody(1, 0)), rvBody(2, bot, "COMMENTED", commitA, 5, markerBody(0, 0))}, commitA, declared, reviewStatusSuccess, true},
+		{"findings review at the old head, new head → pending (awaiting a review)", []gh.PRReview{rvBody(1, bot, "COMMENTED", commitA, 0, markerBody(2, 0))}, commitB, declared, reviewStatusPending, true},
+		{"CR at head then COMMENTED with findings at head → pending", []gh.PRReview{rv(1, bot, "CHANGES_REQUESTED", commitA, 0), rvBody(2, bot, "COMMENTED", commitA, 5, markerBody(1, 0))}, commitA, declared, reviewStatusPending, true},
 		{"unknown head → no status", []gh.PRReview{rv(1, bot, "APPROVED", commitA, 0)}, "", declared, "", false},
 		{"no declared reviewers → no status", []gh.PRReview{rv(1, bot, "APPROVED", commitA, 0)}, commitA, nil, "", false},
 	}
@@ -113,5 +121,26 @@ func TestReviewerStandings_CommentAtHeadIsAdditive(t *testing.T) {
 		if s.CommentAtHead {
 			t.Errorf("CommentAtHead = true with the only COMMENTED on another commit")
 		}
+	}
+}
+
+func rvBody(id int, author, state, commit string, minutes int, body string) gh.PRReview {
+	r := rv(id, author, state, commit, minutes)
+	r.Body = body
+	return r
+}
+
+func markerBody(inline, body int) string {
+	return fmt.Sprintf("summary\n\n<!-- pruefer:findings inline=%d body=%d coverage=complete -->", inline, body)
+}
+
+// A comment-only reviewer's findings review must name the open findings, and the
+// verdict must still be pending while another reviewer is outstanding.
+func TestReviewStatusVerdict_FindingsDescription(t *testing.T) {
+	declared := []string{"pruefer"}
+	h := []gh.PRReview{rvBody(1, "pruefer[bot]", "COMMENTED", commitA, 0, markerBody(1, 0))}
+	got, ok := reviewStatusVerdict(reviewerStandings(h, commitA, declared), declared, commitA)
+	if !ok || got.State != reviewStatusPending || !strings.Contains(got.Description, "open findings") {
+		t.Fatalf("got %+v ok=%v, want pending naming open findings", got, ok)
 	}
 }
