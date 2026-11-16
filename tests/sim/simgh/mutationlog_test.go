@@ -337,7 +337,7 @@ func TestMutationFlagMatchesTheInterfaceSemantics(t *testing.T) {
 		"AddBlockedByIssue": true, "AddComment": true, "AddCommentReaction": true,
 		"AddLabelToIssue": true, "AddPRReviewCommentReaction": true, "AddProjectV2ItemById": true, "AddReviewReaction": true,
 		"AddReviewRequest": true, "ArchiveProjectItem": true, "CloseIssue": true,
-		"CreateDraftPR": true, "CreateIssue": true, "CreatePR": true,
+		"CreateCommitStatus": true, "CreateDraftPR": true, "CreateIssue": true, "CreatePR": true,
 		"DeleteForwardingHooks": true, "DeleteReviewRequest": true,
 		"DequeuePullRequest": true, "DisablePullRequestAutoMerge": true,
 		"EnablePullRequestAutoMerge": true, "EnqueuePullRequest": true,
