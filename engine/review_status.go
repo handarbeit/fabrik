@@ -266,7 +266,7 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 	e.resolveReviewStatusWriteFailure()
 	e.logf(item.Number, "review-status", "%s = %s on %s: %s\n", gh.ReviewStatusContext, res.State, standingSHA(head), res.Description)
 
-	now := e.now()
+	now := time.Now()
 	e.reviewStatus.mu.Lock()
 	next := &reviewStatusRecord{pr: pr, head: head, state: res.State}
 	if rec != nil && rec.pr == pr && rec.head == head && rec.state == reviewStatusPending && res.State != reviewStatusPending {
@@ -283,7 +283,9 @@ func (e *Engine) settleReviewStatus(item gh.ProjectItem, key string, declared []
 // pending, the moment it left pending afterwards, zero when there is no record.
 // The CI wait timers measure a CI stall from max(anchor, floor), so time spent
 // waiting for a reviewer never counts as CI time. Memory-only: after a restart
-// the first scan re-establishes it.
+// the first scan re-establishes it. The instants are host-clock times because
+// every CI dwell compares with time.Since (the sim drives these gates with
+// backdated GitHub times, not the engine clock — ADR 2467).
 func (e *Engine) reviewWaitFloor(item gh.ProjectItem) time.Time {
 	if e.reviewStatus.attributionOff.Load() || e.reviewStatus.off.Load() || item.LinkedPRNumber == 0 {
 		return time.Time{}
@@ -295,7 +297,7 @@ func (e *Engine) reviewWaitFloor(item gh.ProjectItem) time.Time {
 		return time.Time{}
 	}
 	if rec.state == reviewStatusPending {
-		return e.now()
+		return time.Now()
 	}
 	return rec.endedAt
 }
@@ -430,4 +432,30 @@ func (e *Engine) reportReviewStatusConfig() {
 	}
 	e.reviewStatus.configSig = joined
 	e.reviewStatus.configDone = true
+}
+
+// pauseForReviewWaitBackstop is pauseForCIBackstop's branch for an item whose
+// fabrik/review status is pending (#2471, R3, FR-006): the CIBackstopTimeout
+// bound is unchanged, but the comment says the item was waiting for the review
+// of the head — not for CI — and names who has not reviewed it.
+func (e *Engine) pauseForReviewWaitBackstop(item gh.ProjectItem, stage *stages.Stage, appliedAt time.Time, head string) bool {
+	e.logf(item.Number, "ci-timeout", "CIBackstopTimeout elapsed while the fabrik/review status is pending — pausing as a review wait, not a CI stall\n")
+	who := "an expected reviewer"
+	if declared := e.effectiveExpectedReviewers(item, stage); declared != nil && len(*declared) > 0 {
+		who = "the expected reviewer(s) " + strings.Join(*declared, ", ")
+	}
+	total := ""
+	if !appliedAt.IsZero() {
+		total = fmt.Sprintf(" `fabrik:awaiting-ci` has been set for %s.", time.Since(appliedAt).Round(time.Minute))
+	}
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — review wait timeout**\n\nThe review wait for stage **%s** timed out. This was a wait for the review of the PR head `%s`, not for CI: "+
+			"the `%s` commit status is `pending` because %s has not yet reviewed that commit, so a CI job that depends on it has not run.%s\n\n"+
+			"Fabrik has paused this issue. Check why the review has not arrived (is the review bot running and able to see this PR?), "+
+			"then comment or remove the `fabrik:paused` label to resume.",
+		stage.Name, standingSHA(head), gh.ReviewStatusContext, who, total,
+	)
+	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true, cause: pauseCauseReviewTimeout})
+	e.emitReviewTimeout(item, stage)
+	return true
 }

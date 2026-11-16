@@ -331,6 +331,9 @@ func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem
 	e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
 
 	if stalledSince, ok := e.ciProgressStalledSince(owner, repo, item); ok {
+		// #2471: time spent waiting for the fabrik/review status is a review wait,
+		// not a CI stall — the stall is measured from its end.
+		stalledSince = e.anchorAfterReviewWait(item, stalledSince)
 		if time.Since(stalledSince) >= e.ciWaitTimeout() {
 			e.logf(item.Number, "warn", "CI progress stalled for %s (no check-run change since); pausing issue — checks: %s\n", e.ciWaitTimeout(), strings.Join(names, ", "))
 			e.removeAwaitingCILabel(owner, repo, item)
@@ -398,6 +401,8 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 				if time.Since(appliedAt) >= e.ciWaitTimeout() {
 					anchor = e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout never-checked dwell", appliedAt, e.ciWaitTimeout())
 				}
+				// #2471: a review wait (the fabrik/review status pending) is not CI time.
+				anchor = e.anchorAfterReviewWait(item, anchor)
 				if time.Since(anchor) >= e.ciWaitTimeout() {
 					e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
 					e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
@@ -421,6 +426,8 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 				if time.Since(appliedAt) >= e.ciWaitTimeout() {
 					anchor = e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout mergeable-state dwell", appliedAt, e.ciWaitTimeout())
 				}
+				// #2471: a review wait (the fabrik/review status pending) is not CI time.
+				anchor = e.anchorAfterReviewWait(item, anchor)
 				if time.Since(anchor) >= e.ciWaitTimeout() {
 					e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
 					e.removeAwaitingCILabel(owner, repo, item)
@@ -795,7 +802,9 @@ func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
 	// #2302: the CIBackstopTimeout comment for an item that never reached the CI
 	// gate names the gate that held it instead (pauseForCIBackstop).
 	backstopWant := fmt.Sprintf("The awaiting-CI wait for stage **%s** timed out", stage.Name)
-	return hasPauseComment(item, timeoutWant, cycleWant, backstopWant)
+	// #2471: the same backstop while the fabrik/review status was pending.
+	reviewWaitWant := fmt.Sprintf("The review wait for stage **%s** timed out", stage.Name)
+	return hasPauseComment(item, timeoutWant, cycleWant, backstopWant, reviewWaitWant)
 }
 
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
@@ -876,6 +885,12 @@ func (e *Engine) recordedGateHold(item gh.ProjectItem) *itemstate.GateHold {
 func (e *Engine) pauseForCIBackstop(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, appliedAt time.Time) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
 		return e.pauseForCITimeout(board, item, stage) // reapply branch, unchanged (#1408)
+	}
+	// #2471, R3/FR-006: while the fabrik/review status is pending the item is held
+	// on a reviewer, not on CI. The bound is the same CIBackstopTimeout (no new
+	// timeout), but the comment names the review wait.
+	if head, waiting := e.reviewWaitPending(item); waiting {
+		return e.pauseForReviewWaitBackstop(item, stage, appliedAt, head)
 	}
 	hold := e.recordedGateHold(item)
 	if hold != nil && hold.Gate == gateCI {

@@ -323,33 +323,33 @@ func TestReviewStatusConfigWarnings(t *testing.T) {
 
 // R3 plumbing: the review-wait floor is "now" while pending, the moment pending
 // ended afterwards, and zero with no record, with the attribution seam, or for
-// another PR.
+// another PR. Instants are host-clock times (the CI dwells compare with time.Since).
 func TestReviewWaitFloor(t *testing.T) {
 	f := newReviewStatusFixture(t, nil)
-	fc := &fakeClock{t: time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)}
-	f.eng.SetClock(fc)
+	near := func(got time.Time) bool {
+		return !got.IsZero() && time.Since(got) < 5*time.Second && !got.After(time.Now())
+	}
 
 	if !f.eng.reviewWaitFloor(f.item).IsZero() {
 		t.Fatal("no record: floor must be zero")
 	}
 	f.scan() // pending
-	if got := f.eng.reviewWaitFloor(f.item); !got.Equal(fc.t) {
-		t.Fatalf("pending floor = %v, want now (%v)", got, fc.t)
+	if got := f.eng.reviewWaitFloor(f.item); !near(got) {
+		t.Fatalf("pending floor = %v, want about now", got)
 	}
 	if head, ok := f.eng.reviewWaitPending(f.item); !ok || head != commitA {
 		t.Fatalf("reviewWaitPending = (%q, %v)", head, ok)
 	}
 
-	fc.t = fc.t.Add(40 * time.Minute)
 	f.history = []gh.PRReview{rv(1, prBot, "COMMENTED", commitA, 1)}
 	f.scan() // success: the wait ended now
-	if got := f.eng.reviewWaitFloor(f.item); !got.Equal(fc.t) {
-		t.Fatalf("floor after the wait = %v, want the end of the wait (%v)", got, fc.t)
+	ended := f.eng.reviewWaitFloor(f.item)
+	if !near(ended) {
+		t.Fatalf("floor after the wait = %v, want the end of the wait", ended)
 	}
-	ended := fc.t
-	fc.t = fc.t.Add(time.Hour)
+	time.Sleep(20 * time.Millisecond)
 	if got := f.eng.reviewWaitFloor(f.item); !got.Equal(ended) {
-		t.Fatalf("floor must stay at the end of the wait, got %v", got)
+		t.Fatalf("floor must stay at the end of the wait: %v then %v", ended, got)
 	}
 	if _, ok := f.eng.reviewWaitPending(f.item); ok {
 		t.Fatal("success must not read as a review wait")
