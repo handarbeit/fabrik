@@ -122,7 +122,7 @@ func TestRunWriteBackGit_OwnershipChecksSkipWithoutTouchingTheBranch(t *testing.
 			return []string{catchUpEditingLabel}, nil
 		}
 		out := w.eng.runWriteBackGit(context.Background(), w.p, w.m)
-		if out.kind != wbSkipped || !strings.Contains(out.reason, catchUpEditingLabel) {
+		if out.kind != wbSkipped || !out.retryable || !strings.Contains(out.reason, catchUpEditingLabel) {
 			t.Fatalf("outcome = %+v", out)
 		}
 		if got := w.remoteHead(t); got != w.head {
@@ -135,7 +135,7 @@ func TestRunWriteBackGit_OwnershipChecksSkipWithoutTouchingTheBranch(t *testing.
 		w.eng.client.(*mockGitHubClient).fetchLabelsFn = func(o, r string, n int) ([]string, error) {
 			return nil, os.ErrDeadlineExceeded
 		}
-		if out := w.eng.runWriteBackGit(context.Background(), w.p, w.m); out.kind != wbSkipped {
+		if out := w.eng.runWriteBackGit(context.Background(), w.p, w.m); out.kind != wbSkipped || !out.retryable {
 			t.Fatalf("outcome = %+v", out)
 		}
 	})
@@ -148,7 +148,7 @@ func TestRunWriteBackGit_OwnershipChecksSkipWithoutTouchingTheBranch(t *testing.
 		}
 		writeFile(t, filepath.Join(wtDir, "wip.txt"), "uncommitted\n")
 		out := w.eng.runWriteBackGit(context.Background(), w.p, w.m)
-		if out.kind != wbSkipped {
+		if out.kind != wbSkipped || !out.retryable {
 			t.Fatalf("outcome = %+v", out)
 		}
 		if _, err := os.Stat(filepath.Join(wtDir, "wip.txt")); err != nil {
@@ -160,7 +160,7 @@ func TestRunWriteBackGit_OwnershipChecksSkipWithoutTouchingTheBranch(t *testing.
 		w.recordResolution(t)
 		m := w.m
 		m.headSHA = "0000000000000000000000000000000000000000"
-		if out := w.eng.runWriteBackGit(context.Background(), w.p, m); out.kind != wbSkipped {
+		if out := w.eng.runWriteBackGit(context.Background(), w.p, m); out.kind != wbSkipped || !out.retryable {
 			t.Fatalf("outcome = %+v", out)
 		}
 		if got := w.remoteHead(t); got != w.head {
@@ -341,6 +341,22 @@ func TestTryWriteBack_GateSkipsAreSilentAndOnceOnly(t *testing.T) {
 		eng.tryWriteBackAndContinue(context.Background(), p, 2, m, "", "")
 		if *calls != 0 {
 			t.Errorf("write-back ran under the policy memo")
+		}
+	})
+	t.Run("a transient ownership skip does not spend the once-per-base budget", func(t *testing.T) {
+		eng, _, p, m, _, calls := newWriteBackGateWorld(t, writeBackOutcome{kind: wbSkipped, reason: "busy", retryable: true})
+		eng.tryWriteBackAndContinue(context.Background(), p, 2, m, "", "")
+		eng.tryWriteBackAndContinue(context.Background(), p, 2, m, "", "")
+		if *calls != 2 {
+			t.Errorf("calls = %d, want 2: a retryable skip must leave the base re-attemptable", *calls)
+		}
+	})
+	t.Run("a deterministic skip keeps the budget spent", func(t *testing.T) {
+		eng, _, p, m, _, calls := newWriteBackGateWorld(t, writeBackOutcome{kind: wbSkipped, reason: "needs Claude"})
+		eng.tryWriteBackAndContinue(context.Background(), p, 2, m, "", "")
+		eng.tryWriteBackAndContinue(context.Background(), p, 2, m, "", "")
+		if *calls != 1 {
+			t.Errorf("calls = %d, want 1", *calls)
 		}
 	})
 	t.Run("once per member and base", func(t *testing.T) {

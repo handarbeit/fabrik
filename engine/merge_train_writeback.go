@@ -44,6 +44,11 @@ type writeBackOutcome struct {
 	kind    writeBackKind
 	newHead string // the pushed merge commit (wbWritten)
 	reason  string // log text for wbSkipped / wbRejected
+	// retryable marks a wbSkipped caused by a transient ownership condition (a worker in
+	// flight, fabrik:editing, an unreadable label set, a busy worktree or a moved remote).
+	// Nothing was pushed, so the (train, member, base SHA) attempt is released and a
+	// rebuild at the same pinned base may try again once the member is idle.
+	retryable bool
 	// policyReason is set only on a wbRejected push positively identified as repo policy
 	// (classifyCatchUpPushRejection); it feeds the shared per-repo memo (ADR 2065).
 	policyReason string
@@ -77,6 +82,15 @@ func (e *Engine) takeWriteBackAttempt(trainKey string, issue int, baseSHA string
 	}
 	e.writeBack.attempted[k] = struct{}{}
 	return true
+}
+
+// releaseWriteBackAttempt forgets an attempt that ended on a transient ownership skip, so
+// the once-per-base budget is spent only by attempts that reached a decision about the
+// merge or the push.
+func (e *Engine) releaseWriteBackAttempt(trainKey string, issue int, baseSHA string) {
+	e.writeBack.mu.Lock()
+	defer e.writeBack.mu.Unlock()
+	delete(e.writeBack.attempted, writeBackKey(trainKey, issue, baseSHA))
 }
 
 // SetTrainWriteBackDisabledForTest disables the write-back (#2572 FR-009): a resolved
@@ -137,6 +151,9 @@ func (e *Engine) tryWriteBackAndContinue(ctx context.Context, p trialParams, bat
 	}
 	switch out.kind {
 	case wbSkipped:
+		if out.retryable {
+			e.releaseWriteBackAttempt(p.trainKey, m.item.Number, p.baseSHA)
+		}
 		e.logWriteBack(p, m, "skipped: "+out.reason+"; trial continues unchanged, nothing charged")
 		return m, false
 	case wbRejected:
@@ -213,11 +230,11 @@ func (e *Engine) runWriteBackGit(ctx context.Context, p trialParams, m trainMemb
 	n := m.item.Number
 	// Ownership, first check: no worker, no fabrik:editing, readable labels.
 	if why := e.catchUpBusyReason(p, m); why != "" {
-		return writeBackOutcome{kind: wbSkipped, reason: why}
+		return writeBackOutcome{kind: wbSkipped, reason: why, retryable: true}
 	}
 	wtDir, err := p.wm.PrepareCatchUp(n, p.baseBranch, m.headSHA)
 	if err != nil {
-		return writeBackOutcome{kind: wbSkipped, reason: err.Error()}
+		return writeBackOutcome{kind: wbSkipped, reason: err.Error(), retryable: errors.Is(err, ErrCatchUpBusy)}
 	}
 	restore := func() {
 		for _, args := range [][]string{{"merge", "--abort"}, {"reset", "--hard", m.headSHA}, {"clean", "-fd"}} {
@@ -262,7 +279,7 @@ func (e *Engine) runWriteBackGit(ctx context.Context, p trialParams, m trainMemb
 	// Ownership, second check: the merge can take a while.
 	if why := e.catchUpBusyReason(p, m); why != "" {
 		restore()
-		return writeBackOutcome{kind: wbSkipped, reason: why}
+		return writeBackOutcome{kind: wbSkipped, reason: why, retryable: true}
 	}
 	newHead, herr := gitRevParse(wtDir, "HEAD")
 	if herr != nil {
