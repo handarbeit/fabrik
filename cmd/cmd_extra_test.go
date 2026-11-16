@@ -96,6 +96,9 @@ func (m *testGitHubUpgradeClient) FetchCheckRuns(owner, repo, sha string) ([]gh.
 func (m *testGitHubUpgradeClient) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) CreateCommitStatus(owner, repo, sha, state, context, description string) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
 	return nil, nil
 }

@@ -127,6 +127,12 @@ type ProjectConfig struct {
 	// behavior change (ADR-933). Checked against the union of check-run names
 	// and classic commit-status contexts observed on the head SHA.
 	RequiredStatusContexts map[string][]string `yaml:"required_status_contexts"`
+	// ReviewStatus turns on the `fabrik/review` commit status for every stage
+	// that waits for reviews (#2471, ADR 2471). Off by default; a stage's own
+	// review_status key overrides it. Enabling it needs `statuses: write` under
+	// GitHub App auth (refused at startup when missing) or a PAT with `repo`
+	// scope.
+	ReviewStatus bool `yaml:"review_status"`
 	// ProjectFields configures optional display-only project fields Fabrik
 	// writes (#2048). Nil/unset sub-keys mean "use the default".
 	ProjectFields ProjectFieldsConfig `yaml:"project_fields"`

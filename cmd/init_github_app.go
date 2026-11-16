@@ -52,6 +52,14 @@ type githubAppSetupOptions struct {
 	// contents:write unless git runs over SSH (engine.AppGitUsesHTTPS) — so
 	// an installation init accepts is one the engine will start with.
 	GitSSH bool
+	// ReviewStatus mirrors whether the `fabrik/review` commit status is enabled
+	// (#2471): the repo-wide review_status key or any on-disk stage's
+	// review_status: true. When set, verification (and a new App's manifest)
+	// require statuses: write, the engine's own conditional rule
+	// (engine.RequiredGitHubAppPermissionsWithReviewStatus). Init may run before
+	// any config exists; then this is false and the engine's startup refusal is
+	// the authoritative one.
+	ReviewStatus bool
 	// NoBrowser is forwarded to the manifest flow (R7), and also gates
 	// guideMissingInstallations' guided-install browser-open inside
 	// Reconcile's non-pinned discovery branch. Its zero value (false) means
@@ -103,10 +111,10 @@ type githubAppSetupResult struct {
 // adopt path the manifest set is never sent anywhere, so it equals verify.
 func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map[string]string, httpsGit bool) {
 	httpsGit = engine.AppGitUsesHTTPS(opts.GitSSH)
-	verify = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, httpsGit)
+	verify = engine.RequiredGitHubAppPermissionsWithReviewStatus(opts.Webhooks, httpsGit, opts.ReviewStatus)
 	manifest = verify
 	if opts.AppID == 0 {
-		manifest = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, true)
+		manifest = engine.RequiredGitHubAppPermissionsWithReviewStatus(opts.Webhooks, true, opts.ReviewStatus)
 	}
 	return verify, manifest, httpsGit
 }

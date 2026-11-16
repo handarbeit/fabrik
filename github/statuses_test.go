@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -67,5 +68,69 @@ func TestFetchCombinedStatus_Error(t *testing.T) {
 	c := NewClientWithBaseURL("token", srv.URL)
 	if _, err := c.FetchCombinedStatus("owner", "repo", "abc"); err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestCreateCommitStatus_PostsStateContextDescription(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/repos/owner/repo/statuses/deadbeef" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.CreateCommitStatus("owner", "repo", "deadbeef", "pending", ReviewStatusContext, "waiting"); err != nil {
+		t.Fatalf("CreateCommitStatus: %v", err)
+	}
+	if got["state"] != "pending" || got["context"] != "fabrik/review" || got["description"] != "waiting" {
+		t.Errorf("body = %v", got)
+	}
+}
+
+func TestCreateCommitStatus_TruncatesDescriptionTo140(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	long := ""
+	for i := 0; i < 200; i++ {
+		long += "é"
+	}
+	if err := c.CreateCommitStatus("o", "r", "abc", "success", "fabrik/review", long); err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(got["description"])); n != 140 {
+		t.Errorf("description length = %d runes, want 140", n)
+	}
+}
+
+func TestCreateCommitStatus_ClassifiesRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want error
+	}{{http.StatusForbidden, ErrForbidden}, {http.StatusNotFound, ErrNotFound}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.code)
+			w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		}))
+		c := NewClientWithBaseURL("token", srv.URL)
+		err := c.CreateCommitStatus("o", "r", "abc", "pending", "fabrik/review", "x")
+		srv.Close()
+		if !errors.Is(err, tc.want) {
+			t.Errorf("status %d: err = %v, want %v", tc.code, err, tc.want)
+		}
 	}
 }

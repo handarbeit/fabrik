@@ -694,6 +694,8 @@ then restart Fabrik
 
 The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `actions:write`, `contents:read` — `contents:write` instead when git runs over HTTPS (the default; see "Git under App auth" below). (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.)
 
+**`statuses: write` is required only if you turn on the `fabrik/review` status.** The set above keeps `statuses:read` for everyone. When the feature is enabled (the repo-wide `review_status: true` in `.fabrik/config.yaml`, or `review_status: true` on any stage), Fabrik also needs `statuses: write` to publish the status, and startup — and `fabrik init --github-app` when it can see the enabling setting on disk — refuses without it, naming the permission and printing the same two manual steps as for any other missing permission. With the feature off the permission is neither checked nor required, and an installation that lacks it starts exactly as before. A personal access token needs `repo` scope (or, for a fine-grained token, *Commit statuses: Read and write*). See [The `fabrik/review` commit status](#the-fabrikreview-commit-status).
+
 **Why `actions: write` is required.** It lets a stage worker's `gh run view --log-failed` read CI job logs and `gh run rerun` re-run jobs (the worker's `GH_TOKEN` is the engine's installation token, so it carries whatever the installation grants), and it lets the engine re-run a merge-train trial's failed jobs, tell a CI run that never started (a GitHub Actions `startup_failure`) from a real failure and retrigger it (see "CI infrastructure failures" under Merge Train). `write` covers both log reads and re-runs; GitHub has no read-only re-run, and `read` alone is refused. `fabrik init --github-app` requests it for a *newly created* App; an existing App needs the manual steps below before Fabrik will start. The check runs once at startup: if an admin revokes the permission while the daemon runs, the engine's own workflow-run reads and re-runs log once and degrade instead of crashing.
 
 **Upgrading an existing App.** GitHub offers no API for an App to gain a permission, so Fabrik can only detect the gap and refuse to start with the two manual steps (the refusal, at startup and at `fabrik init --github-app`, carries both URLs):
@@ -1385,6 +1387,13 @@ user: your-github-username
 #   your-org/your-repo:
 #     - fantasy/local-test
 
+# Publish Fabrik's own `fabrik/review` commit status on the PR head for every stage
+# that has wait_for_reviews: true (a stage's own review_status key overrides this).
+# Off by default; with it off nothing is written and nothing changes. Needs
+# `statuses: write` under GitHub App auth (startup refuses without it) or a PAT with
+# `repo` scope. See §3 "The fabrik/review commit status".
+# review_status: true
+
 # Fabrik-internal merge train (ADR-059). When "on", yolo Validate completions
 # advance into the Queued column for batched landing with a single combined
 # Validate instead of merging one PR at a time. Off by default — see the
@@ -1833,6 +1842,13 @@ expected_reviewers:       # Optional. Declares unrequested reviewers (self-submi
                           #   the gate advances immediately when nothing is requested either,
                           #   instead of waiting out the timeout. See §3 Declaring Expected
                           #   Reviewers for full details, including the required identity format.
+review_status: true       # Optional (#2471). Publish Fabrik's `fabrik/review` commit status on the PR
+                          #   head: pending while an expected reviewer's review of the head is
+                          #   outstanding, success when every expected reviewer's review of the
+                          #   head asks for no changes, failure when one requests changes. Needs
+                          #   wait_for_reviews: true and a non-empty expected_reviewers. Absent:
+                          #   the repo-wide review_status key decides (default off); false opts
+                          #   this stage out. See §3 The fabrik/review commit status.
 feedback_bots:            # Optional. Bots whose PR/issue conversation comments count as feedback
   - vercel                #   (a bare handle, same form as expected_reviewers). Comments from any
                           #   other bot login are ignored. A bot named in expected_reviewers is
@@ -3055,6 +3071,78 @@ A malformed entry (empty, leading `@`, or trailing `[bot]`/`[Bot]`/`[BOT]`) fail
 - **Pruefer resumes a partial review until every staged diff entry has been read (`max_coverage_passes`, default 2).** When a pass ends with a complete review but some staged entries unread, Pruefer resumes the same Claude session, lists the unread entries and asks the reviewer to open them and emit the whole review again. It stops early when coverage is complete or a pass opens nothing new. Set it with `--max-coverage-passes`, `PRUEFER_MAX_COVERAGE_PASSES` or `max_coverage_passes`; `0` turns the loop off (a single pass, as before), a negative or non-integer value fails startup, and it is operator-only: a reviewed repo's config cannot set it. **Each extra pass is another resumed invocation against your Claude quota**: a review costs at most `1 + max_coverage_passes` invocations, plus one when the review-skill fallback runs. Only the last pass's review is posted, and its coverage block is the union of what every accepted pass read. The log line `coverage loop: …` records the passes, the stop reason, and the summed turns and cost.
 - **The reviewer reads staged entries in amounts the Claude CLI returns whole.** It opens one entry per read, or one plain `cat` of entries whose sizes in `INDEX.txt` add up to at most 20 KiB, because the CLI cuts a larger shell result to a 2 KB preview. An entry seen only as a preview counts as unread, so a review can report `partial` with unread entries even though the reviewer ran a command naming them; the coverage loop above then asks it to reopen them in smaller pieces.
 - **Pruefer reviews a PR even when GitHub never created its `refs/pull/<N>/head` ref.** It then fetches the head commit by its SHA from the base repository and requires the checked-out commit to be that SHA; nothing needs configuring.
+
+---
+
+#### The `fabrik/review` commit status
+
+**The problem.** A repo owner wants an expensive CI job to wait until the review bot has reviewed the *exact commit being tested*. Without help the only way is a CI-side gate job that polls the PR's reviews on its own runner — and Fabrik cannot tell that wait from "CI stuck", so the CI wait timeout and the `fabrik:awaiting-ci` backstop count it as CI time and may escalate the item for the wrong reason.
+
+**What Fabrik does.** With the feature on, Fabrik publishes a commit status named `fabrik/review` on the head commit of the item's open PR (drafts included; nothing for a closed or merged PR):
+
+| State | When |
+|---|---|
+| `pending` | an expected reviewer's review of the head is outstanding (no review, or only a review of an earlier commit) |
+| `success` | every expected reviewer's review of the head asks for no changes |
+| `failure` | an expected reviewer's review of the head requests changes |
+
+It is derived from the same per-reviewer, at-head verdict the review gate uses, so the two cannot disagree about one reviewer's standing at one head. A comment-only bot such as Pruefer counts as clean when its latest review (`COMMENTED`) is on the head **and** its hidden findings marker (the same one that lets Fabrik skip a clean review) does not report findings; a review whose marker reports findings keeps the status `pending` until the head moves (Fabrik's fix) or the reviewer reviews the head again with no findings, so a declined or paused finding never turns the status green. A `COMMENTED` review with no findings marker (another bot, an older Pruefer) cannot be classified and counts as reviewed. A change request on an earlier commit is `pending` (awaiting re-review) for the new head, never `failure`. Only the stage's *expected reviewers* count; an undeclared reviewer never changes the status. Unlike the gate — which clears on any non-`DISMISSED` review — the status needs the head itself reviewed, so it can be stricter. GitHub's `reviewDecision` (branch protection) is not consulted: it answers a different question (approvals from anyone).
+
+**Turn it on.**
+
+```yaml
+# .fabrik/stages/validate.yaml  (and review.yaml)
+wait_for_reviews: true
+expected_reviewers:
+  - handarbeit-pruefer      # the status needs at least one reviewer to wait on
+review_status: true         # or set review_status: true once in .fabrik/config.yaml
+```
+
+The status is off by default. `review_status: true` in `.fabrik/config.yaml` turns it on for every stage with `wait_for_reviews: true`; a stage's own `review_status: false` opts that stage out. It is only written while the item sits in a stage where it is enabled, so enable it on **both Review and Validate** (the stages where the PR waits for reviews) if the PR must be covered across both. The shipped stages declare `expected_reviewers: []`, so you must also declare your review bot; a stage that enables the status without a reviewer to wait on, or sets `review_status` without `wait_for_reviews`, is reported on the warnings panel (`review_status_config`) and writes no status, so a dependent job is never held on a verdict that cannot arrive.
+
+**Permissions.** Under GitHub App auth the installation needs `statuses: write`. It is *not* part of the permissions every installation must hold: with the feature on and the grant missing, startup (and `fabrik init --github-app`) refuses and names it; with the feature off nothing is checked. With a personal access token you need `repo` scope (or fine-grained *Commit statuses: Read and write*). A write GitHub refuses at runtime is logged and reported once on the warnings panel (`review_status_write`), is retried on the next poll, and never pauses an item or blocks a gate.
+
+**A worked workflow.** GitHub Actions has no `needs:` on an external commit status, so the expensive job depends on a small gate job that polls the combined status for the head it is testing:
+
+```yaml
+name: ci
+on: pull_request
+
+jobs:
+  review-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: read
+    steps:
+      - name: Wait for Fabrik's review verdict on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for i in $(seq 1 120); do                      # up to 2 hours
+            state=$(gh api "repos/${{ github.repository }}/commits/$SHA/status" \
+              --jq '[.statuses[] | select(.context=="fabrik/review")][0].state // "absent"')
+            case "$state" in
+              success) exit 0 ;;
+              failure) echo "reviewer requested changes"; exit 1 ;;
+              *) sleep 60 ;;   # "pending" and "absent" both mean: not ready yet
+            esac
+          done
+          echo "timed out waiting for the review"; exit 1
+
+  test:
+    needs: review-gate        # the expensive job starts only after a clean review of this head
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+```
+
+Treat an **absent** context as *not ready*, as above. GitHub attaches a status to a commit, so a new push starts with no `fabrik/review` status at all until Fabrik's next poll writes `pending` for it (up to one poll interval); a job that reads "absent" as "nothing to wait for" would run too early. Branch protection can instead *require* the `fabrik/review` status check on the base branch, which gives the same hold without a gate job.
+
+**Declined findings.** If the reviewer requests changes and the stage answers without a commit (a *declined* finding, see the decision pause above), the status stays not-green until the reviewer's standing at the head changes or a new commit is pushed. For a formal `CHANGES_REQUESTED` review it stays `failure`. For a comment-only bot such as Pruefer, whose review is `COMMENTED` with a findings marker that reports findings, it stays `pending` (described as "open findings"). Either way the status never treats a declined finding as resolved, so a dependent job does not run until a human, a new push, or a later review of the head with no findings settles it. Because `pending` is a review wait, an item left on a declined comment-only finding that nobody settles ends as a *review wait timeout* pause, not a CI stall.
+
+**A review wait is not a CI stall.** While the status is `pending`, the time does not count toward the CI wait timeout dwells, and if the `fabrik:awaiting-ci` backstop (`FABRIK_CI_BACKSTOP_TIMEOUT`, default 4h) still runs out — the bound is unchanged, so a reviewer that never reviews cannot hold an item forever — the pause comment says so: **🏭 Fabrik — review wait timeout**, "The review wait for stage … timed out", naming the head and only the reviewers who have not yet cleared it (no review of the head, or a review that still reports findings), not reviewers who already have. With the status `success`, `failure` or off, the existing CI timeout behavior applies unchanged. The attribution is kept in memory and rebuilt from the first poll after a restart; until then the behavior is today's. **Limitation:** Fabrik cannot see which of your CI jobs depend on `fabrik/review`, so the attribution applies to every CI wait of an item whose status is `pending`, not only to jobs that are actually held on it. If CI is genuinely stuck while the reviewer is slow, the liveness and `CIWaitTimeout` dwells do not fire until the review wait ends, and the item is bounded only by the `CIBackstopTimeout`, which then pauses it with the *review wait timeout* comment even though CI was the stuck part. Enable `review_status` only where CI is meant to wait on the review; the backstop comment names the outstanding reviewers and the head so you can check CI too.
 
 ---
 
@@ -5442,6 +5530,7 @@ Several startup checks are specific to [GitHub App Authentication](#github-app-a
 - **Partial configuration** — only some of `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` are set. Fix: set all three, or remove all three to use a PAT instead.
 - **User-owned board** — App auth was configured against a project board owned by a GitHub user account rather than an organization. Fix: use a personal access token for this board instead — there is no App-auth path around GitHub's own restriction here.
 - **Missing granted permissions** — the installation's actually-granted permissions (checked live at startup) are narrower than what the engine requires. Fix: the refusal prints two steps with the URLs filled in — an App owner sets the missing permission in the App's *Permissions & events* settings, then an org admin accepts the resulting request on the installation (a permission the App requests but nobody has accepted still shows as ungranted). Then restart Fabrik.
+- **`statuses: write` missing while `review_status` is enabled** — the `fabrik/review` commit status is turned on (`review_status` in config or on a stage) but the installation only grants `statuses: read`. Fix: grant *Commit statuses: Read and write* with the same two steps, or remove `review_status`. With the feature off the permission is not checked.
 - **`--webhooks` combined with App auth** — `gh webhook forward` cannot work under a GitHub App installation token, so the combination is refused rather than silently falling back to polling. Fix: drop `--webhooks` to use App auth with `--reconcile-interval` polling, or drop the GitHub App config to use `--webhooks` with a personal access token.
 
 See [GitHub App Authentication](#github-app-authentication) for example messages and full detail on each.

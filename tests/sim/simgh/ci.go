@@ -82,6 +82,33 @@ func (s *Sim) SeedCommitTime(ownerRepo, sha string, at time.Time) *Sim {
 	return s
 }
 
+// CreateCommitStatus writes a classic commit status on sha (#2471). Like
+// GitHub's combined-status endpoint, only the latest status per context is
+// kept, so a rewrite replaces the previous entry of the same context in place.
+// The sim does not model the `statuses: write` permission: a refusal is
+// injected with the fault table (FailAlways("CreateCommitStatus", …)); see
+// FIDELITY.md.
+func (s *Sim) CreateCommitStatus(owner, repo, sha, state, context, description string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return err
+	}
+	if r.commitStatuses == nil {
+		r.commitStatuses = map[string][]gh.CommitStatus{}
+	}
+	st := gh.CommitStatus{Context: context, State: state}
+	for i, prev := range r.commitStatuses[sha] {
+		if prev.Context == context {
+			r.commitStatuses[sha][i] = st
+			return nil
+		}
+	}
+	r.commitStatuses[sha] = append(r.commitStatuses[sha], st)
+	return nil
+}
+
 // FetchCombinedStatus returns the classic commit statuses for a ref.
 //
 // The drain below covers *both* of this function's read sections. Draining is

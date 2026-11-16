@@ -142,6 +142,14 @@ func PermissionShortfallRemedy(shortfalls []githubauth.RequiredPermissionShortfa
 			break
 		}
 	}
+	for _, sf := range shortfalls {
+		if sf.Permission == "statuses" && sf.Required == "write" {
+			b.WriteString("\n`statuses: write` is required because the `fabrik/review` commit status is enabled " +
+				"(`review_status` in .fabrik/config.yaml or a stage's `review_status: true`); " +
+				"remove the setting to run without it")
+			break
+		}
+	}
 	fmt.Fprintf(&b, "\nFabrik cannot change App permissions itself — ask an App owner and an org admin:\n"+
 		"  1. App owner: set the permission at https://github.com/organizations/%s/settings/apps/%s/permissions\n"+
 		"  2. Org admin: accept the permission request at https://github.com/organizations/%s/settings/installations/%d",
@@ -159,6 +167,21 @@ func RequiredGitHubAppPermissionsForGit(webhooksEnabled, httpsGit bool) map[stri
 	perms := RequiredGitHubAppPermissions(webhooksEnabled)
 	if httpsGit {
 		perms["contents"] = "write"
+	}
+	return perms
+}
+
+// RequiredGitHubAppPermissionsWithReviewStatus is RequiredGitHubAppPermissionsForGit
+// plus the conditional tier of the `fabrik/review` commit status (#2471, ADR
+// 2471): when the feature is enabled the installation must grant `statuses:
+// write`; when it is not, the set is byte-identical to the always-required one
+// (which keeps `statuses: read`), so an installation without the write grant
+// starts exactly as before. The grant is compared with the same ordinal rule
+// as every other permission (write satisfies read, not the reverse).
+func RequiredGitHubAppPermissionsWithReviewStatus(webhooksEnabled, httpsGit, reviewStatus bool) map[string]string {
+	perms := RequiredGitHubAppPermissionsForGit(webhooksEnabled, httpsGit)
+	if reviewStatus {
+		perms["statuses"] = "write"
 	}
 	return perms
 }
@@ -557,7 +580,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 	// grant contents:write. Not needed when git goes over SSH — git_ssh, or
 	// a global HTTPS→SSH insteadOf rewrite — where the token never reaches
 	// git at all.
-	required := RequiredGitHubAppPermissionsForGit(cfg.Webhooks, httpsGit)
+	required := RequiredGitHubAppPermissionsWithReviewStatus(cfg.Webhooks, httpsGit, ReviewStatusEnabled(cfg.ReviewStatus, cfg.Stages))
 
 	// Options.RequiredPermissions is deliberately left unset here (rather
 	// than passed required): Reconcile's own verifyPinnedGrants would only

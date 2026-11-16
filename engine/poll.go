@@ -1633,6 +1633,12 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// clock the attention classifier shares (#2550, ADR 2550).
 	e.settleOrphanedLocks()
 
+	// fabrik/review commit status (#2471, ADR 2471): published (and its review wait
+	// recorded) before the catch-up loop and the CI settle scan, so the CI wait timers
+	// that attribute a review wait read this poll's state.
+	e.setPollStep("review status")
+	e.settleReviewStatusScan(board)
+
 	e.setPollStep("selecting deep-fetch candidates")
 	deepFetchCandidates, deepFetched, periodicOnly := e.selectDeepFetchCandidatesCounted(board, repoFilter, cycleSet, priorInQueue)
 

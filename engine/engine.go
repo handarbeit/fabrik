@@ -54,6 +54,7 @@ type Config struct {
 	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	MergeStateUnknownTimeout   time.Duration       // How long a PR's merge state may stay continuously unknown (mergeable=null / mergeable_state=unknown) at the merge gate before the item is paused (default 30m; #2302)
 	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
+	ReviewStatus               bool                // review_status: publish the fabrik/review commit status for every stage that waits for reviews (#2471, ADR 2471); a stage's own review_status overrides it
 	RequiredStatusContexts     map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
 	PostPushDwell              time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
 	MaxCiFixCycles             int                 // Max CI-fix re-invocation cycles per issue before pausing (default 5)
@@ -557,6 +558,11 @@ type Engine struct {
 	// captured candidates and attempt counts, and its per-Engine neutralisation seam.
 	cleanStopResume    cleanStopResumeState
 	cleanStopResumeOff atomic.Bool
+
+	// fabrik/review commit status (#2471, ADR 2471): the per-item last-written record
+	// the scan and the CI-timer attribution read, the warnings-panel dedup state and
+	// the per-Engine neutralisation seams.
+	reviewStatus reviewStatusState
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See

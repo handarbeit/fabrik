@@ -522,3 +522,23 @@ func TestReadDotenv_ReturnsDataAndExportsNothing(t *testing.T) {
 		t.Error("ReadDotenv exported a variable")
 	}
 }
+
+func TestLoadProjectConfig_ReviewStatus(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := LoadProjectConfig()
+	if err != nil || pc.ReviewStatus {
+		t.Fatalf("absent file: ReviewStatus=%v err=%v, want off by default", pc.ReviewStatus, err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("review_status: true\n"), 0644)
+	pc, err = LoadProjectConfig()
+	if err != nil || !pc.ReviewStatus {
+		t.Fatalf("ReviewStatus=%v err=%v, want true", pc.ReviewStatus, err)
+	}
+	if got, _ := UnrecognizedTopLevelKeys(); len(got) != 0 {
+		t.Errorf("review_status reported as unrecognised: %v", got)
+	}
+}
