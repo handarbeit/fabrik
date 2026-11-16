@@ -450,7 +450,13 @@ func (s *Sim) deriveMergeableState(r *repoState, base string, facts gitFactsResu
 		return stateDirty
 	}
 	if draft {
-		return stateDraft
+		s.mu.Lock()
+		override := r.draftMergeableState
+		s.mu.Unlock()
+		if override == "" {
+			return stateDraft
+		}
+		return override
 	}
 
 	s.mu.Lock()
