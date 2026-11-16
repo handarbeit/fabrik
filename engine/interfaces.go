@@ -81,6 +81,11 @@ type GitHubClient interface {
 	FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, error)
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
+	// CreateCommitStatus writes a classic commit status (#2471, the
+	// fabrik/review status). Needs `statuses: write`; a refusal is
+	// gh.ErrForbidden / gh.ErrNotFound and must degrade to a warnings-panel
+	// entry, never pause an item or block a gate.
+	CreateCommitStatus(owner, repo, sha, state, context, description string) error
 	FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
 	// FetchCommitTime returns GitHub's committer date for a commit — the
 	// review-wait gate's head-arrival fact (#2467). The client does no caching

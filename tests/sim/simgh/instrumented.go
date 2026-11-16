@@ -551,6 +551,11 @@ func (in *Instrumented) FetchCombinedStatus(owner, repo, ref string) ([]gh.Commi
 		func() ([]gh.CommitStatus, error) { return in.sim.FetchCombinedStatus(owner, repo, ref) })
 }
 
+func (in *Instrumented) CreateCommitStatus(owner, repo, sha, state, context, description string) error {
+	return do0(in, "CreateCommitStatus", true, Args{Owner: owner, Repo: repo, SHA: sha, Values: []string{state, context, description}},
+		func() error { return in.sim.CreateCommitStatus(owner, repo, sha, state, context, description) })
+}
+
 func (in *Instrumented) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
 	return do1(in, "FetchCommitsBehind", false, Args{Owner: owner, Repo: repo, Values: []string{base, head}},
 		func() (int, error) { return in.sim.FetchCommitsBehind(owner, repo, base, head) })

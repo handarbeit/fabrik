@@ -1827,3 +1827,13 @@ reaches the model. Blanket faults and the observer are not carried through Sim s
 builds the #2388 error as a real `*url.Error` wrapping `context.DeadlineExceeded`
 (not a string), because the transient classifiers match by substring and that error
 matches none of them.
+
+### Commit-status writes (#2471)
+
+`CreateCommitStatus` stores the status per SHA and keeps only the latest per context, like
+the combined-status endpoint. It models no permission: the `statuses: write` grant (and a PAT's
+`repo` scope) is not represented, so the refusal a missing grant produces is injected with
+`FaultTable.FailAlways("CreateCommitStatus", err)` (`ghfault.Forbidden`-shaped). Real GitHub
+also delivers a `status` webhook for each write; the sim has no transport layer. Whether a
+pending `fabrik/review` context blocks a PR's `mergeable_state` is decided by the sim only
+through required contexts (`SeedRequiredContexts`), as for any other status.

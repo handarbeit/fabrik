@@ -44,6 +44,8 @@ type mockGitHubClient struct {
 	fetchPRDetailsFn              func(owner, repo string, prNumber int) (*gh.PRDetails, error)
 	fetchCheckRunsFn              func(owner, repo, sha string) ([]gh.CheckRun, error)
 	fetchCombinedStatusFn         func(owner, repo, ref string) ([]gh.CommitStatus, error)
+	createCommitStatusFn          func(owner, repo, sha, state, context, description string) error
+	commitStatusCalls             []commitStatusCall
 	fetchCheckSuitesFn            func(owner, repo, sha string) ([]gh.CheckSuite, error)
 	fetchCommitTimeFn             func(owner, repo, sha string) (time.Time, error)
 	fetchWorkflowRunsFn           func(owner, repo, sha string) ([]gh.WorkflowRun, error)
@@ -567,6 +569,22 @@ func (m *mockGitHubClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRu
 		return fn(owner, repo, sha)
 	}
 	return nil, nil
+}
+
+// commitStatusCall records one CreateCommitStatus call (#2471).
+type commitStatusCall struct {
+	Owner, Repo, SHA, State, Context, Description string
+}
+
+func (m *mockGitHubClient) CreateCommitStatus(owner, repo, sha, state, context, description string) error {
+	m.mu.Lock()
+	m.commitStatusCalls = append(m.commitStatusCalls, commitStatusCall{owner, repo, sha, state, context, description})
+	fn := m.createCommitStatusFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, sha, state, context, description)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {

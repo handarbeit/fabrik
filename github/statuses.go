@@ -34,3 +34,28 @@ func (c *Client) FetchCombinedStatus(owner, repo, ref string) ([]CommitStatus, e
 	}
 	return out, nil
 }
+
+// ReviewStatusContext is the context name of Fabrik's own review commit status
+// (#2471). It is fixed, not configurable.
+const ReviewStatusContext = "fabrik/review"
+
+// maxStatusDescription is GitHub's limit on a commit status description.
+const maxStatusDescription = 140
+
+// CreateCommitStatus writes a classic commit status on sha (POST
+// /repos/{owner}/{repo}/statuses/{sha}). state is "pending", "success",
+// "failure" or "error". The description is truncated to GitHub's 140-character
+// limit (on a rune boundary). It needs `statuses: write` under App auth and
+// `repo` scope (or fine-grained commit-statuses write) with a PAT; a refusal is
+// ErrForbidden / ErrNotFound under errors.Is.
+func (c *Client) CreateCommitStatus(owner, repo, sha, state, context, description string) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.baseURL, owner, repo, sha)
+	if r := []rune(description); len(r) > maxStatusDescription {
+		description = string(r[:maxStatusDescription-1]) + "…"
+	}
+	body := map[string]string{"state": state, "context": context, "description": description}
+	if err := c.restPost(apiURL, body); err != nil {
+		return fmt.Errorf("creating %s status on %s: %w", context, sha, err)
+	}
+	return nil
+}
