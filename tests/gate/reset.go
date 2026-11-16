@@ -206,7 +206,14 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 		}
 		// The bed may keep its worktrees and clones under a configured workspace
 		// root (#2470); the lock below always stays in the bed.
-		ws, wsErr := workspace.Load(bed, "")
+		// The daemon takes the shell value, else the bed's .env, so the reset
+		// must too: a root set only in the bed's .env would otherwise resolve to
+		// the empty in-bed default and leave the real worktrees in place.
+		wsEnv := os.Getenv(workspace.EnvVar)
+		if wsEnv == "" {
+			wsEnv = envFileLastValue(filepath.Join(bed, ".env"), workspace.EnvVar)
+		}
+		ws, wsErr := workspace.LoadWithEnv(bed, "", wsEnv)
 		if wsErr != nil {
 			return exitErr(1, "reset: %v", wsErr)
 		}
