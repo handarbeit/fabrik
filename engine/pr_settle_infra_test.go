@@ -358,3 +358,54 @@ func hasPausedLabel(mc *mockGitHubClient) bool {
 	}
 	return false
 }
+
+// #2593 R3: "clean" with zero check runs on an item whose PR has had check runs is CI that
+// has not reported yet (a slow Actions start), not "no CI" — the shortcut must not clear it.
+func settleHadChecksSetup(t *testing.T) (*gateInfra, *Engine) {
+	t.Helper()
+	g := newGateInfra("clean")
+	g.runs = nil // no workflow runs either: the Actions-delay shape
+	g.checkRunsOverride = []gh.CheckRun{{ID: 1, Name: "build", Status: "completed", Conclusion: "success"}}
+	eng := gateEngine(t, g)
+	// The first read sees check runs: Ready, and the evidence is recorded.
+	if r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(true)); r.Status != PRMergeReady {
+		t.Fatalf("setup: %+v, want Ready with check runs present", r)
+	}
+	g.mu.Lock()
+	g.head, g.checkRunsOverride = "sha2", nil // a new head with no check runs yet
+	g.mu.Unlock()
+	return g, eng
+}
+
+func TestSettleForCIGate_CleanZeroRunsAfterChecksSeen_HeldNotReady(t *testing.T) {
+	_, eng := settleHadChecksSetup(t)
+	r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(true))
+	if r.Status != PRMergeUnsettled || r.MergeableState != "" {
+		t.Fatalf("result = %+v, want Unsettled (hadChecks) with MergeableState omitted", r)
+	}
+}
+
+func TestSettleForCIGate_CleanZeroRunsAfterChecksSeen_NeutralisedReady(t *testing.T) {
+	_, eng := settleHadChecksSetup(t)
+	eng.SetStageGateHadChecksShortcutDisabledForTest(true)
+	if r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(true)); r.Status != PRMergeReady {
+		t.Fatalf("result = %+v, want the pre-fix Ready with the rule neutralised", r)
+	}
+}
+
+// Never had check runs: genuine no-CI still clears; a non-wait_for_ci stage is untouched.
+func TestSettleForCIGate_CleanZeroRunsNeverHadChecks_StillReady(t *testing.T) {
+	g := newGateInfra("clean")
+	g.runs = nil
+	eng := gateEngine(t, g)
+	if r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(true)); r.Status != PRMergeReady {
+		t.Fatalf("result = %+v, want Ready for a PR that never had check runs", r)
+	}
+}
+
+func TestSettleForCIGate_CleanZeroRunsAfterChecksSeen_NonCIStageUnchanged(t *testing.T) {
+	_, eng := settleHadChecksSetup(t)
+	if r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(false)); r.Status != PRMergeReady {
+		t.Fatalf("result = %+v, want today's Ready for a stage that does not wait for CI", r)
+	}
+}

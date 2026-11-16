@@ -1484,7 +1484,7 @@ func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, me
 	if len(survivors) == 0 {
 		return nil, TrainCIPending, 0, nil, nil
 	}
-	result, diag := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
+	result, diag := e.pollTrainCIFor(ctx, p.owner, p.repo, prNum, trialSHA, trialBaseProbe{}, survivors)
 	return survivors, result, prNum, diag, nil
 }
 
@@ -1941,7 +1941,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		if existing != nil {
 			expectedHead = existing.HeadSHA
 		}
-		res := e.settleAndMerge(ctx, p.owner, p.repo, prNum, expectedHead)
+		res := e.settleAndMerge(ctx, p.owner, p.repo, prNum, expectedHead, []trainMember{m})
 		if res.outcome != outcomeMerged {
 			keepTrial = e.keepGreenTrial(p.owner, p.repo, p.baseBranch, trialBranch, res)
 			e.postLandingFailure(p.owner, p.repo, prNum, []trainMember{m}, res, keepTrial)
@@ -4745,7 +4745,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		if integrationPR != nil {
 			expectedHead = integrationPR.HeadSHA
 		}
-		res := e.settleAndMerge(ctx, owner, repo, integrationPRNum, expectedHead)
+		res := e.settleAndMerge(ctx, owner, repo, integrationPRNum, expectedHead, survivors)
 		if res.outcome != outcomeMerged {
 			keepTrial = e.keepGreenTrial(owner, repo, baseBranch, trialBranch, res)
 			e.postLandingFailure(owner, repo, integrationPRNum, survivors, res, keepTrial)
@@ -5313,7 +5313,7 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 		result, _ = e.trainValidateFn(ctx, survivors)
 	} else {
 		var diag *trainCIDiagnostic
-		result, diag = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
+		result, diag = e.pollTrainCIFor(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA, trialBaseProbe{}, survivors)
 		if result == TrainCIInfra {
 			// #2052: keep today's pending behaviour (dissolve and re-form), but hold the
 			// partition off for the cooldown so a broken workflow is not retried every poll.
@@ -5384,13 +5384,14 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // branch below), since in that case there is no per-check signal to fall
 // back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
-	return e.pollTrainCIFor(ctx, owner, repo, prNum, trialSHA, trialBaseProbe{})
+	return e.pollTrainCIFor(ctx, owner, repo, prNum, trialSHA, trialBaseProbe{}, nil)
 }
 
 // pollTrainCIFor is pollTrainCI with the trial's base identity, so a "dirty" reading on a
 // moved base is the uncharged TrainCIStale rather than red (#2298). A zero probe keeps
-// "dirty" red.
-func (e *Engine) pollTrainCIFor(ctx context.Context, owner, repo string, prNum int, trialSHA string, probe trialBaseProbe) (TrainCIResult, *trainCIDiagnostic) {
+// "dirty" red. members are the trial's batch members (#2593): the source of the
+// positive-CI evidence on the zero-check path; nil means none.
+func (e *Engine) pollTrainCIFor(ctx context.Context, owner, repo string, prNum int, trialSHA string, probe trialBaseProbe, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 	deadline := time.Now().Add(e.ciBackstopTimeout())
 
 	// #2052: per-trial CI-infrastructure state. Local to this call — one call is
@@ -5398,6 +5399,7 @@ func (e *Engine) pollTrainCIFor(ctx context.Context, owner, repo string, prNum i
 	// sub-trial gets its own retrigger budget and its own single failed-job re-run.
 	var st trialCIState
 	st.probe = probe
+	st.members = members
 
 	for {
 		select {

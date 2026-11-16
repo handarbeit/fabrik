@@ -24,6 +24,10 @@ type trialCIState struct {
 	// evaluation, never persisted; the zero value disables the stale classification
 	// (a "dirty" trial is then red, as before #2298).
 	probe trialBaseProbe
+	// members are the trial's batch members, the source of the #2593 positive-CI
+	// evidence on the zero-check path. Set by the caller before each evaluation, never
+	// persisted (a restart rebuilds them from the run record); nil = no evidence.
+	members []trainMember
 }
 
 // trialBaseProbe identifies the branches evalTrialCI compares to decide whether a
@@ -235,6 +239,13 @@ func (e *Engine) evalTrialCI(ctx context.Context, owner, repo string, prNum int,
 			// #1822: see the all-green branch above.
 			if hold, why := e.ciSuiteHold(e.client, owner, repo, trialSHA); hold {
 				e.logfRepo(owner+"/"+repo, "merge-train", "trial %s has zero check runs but %s — still waiting\n", trialSHA, why)
+			} else if hold, why := e.memberCIEvidence(owner, repo, st.members); hold {
+				// #2593: no check runs, no workflow runs and no suites is also what a
+				// repository that runs CI looks like while GitHub is slow to create its
+				// workflows. A member PR carrying check runs says this repository runs
+				// CI, so this is "not started yet", not "no CI": pending, bounded by
+				// CIBackstopTimeout, uncharged.
+				e.logfRepo(logRepo, "merge-train", "%s", zeroCheckHoldLine("trial", trialSHA, why))
 			} else {
 				e.logfRepo(owner+"/"+repo, "merge-train", "trial %s green — mergeable_state %q accepted, zero check runs, required contexts satisfied\n", trialSHA, mergeableState)
 				return TrainCIGreen, nil, true

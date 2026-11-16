@@ -402,6 +402,8 @@ type Engine struct {
 	mergeTrainInfraCooldown   map[string]time.Time   // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	trainNotPassedAsRed       atomic.Bool            // test seam: SetTrainNotPassedAsRedForTest (#2296)
 	trainStaleAsRed           atomic.Bool            // test seam: SetTrainStaleAsRedForTest (#2298)
+	zeroCheckEvidenceOff      atomic.Bool            // test seam: SetZeroCheckMemberEvidenceDisabledForTest (#2593)
+	stageGateHadChecksOff     atomic.Bool            // test seam: SetStageGateHadChecksShortcutDisabledForTest (#2593)
 	landing                   landingState           // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
 	pushGuardDisabled         atomic.Bool            // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
 	issueBodyWriteThroughOff  atomic.Bool            // test seam: SetIssueBodyWriteThroughDisabledForTest (#2346)

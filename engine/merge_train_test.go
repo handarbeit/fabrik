@@ -356,7 +356,7 @@ func TestPollForMergeable_BackstopTimeout_ReturnsFalseAndDegrades(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false when CIBackstopTimeout elapses with mergeability never resolved")
 	}
@@ -397,7 +397,7 @@ func TestPollForMergeable_UnstableWithFailedCheckRun_ReturnsFalse(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false for mergeable_state=unstable with a failed check run")
 	}
@@ -445,7 +445,7 @@ func TestPollForMergeable_UnstableWithPendingCheckRun_KeepsPollingThenDegrades(t
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false — a pending non-required check must not be judged landable")
 	}
@@ -479,7 +479,7 @@ func TestPollForMergeable_Dirty_ReturnsFalseImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false immediately for mergeable_state=dirty")
 	}
@@ -509,7 +509,7 @@ func TestPollForMergeable_CleanZeroCheckRuns_ReturnsTrue(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if !result {
 		t.Error("expected settleAndMerge to return true for mergeable_state=clean with zero check runs")
 	}
@@ -539,7 +539,7 @@ func TestPollForMergeable_RequiredContextFailedZeroCheckRuns_ReturnsFalse(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false for a required context confirmed-failed via classic commit status with zero check runs")
 	}
@@ -589,7 +589,7 @@ func TestPollForMergeable_FetchCheckRunsError_DoesNotTreatAsGreen(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "").outcome == outcomeMerged
+	result := eng.settleAndMerge(ctx, "owner", "repo", 42, "", nil).outcome == outcomeMerged
 	if result {
 		t.Error("expected settleAndMerge to return false when FetchCheckRuns errors — a fetch failure must not be treated as confirmed zero check runs")
 	}
