@@ -132,7 +132,7 @@ An operator who does not use the feature sees no change: no status is written, n
 - The PR is closed, merged or has no head yet: no status is written for it.
 - A status write fails (permission revoked, API error): logged and reported once; the review gate, CI gate and items are unaffected, and the write is retried on a later evaluation.
 - The review wait itself runs out under the existing review-wait handling: that existing escalation is unchanged, and its comment names the review wait.
-- A declined finding (a request for changes the stage answered without a commit) is not treated as resolved by this feature; it stays `failure` until the reviewer's verdict at the head changes.
+- A declined finding (a request for changes the stage answered without a commit) is not treated as resolved by this feature; a formal change request stays `failure` and a comment-only findings review (a bot such as Pruefer) stays `pending` ("open findings"), either way until the head moves or the reviewer's latest review at the head changes.
 
 ## Requirements *(mandatory)*
 
