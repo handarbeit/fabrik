@@ -267,3 +267,26 @@ func TestRunResume_HelpFlag(t *testing.T) {
 		t.Errorf("expected flag.ErrHelp, got %v", err)
 	}
 }
+
+// #2470: resume locates a worktree under the per-repo layout and under a
+// configured workspace root. The flat-only lookup it replaces never found a
+// namespaced worktree.
+func TestFindWorktreeDir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "worktrees")
+	flat := filepath.Join(root, "issue-2")
+	namespaced := filepath.Join(root, "o-r", "issue-3")
+	for _, d := range []string{flat, namespaced} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := findWorktreeDir(root, 2); got != flat {
+		t.Errorf("flat = %s, want %s", got, flat)
+	}
+	if got := findWorktreeDir(root, 3); got != namespaced {
+		t.Errorf("namespaced = %s, want %s", got, namespaced)
+	}
+	if got, want := findWorktreeDir(root, 9), filepath.Join(root, "issue-9"); got != want {
+		t.Errorf("missing = %s, want the flat path %s", got, want)
+	}
+}
