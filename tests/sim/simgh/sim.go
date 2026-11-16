@@ -149,6 +149,10 @@ func (realClock) Now() time.Time { return time.Now() }
 // Sim is a simulated GitHub instance. The zero value is not usable; construct
 // one with New.
 type Sim struct {
+	// stickyDismissed restores the pre-#2588 review collapse (a stored DISMISSED
+	// is sticky against a later COMMENTED). Test-only; guarded by mu.
+	stickyDismissed bool
+
 	// baseDir is the directory holding every backing bare repository. Callers
 	// normally pass t.TempDir().
 	baseDir string

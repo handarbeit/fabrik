@@ -4,13 +4,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // symlinkEnvIfEnabled creates a symlink at <workDir>/.env pointing to the
-// fabrikDir .env when cfg.SymlinkEnv is true. It is idempotent: if the
-// destination already exists (file or symlink) it is left untouched. Symlink
-// creation failure is non-fatal — a warning is logged and the stage proceeds.
+// fabrikDir .env when cfg.SymlinkEnv is true. It is idempotent: a real file at
+// the destination, or a symlink that resolves, is left untouched. A symlink
+// that no longer resolves is repaired (#2470, R4). Symlink creation failure is
+// non-fatal — a warning is logged and the stage proceeds.
+//
+// With the default workspace the target is relative (byte-identical to before
+// the workspace root existed); a worktree under a configured root may sit on
+// another volume, where a relative chain of ../ is fragile, so the target is
+// the absolute path of the bed's .env.
 func (e *Engine) symlinkEnvIfEnabled(issueNumber int, workDir string) {
 	if !e.cfg.SymlinkEnv {
 		return
@@ -25,21 +32,49 @@ func (e *Engine) symlinkEnvIfEnabled(issueNumber int, workDir string) {
 	}
 
 	dst := filepath.Join(workDir, ".env")
-	if _, err := os.Lstat(dst); err == nil {
-		e.logf(issueNumber, "debug", "worktree .env already exists — skipping symlink\n")
-		return
-	} else if !os.IsNotExist(err) {
-		e.logf(issueNumber, "warn", "symlink-env: could not stat worktree .env: %v\n", err)
-		return
-	}
-
-	target, err := filepath.Rel(workDir, src)
-	if err != nil {
-		target = src
-	}
-
-	if err := os.Symlink(target, dst); err != nil {
+	repaired, err := linkEnv(src, dst, workDir, !e.layout().IsDefault())
+	switch {
+	case err != nil:
 		e.logf(issueNumber, "warn", "could not symlink .env into worktree: %v\n", err)
+	case repaired:
+		e.logf(issueNumber, "info", "repaired broken worktree .env symlink\n")
+	}
+}
+
+// linkEnv makes dst a working symlink to src. A real (non-link) file, or a link
+// that resolves, is left alone. A link whose target is missing is replaced
+// atomically — a temporary link renamed over it — so a worker reading the file
+// never sees a moment with no .env. repaired reports a replaced broken link.
+func linkEnv(src, dst, workDir string, absolute bool) (repaired bool, err error) {
+	target := src
+	if !absolute {
+		if rel, relErr := filepath.Rel(workDir, src); relErr == nil {
+			target = rel
+		}
+	}
+	fi, lerr := os.Lstat(dst)
+	switch {
+	case lerr == nil:
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return false, nil // a real file: never overwritten
+		}
+		if _, serr := os.Stat(dst); serr == nil {
+			return false, nil // resolves: leave it
+		}
+		tmp := dst + ".fabrik-repair-" + strconv.Itoa(os.Getpid())
+		_ = os.Remove(tmp)
+		if err := os.Symlink(target, tmp); err != nil {
+			return false, err
+		}
+		if err := os.Rename(tmp, dst); err != nil {
+			_ = os.Remove(tmp)
+			return false, err
+		}
+		return true, nil
+	case os.IsNotExist(lerr):
+		return false, os.Symlink(target, dst)
+	default:
+		return false, lerr
 	}
 }
 

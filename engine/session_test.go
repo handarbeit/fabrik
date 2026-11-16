@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestLogDir(t *testing.T) {
 
 func TestLogDirForItem_SingleRepo(t *testing.T) {
 	issue := gh.ProjectItem{Number: 42}
-	dir := logDirForItem(issue)
+	dir := logDirForItem(cwdLayout(), issue)
 	if !strings.Contains(dir, "issue-42") {
 		t.Errorf("logDirForItem single-repo = %q, expected issue-42", dir)
 	}
@@ -73,7 +74,7 @@ func TestLogDirForItem_SingleRepo(t *testing.T) {
 
 func TestLogDirForItem_MultiRepo(t *testing.T) {
 	issue := gh.ProjectItem{Number: 7, Repo: "myorg/myrepo"}
-	dir := logDirForItem(issue)
+	dir := logDirForItem(cwdLayout(), issue)
 	if !strings.Contains(dir, "myorg-myrepo") {
 		t.Errorf("logDirForItem multi-repo = %q, expected myorg-myrepo", dir)
 	}
@@ -281,7 +282,7 @@ func TestSessionFile(t *testing.T) {
 
 func TestReadSessionID_FileAbsent(t *testing.T) {
 	t.Chdir(t.TempDir())
-	got := ReadSessionID("", 999, "Research")
+	got := ReadSessionID(cwdLayout(), "", 999, "Research")
 	if got != "" {
 		t.Errorf("expected empty string for absent file, got %q", got)
 	}
@@ -297,7 +298,7 @@ func TestReadSessionID_FileEmpty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Research.session"), []byte(""), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := ReadSessionID("", 1, "Research")
+	got := ReadSessionID(cwdLayout(), "", 1, "Research")
 	if got != "" {
 		t.Errorf("expected empty string for empty file, got %q", got)
 	}
@@ -314,7 +315,7 @@ func TestReadSessionID_ValidID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Plan.session"), []byte(wantID), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := ReadSessionID("", 42, "Plan")
+	got := ReadSessionID(cwdLayout(), "", 42, "Plan")
 	if got != wantID {
 		t.Errorf("expected %q, got %q", wantID, got)
 	}
@@ -331,7 +332,7 @@ func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Implement.session"), []byte("  "+wantID+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := ReadSessionID("", 7, "Implement")
+	got := ReadSessionID(cwdLayout(), "", 7, "Implement")
 	if got != wantID {
 		t.Errorf("expected %q after trimming, got %q", wantID, got)
 	}
@@ -348,7 +349,7 @@ func TestReadSessionID_MultiRepo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Implement.session"), []byte(wantID), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := ReadSessionID("myorg/myrepo", 55, "Implement")
+	got := ReadSessionID(cwdLayout(), "myorg/myrepo", 55, "Implement")
 	if got != wantID {
 		t.Errorf("expected %q, got %q", wantID, got)
 	}
@@ -381,7 +382,7 @@ func TestMigrateHomeToProject_Basic(t *testing.T) {
 	projectDir := t.TempDir()
 
 	var logs []string
-	migrateHomeToProject(projectDir, func(msg string) { logs = append(logs, msg) })
+	migrateHomeToProject(workspace.Default(projectDir), func(msg string) { logs = append(logs, msg) })
 
 	// Session should have moved.
 	newSessFile := filepath.Join(projectDir, ".fabrik", "sessions", "myorg-myrepo", "issue-10", "Research.session")
@@ -433,7 +434,7 @@ func TestMigrateHomeToProject_Idempotent(t *testing.T) {
 	}
 
 	var logs []string
-	migrateHomeToProject(projectDir, func(msg string) { logs = append(logs, msg) })
+	migrateHomeToProject(workspace.Default(projectDir), func(msg string) { logs = append(logs, msg) })
 
 	// Destination should still have the original content (not overwritten).
 	data, err := os.ReadFile(filepath.Join(newSessDir, "Plan.session"))
@@ -471,7 +472,7 @@ func TestMigrateHomeToProject_SamePath(t *testing.T) {
 	}
 
 	// Run migration with fabrikDir == fakeHome (same-path case).
-	migrateHomeToProject(sameDir, nil)
+	migrateHomeToProject(workspace.Default(sameDir), nil)
 
 	// File should still be in the original location, not moved.
 	data, err := os.ReadFile(filepath.Join(sessDir, "Research.session"))

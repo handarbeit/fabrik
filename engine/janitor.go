@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -63,7 +64,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 		return
 	}
 
-	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	worktreesRoot := e.layout().Dir(workspace.Worktrees)
 
 	wmByDirName := e.buildWMByDirName()
 
@@ -151,7 +152,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 			cleanupWM := wm
 			if cleanupWM == nil {
 				// Unregistered repo: construct a temporary WM.
-				bareDir := filepath.Join(e.fabrikDir, ".fabrik", "repos", dirName+".git")
+				bareDir := filepath.Join(e.layout().Dir(workspace.Repos), dirName+".git")
 				if fi, statErr := os.Stat(bareDir); statErr == nil && fi.IsDir() {
 					cleanupWM = NewWorktreeManagerForRepo(bareDir, worktreesRoot, dirName)
 					cleanupWM.logfFn = e.logf
@@ -297,14 +298,14 @@ func (e *Engine) janitorIsClosed(ctx context.Context, owner, repo string, issueN
 	return result
 }
 
-// runLogJanitor prunes .fabrik/logs/ by age and total size, then removes
+// runLogJanitor prunes <workspace>/logs/ by age and total size, then removes
 // empty issue/repo directories. Disabled when JanitorIntervalHours == 0
 // (same gate as the worktree janitor). Called from poll.go at startup and
 // on every periodic janitor tick — the tick is the primary mechanism for
 // long-running instances that never restart.
 func (e *Engine) runLogJanitor(ctx context.Context) {
 	_ = ctx // reserved for future use (graceful cancellation on long walks)
-	logsRoot := filepath.Join(e.fabrikDir, ".fabrik", "logs")
+	logsRoot := e.layout().Dir(workspace.Logs)
 	scanned, removed, bytes, ageRemoved, sizeRemoved, err := pruneLogs(
 		logsRoot, e.cfg.LogRetentionDays, e.cfg.LogMaxBytes, time.Now(),
 	)
@@ -318,7 +319,7 @@ func (e *Engine) runLogJanitor(ctx context.Context) {
 	)
 }
 
-// runSessionJanitor prunes .fabrik/sessions/ of .session files whose age
+// runSessionJanitor prunes <workspace>/sessions/ of .session files whose age
 // exceeds SessionRetentionDays (age-based expiry — see adrs/1136-session-janitor.md
 // for why liveness-checking against Claude Code's internal transcript layout was
 // rejected). Disabled when SessionRetentionDays == 0. Never deletes a session file
@@ -330,7 +331,7 @@ func (e *Engine) runLogJanitor(ctx context.Context) {
 // and log janitors — same cadence, no new scheduler.
 func (e *Engine) runSessionJanitor(ctx context.Context) {
 	_ = ctx // reserved for future use; the walk below performs no cancellable I/O
-	sessionsRoot := filepath.Join(e.fabrikDir, ".fabrik", "sessions")
+	sessionsRoot := e.layout().Dir(workspace.Sessions)
 	wmByDirName := e.buildWMByDirName()
 
 	resolveOwnerRepo := func(dirName string) (string, bool) {

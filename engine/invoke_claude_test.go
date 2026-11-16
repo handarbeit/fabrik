@@ -973,7 +973,7 @@ func TestSaveDebugLog(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(orig) })
 
 	const want = "hello debug output"
-	saveDebugLog(42, "Research", want)
+	saveDebugLog(cwdLayout(), 42, "Research", want)
 
 	debugDir := filepath.Join(dir, ".fabrik", "debug")
 	entries, err := os.ReadDir(debugDir)
@@ -1014,8 +1014,8 @@ func TestSaveDebugLog_UniqueNames(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
 
-	saveDebugLog(1, "Implement", "output-a")
-	saveDebugLog(1, "Implement", "output-b")
+	saveDebugLog(cwdLayout(), 1, "Implement", "output-a")
+	saveDebugLog(cwdLayout(), 1, "Implement", "output-b")
 
 	debugDir := filepath.Join(dir, ".fabrik", "debug")
 	entries, err := os.ReadDir(debugDir)
@@ -2136,7 +2136,7 @@ printf '%s\n' '{"result":"done\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_path
 
 	// ReadSessionID must find the session written by the write path above —
 	// both must resolve the same sanitized ("default") basename.
-	got := ReadSessionID("", 909, "")
+	got := ReadSessionID(cwdLayout(), "", 909, "")
 	if got != "sess_pathological" {
 		t.Errorf("ReadSessionID(\"\", 909, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_pathological")
 	}
@@ -2169,7 +2169,7 @@ printf '%s\n' '{"result":"comment done","session_id":"sess_cmt_pathological","nu
 		t.Fatalf("InvokeClaudeForComments: %v", err)
 	}
 
-	got := ReadSessionID("", 910, "")
+	got := ReadSessionID(cwdLayout(), "", 910, "")
 	if got != "sess_cmt_pathological" {
 		t.Errorf("ReadSessionID(\"\", 910, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_cmt_pathological")
 	}

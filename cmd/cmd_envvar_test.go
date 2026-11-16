@@ -1425,3 +1425,37 @@ func TestExecute_FixRoundSlots(t *testing.T) {
 		})
 	}
 }
+
+// #2470: workspace_root layers flag > FABRIK_WORKSPACE_ROOT > config.yaml.
+func TestExecute_WorkspaceRootPrecedence(t *testing.T) {
+	cases := []struct {
+		name  string
+		yaml  string
+		env   string
+		extra []string
+		want  string
+	}{
+		{"unset", "", "", nil, ""},
+		{"yaml", "workspace_root: /from/yaml\n", "", nil, "/from/yaml"},
+		{"env beats yaml", "workspace_root: /from/yaml\n", "/from/env", nil, "/from/env"},
+		{"flag beats env and yaml", "workspace_root: /from/yaml\n", "/from/env", []string{"--workspace-root", "/from/flag"}, "/from/flag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, stagesDir := setupValidStages(t)
+			chdirTest(t, dir)
+			if tc.yaml != "" {
+				os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+				os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(tc.yaml), 0644)
+			}
+			resetFlags()
+			t.Setenv("GITHUB_TOKEN", "tok")
+			t.Setenv("FABRIK_WORKSPACE_ROOT", tc.env)
+			os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, tc.extra...)
+			got := executeWithConfigHook(t)
+			if got.WorkspaceRoot != tc.want {
+				t.Errorf("WorkspaceRoot = %q, want %q", got.WorkspaceRoot, tc.want)
+			}
+		})
+	}
+}

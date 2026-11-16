@@ -421,15 +421,19 @@ mutate "the probe does not re-check archived after the snapshot" \
 
 mutate "FetchPRReviews returns the raw submission history" \
   'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
-  'reviews.go::s{return latestReviewsByAuthor\(pr\.reviews\), nil}{out := make([]gh.PRReview, len(pr.reviews)); copy(out, pr.reviews); return out, nil}'
+  'reviews.go::s{return latestReviewsByAuthor\(pr\.reviews, s\.stickyDismissed\), nil}{out := make([]gh.PRReview, len(pr.reviews)); copy(out, pr.reviews); return out, nil}'
 
-mutate "a COMMENTED follow-up overwrites the author's formal verdict" \
-  'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
-  'reviews.go::s{\} else if rev\.State == "COMMENTED" \{\n\t\t\tcontinue\n\t\t\}}{\} else if rev.State == "COMMENTED" \&\& false \{\n\t\t\tcontinue\n\t\t\}}'
+mutate "a COMMENTED follow-up overwrites the author's standing verdict" \
+  'TestFetchPRReviewsCollapsesToLatestPerAuthor|TestLatestReviewsByAuthor_MatchesProductionCollapse' \
+  'reviews.go::s{\} else if rev\.State == "COMMENTED" \&\& \(isStandingVerdict}{\} else if rev.State == "COMMENTED" \&\& false \&\& \(isStandingVerdict}'
+
+mutate "a dismissal is a standing verdict again (#2588: DISMISSED hides a later COMMENTED)" \
+  'TestLatestReviewsByAuthor_MatchesProductionCollapse' \
+  'reviews.go::s{return state == "APPROVED" \|\| state == "CHANGES_REQUESTED"\n}{return state == "APPROVED" \|\| state == "CHANGES_REQUESTED" \|\| state == "DISMISSED"\n}'
 
 mutate "the board projection reports raw reviews, disagreeing with FetchPRReviews" \
   'TestFetchPRReviewsCollapsesToLatestPerAuthor' \
-  'board.go::s{item\.LinkedPRReviews = latestReviewsByAuthor\(linked\.reviews\)}{item.LinkedPRReviews = append([]gh.PRReview(nil), linked.reviews...)}'
+  'board.go::s{item\.LinkedPRReviews = latestReviewsByAuthor\(linked\.reviews, s\.stickyDismissed\)}{item.LinkedPRReviews = append([]gh.PRReview(nil), linked.reviews...)}'
 
 mutate "repo directories flatten owner and repo, colliding" \
   'TestRepoDirsDoNotCollide' \
@@ -465,7 +469,7 @@ mutate "removing an absent label is a silent no-op" \
 
 mutate "the review decision filters before collapsing, so a dismissal is skipped" \
   'TestDismissedReviewDoesNotCountTowardApproval' \
-  'reviews.go::s{for _, rev := range latestReviewsByAuthor\(pr\.reviews\) \{}{for _, rev := range pr.reviews \{\n\t\tif rev.State != "APPROVED" \&\& rev.State != "CHANGES_REQUESTED" \{ continue \}}'
+  'reviews.go::s{for _, rev := range latestReviewsByAuthor\(pr\.reviews, s\.stickyDismissed\) \{}{for _, rev := range pr.reviews \{\n\t\tif rev.State != "APPROVED" \&\& rev.State != "CHANGES_REQUESTED" \{ continue \}}'
 
 mutate "a non-canonical issue state is stored verbatim" \
   'TestSeedRefusesNonCanonicalState' \

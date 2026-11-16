@@ -213,11 +213,17 @@ func (e *Engine) Run() error {
 	// directories. Taken before log rotation so a refused loser never rotates the
 	// winner's log. flocks are advisory but sufficient — released on process exit
 	// or crash.
-	locks, err := acquireInstanceLocks(e.cfg, e.fabrikDir)
+	locks, err := acquireInstanceLocksIn(e.cfg, e.fabrikDir, e.layout())
 	if err != nil {
 		return err
 	}
 	defer locks.Release()
+	// Record the workspace root now that this process owns the instance lock, so
+	// a second instance that lost the lock never rewrites the marker the next
+	// start's migration check compares against (#2470, R6).
+	if err := e.layout().Record(); err != nil {
+		return err
+	}
 	// Tolerated (inconclusive) verification failures go to the engine log.
 	locks.warnf = func(format string, args ...any) { e.logf(0, "warn", format+"\n", args...) }
 

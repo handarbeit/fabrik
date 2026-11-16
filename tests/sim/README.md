@@ -927,7 +927,7 @@ Two fidelity notes surfaced while building gap 4, recorded in
 `reinvoke_cycle_counters_test.go`'s own doc comments: `simgh`'s
 `FetchPRReviews` collapsed same-author `COMMENTED` follow-ups (a fidelity
 bug, fixed by #1953: production supersedes a stored `COMMENTED` with a newer
-one and only a stored *formal verdict* resists it — `latestReviewsByAuthor` now
+one and only a stored *standing verdict* (`APPROVED`/`CHANGES_REQUESTED`; `DISMISSED` stopped being sticky in #2588) resists it — `latestReviewsByAuthor` now
 does the same). A distinct author per round is still harmless but no longer
 required; the historical note in `reinvoke_cycle_counters_test.go` predates the fix;
 and `dispatchReviewReinvoke`'s `build()` hook captures `headBefore` via

@@ -71,7 +71,7 @@ func (e *Engine) worktreeExistsForItem(item gh.ProjectItem) bool {
 	} else {
 		owner, repo := parseOwnerRepo(key)
 		dirName := owner + "-" + repo
-		wtDir = filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
+		wtDir = e.layout().WorktreePath(dirName, item.Number)
 	}
 	_, err := os.Stat(wtDir)
 	return err == nil

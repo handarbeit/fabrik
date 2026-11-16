@@ -10,7 +10,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -27,6 +29,8 @@ func runResume(args []string) error {
 	stageName := fset.String("stage", "", "Stage name to resume (required until #109 lands)")
 	stagesDir := fset.String("stages", ".fabrik/stages", "Directory containing stage YAML configs")
 	pluginDir := fset.String("plugin-dir", "", "Path to Fabrik plugin directory")
+	repoFlag := fset.String("repo", "", "owner/repo of the worktree, required when issue-N exists under more than one repo")
+	workspaceRoot := fset.String("workspace-root", "", "Workspace root holding worktrees and sessions (also FABRIK_WORKSPACE_ROOT, config.yaml workspace_root; default <dir>/.fabrik)")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik resume <issue-number> [--stage <name>] [flags]\n\n")
@@ -86,7 +90,22 @@ func runResume(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resume: getting working directory: %w", err)
 	}
-	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
+	ws, err := workspace.LoadWithEnv(cwd, *workspaceRoot, resumeWorkspaceEnv())
+	if err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
+	worktreeRoot := ws.Dir(workspace.Worktrees)
+	var worktreeDir string
+	if *repoFlag != "" {
+		// An explicit repo is never resolved to some other repo's worktree.
+		worktreeDir = filepath.Join(worktreeRoot, strings.ReplaceAll(*repoFlag, "/", "-"), fmt.Sprintf("issue-%d", issueNumber))
+	} else {
+		matches := worktreeMatches(worktreeRoot, issueNumber)
+		if len(matches) > 1 {
+			return fmt.Errorf("resume: issue #%d has worktrees in more than one repo:\n  %s\nPass --repo owner/repo to choose one.", issueNumber, strings.Join(matches, "\n  "))
+		}
+		worktreeDir = findWorktreeDir(worktreeRoot, issueNumber)
+	}
 	if _, err := os.Stat(worktreeDir); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("resume: worktree for issue #%d not found at %s\n"+
@@ -117,12 +136,11 @@ func runResume(args []string) error {
 	}
 
 	// Determine the repo for namespaced session lookup by scanning the worktree root.
-	worktreeRoot := filepath.Join(cwd, ".fabrik", "worktrees")
-	repo := findRepoForIssue(worktreeRoot, issueNumber)
+	repo := repoFromWorktree(worktreeDir)
 
 	// Build the claude args
 	claudeArgs := []string{"claude"}
-	sessionID := engine.ReadSessionID(repo, issueNumber, *stageName)
+	sessionID := engine.ReadSessionID(ws, repo, issueNumber, *stageName)
 	if sessionID != "" {
 		claudeArgs = append(claudeArgs, "--resume", sessionID)
 	}
@@ -142,33 +160,56 @@ func runResume(args []string) error {
 	return execFn(claudeBin, claudeArgs, os.Environ())
 }
 
-// findRepoForIssue scans worktreeRoot for a directory named issue-N (either
-// directly or one level deep in a per-repo subdir), reads its git remote, and
-// returns "owner/repo". Returns "" if the worktree or remote cannot be found.
-func findRepoForIssue(worktreeRoot string, issueNumber int) string {
-	issueDirName := fmt.Sprintf("issue-%d", issueNumber)
-
-	// Check flat path first (single-repo or pre-migration).
-	candidate := filepath.Join(worktreeRoot, issueDirName)
-	if repo := repoFromWorktree(candidate); repo != "" {
-		return repo
+// findWorktreeDir returns the worktree directory of an issue under worktreeRoot:
+// the flat <root>/issue-N when it exists, else <root>/<owner>-<repo>/issue-N for
+// the first per-repo directory that has one. When none exists it returns the
+// flat path, so the "not found" message names a concrete location. Fabrik has
+// namespaced worktrees by repo for a long time; the flat-only lookup this
+// replaces never found them (#2470).
+func findWorktreeDir(worktreeRoot string, issueNumber int) string {
+	name := fmt.Sprintf("issue-%d", issueNumber)
+	flat := filepath.Join(worktreeRoot, name)
+	if _, err := os.Stat(flat); err == nil {
+		return flat
 	}
+	if entries, err := os.ReadDir(worktreeRoot); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			cand := filepath.Join(worktreeRoot, e.Name(), name)
+			if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+				return cand
+			}
+		}
+	}
+	return flat
+}
 
-	// Scan one level of subdirs for the namespaced layout.
-	repoDirs, err := os.ReadDir(worktreeRoot)
+// worktreeMatches returns every worktree directory of an issue under
+// worktreeRoot: the flat <root>/issue-N and each <root>/<owner>-<repo>/issue-N.
+// Issue numbers are per repo, so more than one match means the caller must be
+// told which repo is meant rather than be handed the first by directory order.
+func worktreeMatches(worktreeRoot string, issueNumber int) []string {
+	name := fmt.Sprintf("issue-%d", issueNumber)
+	var out []string
+	if fi, err := os.Stat(filepath.Join(worktreeRoot, name)); err == nil && fi.IsDir() {
+		out = append(out, filepath.Join(worktreeRoot, name))
+	}
+	entries, err := os.ReadDir(worktreeRoot)
 	if err != nil {
-		return ""
+		return out
 	}
-	for _, repoDir := range repoDirs {
-		if !repoDir.IsDir() {
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		candidate = filepath.Join(worktreeRoot, repoDir.Name(), issueDirName)
-		if repo := repoFromWorktree(candidate); repo != "" {
-			return repo
+		cand := filepath.Join(worktreeRoot, e.Name(), name)
+		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+			out = append(out, cand)
 		}
 	}
-	return ""
+	return out
 }
 
 // repoFromWorktree reads the git remote origin URL from dir and returns
@@ -206,4 +247,17 @@ func parseOwnerRepoFromURL(remoteURL string) string {
 		return ""
 	}
 	return owner + "/" + repo
+}
+
+// resumeWorkspaceEnv returns FABRIK_WORKSPACE_ROOT as the daemon sees it: the
+// shell value, else the bed's .env. The .env is read as data and never exported,
+// because resume execs claude with os.Environ() and must not hand it a daemon
+// setting (or any other .env value, which resume deliberately does not load).
+// An unreadable or absent .env is "unset", as for `fabrik watch`.
+func resumeWorkspaceEnv() string {
+	if v := os.Getenv(workspace.EnvVar); v != "" {
+		return v
+	}
+	data, _ := config.ReadDotenv()
+	return data[workspace.EnvVar]
 }

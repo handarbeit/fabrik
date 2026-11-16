@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -25,6 +26,19 @@ type GitHubOptions struct {
 	Client       *gh.Client
 	PollInterval time.Duration
 	PluginDir    string
+	// Workspace locates the worktree, session and log directories (#2470).
+	// The zero value means the in-bed default under the working directory.
+	Workspace workspace.Layout
+}
+
+// layout returns the workspace layout the watcher reads, defaulting to the
+// working directory's in-bed workspace.
+func (o GitHubOptions) layout() workspace.Layout {
+	if o.Workspace.Bed != "" {
+		return o.Workspace
+	}
+	cwd, _ := os.Getwd()
+	return workspace.Default(cwd)
 }
 
 // issueState holds the latest GitHub-fetched state for the watched issue.
@@ -91,7 +105,7 @@ type WatchModel struct {
 // pipeline order map for tab sorting. If stagesDir is empty or LoadAll fails,
 // tabs fall back to chronological ordering.
 func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel {
-	logDir := issueLogDir(opts.Owner, opts.Repo, issueNumber)
+	logDir := issueLogDir(opts.layout(), opts.Owner, opts.Repo, issueNumber)
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
 
@@ -243,42 +257,42 @@ func mergeTabSelection(newTabs []stageTab, oldTabs []stageTab, oldIdx int) int {
 	return liveTabIdx(newTabs)
 }
 
-// issueLogDir returns the log directory for an issue, namespaced by repo when
-// owner and repo are non-empty (multi-repo mode).
-//   - single-repo: <cwd>/.fabrik/logs/issue-N/
-//   - multi-repo:  <cwd>/.fabrik/logs/<owner>-<repo>/issue-N/
-func issueLogDir(owner, repo string, issueNumber int) string {
-	cwd, _ := os.Getwd()
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+// repoDirName is the <owner>-<repo> directory segment, or "" in single-repo mode.
+func repoDirName(owner, repo string) string {
 	if owner == "" || repo == "" {
-		return filepath.Join(cwd, ".fabrik", "logs", issuePart)
+		return ""
 	}
-	return filepath.Join(cwd, ".fabrik", "logs", owner+"-"+repo, issuePart)
+	return owner + "-" + repo
+}
+
+// issueDir joins root with [<owner>-<repo>/]issue-N.
+func issueDir(root, owner, repo string, issueNumber int) string {
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if seg := repoDirName(owner, repo); seg != "" {
+		return filepath.Join(root, seg, issuePart)
+	}
+	return filepath.Join(root, issuePart)
+}
+
+// issueLogDir returns the log directory for an issue, namespaced by repo when
+// owner and repo are non-empty (multi-repo mode):
+//   - single-repo: <workspace>/logs/issue-N/
+//   - multi-repo:  <workspace>/logs/<owner>-<repo>/issue-N/
+func issueLogDir(ws workspace.Layout, owner, repo string, issueNumber int) string {
+	return issueDir(ws.Dir(workspace.Logs), owner, repo, issueNumber)
 }
 
 // sessionDir returns the session directory for an issue, namespaced by repo when
 // owner and repo are non-empty (multi-repo mode).
-//   - single-repo: <cwd>/.fabrik/sessions/issue-N/
-//   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
-func sessionDir(owner, repo string, issueNumber int) string {
-	cwd, _ := os.Getwd()
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-	if owner == "" || repo == "" {
-		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)
-	}
-	return filepath.Join(cwd, ".fabrik", "sessions", owner+"-"+repo, issuePart)
+func sessionDir(ws workspace.Layout, owner, repo string, issueNumber int) string {
+	return issueDir(ws.Dir(workspace.Sessions), owner, repo, issueNumber)
 }
 
-// worktreeDir returns .fabrik/worktrees/[<owner>-<repo>/]issue-N relative to CWD.
+// worktreeDir returns <workspace>/worktrees/[<owner>-<repo>/]issue-N.
 // When owner and repo are both non-empty it produces the multi-repo-qualified path;
 // when either is empty it falls back to the legacy bare path.
-func worktreeDir(owner, repo string, issueNumber int) string {
-	cwd, _ := os.Getwd()
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-	if owner == "" || repo == "" {
-		return filepath.Join(cwd, ".fabrik", "worktrees", issuePart)
-	}
-	return filepath.Join(cwd, ".fabrik", "worktrees", owner+"-"+repo, issuePart)
+func worktreeDir(ws workspace.Layout, owner, repo string, issueNumber int) string {
+	return ws.WorktreePath(repoDirName(owner, repo), issueNumber)
 }
 
 // currentStageFromLog returns the stage name derived from the newest .log filename
@@ -292,11 +306,11 @@ func currentStageFromLog(logDir string) string {
 }
 
 // readSessionID returns the session ID for the current stage, or "" if not found.
-func readSessionID(owner, repo string, issueNumber int, stageName string) string {
+func readSessionID(ws workspace.Layout, owner, repo string, issueNumber int, stageName string) string {
 	if stageName == "" {
 		return ""
 	}
-	path := filepath.Join(sessionDir(owner, repo, issueNumber), stageName+".session")
+	path := filepath.Join(sessionDir(ws, owner, repo, issueNumber), stageName+".session")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -731,7 +745,7 @@ func (m WatchModel) bottomStatusLine(width int) string {
 		return failStyle.Render(m.statusMsg)
 	}
 
-	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, currentStageFromLog(m.logDir))
+	sessionID := readSessionID(m.opts.layout(), m.opts.Owner, m.opts.Repo, m.issueNumber, currentStageFromLog(m.logDir))
 	prefix := "no session yet"
 	if sessionID != "" {
 		prefix = "session: " + sessionID
@@ -778,15 +792,15 @@ func (m WatchModel) bottomStatusLine(width int) string {
 // tea.ExecProcess is NOT called.
 func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 	stageName := currentStageFromLog(m.logDir)
-	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, stageName)
+	sessionID := readSessionID(m.opts.layout(), m.opts.Owner, m.opts.Repo, m.issueNumber, stageName)
 
 	// Resolve worktree directory: try multi-repo path first, then legacy bare path.
 	wt := ""
-	multiPath := worktreeDir(m.opts.Owner, m.opts.Repo, m.issueNumber)
+	multiPath := worktreeDir(m.opts.layout(), m.opts.Owner, m.opts.Repo, m.issueNumber)
 	if _, err := os.Stat(multiPath); err == nil {
 		wt = multiPath
 	} else if m.opts.Owner != "" && m.opts.Repo != "" {
-		barePath := worktreeDir("", "", m.issueNumber)
+		barePath := worktreeDir(m.opts.layout(), "", "", m.issueNumber)
 		if _, err := os.Stat(barePath); err == nil {
 			wt = barePath
 		}

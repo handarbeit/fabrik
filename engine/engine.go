@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,11 +18,13 @@ import (
 	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
 
 type Config struct {
+	WorkspaceRoot              string // resolved workspace_root value (flag > FABRIK_WORKSPACE_ROOT > config.yaml); empty = <bed>/.fabrik. Relative values resolve against the bed (#2470)
 	Owner                      string
 	Repo                       string
 	ProjectNum                 int
@@ -249,6 +250,7 @@ type Engine struct {
 	projectIDWriteGuardDisabledForTest atomic.Bool                 // neutralises writeProjectID/fillBoardProjectID (#2396)
 	worktreeManagers                   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	fabrikDir                          string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	ws                                 workspace.Layout            // where worktrees, clones, sessions, logs and debug live (#2470); zero = in-bed default, see layout()
 	mu                                 sync.Mutex
 	store                              *itemstate.Store         // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
 	totalTokens                        TokenUsage               // accumulated token usage since process start
@@ -699,6 +701,21 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("resolving working directory: %w", err)
 	}
 
+	// The workspace root (#2470, ADR 2470): where worktrees, bare clones,
+	// sessions, logs and debug output live. Checked before anything is migrated
+	// or created under it: a root change that would orphan live worktrees is
+	// refused, and an unusable root fails startup rather than falling back.
+	ws, err := workspace.Resolve(fabrikDir, cfg.WorkspaceRoot, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if err := ws.CheckMigration(); err != nil {
+		return nil, err
+	}
+	if err := ws.Prepare(); err != nil {
+		return nil, err
+	}
+
 	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
 	// --plugin-dir flag overrides this for development.
 	// Path must be absolute since Claude runs in the worktree, not the repo root.
@@ -749,7 +766,7 @@ func New(cfg Config) (*Engine, error) {
 		fmt.Printf("[startup] worker session naming (--name) unavailable: installed claude binary does not advertise --name; upgrade claude to enable session names in ps/session-picker output\n")
 	}
 
-	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
+	worktreeRoot := ws.Dir(workspace.Worktrees)
 	sharedStore := itemstate.NewStore(nil)
 
 	// event_source: hookdeck was removed (ADR 2477). Its refusal is
@@ -850,7 +867,8 @@ func New(cfg Config) (*Engine, error) {
 		appGitHTTPS:               appGitHTTPS,
 		appIdent:                  appIdent,
 		skillResolver:             newSkillResolver(pluginDirs),
-		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput, WS: ws},
+		ws:                        ws,
 		worktreeManagers:          make(map[string]*WorktreeManager),
 		fabrikDir:                 fabrikDir,
 		store:                     sharedStore,
@@ -931,14 +949,14 @@ func New(cfg Config) (*Engine, error) {
 	// Must run after migrateWorktrees so namespaced worktree paths exist for remote lookup.
 	home, _ := os.UserHomeDir()
 	migrateSessions(
-		filepath.Join(home, ".fabrik", "sessions"),
+		workspace.Default(home).Dir(workspace.Sessions),
 		worktreeRoot,
 		func(msg string) { fmt.Printf("[startup] %s", msg) },
 	)
 
 	// Migrate sessions and logs from ~/.fabrik/ to <cwd>/.fabrik/ (cross-root migration).
 	// Must run after migrateSessions so home-dir sessions are already in namespaced layout.
-	migrateHomeToProject(fabrikDir, func(msg string) { fmt.Printf("[startup] %s", msg) })
+	migrateHomeToProject(ws, func(msg string) { fmt.Printf("[startup] %s", msg) })
 
 	// Wire the github package's diagnostic logger to engine.logf so retry/
 	// degradation warnings (e.g. project board indexer mismatches) reach
@@ -1209,6 +1227,16 @@ func (e *Engine) defaultRepo() string {
 	return e.cfg.Owner + "/" + e.cfg.Repo
 }
 
+// layout returns the engine's workspace layout (#2470). Engines built outside
+// New() (NewWithDeps, tests that set only fabrikDir) get the in-bed default
+// under fabrikDir, so every existing path is unchanged.
+func (e *Engine) layout() workspace.Layout {
+	if e.ws.Bed != "" {
+		return e.ws
+	}
+	return workspace.Default(e.fabrikDir)
+}
+
 // worktreesFor returns the WorktreeManager for the given "owner/repo" key.
 // Panics if no WM is registered for that repo — callers must call ensureRepoReady first.
 func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
@@ -1418,7 +1446,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		return nil // cannot determine repo — let processItem handle it
 	}
 	nameWithOwner := owner + "/" + repo
-	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	worktreeRoot := e.layout().Dir(workspace.Worktrees)
 	callerKey := issueKey(item, e.defaultRepo())
 
 	for {
@@ -1466,7 +1494,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareCloneAs(e.fabrikDir, owner, repo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.layout().Dir(workspace.Repos), owner, repo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 
@@ -1538,7 +1566,7 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 		return fmt.Errorf("ensureSpawnTargetReady: cannot determine parent repo for item %d", parentItem.Number)
 	}
 	nameWithOwner := targetOwner + "/" + targetRepo
-	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	worktreeRoot := e.layout().Dir(workspace.Worktrees)
 	callerKey := issueKey(parentItem, e.defaultRepo())
 
 	for {
@@ -1585,7 +1613,7 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareCloneAs(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.layout().Dir(workspace.Repos), targetOwner, targetRepo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 

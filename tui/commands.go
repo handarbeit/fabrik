@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/warnings"
 )
@@ -43,20 +44,12 @@ func upgradePluginCmd(pluginDir string) tea.Cmd {
 
 // tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
-func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
-	cwd, _ := os.Getwd()
+func tuiReadSessionID(ws workspace.Layout, repo string, issueNumber int, stageName string) string {
 	base := filepath.Base(stageName)
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
 		base = "default"
 	}
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-	var sessDir string
-	if repo != "" {
-		repoPart := strings.ReplaceAll(repo, "/", "-")
-		sessDir = filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
-	} else {
-		sessDir = filepath.Join(cwd, ".fabrik", "sessions", issuePart)
-	}
+	sessDir := filepath.Join(ws.Dir(workspace.Sessions), issueDirPart(repo, issueNumber))
 	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
 	if err != nil {
 		return ""
@@ -120,12 +113,17 @@ func fmtBannerCountdown(reset time.Time, now time.Time) string {
 // The TUI is restored automatically when the user exits watch with q.
 // In multi-repo mode, --owner and --repo flags are passed explicitly so the
 // child process watches the correct repository.
-func openWatchInlineCmd(issueNumber int, repo string) tea.Cmd {
+func openWatchInlineCmd(ws workspace.Layout, issueNumber int, repo string) tea.Cmd {
 	fabrikBin, err := os.Executable()
 	if err != nil {
 		fabrikBin = "fabrik"
 	}
 	args := []string{"watch"}
+	// A configured workspace root may have come from the daemon's own flag, which
+	// the child cannot see; pass the resolved value explicitly.
+	if ws.Bed != "" && !ws.IsDefault() {
+		args = append(args, "--workspace-root", ws.Root)
+	}
 	if repo != "" {
 		parts := strings.SplitN(repo, "/", 2)
 		if len(parts) == 2 {
@@ -144,9 +142,9 @@ func openWatchInlineCmd(issueNumber int, repo string) tea.Cmd {
 // worktreePath must already be verified to exist by the caller.
 // If a session file exists for the given stage, --resume <id> is passed;
 // otherwise a fresh session starts.
-func openResumeInlineCmd(pluginDir, repo string, issueNumber int, stageName, stageModel, worktreePath string) tea.Cmd {
+func openResumeInlineCmd(ws workspace.Layout, pluginDir, repo string, issueNumber int, stageName, stageModel, worktreePath string) tea.Cmd {
 	args := []string{}
-	sessionID := tuiReadSessionID(repo, issueNumber, stageName)
+	sessionID := tuiReadSessionID(ws, repo, issueNumber, stageName)
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}
@@ -221,15 +219,20 @@ func runWarningsFixCmd(entry warnings.Entry) tea.Cmd {
 	}
 }
 
-// worktreePathForIssue returns the absolute path to the issue's git worktree.
-// Path: <rootDir>/.fabrik/worktrees/<owner>-<repo>/issue-N
-func worktreePathForIssue(rootDir, repo string, issueNumber int) string {
+// issueDirPart is [<owner>-<repo>/]issue-N, the per-issue path below a
+// workspace subdirectory.
+func issueDirPart(repo string, issueNumber int) string {
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	if repo != "" {
-		repoPart := strings.ReplaceAll(repo, "/", "-")
-		return filepath.Join(rootDir, ".fabrik", "worktrees", repoPart, issuePart)
+		return filepath.Join(strings.ReplaceAll(repo, "/", "-"), issuePart)
 	}
-	return filepath.Join(rootDir, ".fabrik", "worktrees", issuePart)
+	return issuePart
+}
+
+// worktreePathForIssue returns the absolute path to the issue's git worktree.
+// Path: <workspace>/worktrees/<owner>-<repo>/issue-N
+func worktreePathForIssue(ws workspace.Layout, repo string, issueNumber int) string {
+	return filepath.Join(ws.Dir(workspace.Worktrees), issueDirPart(repo, issueNumber))
 }
 
 // isActiveIssue reports whether the history entry's issue is currently being

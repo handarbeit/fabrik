@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -523,7 +524,7 @@ func TestEnsureBareCloneAs_ExistingCloneGetsAppIdentity_PATWritesNoMarkers(t *te
 	unsetGitConfig(t, bareDir, "user.name", "user.email")
 
 	// PAT mode (nil identity): the legacy path, no marker keys.
-	if _, err := ensureBareCloneAs(base, "o", "r", "operator", nil, false, ""); err != nil {
+	if _, err := ensureBareCloneAs(workspace.Default(base).Dir(workspace.Repos), "o", "r", "operator", nil, false, ""); err != nil {
 		t.Fatalf("ensureBareCloneAs: %v", err)
 	}
 	if got := readGitConfig(t, bareDir, "user.name"); got != "operator" {
@@ -534,7 +535,7 @@ func TestEnsureBareCloneAs_ExistingCloneGetsAppIdentity_PATWritesNoMarkers(t *te
 	}
 
 	// Switch to App mode over the same, now-existing clone.
-	if _, err := ensureBareCloneAs(base, "o", "r", "operator", testAppIdent, false, ""); err != nil {
+	if _, err := ensureBareCloneAs(workspace.Default(base).Dir(workspace.Repos), "o", "r", "operator", testAppIdent, false, ""); err != nil {
 		t.Fatalf("ensureBareCloneAs: %v", err)
 	}
 	if got := readGitConfig(t, bareDir, "user.name"); got != testAppIdent.Name {
