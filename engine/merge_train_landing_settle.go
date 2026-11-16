@@ -208,6 +208,9 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 			}
 			verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns)
 			zeroHeld := false
+			// The expiry reason must describe the LAST evaluation: real check runs that
+			// appeared after an earlier zero-check hold mean CI did start.
+			lastZeroHold = ""
 			if verdict == TrainCIGreen && len(checkRuns) == 0 {
 				// #2593: zero check runs on the landing head is "no CI" only if no member
 				// shows the repository runs check-run CI; otherwise it is CI not started yet.

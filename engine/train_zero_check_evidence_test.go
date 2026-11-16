@@ -186,6 +186,41 @@ func TestSettleAndMerge_ZeroChecks_MemberHasChecks_HeldToBackstop(t *testing.T) 
 	}
 }
 
+// A zero-check hold followed by real check runs that stay pending must expire with the
+// ordinary "checks were still pending" reason, not "CI had not started" (CI did start).
+func TestSettleAndMerge_ZeroChecks_HoldThenPendingRuns_ExpiryReasonIsNotStale(t *testing.T) {
+	client := zeroCheckClient(map[string][]gh.CheckRun{"m11": ciOK}, nil)
+	var mu sync.Mutex
+	headReads := 0
+	pending := []gh.CheckRun{{ID: 2, Name: "build", Status: "in_progress"}}
+	client.fetchCheckRunsFn = func(owner, repo, sha string) ([]gh.CheckRun, error) {
+		if sha == "sha123" {
+			mu.Lock()
+			defer mu.Unlock()
+			headReads++
+			if headReads <= 2 {
+				return nil, nil // Actions delay: zero check runs
+			}
+			return pending, nil // CI started, never finishes
+		}
+		if sha == "m11" {
+			return ciOK, nil
+		}
+		return nil, nil
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	res := settleZero(t, eng, evidenceMembers())
+	if res.outcome != outcomeBackstopExpired {
+		t.Fatalf("outcome=%v, want backstop expiry", res.outcome)
+	}
+	if strings.Contains(res.reason, "CI had not started") {
+		t.Fatalf("reason %q is stale: real check runs appeared after the zero-check hold", res.reason)
+	}
+	if !strings.Contains(res.reason, "still pending") {
+		t.Fatalf("reason %q should say checks were still pending", res.reason)
+	}
+}
+
 func TestSettleAndMerge_ZeroChecks_MemberHasChecks_NeutralisedMerges(t *testing.T) {
 	eng := trainTestEngine(t, zeroCheckClient(map[string][]gh.CheckRun{"m11": ciOK}, nil), &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	eng.SetZeroCheckMemberEvidenceDisabledForTest(true)
