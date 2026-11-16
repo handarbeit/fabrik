@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -33,8 +34,8 @@ func (e *Engine) SetContinuationExemptionDisabledForTest(disabled bool) {
 }
 
 // SetSessionDirForTest roots the session decision's lookups at <root>/.fabrik/sessions
-// instead of the working directory, so a parallel sim test needs no t.Chdir.
-// Production keeps sessionDirForItem. The real invoker is not affected.
+// instead of the engine layout, so a parallel sim test needs no t.Chdir.
+// Production uses the workspace layout. The real invoker is not affected.
 func (e *Engine) SetSessionDirForTest(root string) {
 	e.sessionRootForTest.Store(&root)
 }
@@ -71,9 +72,9 @@ func (e *Engine) RecordSessionForTest(item gh.ProjectItem, stageName, sessionID 
 func (e *Engine) sessionFilePathFor(item gh.ProjectItem, stageName string) string {
 	var dir string
 	if root := e.sessionRootForTest.Load(); root != nil {
-		dir = sessionDirForItemUnder(*root, item)
+		dir = sessionDirForItem(workspace.Default(*root), item)
 	} else {
-		dir = sessionDirForItem(item)
+		dir = sessionDirForItem(e.layout(), item)
 	}
 	return filepath.Join(dir, sanitizeStageName(stageName)+".session")
 }

@@ -339,6 +339,8 @@ Fabrik **always bare-clones** each managed repository on first access:
 - Worktrees are created at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`
 - One worktree manager runs per discovered repository, all sharing the same poll loop
 
+These are the defaults. `workspace_root` moves the worktrees, clones, sessions, logs and debug output to another directory, for example a separate volume — see "Workspace Root" below.
+
 **`.fabrik/repos/` is excluded from git tracking by default** (gitignored). Bare clone directories can be very large and should not be committed to your repository. When you run `fabrik init` inside a git repo, these paths are also added to `.git/info/exclude` automatically.
 
 To restrict processing to a single repository, pass `--repo owner/repo`.
@@ -1210,6 +1212,13 @@ user: your-github-username
 
 # Optional settings (defaults shown):
 
+# Directory under which per-issue worktrees, bare clones, sessions, logs and
+# debug output live. Absent (the default) means <this directory>/.fabrik, so
+# nothing changes. config.yaml, .env, fabrik.lock and the local API socket
+# always stay here. A relative path is relative to this directory; ~ is
+# expanded. See "Workspace Root" below before changing it on a running bed.
+# workspace_root: /Volumes/FabrikScratch/fabrik
+
 # GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent
 # (the default) means github.com — byte-identical to today's behavior. See
 # "GitHub Enterprise Server Support" above for the full effect and the
@@ -1319,8 +1328,10 @@ user: your-github-username
 # or prompt issues. Files are named by issue number and stage.
 # debug_output: false
 
-# When true, creates a relative symlink at <worktree>/.env pointing to the
-# fabrikDir .env file whenever a worktree is set up. Lets stage code read
+# When true, creates a symlink at <worktree>/.env pointing to the
+# fabrikDir .env file whenever a worktree is set up (relative by default;
+# absolute when workspace_root puts the worktree elsewhere; a broken link is
+# repaired). Lets stage code read
 # credentials (e.g. ANTHROPIC_API_KEY) without copying secrets. No-op when
 # the source .env is absent; never overwrites an existing .env in the worktree;
 # also excluded from git stash via the worktree's git exclude file.
@@ -1537,8 +1548,9 @@ FABRIK_USER=my-personal-username
 | `--drain-deadline` | Bound on a clean stop's worker drain — how long `Run()` waits, after the first SIGINT/SIGTERM, for in-flight workers and the shutdown-pause write phase (see [Graceful Shutdown](#graceful-shutdown)) before returning anyway (Go duration: `30s`, `1m`; unlike `--kill-grace-*`, `"0s"` is **not** a "wait forever" sentinel — any non-positive value falls back to the default with a warning; also `FABRIK_DRAIN_DEADLINE`). Should stay comfortably above `--kill-grace-sigint` + `--kill-grace-sigterm`, or the drain will preempt the kill escalation before it can complete — a startup warning fires if it doesn't. | `""` (30s) |
 | `--archive-after` | Grace period since an item settled into Done (its `stage:<Done>:complete` label was applied) before it is auto-archived off the project board (Go duration: `168h`, `24h`; `"0s"` archives immediately once eligible; also `FABRIK_ARCHIVE_AFTER`) | `""` (168h = 1 week) |
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
-| `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
-| `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
+| `--debug-output` | Save Claude stage output to `<workspace>/debug/` (`.fabrik/debug/` by default) | `false` |
+| `--symlink-env` | Create a symlink (relative; absolute when `workspace_root` puts the worktree outside the bed) at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` file in the worktree, but repairs a symlink whose target is missing; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
+| `--workspace-root` | Directory under which worktrees, bare clones, sessions, logs and debug output live, e.g. a separate volume excluded from snapshots. A relative path is relative to the directory Fabrik runs in; `~` is expanded. `config.yaml`, `.env`, `fabrik.lock` and the local API socket stay in the bed. Changing it while the old root holds worktrees is refused at startup — see "Workspace Root". Also `FABRIK_WORKSPACE_ROOT` and `workspace_root` | `<bed>/.fabrik` |
 | `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 | `--claude-config-dir` | Claude Code profile directory every stage worker runs under; highest precedence of the six sources. Also `FABRIK_CLAUDE_CONFIG_DIR`, `claude_config_dir`. See [Alternate Claude Profile](#alternate-claude-profile-claude_config_dir). | `""` (Claude Code's own default) |
 | `--github-app-id` | GitHub App ID for App-installation auth — co-equal with `--token`, not a replacement. Must be set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all. Also `FABRIK_GITHUB_APP_ID`. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
@@ -1635,6 +1647,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_WORKER_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact names of Fabrik-scrubbed variables (see "Fabrik Daemon Secrets Workers Never See" below) to let through to every Claude worker unchanged. Names not on the scrub list, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, `GIT_CONFIG_*` and this variable itself are ignored with a `[startup]` warning. Can admit credentials, so a `[startup]` notice names each admitted variable. Never forwarded to the worker itself. | -- |
 | `FABRIK_INSTANCE_ID` | *(no config.yaml key)* | GitHub App auth only. Stable per-instance string that replaces the hostname in the hash behind the `fabrik:locked:<slug>-<hash>` lock label, so it survives hostname changes (container/pod restarts). Ignored in PAT mode. Absent (default) means the hostname is used. See [GitHub App Authentication](#github-app-authentication). | `""` (hostname) |
+| `FABRIK_WORKSPACE_ROOT` | `workspace_root` | Workspace root for worktrees, clones, sessions, logs and debug output — see `--workspace-root` and "Workspace Root" | `<bed>/.fabrik` |
 | `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 | `FABRIK_CLAUDE_CONFIG_DIR` | `claude_config_dir` | Claude Code profile directory every stage worker runs under. As an environment variable it outranks `.env` and `config.yaml`; a bare `CLAUDE_CONFIG_DIR` ranks *below* `config.yaml`. Never forwarded to workers (they get `CLAUDE_CONFIG_DIR`). See [Alternate Claude Profile](#alternate-claude-profile-claude_config_dir). | `""` (Claude Code's own default) |
 | `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
@@ -4867,6 +4880,37 @@ older worker may still have them set. The suite is hermetic against all of it
 which exports dummy App/PAT/webhook/`GH_TOKEN`/`GIT_CONFIG_*` values and runs the
 same `go test -race ./...`.
 
+### Workspace Root (`workspace_root`)
+
+Everything Fabrik writes while it works — a worktree per issue (often with `node_modules`), the bare clones, session records, logs and debug output — lives under `.fabrik/` in the directory you run it from. That is on the same volume as your checkout, and the workload is mostly create-and-delete. On macOS this is costly: Time Machine takes hourly whole-volume local snapshots and keeps each for 24 hours, and every snapshot pins data deleted after it. On one busy host a day of snapshots pinned 133 GB. Excluding a directory does not help, because snapshots are whole-volume; a separate, excluded volume does. The same setting serves a faster scratch disk, a quota-capped volume (so a runaway agent cannot fill the system disk) or a volume kept out of Spotlight or a backup agent.
+
+`workspace_root` points Fabrik's runtime churn at a directory you choose. Unset (the default) means `<bed>/.fabrik/`, and every path is exactly what it was before.
+
+**Precedence**, highest first: `--workspace-root`, `FABRIK_WORKSPACE_ROOT` (shell or `.env`), `workspace_root:` in `.fabrik/config.yaml`, the default. A relative value is resolved against the *bed* (the directory Fabrik runs in), never against the process's working directory; a leading `~` is expanded. `fabrik watch` and `fabrik resume` accept the same flag and variable, so they find the same worktrees as the daemon. Issue numbers are per repository, so when `issue-N` exists under more than one repo, `fabrik resume N` refuses and lists them; pass `--repo owner/repo` to choose.
+
+```yaml
+# .fabrik/config.yaml
+workspace_root: /Volumes/FabrikScratch/fabrik
+```
+
+**What moves** (under the root): `worktrees/`, `repos/`, `sessions/` (including the per-stage session sidecars), `logs/` and `debug/`. Worktrees and clones always move together, so `git worktree` stays on one filesystem.
+
+**What stays in the bed:** `config.yaml`, `.env`, `fabrik.lock`, the local API socket and everything else under `.fabrik/state/` (decision state, merge-train runs, recorded stage outcomes), plus `fabrik.log`, `history.json` and `warnings.json`. The CLI, the TUI and the MCP tools find a running daemon through these, so they never move.
+
+**Setting up a separate volume.**
+
+1. Create and mount the volume (for example an APFS volume excluded from Time Machine). Fabrik does not manage it.
+2. Create a directory on it and set `workspace_root` to that directory. The root must already exist: Fabrik creates only the `worktrees`, `repos`, `sessions`, `logs` and `debug` directories inside it and never the root itself. If the volume is not mounted, startup fails naming the path instead of silently recreating the workspace on the system disk (a root that is a mount point would otherwise be recreated there).
+3. Give each bed its own root. Two beds sharing one root would collide on `worktrees/<owner>-<repo>/issue-N`; Fabrik does not detect this.
+
+A root that does not exist, is not a directory or is not writable fails startup with a message naming the path. It never falls back to the in-bed location.
+
+**Changing the root on a bed that already has worktrees is refused.** Fabrik records the root it last ran with in `.fabrik/state/workspace-root`. If the configured root differs and the previous root (or the default `<bed>/.fabrik/` for a bed that never set one) still holds any `issue-N` worktree directory, startup stops with an error naming the old root and the worktrees. Nothing is moved, deleted or rewritten. Fabrik refuses rather than moves because moving live worktrees means git surgery on in-flight branches; refusing is lossless and reversible. To proceed, either set `workspace_root` back to its previous value, or let the work finish and remove the old worktrees (push or discard their changes first, then `git worktree remove <path>` from the matching bare clone, or run Fabrik once with the old setting and let the janitor clean closed issues), then restart. "Active" means *any* `issue-N` directory, including leftovers the janitor has not yet collected: whether one is still needed depends on GitHub and the item state, neither of which exists at startup. The same rule applies when you unset `workspace_root` after using it. If the previous root cannot be inspected (for example its volume is not mounted, so neither it nor its parent exists), startup is refused too, because an unreachable root is not known to be empty: mount the volume and restart, or set `workspace_root` back. The same applies to a previous root that exists but has no `worktrees/` directory and no `.fabrik-workspace` file (Fabrik writes that file into a root when it first prepares it): when the root is a mount point, that is the empty directory left on the system disk while the volume is unmounted. If the volume is mounted and you know the old root holds no worktrees, create an empty `.fabrik-workspace` file in it and restart.
+
+**`.env` links.** With `symlink_env` on, the worktree's `.env` is a relative link in the default layout and an absolute link to the bed's `.env` when the worktree lives under a configured root (possibly on another volume). A link whose target no longer exists — for example after the bed moved — is replaced with a working one; a real `.env` file in a worktree is never touched.
+
+**Path matching.** The janitor, session migration, the issue-to-worktree lookup and the cwd-based process reaper compare resolved paths, so a root reached through a symlink (an external-volume mount point, `/var` versus `/private/var` on macOS) behaves exactly like its resolved form. Starting Fabrik from inside a worktree is refused for a relocated root as well.
+
 ### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
 
 `CLAUDE_CONFIG_DIR` decides which Claude account every stage worker bills to.
@@ -4917,8 +4961,8 @@ a different (overridden) value; when nothing resolved the variable is removed fr
 the worker. `FABRIK_CLAUDE_CONFIG_DIR` never reaches a worker. The interactive
 `claude` launches (TUI resume, the warnings-panel fix session, `fabrik watch`) and
 the `apiKeyHelper` check use the same resolved directory, as does the account shown
-in the TUI footer. (`fabrik resume`, which does not read `.env`, still follows the
-shell environment only.)
+in the TUI footer. (`fabrik resume`, which does not load `.env` into its environment, still follows the
+shell environment only for this; the one exception is `FABRIK_WORKSPACE_ROOT`, which it reads from `.env` as data so it finds the same worktrees as the daemon.)
 
 **Startup line.** To see what was resolved, check the startup output (stderr and
 `.fabrik/fabrik.log`):

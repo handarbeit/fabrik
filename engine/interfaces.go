@@ -2,9 +2,11 @@ package engine
 
 import (
 	"context"
+	"os"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -146,6 +148,10 @@ type GitHubClient interface {
 // Using a struct rather than individual parameters means future overrides
 // (e.g. DisableAdaptiveThinking) are zero-churn field additions.
 type InvokeOptions struct {
+	// Workspace locates sessions and logs (#2470). RealClaudeInvoker fills it
+	// from its own layout; the zero value means the in-bed default under the
+	// working directory, which is what direct InvokeClaude callers (tests) get.
+	Workspace        workspace.Layout
 	ModelOverride    string // from "model:<name>" label, overrides stage.Model
 	EffortOverride   string // from "effort:<level>" label, overrides stage.EffortLevel
 	BaseBranch       string // actual default base branch for the managed repo (e.g. "develop", not always "main")
@@ -235,20 +241,40 @@ type ClaudeInvoker interface {
 // RealClaudeInvoker wraps the existing InvokeClaude function.
 type RealClaudeInvoker struct {
 	DebugOutput bool
+	// WS is the workspace layout sessions, logs and debug output are written
+	// under (#2470). The zero value means the in-bed default under the working
+	// directory.
+	WS workspace.Layout
 }
 
 func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+	if r.WS.Bed != "" {
+		opts.Workspace = r.WS
+	}
 	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, opts)
 	if r.DebugOutput {
-		saveDebugLog(issue.Number, stage.Name, output)
+		saveDebugLog(opts.layout(), issue.Number, stage.Name, output)
 	}
 	return output, completed, usage, err
 }
 
 func (r *RealClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+	if r.WS.Bed != "" {
+		opts.Workspace = r.WS
+	}
 	output, completed, usage, err := InvokeClaudeForComments(ctx, stage, issue, comments, workDir, opts)
 	if r.DebugOutput {
-		saveDebugLog(issue.Number, stage.Name+"-comment-review", output)
+		saveDebugLog(opts.layout(), issue.Number, stage.Name+"-comment-review", output)
 	}
 	return output, completed, usage, err
+}
+
+// layout returns the workspace layout of the invocation: the injected one, or
+// the in-bed default under the working directory when none was set.
+func (o InvokeOptions) layout() workspace.Layout {
+	if o.Workspace.Bed != "" {
+		return o.Workspace
+	}
+	cwd, _ := os.Getwd()
+	return workspace.Default(cwd)
 }

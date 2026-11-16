@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ import (
 // that causes indefinite ghost entries whenever processItem early-returns
 // without invoking Claude.
 type ActivePaneComponent struct {
+	ws             workspace.Layout // workspace layout for launching watch (#2470)
 	active         map[string]*activeJob
 	activeNumToKey map[int]string
 	blocked        map[string]*blockedIssue
@@ -172,7 +174,7 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 					// shell out to `fabrik watch ... 0` for a worktree that was
 					// never created. Silently no-op, matching this switch's
 					// existing "not present" guards above.
-					return a, openWatchInlineCmd(job.IssueNumber, job.Repo)
+					return a, openWatchInlineCmd(a.ws, job.IssueNumber, job.Repo)
 				}
 			}
 		}

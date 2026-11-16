@@ -298,3 +298,26 @@ func containsLine(lines []string, want string) bool {
 	}
 	return false
 }
+
+// #2470 review: a workspace root set only in the bed's .env is the one the
+// daemon uses, so reset --worktrees must clear it, not the empty in-bed default.
+func TestResetWorktreesHonoursARootSetOnlyInTheBedDotenv(t *testing.T) {
+	t.Setenv("FABRIK_WORKSPACE_ROOT", "")
+	rf := &resetFake{projectID: "P", remaining: "0"}
+	g, _ := newResetGate(t, rf)
+	bed := g.Cfg.TestBed
+	root := t.TempDir()
+	prev, _ := os.ReadFile(bed + "/.env")
+	mustWrite(t, bed+"/.env", string(prev)+"\nFABRIK_WORKSPACE_ROOT="+root+"\n")
+	mustWrite(t, root+"/worktrees/o-r/issue-1/a.txt", "x")
+	mustWrite(t, root+"/repos/o-r.git/HEAD", "x")
+	rf.psOut = "  PID COMMAND\n"
+	if err := g.Reset(context.Background(), ResetOptions{Worktrees: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/worktrees", "/repos"} {
+		if _, err := os.Stat(root + p); err == nil {
+			t.Errorf("%s under the .env-configured root should have been removed", p)
+		}
+	}
+}

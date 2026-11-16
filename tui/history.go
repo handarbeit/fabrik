@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,6 +64,7 @@ func SaveHistory(entries []HistoryEntry) {
 
 // HistoryPaneComponent manages the completed jobs history pane.
 type HistoryPaneComponent struct {
+	ws           workspace.Layout // workspace layout for launching watch (#2470)
 	history      []HistoryEntry
 	historyVP    viewport.Model
 	histIdx      int
@@ -167,7 +169,7 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 						// A merge-train episode entry (#2050): no per-issue worktree.
 						return h, nil
 					}
-					return h, openWatchInlineCmd(he.IssueNumber, he.Repo)
+					return h, openWatchInlineCmd(h.ws, he.IssueNumber, he.Repo)
 				}
 			}
 		}

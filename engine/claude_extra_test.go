@@ -45,7 +45,7 @@ func TestSaveDebugLog_WritesFile(t *testing.T) {
 	}
 	defer os.Chdir(origDir)
 
-	saveDebugLog(1, "Research", "some debug output")
+	saveDebugLog(cwdLayout(), 1, "Research", "some debug output")
 
 	debugDir := filepath.Join(tmpDir, ".fabrik", "debug")
 	entries, err := os.ReadDir(debugDir)

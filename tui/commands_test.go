@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,7 +97,7 @@ func TestFmtBannerCountdown(t *testing.T) {
 
 // TestTuiReadSessionID_NotFound verifies empty string for a missing session file.
 func TestTuiReadSessionID_NotFound(t *testing.T) {
-	id := tuiReadSessionID("", 99999, "SomeStageThatDoesNotExist")
+	id := tuiReadSessionID(workspace.Default(t.TempDir()), "", 99999, "SomeStageThatDoesNotExist")
 	if id != "" {
 		t.Errorf("expected empty string for missing session, got %q", id)
 	}

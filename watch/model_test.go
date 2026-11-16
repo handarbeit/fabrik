@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,7 +263,7 @@ func TestWorktreeDir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := worktreeDir(tt.owner, tt.repo, tt.issueNumber)
+			got := worktreeDir(workspace.Default(cwd), tt.owner, tt.repo, tt.issueNumber)
 			if got != tt.wantSuffix {
 				t.Errorf("worktreeDir(%q, %q, %d) = %q, want %q",
 					tt.owner, tt.repo, tt.issueNumber, got, tt.wantSuffix)

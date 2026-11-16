@@ -91,6 +91,11 @@ type ProjectConfig struct {
 	// .env, and above a bare inherited CLAUDE_CONFIG_DIR. See
 	// internal/claudeprofile.Resolve.
 	ClaudeConfigDir string `yaml:"claude_config_dir"`
+	// WorkspaceRoot is the directory under which worktrees, bare clones,
+	// sessions, logs and debug output live (#2470, ADR 2470). Empty means
+	// <bed>/.fabrik. It ranks below --workspace-root and FABRIK_WORKSPACE_ROOT.
+	// See internal/workspace.Resolve.
+	WorkspaceRoot string `yaml:"workspace_root"`
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure GitHub App authentication (#1713) as a second,
 	// co-equal path alongside a PAT (Token()) — all three must be set

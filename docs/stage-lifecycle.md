@@ -53,7 +53,7 @@ Shallow query: ~16 points/poll. Deep fetch: ~2 points per active item. Typical p
 
 ### Worktree Setup
 
-Each issue gets `.fabrik/worktrees/issue-<N>` on branch `fabrik/issue-<N>`:
+Each issue gets a worktree under the workspace root (`.fabrik/worktrees/issue-<N>` by default; `workspace_root` relocates the worktrees, clones, sessions, logs and debug output, see the User Guide's "Workspace Root") on branch `fabrik/issue-<N>`:
 - **First run**: Created from `origin/main`, rebased onto latest. When the local branch is missing but `origin/fabrik/issue-<N>` exists (lost local copy, branch pushed elsewhere), the worktree starts from that branch instead, so unmerged work is kept and pushes keep a valid lease (#1916)
 - **Already-landed origin branch is not adopted** (#1917, ADR 1917): after fetching the branch, adoption is declined and the worktree forks from base (one log line says why) when the branch tip is an ancestor of `origin/<base>` (every commit is on base), or when the tip equals the head SHA of a merged PR the engine already knows (the item's linked PR, or its `fabrik:credited-pr:<N>` PR; this catches squash and rebase merges). An unknown merged-PR head falls back to the ancestry check only. Any git error in the ancestry check adopts the branch as before (adopting is lossless; forking on doubt would reintroduce the stale-lease loop). When an adopted branch's open PR targets a base other than the item's resolved base, a loud `warn: base mismatch` line naming both bases is logged; adoption is unchanged and the stage rebases
 - **Existing worktree is synced from origin before it is rebased** (#2295, ADR 2295): on a clean, idle tree the local `fabrik/issue-<N>` is compared with a freshly fetched `origin/fabrik/issue-<N>` — fast-forwarded when behind, reset to the remote head when it holds nothing the remote lacks (a pure rebase), kept when the remote holds nothing it lacks (unpushed work). A branch where both sides hold something the other lacks is **diverged**: nothing is rebased or pushed, no stage runs, and the item is paused with a comment naming both heads. A dirty tree, a mid-merge/rebase tree, an unreachable remote or an absent remote skips the sync with a log line. Every engine push of the branch then uses an explicit `--force-with-lease=<ref>:<sha>` on a remote head verified against the local branch, instead of a bare lease
@@ -109,7 +109,7 @@ The file is a snapshot taken at invocation start: a mid-run push moves HEAD and 
 
 ### Session Resume
 
-Session file: `.fabrik/sessions/issue-<N>/<stageName>.session`, relative to the process working directory — or `.fabrik/sessions/<owner>-<repo>/issue-<N>/<stageName>.session` on multi-repo projects (`engine/claude.go:227-242`). On retry, loaded via `--resume` to restore conversation context.
+Session file: `<workspace>/sessions/issue-<N>/<stageName>.session` — or `<workspace>/sessions/<owner>-<repo>/issue-<N>/<stageName>.session` on multi-repo projects (`sessionDirForItem` in `engine/claude.go`), where `<workspace>` is the resolved workspace root, `.fabrik/` under the working directory unless `workspace_root` is set. On retry, loaded via `--resume` to restore conversation context.
 
 The session ID is captured even when the invocation ends by hitting `max_turns` — `parseClaudeJSON` accepts a response whose `result` is empty as long as `session_id` is present (`engine/claude.go:1163-1166`), because a turn-cap kill produces exactly that shape. This is deliberate: it is what allows a turn-capped stage to be resumed rather than restarted.
 
@@ -465,7 +465,7 @@ Comment processing (`comments.go`) always passes `resume = true`: reaching the c
 
 ### Output Logging
 
-Each invocation writes one NDJSON stream file to `.fabrik/logs/<owner>-<repo>/issue-<N>/` as `<stage>-<timestamp>-<nanos>.log`. This file is written live during execution (tee'd from Claude's stdout) and is the sole on-disk copy of the stream. Viewable via `cat <file> | fabrik stream-filter | less -R` or through the TUI's `l` key.
+Each invocation writes one NDJSON stream file to `<workspace>/logs/<owner>-<repo>/issue-<N>/` as `<stage>-<timestamp>-<nanos>.log`. This file is written live during execution (tee'd from Claude's stdout) and is the sole on-disk copy of the stream. Viewable via `cat <file> | fabrik stream-filter | less -R` or through the TUI's `l` key.
 
 ### Turn Progress Emission
 

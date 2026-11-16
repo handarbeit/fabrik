@@ -15,6 +15,7 @@ import (
 	"github.com/handarbeit/fabrik/engine"
 	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/pollctl"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -112,6 +113,7 @@ type Config struct {
 	SessionRetentionDays       int    // days; 14 = default; 0 disables age-based session pruning
 	ArchiveAfter               string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone                string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	WorkspaceRoot              string // workspace root flag value (also FABRIK_WORKSPACE_ROOT, workspace_root); resolved by internal/workspace
 	ClaudeConfigDir            string // Claude profile dir flag value (also FABRIK_CLAUDE_CONFIG_DIR, .env, claude_config_dir); resolved by internal/claudeprofile
 	GHESHost                   string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
@@ -257,7 +259,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxNoOpCommentCycles, "max-no-op-comment-cycles", 0, "Success-agnostic comment-processing circuit breaker: maximum consecutive comment-processing invocations for the same issue and stage that produce no observable progress (no commit, no issue-body update, no FABRIK_STAGE_COMPLETE) before pausing, regardless of whether each invocation itself exited successfully. Deliberately higher than --max-review-cycles's default (5), not equal to it, since both counters observe the same dispatch funnel but only this one never refunds (0 = use default of 10; also FABRIK_MAX_NO_OP_COMMENT_CYCLES; #1555)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
-	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
+	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to the workspace debug/ directory for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
 	flag.BoolVar(&cfg.WorktreeBoundaryAudit, "worktree-boundary-audit", false, "Enable Layer 2 cross-repo ref-mutation audit (default off pending #808 root-cause fix; also FABRIK_WORKTREE_BOUNDARY_AUDIT)")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; REPLACES the base Fabrik plugin — use --plugin-dirs to add plugins alongside it; also FABRIK_PLUGIN_DIR, no config.yaml key)")
@@ -281,7 +283,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile drift checks (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Always active — this is the sole correctness backstop in poll-only mode; when --webhooks is enabled it also drives webhook stream-health transitions.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
 	flag.IntVar(&cfg.LogRetentionDays, "log-retention-days", 14, "Delete log files older than this many days; 0 disables age-based pruning (also FABRIK_LOG_RETENTION_DAYS)")
-	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
+	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for the workspace logs/ directory in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
 	flag.IntVar(&cfg.SessionRetentionDays, "session-retention-days", 14, "Delete .session files older than this many days; 0 disables age-based pruning (also FABRIK_SESSION_RETENTION_DAYS)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
@@ -289,6 +291,7 @@ func Execute() error {
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
+	flag.StringVar(&cfg.WorkspaceRoot, "workspace-root", "", "Directory under which worktrees, bare clones, sessions, logs and debug output live, e.g. a separate volume excluded from snapshots (also FABRIK_WORKSPACE_ROOT, config.yaml workspace_root; a relative path is relative to this directory, ~ is expanded; default: <this directory>/.fabrik). config.yaml, .env, fabrik.lock and the local API socket stay here. Changing it while the old root holds worktrees is refused at startup")
 	flag.StringVar(&cfg.ClaudeConfigDir, "claude-config-dir", "", "Claude Code profile directory every stage worker runs under (also FABRIK_CLAUDE_CONFIG_DIR; ranks above .env, config.yaml and a bare CLAUDE_CONFIG_DIR; default: unset, meaning Claude Code's own default)")
 	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
 	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
@@ -403,6 +406,7 @@ func Execute() error {
 		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
 	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
+	cfg.WorkspaceRoot = workspace.Pick(cfg.WorkspaceRoot, os.Getenv(workspace.EnvVar), pc.WorkspaceRoot)
 	claudeprofile.Set(resolveClaudeProfile(claudeprofile.Inputs{
 		Flag:        cfg.ClaudeConfigDir,
 		ShellFabrik: shellFabrikConfigDir,
@@ -1154,6 +1158,7 @@ func Execute() error {
 	}
 
 	eng, err := engine.New(engine.Config{
+		WorkspaceRoot:              cfg.WorkspaceRoot,
 		Owner:                      cfg.Owner,
 		Repo:                       cfg.Repo,
 		ProjectNum:                 cfg.ProjectNum,
@@ -1982,7 +1987,11 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 	if cfg.Owner != "" && cfg.Repo != "" {
 		repo = cfg.Owner + "/" + cfg.Repo
 	}
+	// The daemon already refused an unusable root in engine.New; a failure here
+	// only leaves the layout zero, which the TUI treats as the in-bed default.
+	ws, _ := workspace.Resolve(cwd, cfg.WorkspaceRoot, "", "")
 	return tui.ProjectInfo{
+		Workspace:     ws,
 		CWD:           cwdDisplay,
 		Repo:          repo,
 		Version:       version,

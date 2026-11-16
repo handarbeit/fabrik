@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/handarbeit/fabrik/internal/workspace"
 )
 
 // WorktreeManager handles git worktrees for issue isolation.
@@ -101,7 +103,7 @@ func (wm *WorktreeManager) logf(issueNumber int, tag, format string, args ...any
 }
 
 func NewWorktreeManager(repoDir string) *WorktreeManager {
-	return NewWorktreeManagerWithRoot(repoDir, filepath.Join(repoDir, ".fabrik", "worktrees"))
+	return NewWorktreeManagerWithRoot(repoDir, workspace.Default(repoDir).Dir(workspace.Worktrees))
 }
 
 func NewWorktreeManagerWithRoot(repoDir, worktreeRoot string) *WorktreeManager {
@@ -151,7 +153,9 @@ func nonInteractiveGitEnv() []string {
 }
 
 // ensureBareClone creates a bare clone of the target repo at
-// .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
+// <bed>/.fabrik/repos/<owner>-<repo>.git (the in-bed default layout) if it
+// doesn't already exist. Production uses ensureBareCloneAs with the workspace's
+// repos directory.
 // Returns the path to the bare clone directory on success.
 // This is used for all repos — Fabrik always bare-clones managed repos.
 //
@@ -164,7 +168,7 @@ func nonInteractiveGitEnv() []string {
 // host is the configured GHES hostname (see buildCloneURL); an empty host
 // defaults to "github.com".
 func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string) (string, error) {
-	return ensureBareCloneAs(baseDir, owner, repo, user, nil, useSSH, host)
+	return ensureBareCloneAs(workspace.Default(baseDir).Dir(workspace.Repos), owner, repo, user, nil, useSSH, host)
 }
 
 // ensureBareCloneAs is ensureBareClone with an optional App commit identity
@@ -172,8 +176,8 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string
 // byte. A non-nil ident (GitHub App auth) writes the App's bot identity
 // instead, via setAppCommitterIdentity's marker protocol, with user consulted
 // only to recognize a previously Fabrik-written operator identity to replace.
-func ensureBareCloneAs(baseDir, owner, repo, user string, ident *commitIdentity, useSSH bool, host string) (string, error) {
-	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
+func ensureBareCloneAs(reposDir, owner, repo, user string, ident *commitIdentity, useSSH bool, host string) (string, error) {
+	bareDir := filepath.Join(reposDir, owner+"-"+repo+".git")
 	env := nonInteractiveGitEnv()
 
 	if _, err := os.Stat(bareDir); err == nil {
@@ -206,7 +210,7 @@ func ensureBareCloneAs(baseDir, owner, repo, user string, ident *commitIdentity,
 	}
 
 	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
-		return "", fmt.Errorf("creating .fabrik/repos dir: %w", err)
+		return "", fmt.Errorf("creating repos dir %s: %w", filepath.Dir(bareDir), err)
 	}
 
 	cloneURL := buildCloneURL(owner, repo, useSSH, host)

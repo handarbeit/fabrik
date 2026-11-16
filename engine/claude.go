@@ -26,6 +26,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/skillref"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/internal/workspace"
 	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -703,15 +704,10 @@ func effectiveRequestedModel(override, stageModel string) string {
 }
 
 // saveDebugLog writes Claude's output for a stage invocation to
-// .fabrik/debug/issue-{N}_{epoch}_{label}.log in the current working directory.
+// <workspace>/debug/issue-{N}_{epoch}_{label}.log.
 // Errors are non-fatal — a warning is printed to stderr.
-func saveDebugLog(issueNumber int, label string, output string) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		claudeLog(issueNumber, "warn", "saveDebugLog: getting cwd: %v\n", err)
-		return
-	}
-	debugDir := filepath.Join(cwd, ".fabrik", "debug")
+func saveDebugLog(ws workspace.Layout, issueNumber int, label string, output string) {
+	debugDir := ws.Dir(workspace.Debug)
 	if err := os.MkdirAll(debugDir, 0700); err != nil {
 		claudeLog(issueNumber, "warn", "saveDebugLog: creating debug dir: %v\n", err)
 		return
@@ -728,53 +724,32 @@ func saveDebugLog(issueNumber int, label string, output string) {
 	}
 }
 
-// SessionDir returns the directory where Claude sessions are cached for an issue.
-// The path is <cwd>/.fabrik/sessions/issue-N/ for single-repo projects.
-// Use sessionDirForItem for multi-repo-aware paths.
-func SessionDir(issueNumber int) string {
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
-}
-
-// sessionDirForItem returns the session directory for an issue, namespaced by
-// repo when item.Repo is set (multi-repo mode). The path is:
-//   - single-repo: <cwd>/.fabrik/sessions/issue-N/
-//   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
-func sessionDirForItem(issue gh.ProjectItem) string {
-	cwd, _ := os.Getwd()
-	return sessionDirForItemUnder(cwd, issue)
-}
-
-// sessionDirForItemUnder is sessionDirForItem rooted at base instead of the
-// working directory.
-func sessionDirForItemUnder(cwd string, issue gh.ProjectItem) string {
-	issuePart := fmt.Sprintf("issue-%d", issue.Number)
-	if issue.Repo == "" {
-		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)
-	}
-	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
-	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
-	return filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
-}
-
-// LogDir returns the directory where Claude session logs are stored for an issue.
-func LogDir(issueNumber int) string {
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
+// sessionDirForItem returns the session directory for an issue under the
+// workspace root, namespaced by repo when item.Repo is set (multi-repo mode).
+// The path is:
+//   - single-repo: <workspace>/sessions/issue-N/
+//   - multi-repo:  <workspace>/sessions/<owner>-<repo>/issue-N/
+func sessionDirForItem(ws workspace.Layout, issue gh.ProjectItem) string {
+	return namespacedIssueDir(ws.Dir(workspace.Sessions), issue.Repo, issue.Number)
 }
 
 // logDirForItem returns the log directory for an issue, namespaced by repo when
-// item.Repo is set (multi-repo mode). The path is:
-//   - single-repo: <cwd>/.fabrik/logs/issue-N/
-//   - multi-repo:  <cwd>/.fabrik/logs/<owner>-<repo>/issue-N/
-func logDirForItem(issue gh.ProjectItem) string {
-	cwd, _ := os.Getwd()
-	issuePart := fmt.Sprintf("issue-%d", issue.Number)
-	if issue.Repo == "" {
-		return filepath.Join(cwd, ".fabrik", "logs", issuePart)
+// item.Repo is set (multi-repo mode):
+//   - single-repo: <workspace>/logs/issue-N/
+//   - multi-repo:  <workspace>/logs/<owner>-<repo>/issue-N/
+func logDirForItem(ws workspace.Layout, issue gh.ProjectItem) string {
+	return namespacedIssueDir(ws.Dir(workspace.Logs), issue.Repo, issue.Number)
+}
+
+// namespacedIssueDir joins root with <owner>-<repo>/issue-N, or just issue-N
+// when repo is empty.
+func namespacedIssueDir(root, repo string, issueNumber int) string {
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if repo == "" {
+		return filepath.Join(root, issuePart)
 	}
-	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
-	return filepath.Join(cwd, ".fabrik", "logs", repoPart, issuePart)
+	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
+	return filepath.Join(root, strings.ReplaceAll(repo, "/", "-"), issuePart)
 }
 
 // sanitizeStageName sanitizes a stage name for use as a session-file basename,
@@ -789,27 +764,14 @@ func sanitizeStageName(stageName string) string {
 	return base
 }
 
-// sessionFile returns the path to the session ID file for a given issue+stage.
-func sessionFile(issueNumber int, stageName string) string {
-	return filepath.Join(SessionDir(issueNumber), sanitizeStageName(stageName)+".session")
-}
-
-// ReadSessionID reads the session ID for a given repo, issue, and stage name.
+// ReadSessionID reads the session ID for a given repo, issue, and stage name
+// under the workspace root.
 // repo should be "owner/repo" for multi-repo projects, or "" for single-repo.
 // Returns the session ID string, or empty string if the file does not exist,
 // is unreadable, or is empty.
-func ReadSessionID(repo string, issueNumber int, stageName string) string {
-	base := sanitizeStageName(stageName)
-	cwd, _ := os.Getwd()
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-	var sessDir string
-	if repo == "" {
-		sessDir = filepath.Join(cwd, ".fabrik", "sessions", issuePart)
-	} else {
-		repoPart := strings.ReplaceAll(repo, "/", "-")
-		sessDir = filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
-	}
-	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
+func ReadSessionID(ws workspace.Layout, repo string, issueNumber int, stageName string) string {
+	sessDir := namespacedIssueDir(ws.Dir(workspace.Sessions), repo, issueNumber)
+	data, err := os.ReadFile(filepath.Join(sessDir, sanitizeStageName(stageName)+".session"))
 	id, _ := classifySessionFile(data, err)
 	return id
 }
@@ -903,7 +865,7 @@ func resolveResumeSessionID(issueNumber int, stageName, sessFilePath string, res
 // opts.EffortOverride, if non-empty, replaces the stage's configured effort level.
 // It returns Claude's output, whether Claude indicated completion, and token usage.
 func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-	sessDir := sessionDirForItem(issue)
+	sessDir := sessionDirForItem(opts.layout(), issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -912,7 +874,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	}
 
 	sessFilePath := filepath.Join(sessDir, sanitizeStageName(stage.Name)+".session")
-	ld := logDirForItem(issue)
+	ld := logDirForItem(opts.layout(), issue)
 
 	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch, opts.CorrectiveHint)
 	effectiveBudget := stage.MaxTurns
@@ -948,7 +910,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 // opts.ModelOverride, if non-empty, replaces the stage's configured model.
 // opts.EffortOverride, if non-empty, replaces the stage's configured effort level.
 func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-	sessDir := sessionDirForItem(issue)
+	sessDir := sessionDirForItem(opts.layout(), issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -957,7 +919,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	}
 
 	sessFilePath := filepath.Join(sessDir, sanitizeStageName(stage.Name)+".session")
-	ld := logDirForItem(issue)
+	ld := logDirForItem(opts.layout(), issue)
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
 	base := commentMaxTurns(stage)
@@ -2961,18 +2923,19 @@ func renameWithFallback(src, dst string) error {
 
 // migrateHomeToProject moves session and log files from the legacy home-dir
 // location (~/.fabrik/sessions/ and ~/.fabrik/logs/) to the CWD-relative
-// location (<fabrikDir>/.fabrik/sessions/ and <fabrikDir>/.fabrik/logs/).
+// workspace (<workspace>/sessions/ and <workspace>/logs/).
 // It is idempotent: files that already exist at the destination are skipped.
 // It is a no-op when src == dst (e.g. when HOME == fabrikDir in tests).
 // logfn is optional; pass nil to suppress output.
-func migrateHomeToProject(fabrikDir string, logfn func(string)) {
+func migrateHomeToProject(ws workspace.Layout, logfn func(string)) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
-	for _, subdir := range []string{"sessions", "logs"} {
-		src := filepath.Join(home, ".fabrik", subdir)
-		dst := filepath.Join(fabrikDir, ".fabrik", subdir)
+	legacy := workspace.Default(home)
+	for _, subdir := range []string{workspace.Sessions, workspace.Logs} {
+		src := legacy.Dir(subdir)
+		dst := ws.Dir(subdir)
 
 		// Same-path guard: no-op when home dir == project dir.
 		if filepath.Clean(src) == filepath.Clean(dst) {
