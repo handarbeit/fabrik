@@ -50,8 +50,8 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.92: Hookdeck is removed in favour of relay-free webhooks (<code>event_source: tailscale</code> or <code>direct</code>, both on GitHub App auth); see
-      <a href="{{ '/USER_GUIDE' | relative_url }}#migrating-from-hookdeck">Migrating from Hookdeck</a>. Pruefer can now receive webhooks the same way, and lock and label state holds up better: orphaned locks are reclaimed, lost label writes are confirmed and re-applied, and a merge-train trial's CI verdict is acted on within one poll. (v0.0.91 added
+      New in v0.0.93: <a href="{{ '/USER_GUIDE' | relative_url }}#the-fabrikreview-commit-status">a <code>fabrik/review</code> commit status</a> your CI can wait on (opt in with <code>review_status</code>), a 30-minute safety-net re-check instead of every ten polls while webhook delivery is healthy, a <a href="{{ '/USER_GUIDE' | relative_url }}#workspace-root-workspace_root">configurable workspace root</a> for worktrees and clones on another disk, and a steadier review gate and merge train. (v0.0.92 removed Hookdeck in favour of relay-free webhooks (<code>event_source: tailscale</code> or <code>direct</code>, both on GitHub App auth); see
+      <a href="{{ '/USER_GUIDE' | relative_url }}#migrating-from-hookdeck">Migrating from Hookdeck</a>. It also let Pruefer receive webhooks the same way and made lock and label state hold up better. v0.0.91 added
       <a href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate">review gates that read the reviewer, not the clock</a>.)
     </p>
 
