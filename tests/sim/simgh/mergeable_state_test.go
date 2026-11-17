@@ -632,3 +632,17 @@ func TestMergeableUnknownUntilWindow(t *testing.T) {
 		t.Fatalf("after the window = (%v, %q), want (true, clean)", mergeable, state)
 	}
 }
+
+// #2593: the draft-state override reports the configured state for a conflict-free draft PR
+// and leaves the default (and "dirty" precedence) alone.
+func TestMergeableStateDraftOverride(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedPRForState(t, s, true)
+	assertState(t, s, stateDraft) // default unchanged
+
+	s.SetDraftMergeableState("acme/widgets", stateClean)
+	assertState(t, s, stateClean)
+
+	s.SetDraftMergeableState("acme/widgets", "")
+	assertState(t, s, stateDraft)
+}

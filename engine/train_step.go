@@ -1087,7 +1087,7 @@ func (e *Engine) awaitTrialVerdict(ctx context.Context, r *trainRun) trialVerdic
 		res = e.staleSeamVerdict(res)
 		return trialVerdict{result: res, diag: diag}
 	}
-	res, diag := e.pollTrainCIFor(ctx, r.p.owner, r.p.repo, t.PRNum, t.HeadSHA, r.baseProbe(t))
+	res, diag := e.pollTrainCIFor(ctx, r.p.owner, r.p.repo, t.PRNum, t.HeadSHA, r.baseProbe(t), r.memberList(t.Members))
 	return trialVerdict{result: res, diag: diag}
 }
 

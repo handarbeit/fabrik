@@ -260,8 +260,27 @@ func (e *Engine) settlePRMergeStateInner(item gh.ProjectItem, stage *stages.Stag
 					if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
 						return r
 					}
-				} else if st, _, _ := gh.ClassifyCheckRuns(runs); st == gh.CheckRunsNonPassing {
-					nonPassingShortcut = true
+					// #2593 R3: zero check runs on a head whose item has had check runs
+					// is CI that has not reported yet, not "no CI" — the same reading
+					// the classified path below already gives (post-push registration
+					// delay). "clean" only says no REQUIRED check is outstanding.
+					if !e.stageGateHadChecksOff.Load() {
+						if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
+							if lpr := snap.LinkedPR(); lpr != nil && lpr.HasHadChecks {
+								e.logf(item.Number, "settle", "PR #%d mergeable_state=%q but no check runs for SHA %s although this PR has had checks — CI not started yet, waiting\n",
+									pr.Number, mergeableState, pr.HeadSHA[:min(8, len(pr.HeadSHA))])
+								// MergeableState omitted, as in the classified path's hadChecks return.
+								return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push registration delay (hadChecks)", PR: pr}
+							}
+						}
+					}
+				} else {
+					// The shortcut never recorded that this PR has had check runs; without
+					// this an item that only ever took it would carry no evidence (#2593).
+					e.store.Apply(itemstate.PRChecksObserved{Repo: itemRepo, Number: item.Number})
+					if st, _, _ := gh.ClassifyCheckRuns(runs); st == gh.CheckRunsNonPassing {
+						nonPassingShortcut = true
+					}
 				}
 			}
 		}

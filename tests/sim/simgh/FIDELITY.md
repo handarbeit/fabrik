@@ -285,6 +285,14 @@ reach the engine's stale-trial branch). If a scenario depends on a specific
 combination, verify the real behaviour against a recorded GitHub response
 rather than trusting the sim's ordering.
 
+**Escape hatch (#2593):** `SetDraftMergeableState(ownerRepo, state)` makes a conflict-free
+draft PR report `state` (normally `clean`) instead of `draft`. The merge-train's trial PRs
+are drafts, and real GitHub reported `clean` for the draft trial PR in the 0.0.93 incident
+(a repository with no required checks), which the default precedence cannot reach: a
+zero-check trial never got to the engine's zero-check green path in the sim, so a test
+that only asserted "does not land" would have passed without the fix. The default is
+unchanged and `dirty` still wins.
+
 **Risk:** medium, and concentrated in *which* state an untested combination
 resolves to rather than in the ordering itself. Each single-condition case has
 its own test, and `mergeable_precedence_test.go` additionally pins every

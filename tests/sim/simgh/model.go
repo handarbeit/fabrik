@@ -131,6 +131,12 @@ type repoState struct {
 	// otherwise.
 	requireUpToDate map[string]bool
 
+	// draftMergeableState, when set, is the mergeable_state a conflict-free draft PR
+	// reports in place of "draft" (#2593). Real GitHub reports clean/unstable for a
+	// draft PR with no required checks — the merge-train's trial PRs are drafts — which
+	// the default precedence cannot reach. Empty = the default ("draft").
+	draftMergeableState string
+
 	// requiredApprovals maps a branch name to the approving-review count
 	// branch protection requires, backing FetchPRReviewDecision.
 	requiredApprovals map[string]int

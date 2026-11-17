@@ -696,6 +696,23 @@ func (s *Sim) SeedRequireUpToDate(ownerRepo, branch string, required bool) *Sim 
 	return s
 }
 
+// SetDraftMergeableState makes a conflict-free draft PR in ownerRepo report state (e.g.
+// "clean") instead of "draft" (#2593). The default precedence makes a draft trial PR read
+// "draft", which is never accepted, so a zero-check trial could not reach the engine's
+// zero-check green path in the sim; real GitHub reported "clean" for the draft trial PR in
+// the incident. "dirty" still wins (a conflict is checked first). state == "" restores the
+// default. See FIDELITY.md, "mergeable_state".
+func (s *Sim) SetDraftMergeableState(ownerRepo, state string) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.draftMergeableState = state
+	return s
+}
+
 // SeedRequiredApprovals declares how many approving reviews branch protection
 // requires on a branch, backing FetchPRReviewDecision.
 //

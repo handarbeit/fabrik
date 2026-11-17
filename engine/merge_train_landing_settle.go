@@ -151,7 +151,12 @@ func countPending(runs []gh.CheckRun) int {
 // expectedHead is the head the trial was validated at; "" adopts the head of the first
 // successful read. mergeable_state gates the merge but never makes a verdict green — green
 // still comes only from classifyLandingCI (ADR-1153/1441).
-func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum int, expectedHead string) landingResult {
+//
+// members are the batch members being landed (#2593): when the landing head has zero check
+// runs and classifyLandingCI would call it green, a member PR head carrying check runs
+// (memberCIEvidence) says the repository runs CI that has not started yet, so the head is
+// waited out under the same deadline instead of merged. nil members = no evidence.
+func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum int, expectedHead string, members []trainMember) landingResult {
 	repoKey := owner + "/" + repo
 	deadline := time.Now().Add(e.ciBackstopTimeout())
 	blockedBound := e.landingBlockedBoundOrDefault()
@@ -159,6 +164,7 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 	var blockedSince time.Time
 	head := expectedHead
 	lastState := ""
+	lastZeroHold := "" // #2593: the member-evidence reason of the last zero-check hold
 
 	for {
 		select {
@@ -201,6 +207,18 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 				break
 			}
 			verdict, detail := e.classifyLandingCI(owner, repo, pr.MergeableState, pr.HeadSHA, checkRuns)
+			zeroHeld := false
+			// The expiry reason must describe the LAST evaluation: real check runs that
+			// appeared after an earlier zero-check hold mean CI did start.
+			lastZeroHold = ""
+			if verdict == TrainCIGreen && len(checkRuns) == 0 {
+				// #2593: zero check runs on the landing head is "no CI" only if no member
+				// shows the repository runs check-run CI; otherwise it is CI not started yet.
+				if hold, why := e.memberCIEvidence(owner, repo, members); hold {
+					verdict, zeroHeld, lastZeroHold = TrainCIPending, true, why
+					detail = fmt.Sprintf("zero check runs but %s — CI not started yet", why)
+				}
+			}
 			switch verdict {
 			case TrainCIRed:
 				e.logfRepo(repoKey, "merge-train", "integration PR #%d not mergeable — %s\n", prNum, detail)
@@ -252,6 +270,10 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 				e.logfRepo(repoKey, "merge-train", "integration PR #%d blocked after mark-ready, all green (mergeable_state=%q), waiting up to %s\n", prNum, pr.MergeableState, blockedBound)
 			default: // TrainCIPending — wait under CIBackstopTimeout
 				blockedSince = time.Time{}
+				if zeroHeld {
+					e.logfRepo(repoKey, "merge-train", "%s", zeroCheckHoldLine("integration PR", fmt.Sprintf("#%d (head %s)", prNum, shortSHA(pr.HeadSHA)), lastZeroHold))
+					break
+				}
 				e.logfRepo(repoKey, "merge-train", "integration PR #%d blocked after mark-ready, %d check(s) pending (mergeable_state=%q), waiting up to %s — %s\n", prNum, countPending(checkRuns), pr.MergeableState, e.ciBackstopTimeout(), detail)
 			}
 		}
@@ -274,6 +296,10 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 	}
 
 	e.logfRepo(repoKey, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
+	if lastZeroHold != "" {
+		return landingResult{outcome: outcomeBackstopExpired, state: lastState,
+			reason: fmt.Sprintf("CI had not started on the PR after %s (zero check runs, but %s)", e.ciBackstopTimeout(), lastZeroHold)}
+	}
 	return landingResult{outcome: outcomeBackstopExpired, state: lastState,
 		reason: fmt.Sprintf("checks were still pending after %s", e.ciBackstopTimeout())}
 }
