@@ -86,6 +86,8 @@ func TestMain(m *testing.M) {
 			time.Sleep(time.Hour)
 		}
 	}
+	// Only the main test process: the helper branches above return or loop first.
+	installStraySighupSink()
 	lockVerifyDelay = 0
 	// Don't spawn a real macOS `lsof` on every CleanupWorktree (#1805); the
 	// reaper's own tests re-enable the real path via useRealLsofReaper.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -21,7 +22,21 @@ import (
 
 // setsidHelper moves the calling process into a brand-new session. Used by
 // TestMain's FABRIK_TEST_SETSID_HELPER mode.
-func setsidHelper() { _, _ = unix.Setsid() }
+func setsidHelper() {
+	_, _ = unix.Setsid()
+	// Report readiness only once the helper is in its own session. Until then
+	// the ordinary SID reap still reaches it, so a test that reads the PID
+	// earlier races the helper's startup (a -race test binary can take well
+	// over a second to start on a loaded CI runner). Reparenting needs no wait:
+	// the launching subshell runs in the foreground, so it has exited before
+	// the script reads this file.
+	if ready := os.Getenv("FABRIK_TEST_SETSID_READY"); ready != "" {
+		tmp := ready + ".tmp"
+		if err := os.WriteFile(tmp, []byte(strconv.Itoa(os.Getpid())), 0o644); err == nil {
+			_ = os.Rename(tmp, ready)
+		}
+	}
+}
 
 // markedHelper starts a Go test-binary helper (readable environment on macOS,
 // unlike SIP-protected /bin/sleep) in a session of its own, carrying
@@ -339,8 +354,12 @@ func runMarkedEscapeInvocation(t *testing.T) (helperPID int, ownerSeen string, f
 		// the worker, which is what a backgrounded command looks like once its
 		// shell is gone. Left as a plain child, the end-of-invocation sample would
 		// find its new session through the chain and reap it without the marker.
-		"( FABRIK_TEST_SETSID_HELPER=1 '" + os.Args[0] + "' >/dev/null 2>&1 & echo $! > '" + pidFile + "' )\n" +
-		"sleep 1\n" +
+		//
+		// The helper writes pidFile itself once it has left the worker's session
+		// and been reparented (setsidHelper); the script waits for that rather
+		// than a fixed sleep, which a slow helper start outran (#2596 CI).
+		"( FABRIK_TEST_SETSID_HELPER=1 FABRIK_TEST_SETSID_READY='" + pidFile + "' '" + os.Args[0] + "' >/dev/null 2>&1 & )\n" +
+		"i=0; while [ ! -s '" + pidFile + "' ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done\n" +
 		"printf '%s\\n' '" + fakeClaudeCompleteJSON + "'\n"
 	invokeFakeClaudeNoTick(t, script)
 
