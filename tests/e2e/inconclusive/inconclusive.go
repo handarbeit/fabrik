@@ -36,3 +36,30 @@ func IsMarked(skipMsg string) bool {
 func Reason(skipMsg string) string {
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(skipMsg), Marker))
 }
+
+// transientWriteMarkers are the gh/GitHub error texts that mean a harness seed
+// write failed on GitHub's side, not because the test asked for something
+// wrong. They were seen in release gates: a GraphQL "Something went wrong"
+// after `gh pr create` had already created the PR (0.0.93, beta#767), and the
+// usual 5xx / connection-level failures.
+var transientWriteMarkers = []string{
+	"something went wrong",
+	"http 500", "http 502", "http 503", "http 504",
+	"502 bad gateway", "503 service unavailable", "504 gateway time",
+	"internal server error",
+	"connection reset", "connection refused", "i/o timeout", "tls handshake timeout",
+	"unexpected eof", "timeout awaiting response headers", "context deadline exceeded",
+}
+
+// IsTransientGitHubWrite reports whether a failed seed write's gh output names
+// a GitHub-side or transport failure. Anything else (a missing label, a 422
+// validation error, a 404) is a test bug and must stay a failure.
+func IsTransientGitHubWrite(output string) bool {
+	o := strings.ToLower(output)
+	for _, m := range transientWriteMarkers {
+		if strings.Contains(o, m) {
+			return true
+		}
+	}
+	return false
+}

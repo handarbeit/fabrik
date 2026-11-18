@@ -462,12 +462,43 @@ func IssueLabels(t *testing.T, env *Env, repo string, issueNumber int) []string 
 	return labels
 }
 
-// AddLabel adds a label to the issue. Fails the test if gh refuses (e.g. label not seeded).
+// AddLabel adds a label to the issue. Fails the test if gh refuses (e.g. label
+// not seeded). Adding a label is idempotent, so a GitHub-side failure is retried;
+// one that persists ends the test inconclusive (seedWriteFailed), not failed — a
+// lost harness write says nothing about the engine (0.0.93 gate, gamma#2175).
 func AddLabel(t *testing.T, env *Env, repo string, issueNumber int, label string) {
 	t.Helper()
-	if _, err := ghOutput(env, "issue", "edit", fmt.Sprint(issueNumber), "-R", repo, "--add-label", label); err != nil {
-		t.Fatalf("add label %q on %s#%d: %v", label, repo, issueNumber, err)
+	const attempts = 3
+	var out string
+	var err error
+	for i := 1; i <= attempts; i++ {
+		out, err = ghOutput(env, "issue", "edit", fmt.Sprint(issueNumber), "-R", repo, "--add-label", label)
+		if err == nil {
+			return
+		}
+		if !inconclusive.IsTransientGitHubWrite(out) || i == attempts {
+			break
+		}
+		t.Logf("add label %q on %s#%d: transient GitHub error (attempt %d/%d), retrying: %v\n%s",
+			label, repo, issueNumber, i, attempts, err, strings.TrimSpace(out))
+		pollSleep(pollBase())
 	}
+	seedWriteFailed(t, fmt.Sprintf("add label %q on %s#%d", label, repo, issueNumber), err, out)
+}
+
+// seedWriteFailed ends a test whose harness write to GitHub failed. A failure
+// whose gh output names a GitHub-side or transport error
+// (inconclusive.IsTransientGitHubWrite) is INCONCLUSIVE, so the gate re-runs the
+// test in the same cell; anything else is a test bug and FAILS. gh's own output
+// is always included.
+func seedWriteFailed(t *testing.T, what string, err error, out string) {
+	t.Helper()
+	out = strings.TrimSpace(out)
+	if inconclusive.IsTransientGitHubWrite(out) {
+		Inconclusive(t, "%s: GitHub-side failure on a harness write: %v\n%s", what, err, out)
+		return
+	}
+	t.Fatalf("%s: %v\n%s", what, err, out)
 }
 
 // RemoveLabel removes a label from the issue.

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 	"github.com/handarbeit/fabrik/tests/e2e/trainlog"
 )
@@ -187,7 +188,17 @@ func createMemberPRBody(t *testing.T, env *Env, repo, baseBranch, branch, path, 
 	}
 	out, err := ghOutput(env, args...)
 	if err != nil {
-		t.Fatalf("create member PR for #%d on %s: %v\n%s", issueNum, repo, err, out)
+		// gh pr create can fail after GitHub created the PR (0.0.93 gate, beta#767:
+		// the follow-up label update returned a GraphQL "Something went wrong"). A
+		// blind retry would open a duplicate, so adopt the PR the branch already has.
+		if inconclusive.IsTransientGitHubWrite(out) {
+			if pr := adoptMemberPR(t, env, repo, branch); pr != 0 {
+				t.Logf("create member PR for #%d on %s: gh failed after creating PR #%d; adopted it: %v\n%s",
+					issueNum, repo, pr, err, strings.TrimSpace(out))
+				return pr
+			}
+		}
+		seedWriteFailed(t, fmt.Sprintf("create member PR for #%d on %s", issueNum, repo), err, out)
 	}
 	prNum := parseIssueNumberFromURL(lastNonEmpty(out))
 	if prNum == 0 {
@@ -1241,4 +1252,32 @@ func queueInObservedOrder(t *testing.T, env *Env, repo string, members []queuedM
 		// leave it time to land so the next member is stamped strictly later.
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// adoptMemberPR returns the open PR whose head is branch, after making sure it
+// carries prueferIgnoreLabel (the part of `gh pr create` that failed in the
+// 0.0.93 gate). It returns 0 when no such PR exists or it cannot be read.
+func adoptMemberPR(t *testing.T, env *Env, repo, branch string) int {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return 0
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls?head=%s:%s&state=open&per_page=1", owner, name, owner, branch),
+		"--jq", ".[0].number")
+	if err != nil {
+		t.Logf("adopt member PR on %s: list PRs for %s: %v\n%s", repo, branch, err, strings.TrimSpace(out))
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || n == 0 {
+		return 0
+	}
+	if out, err := ghOutput(env, "api", "--method", "POST",
+		fmt.Sprintf("repos/%s/issues/%d/labels", repo, n),
+		"-f", "labels[]="+prueferIgnoreLabel); err != nil {
+		seedWriteFailed(t, fmt.Sprintf("label adopted member PR #%d on %s", n, repo), err, out)
+	}
+	return n
 }

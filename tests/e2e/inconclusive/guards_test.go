@@ -31,6 +31,7 @@ var inconclusiveHelpers = map[string]bool{
 	"finishAwait": true, "AwaitBoardItemVisible": true, "AwaitStatusVisible": true,
 	"AwaitClosingLinkage": true, "AwaitPRMergeableComputed": true, "AwaitPRMergeableSettled": true,
 	"AwaitLabelVisible": true, "AwaitLabelGone": true, "AwaitPRForBranchVisible": true,
+	"seedWriteFailed": true,
 }
 
 var namedGuards = []struct{ file, test string }{
