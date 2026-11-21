@@ -231,7 +231,14 @@ func workerRow(res Result, in Input) (Result, bool) {
 	}
 	if in.HasWorker && workerOverdue(res, in) {
 		res.State, res.Code, res.Rank = Stalled, CodeWorkerNoProgress, RankStalled
-		res.Summary = fmt.Sprintf("%s is in flight%s but nothing observable changed for %s", what, triggerSuffix(in), res.ProgressAge.Round(time.Second))
+		if turnsLive(in) {
+			res.Summary = fmt.Sprintf("%s is in flight%s but no turn for %s", what, triggerSuffix(in), in.Now.Sub(in.WorkerLastTurnAt).Round(time.Second))
+			if in.WorkerInactivityTimeout > 0 {
+				res.Summary += fmt.Sprintf(" (inactivity timeout %s did not end it)", in.WorkerInactivityTimeout.Round(time.Second))
+			}
+		} else {
+			res.Summary = fmt.Sprintf("%s is in flight%s but nothing observable changed for %s", what, triggerSuffix(in), res.ProgressAge.Round(time.Second))
+		}
 		res.Next.Action = "the worker's own inactivity/wall-time limits will end it; the engine then reads its result"
 		return res, true
 	}
@@ -241,7 +248,11 @@ func workerRow(res Result, in Input) (Result, bool) {
 		summary = "a worker is running"
 	}
 	summary += triggerSuffix(in) + turnsText(in)
-	if in.HasWorker && in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
+	if turnsLive(in) {
+		if run := in.Now.Sub(in.WorkerStartedAt); in.Cfg.StallThreshold > 0 && !in.WorkerStartedAt.IsZero() && run > in.Cfg.StallThreshold {
+			summary += fmt.Sprintf(" (long-running: %s, last turn %s ago)", run.Round(time.Second), in.Now.Sub(in.WorkerLastTurnAt).Round(time.Second))
+		}
+	} else if in.HasWorker && in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
 		summary += fmt.Sprintf(" (long-running: %s, within its stage's wall-clock budget)", res.ProgressAge.Round(time.Second))
 	}
 	res.Summary = summary

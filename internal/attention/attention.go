@@ -192,6 +192,15 @@ type Input struct {
 	WorkerTurnsKnown bool
 	WorkerTurnsUsed  int
 	WorkerMaxTurns   int
+	// WorkerLastTurnAt is when the live worker's turn count last rose (#2604);
+	// zero = unknown (no turn yet, turns not recorded, or the worker is queued). A
+	// turn is real model output, so it counts as progress; the worker heartbeat
+	// (LastSignAt) still does not.
+	WorkerLastTurnAt time.Time
+	// WorkerInactivityTimeout is the Claude inactivity timeout (no output for this
+	// long ends the worker); zero = unknown. Used only to word a stalled worker
+	// whose turns are known.
+	WorkerInactivityTimeout time.Duration
 	// Conflict is set while a merge-train conflict resolution for this member is
 	// queued for, or holding, a worker slot. It is treated like a worker (#2121).
 	Conflict *ConflictFact
@@ -1142,7 +1151,7 @@ func activeCooldown(in Input) (reason string, until time.Time, ok bool) {
 
 // progressAnchor is the latest observable-progress time. It deliberately
 // excludes the worker heartbeat (a ticker that stays fresh while Claude is
-// hung) and UpdatedAt (bumped by Fabrik's own writes). Zero means unknown.
+// hung; the latest turn is included, being real model output) and UpdatedAt (bumped by Fabrik's own writes). Zero means unknown.
 func progressAnchor(in Input) time.Time {
 	latest := in.StatusEnteredAt
 	consider := func(t time.Time) {
@@ -1153,6 +1162,7 @@ func progressAnchor(in Input) time.Time {
 	consider(in.LastAttemptAt)
 	consider(in.LastCIProgressAt)
 	consider(in.WorkerStartedAt)
+	consider(in.WorkerLastTurnAt)
 	consider(in.EligibilityChangedAt)
 	for _, t := range in.LabelAppliedAt {
 		consider(t)
@@ -1175,10 +1185,22 @@ func workerOverdue(res Result, in Input) bool {
 	if !stallExceeded(res, in) {
 		return false
 	}
-	if in.WorkerBudget > 0 && res.ProgressAge <= in.WorkerBudget+WorkerStallMargin {
+	limit := in.WorkerBudget
+	if turnsLive(in) && in.WorkerInactivityTimeout > 0 {
+		// With turns known the question is a gap between turns, which the
+		// inactivity timeout (not a total-run wall-time cap) should have ended.
+		limit = in.WorkerInactivityTimeout
+	}
+	if limit > 0 && res.ProgressAge <= limit+WorkerStallMargin {
 		return false
 	}
 	return true
+}
+
+// turnsLive reports whether the in-flight worker has a known latest-turn time
+// (#2604); only then are the turn-based verdict and wording used.
+func turnsLive(in Input) bool {
+	return in.HasWorker && !in.WorkerLastTurnAt.IsZero()
 }
 
 func overdueBy(ds []Deadline, in Input) (bool, Deadline) {

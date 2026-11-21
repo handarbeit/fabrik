@@ -457,3 +457,84 @@ func TestPollStallDoesNotBlameThePollForAQueuedWorker(t *testing.T) {
 		t.Errorf("control wait not attributed to the poll: %q", got.Summary)
 	}
 }
+
+// #2604: a live turn is progress; the stalled verdict means no turn for longer
+// than the stall threshold.
+func turnInput(running, sinceTurn time.Duration) Input {
+	in := baseInput()
+	in.HasWorker = true
+	in.WorkerStartedAt = t0.Add(-running)
+	in.StatusEnteredAt = t0.Add(-3 * time.Hour)
+	in.WorkerBudget = 15 * time.Minute
+	in.WorkerInactivityTimeout = 15 * time.Minute
+	in.WorkerTurnsKnown = true
+	in.WorkerTurnsUsed = 86
+	in.WorkerMaxTurns = 100
+	in.WorkerLastTurnAt = t0.Add(-sinceTurn)
+	return in
+}
+
+func TestWorkerWithRecentTurnStaysWorkingPastThreshold(t *testing.T) {
+	got := Classify(turnInput(47*time.Minute, 20*time.Second))
+	if got.State != Working || got.Rank != NotRanked {
+		t.Fatalf("got %s/%s rank=%d, want working", got.State, got.Code, got.Rank)
+	}
+	if !strings.Contains(got.Summary, "(long-running: 47m0s, last turn 20s ago)") {
+		t.Errorf("summary = %q, want the long-running note with run time and last-turn age", got.Summary)
+	}
+	// A max_wall_time budget longer than the run changes nothing.
+	in := turnInput(47*time.Minute, 20*time.Second)
+	in.WorkerBudget = 45 * time.Minute
+	if got := Classify(in); got.State != Working {
+		t.Errorf("got %s, want working", got.State)
+	}
+	// An overrun of the wall-time cap while still taking turns is the kill's job.
+	in = turnInput(2*time.Hour, 20*time.Second)
+	in.WorkerBudget = 45 * time.Minute
+	if got := Classify(in); got.State != Working {
+		t.Errorf("overrun with live turns: got %s, want working", got.State)
+	}
+}
+
+func TestWorkerWithStaleTurnIsStalledWithTurnWording(t *testing.T) {
+	got := Classify(turnInput(2*time.Hour, 31*time.Minute))
+	if got.State != Stalled || got.Code != CodeWorkerNoProgress || got.Rank != RankStalled {
+		t.Fatalf("got %s/%s rank=%d, want stalled/worker-no-progress", got.State, got.Code, got.Rank)
+	}
+	if !strings.Contains(got.Summary, "no turn for 31m0s (inactivity timeout 15m0s did not end it)") {
+		t.Errorf("summary = %q", got.Summary)
+	}
+	// Without a known inactivity timeout the parenthetical is dropped.
+	in := turnInput(2*time.Hour, 31*time.Minute)
+	in.WorkerInactivityTimeout = 0
+	got = Classify(in)
+	if got.State != Stalled || !strings.HasSuffix(got.Summary, "but no turn for 31m0s") {
+		t.Errorf("got %s %q", got.State, got.Summary)
+	}
+	// A turn gap between the inactivity timeout and the stall threshold is working.
+	if got := Classify(turnInput(2*time.Hour, 20*time.Minute)); got.State != Working {
+		t.Errorf("20m since a turn: got %s, want working", got.State)
+	}
+}
+
+func TestWorkerWithUnknownTurnsKeepsTodaysVerdictAndWording(t *testing.T) {
+	in := baseInput()
+	in.HasWorker = true
+	in.WorkerStartedAt = t0.Add(-45 * time.Minute)
+	in.StatusEnteredAt = t0.Add(-2 * time.Hour)
+	in.WorkerBudget = 15 * time.Minute
+	in.WorkerInactivityTimeout = 15 * time.Minute // set, but turns are unknown
+	got := Classify(in)
+	if got.State != Stalled || got.Summary != "a worker is in flight but nothing observable changed for 45m0s" {
+		t.Errorf("got %s %q", got.State, got.Summary)
+	}
+}
+
+func TestQueuedWorkerIgnoresTurnTime(t *testing.T) {
+	in := turnInput(47*time.Minute, 20*time.Second)
+	in.WorkerQueued = true
+	in.WorkerQueuedSince = t0.Add(-time.Minute)
+	if got := Classify(in); got.Code != CodeQueuedForSlot {
+		t.Errorf("got %s/%s, want queued-for-slot", got.State, got.Code)
+	}
+}
