@@ -32,6 +32,9 @@ type channelTestSettings struct {
 	settleCauseOff     atomic.Bool
 	situationDedupOff  atomic.Bool
 	reviewReinvokeOff  atomic.Bool
+	// turnProgressOff drops the live worker's last-turn time from the attention
+	// input (#2604), so a long healthy run reads stalled again.
+	turnProgressOff atomic.Bool
 
 	// #2450: finalFlushOff skips the publish-on-stop of the queued events,
 	// liveLabelDedupOff skips the pending-prior adjustment and same-call dedup of
@@ -115,6 +118,7 @@ func (e *Engine) CopyChannelTestSettingsFrom(old *Engine) {
 	s.settleCauseOff.Store(o.settleCauseOff.Load())
 	s.situationDedupOff.Store(o.situationDedupOff.Load())
 	s.reviewReinvokeOff.Store(o.reviewReinvokeOff.Load())
+	s.turnProgressOff.Store(o.turnProgressOff.Load())
 	s.finalFlushOff.Store(o.finalFlushOff.Load())
 	s.liveLabelDedupOff.Store(o.liveLabelDedupOff.Load())
 	s.drainSlackOff.Store(o.drainSlackOff.Load())
