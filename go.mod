@@ -1,6 +1,6 @@
 module github.com/handarbeit/fabrik
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
@@ -13,7 +13,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.5.64
 	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.104.6
+	tailscale.com v1.104.7
 )
 
 require (
