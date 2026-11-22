@@ -1151,7 +1151,8 @@ func activeCooldown(in Input) (reason string, until time.Time, ok bool) {
 
 // progressAnchor is the latest observable-progress time. It deliberately
 // excludes the worker heartbeat (a ticker that stays fresh while Claude is
-// hung; the latest turn is included, being real model output) and UpdatedAt (bumped by Fabrik's own writes). Zero means unknown.
+// hung) and UpdatedAt (bumped by Fabrik's own writes). The latest worker turn
+// is included, being real model output (#2604). Zero means unknown.
 func progressAnchor(in Input) time.Time {
 	latest := in.StatusEnteredAt
 	consider := func(t time.Time) {
