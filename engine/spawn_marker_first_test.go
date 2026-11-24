@@ -337,6 +337,57 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// A served, freshly created dependent of a closed, marked, unserved blocker
+// records its sibling edge to that blocker as CLOSED, not OPEN, so it is not held
+// by a closed issue until the next deep fetch.
+func TestSpawnChildren_ServedDependentOfClosedRemoteMarkedBlocker_EdgeIsClosed(t *testing.T) {
+	edge := []gh.Dependency{{Repo: "owner/child", Number: 101, State: "CLOSED"}}
+	eng, client := markerFirstEngine(t, true, edge)
+	client.createIssueFn = func(owner, repo, title, body string, assignees []string) (int, string, error) {
+		return 300, "I_served300", nil
+	}
+	client.addProjectV2ItemByIdFn = func(projectID, contentNodeID string) (string, error) {
+		return "PVTI_" + contentNodeID, nil
+	}
+
+	// Block 1 (marked, unserved, closed) is the blocker; block 2 (served,
+	// created) depends on it.
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Marked blocker
+Body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Served dependent
+DEPENDS_ON: 1
+Body two.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+
+	spawned, err := eng.preImplement(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item)
+	if err != nil || !spawned {
+		t.Fatalf("preImplement: spawned=%v err=%v", spawned, err)
+	}
+	snap, err := eng.store.Get("owner/repo", 300)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	var found bool
+	for _, d := range snap.State().BlockedBy {
+		if d.Repo == "owner/child" && d.Number == 101 {
+			found = true
+			if d.State != "CLOSED" {
+				t.Errorf("sibling edge to the closed marked blocker = %q, want CLOSED", d.State)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no sibling edge to owner/child#101 in %+v", snap.State().BlockedBy)
+	}
+}
+
 func TestSpawnChildren_NonResumable_IgnoresMarkerAndPauses(t *testing.T) {
 	eng, client := markerFirstEngine(t, true, nil)
 

@@ -922,6 +922,9 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// this instance does not serve (#2612). It is resolved read-only; nothing is
 	// written to the child or to this instance's board for it.
 	remoteMarked := make([]bool, len(blocks))
+	// childClosedAt[i]: block i+1's resumed child was already closed, so the
+	// sibling write-through below records its blocker edge as CLOSED, not OPEN.
+	childClosedAt := make([]bool, len(blocks))
 	for i, block := range blocks {
 		blockIndex := i + 1
 		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
@@ -1011,6 +1014,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
 		childNodeIDs[i] = childNodeID
 		childNumbers[i] = childNumber
+		childClosedAt[i] = childClosed
 
 		// Add child to the project board. When resuming, check first rather
 		// than assume AddProjectV2ItemById is safe to call twice (unconfirmed
@@ -1186,7 +1190,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		e.store.Apply(itemstate.BlockedByEdgeAdded{
 			Repo:   block.Repo,
 			Number: childNumbers[i],
-			Dep:    gh.Dependency{Repo: blocks[blockerIdx].Repo, Number: childNumbers[blockerIdx], State: "OPEN"},
+			Dep:    gh.Dependency{Repo: blocks[blockerIdx].Repo, Number: childNumbers[blockerIdx], State: depEdgeState(childClosedAt[blockerIdx])},
 		})
 	}
 
