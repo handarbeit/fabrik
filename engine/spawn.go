@@ -787,37 +787,109 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		return nil, false, fmt.Errorf("spawn: %w", err)
 	}
 
-	// Ensure every target repo is one this instance is actually configured to
-	// serve, before any GitHub mutation — the board-servability guard
-	// (requirement 3). A repo:-scoped instance that doesn't cover a target
-	// repo fails loud here rather than silently registering the child onto
-	// its own (wrong) board.
-	uniqueRepos := make(map[string]struct{})
-	for _, b := range blocks {
-		uniqueRepos[b.Repo] = struct{}{}
+	// Resume support (ADR-1583): recover which blocks (if any) already had
+	// their child created by a previous, interrupted attempt — or by hand (#2612)
+	// — the only durable, restart-surviving record of that fact. When found (or
+	// when the shallow snapshot can't be trusted to have found them — see
+	// below), refresh item live first: BlockedBy is a "deep field" the bulk
+	// board fetch never populates, and the per-child loop below needs it fresh
+	// to tell whether an already-created child was also already linked. A
+	// live-read failure or active cooldown defers to the next poll without
+	// pausing the parent.
+	//
+	// Gated on resumable (see this function's doc comment): a non-resumable
+	// origin (Review/Validate mid-flight) never consults an existing marker,
+	// so alreadyCreated stays empty and every block below takes the fresh-
+	// CreateIssue path, exactly as it did before ADR-1583.
+	//
+	// The markers are read BEFORE the servability guard (#2612, ADR 2612): the
+	// guard only applies to blocks that still need a child created, so a marker
+	// for a child created by hand in a repo this instance does not serve can
+	// resume the parent instead of pausing it for ever.
+	alreadyCreated := map[int]int{}
+	readMarkers := func() error {
+		if !resumable {
+			return nil
+		}
+		alreadyCreated = parseSpawnChildLabels(item.Labels)
+		// item.Labels here may be the shallow board-fetch's capped set (found
+		// in review of PR #1708): if it's at exactly shallowFetchLabelLimit, a
+		// fabrik:spawned-child:* marker could have been truncated out of view,
+		// so alreadyCreated would wrongly read as empty and this block would
+		// silently take the fresh-CreateIssue path — reproducing the exact
+		// duplicate-child bug this function exists to fix. Live-refresh
+		// whenever a marker was already found (unchanged) OR whenever the
+		// snapshot's length hits the cap, even with none found yet.
+		if len(alreadyCreated) > 0 || len(item.Labels) >= shallowFetchLabelLimit {
+			if err := e.refreshForSpawnResume(&item); err != nil {
+				return err
+			}
+			alreadyCreated = parseSpawnChildLabels(item.Labels)
+		}
+		return nil
 	}
-	for targetRepo := range uniqueRepos {
-		targetOwner, targetRepoName, ok := parseOwnerRepoStr(targetRepo)
+	markerFirst := !e.spawnMarkerFirstOff.Load()
+	if markerFirst {
+		if err := readMarkers(); err != nil {
+			return nil, false, err
+		}
+	}
+
+	// Ensure every target repo that still needs a child created is one this
+	// instance is actually configured to serve, before any GitHub mutation —
+	// the board-servability guard (requirement 3). A repo:-scoped instance that
+	// doesn't cover a target repo fails loud here rather than silently
+	// registering the child onto its own (wrong) board. A block with a usable
+	// marker needs no creation, so it is exempt (resolved read-only below).
+	for i, b := range blocks {
+		if markerFirst {
+			if _, marked := alreadyCreated[i+1]; marked {
+				continue
+			}
+		}
+		targetOwner, targetRepoName, ok := parseOwnerRepoStr(b.Repo)
 		if !ok {
 			// Malformed repo string — the per-block loop below will catch and report it.
 			continue
 		}
 		if !e.spawnTargetServedByThisInstance(targetOwner, targetRepoName) {
-			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nSpawn target `%s` is not served by this Fabrik instance (configured for `%s/%s` only, and this instance's `repo:` scoping means it does not process other repos' boards). Created so far: %s\n\nEither reconfigure this instance's `repo:`/`project:` to cover `%s`, or run the spawn from an instance that does. Remove `fabrik:paused` after fixing, then re-advance to retry.",
-				targetRepo, e.cfg.Owner, e.cfg.Repo, formatSpawnedList(nil), targetRepo)
+			// Name every unserved block that needs creating, so the operator
+			// can supply each child by hand with the right marker.
+			var manual []string
+			for j, bj := range blocks {
+				if _, marked := alreadyCreated[j+1]; marked && markerFirst {
+					continue
+				}
+				o, r, okj := parseOwnerRepoStr(bj.Repo)
+				if okj && !e.spawnTargetServedByThisInstance(o, r) {
+					manual = append(manual, fmt.Sprintf("spawn block #%d (`%s`): label `fabrik:spawned-child:%d:<n>`", j+1, bj.Repo, j+1))
+				}
+			}
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nSpawn target `%s` is not served by this Fabrik instance (configured for `%s/%s` only, and this instance's `repo:` scoping means it does not process other repos' boards). Created so far: %s\n\nEither reconfigure this instance's `repo:`/`project:` to cover `%s`, or run the spawn from an instance that does.\n\nTo supply the child by hand instead: create it in the target repo, add the label `fabrik:spawned-child:<i>:<n>` to this parent (`<i>` is the spawn block number, `<n>` the child's issue number in the target repo), link the child as blocked-by if you wish, then remove `fabrik:paused`. For this spawn: %s.",
+				b.Repo, e.cfg.Owner, e.cfg.Repo, formatSpawnedList(nil), b.Repo, strings.Join(manual, "; "))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 				cause:     pauseCauseQuestion,
 			})
-			return nil, false, fmt.Errorf("spawn: target %s not served by this instance (configured for %s/%s)", targetRepo, e.cfg.Owner, e.cfg.Repo)
+			return nil, false, fmt.Errorf("spawn: target %s not served by this instance (configured for %s/%s)", b.Repo, e.cfg.Owner, e.cfg.Repo)
 		}
 	}
 
-	// Ensure all target repos are initialized (bare-cloned) before any mutation.
+	// Ensure target repos are initialized (bare-cloned) before any mutation.
 	// On-demand clone via singleflight — no prior processing of an issue from the
 	// target repo is required. Error comment and labels are posted by
-	// ensureSpawnTargetReady on failure.
-	for targetRepo := range uniqueRepos {
+	// ensureSpawnTargetReady on failure. A marked block in a repo this instance
+	// does not serve is only read through FetchProjectItem, so it needs no clone.
+	cloneRepos := make(map[string]struct{})
+	for i, b := range blocks {
+		if _, marked := alreadyCreated[i+1]; marked {
+			if o, r, ok := parseOwnerRepoStr(b.Repo); ok && !e.spawnTargetServedByThisInstance(o, r) {
+				continue
+			}
+		}
+		cloneRepos[b.Repo] = struct{}{}
+	}
+	for targetRepo := range cloneRepos {
 		targetOwner, targetRepoName, ok := parseOwnerRepoStr(targetRepo)
 		if !ok {
 			// Malformed repo string — the per-block loop below will catch and report it.
@@ -833,36 +905,10 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	sf := e.statusField
 	e.mu.Unlock()
 
-	// Resume support (ADR-1583): recover which blocks (if any) already had
-	// their child created by a previous, interrupted attempt — the only
-	// durable, restart-surviving record of that fact. When found (or when the
-	// shallow snapshot can't be trusted to have found them — see below),
-	// refresh item live first: BlockedBy is a "deep field" the bulk board
-	// fetch never populates, and the per-child loop below needs it fresh to
-	// tell whether an already-created child was also already linked. A
-	// live-read failure or active cooldown defers to the next poll without
-	// pausing the parent.
-	//
-	// Gated on resumable (see this function's doc comment): a non-resumable
-	// origin (Review/Validate mid-flight) never consults an existing marker,
-	// so alreadyCreated stays empty and every block below takes the fresh-
-	// CreateIssue path, exactly as it did before ADR-1583.
-	alreadyCreated := map[int]int{}
-	if resumable {
-		alreadyCreated = parseSpawnChildLabels(item.Labels)
-		// item.Labels here may be the shallow board-fetch's capped set (found
-		// in review of PR #1708): if it's at exactly shallowFetchLabelLimit, a
-		// fabrik:spawned-child:* marker could have been truncated out of view,
-		// so alreadyCreated would wrongly read as empty and this block would
-		// silently take the fresh-CreateIssue path — reproducing the exact
-		// duplicate-child bug this function exists to fix. Live-refresh
-		// whenever a marker was already found (unchanged) OR whenever the
-		// snapshot's length hits the cap, even with none found yet.
-		if len(alreadyCreated) > 0 || len(item.Labels) >= shallowFetchLabelLimit {
-			if err := e.refreshForSpawnResume(&item); err != nil {
-				return nil, false, err
-			}
-			alreadyCreated = parseSpawnChildLabels(item.Labels)
+	if !markerFirst {
+		// Neutralised (test seam): the pre-#2612 order, markers after the guard.
+		if err := readMarkers(); err != nil {
+			return nil, false, err
 		}
 	}
 
@@ -872,6 +918,10 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	var spawned []string
 	childNodeIDs := make([]string, len(blocks))
 	childNumbers := make([]int, len(blocks))
+	// remoteMarked[i]: block i+1's child was supplied by hand (marker) in a repo
+	// this instance does not serve (#2612). It is resolved read-only; nothing is
+	// written to the child or to this instance's board for it.
+	remoteMarked := make([]bool, len(blocks))
 	for i, block := range blocks {
 		blockIndex := i + 1
 		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
@@ -886,6 +936,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 
 		resuming := false
+		childClosed := false
 		var childNumber int
 		var childNodeID string
 		var resumedLabels []string
@@ -906,6 +957,8 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			}
 			childNodeID = pi.ID
 			resumedLabels = pi.Labels
+			childClosed = pi.IsClosed
+			remoteMarked[i] = !e.spawnTargetServedByThisInstance(childOwner, childRepo)
 			e.logf(item.Number, "spawn", "resuming block %d: child %s/%s#%d already created\n", blockIndex, childOwner, childRepo, childNumber)
 		} else {
 			// PAT mode: every spawned child is assigned to cfg.User — the user
@@ -966,7 +1019,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		// the placement step below.
 		var childItemID, existingStatus string
 		addedAlready := false
-		if resuming {
+		if resuming && !remoteMarked[i] {
 			id, status, lerr := e.client.LookupIssueProjectItem(projectID, block.Repo, childNumber)
 			if lerr != nil {
 				e.logf(item.Number, "warn", "spawn resume: could not check existing board membership for %s#%d: %v — attempting AddProjectV2ItemById anyway\n", block.Repo, childNumber, lerr)
@@ -974,7 +1027,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				childItemID, existingStatus, addedAlready = id, status, true
 			}
 		}
-		if !addedAlready {
+		if !addedAlready && !remoteMarked[i] {
 			id, err := e.client.AddProjectV2ItemById(projectID, childNodeID)
 			if err != nil {
 				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\n%s",
@@ -1018,8 +1071,16 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		e.store.Apply(itemstate.BlockedByEdgeAdded{
 			Repo:   fmt.Sprintf("%s/%s", owner, repo),
 			Number: item.Number,
-			Dep:    gh.Dependency{Repo: block.Repo, Number: childNumber, State: "OPEN"},
+			Dep:    gh.Dependency{Repo: block.Repo, Number: childNumber, State: depEdgeState(childClosed)},
 		})
+
+		// A marked child in a repo this instance does not serve is read-only (#2612,
+		// ADR 2612): no sub-issue label, no inherited labels and no placement — each
+		// is a write to the unserved repo or to a board this instance does not own.
+		if remoteMarked[i] {
+			e.logf(item.Number, "spawn", "block %d: child %s#%d supplied by hand in a repo this instance does not serve — read-only, no writes to it\n", blockIndex, block.Repo, childNumber)
+			continue
+		}
 
 		// Apply fabrik:sub-issue label to child (idempotent add; for human-visible filtering; no engine semantics).
 		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
@@ -1082,6 +1143,12 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// earlier sibling regardless of where creation happened to succeed.
 	for i, block := range blocks {
 		if !block.DependsOnDeclared {
+			continue
+		}
+		if remoteMarked[i] {
+			// The edge would be written on a child in a repo this instance does
+			// not serve (#2612, ADR 2612): left to the operator who created it.
+			e.logf(item.Number, "spawn", "block %d depends on block %d, but its child %s#%d is in a repo this instance does not serve — sibling edge not written\n", i+1, block.DependsOn, block.Repo, childNumbers[i])
 			continue
 		}
 		blockerIdx := block.DependsOn - 1
@@ -1150,6 +1217,16 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 
 	e.logf(item.Number, "spawn", "spawned %d child(ren); parent will be gated until all close\n", len(blocks))
 	return spawned, true, nil
+}
+
+// depEdgeState is the write-through state of a parent's blockedBy edge to a
+// resumed child: CLOSED for a child that is already closed, so a closed
+// hand-made child does not re-block the parent through a stale OPEN edge.
+func depEdgeState(closed bool) string {
+	if closed {
+		return "CLOSED"
+	}
+	return "OPEN"
 }
 
 // addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through
