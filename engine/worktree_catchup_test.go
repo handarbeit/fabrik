@@ -234,12 +234,37 @@ func TestPrepareCatchUp_RealRebaseInProgressStaysBusy(t *testing.T) {
 		t.Fatalf("fixture: expected a rebase conflict, got %s", out)
 	}
 
+	// An operation really in progress is busy but is not a leftover: it must not count
+	// toward the bounded deferral (spec FR-007).
 	var busy *CatchUpBusyError
-	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.As(err, &busy) || !busy.Worktree {
-		t.Fatalf("err = %v, want a worktree-busy error", err)
+	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.As(err, &busy) || !busy.Worktree || !busy.Operation {
+		t.Fatalf("err = %v, want a worktree-busy error marked Operation", err)
 	}
 	if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", "REBASE_HEAD"); err != nil {
 		t.Error("REBASE_HEAD of a real rebase must not be removed")
+	}
+}
+
+// A merge whose conflicts are resolved and staged but not yet committed (so no rebase
+// directory and no unmerged entries) is still an operation in progress: its MERGE_HEAD
+// must survive, or the pending commit would lose its merge parent.
+func TestWorktreeBusyReason_PendingMergeCommitKeepsMergeHead(t *testing.T) {
+	for _, ref := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		t.Run(ref, func(t *testing.T) {
+			wm, _, head := catchUpFixture(t)
+			wtDir := readyWorktree(t, wm, head)
+			gd := gitDirOf(t, wtDir)
+			writeFile(t, filepath.Join(gd, ref), head+"\n")
+			writeFile(t, filepath.Join(gd, "MERGE_MSG"), "Merge pending\n")
+
+			reason, operation, err := wm.worktreeBusyDetail(wtDir, "fabrik/issue-7")
+			if err != nil || !operation || !strings.Contains(reason, ref+" present") {
+				t.Fatalf("reason=%q operation=%v err=%v, want %s present as an operation", reason, operation, err, ref)
+			}
+			if _, err := os.Stat(filepath.Join(gd, ref)); err != nil {
+				t.Errorf("%s of a pending commit must not be removed: %v", ref, err)
+			}
+		})
 	}
 }
 

@@ -50,10 +50,10 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 	defer wm.mu.Unlock()
 	branch := wm.branchName(issueNumber)
 
-	if reason, err := wm.worktreeBusyReason(wtDir, branch); err != nil {
+	if reason, operation, err := wm.worktreeBusyDetail(wtDir, branch); err != nil {
 		return "", err
 	} else if reason != "" {
-		return "", &CatchUpBusyError{Reason: reason, Worktree: true}
+		return "", &CatchUpBusyError{Reason: reason, Worktree: true, Operation: operation}
 	}
 
 	tracking := "refs/remotes/origin/" + branch
@@ -167,6 +167,10 @@ func holdsNothingBeyond(wtDir, subject, other, baseRef string) (bool, string) {
 type CatchUpBusyError struct {
 	Reason   string
 	Worktree bool
+	// Operation is true when the reason is a rebase, merge or cherry-pick really in progress
+	// in the worktree. That is real activity, not a leftover: it keeps today's uncharged
+	// deferral but never counts toward the bounded deferral (spec FR-007/FR-010).
+	Operation bool
 }
 
 func (e *CatchUpBusyError) Error() string { return ErrCatchUpBusy.Error() + ": " + e.Reason }
@@ -207,7 +211,7 @@ func gitPathIn(wtDir, name string) (string, error) {
 
 // operationInProgress reports whether a rebase is running (rebase-merge/ or rebase-apply/
 // in the worktree gitdir) or the index holds unmerged entries. busy names the evidence.
-func operationInProgress(wtDir string) (busy bool, why string, err error) {
+func operationInProgress(wtDir, marker string) (busy bool, why string, err error) {
 	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
 		p, perr := gitPathIn(wtDir, dir)
 		if perr != nil {
@@ -215,6 +219,21 @@ func operationInProgress(wtDir string) (busy bool, why string, err error) {
 		}
 		if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
 			return true, dir + "/ present", nil
+		}
+	}
+	if marker == "MERGE_HEAD" || marker == "CHERRY_PICK_HEAD" {
+		// A merge or cherry-pick whose conflicts are all resolved and staged, but not yet
+		// committed, has neither a rebase directory nor unmerged entries. Git removes
+		// MERGE_MSG when the commit is made or the operation aborted, so its presence means
+		// the operation is still waiting for its commit — deleting the ref would turn that
+		// commit into a plain one and drop the merge parent. REBASE_HEAD is the ref git
+		// really leaves behind after a finished rebase, so it is not guarded this way.
+		p, perr := gitPathIn(wtDir, "MERGE_MSG")
+		if perr != nil {
+			return false, "", perr
+		}
+		if _, serr := os.Stat(p); serr == nil {
+			return true, "MERGE_MSG present, commit pending", nil
 		}
 	}
 	out, lerr := gitOutputIn(wtDir, "ls-files", "-u")
@@ -258,32 +277,42 @@ func removeStaleOperationRef(wtDir, ref string) (string, error) {
 // those paths still counts); and MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD mean busy only
 // when an operation is really in progress — otherwise the stale ref is removed (logged).
 func (wm *WorktreeManager) worktreeBusyReason(wtDir, branch string) (string, error) {
+	reason, _, err := wm.worktreeBusyDetail(wtDir, branch)
+	return reason, err
+}
+
+// worktreeBusyDetail is worktreeBusyReason plus whether the reason is an operation
+// (rebase, merge, cherry-pick) really in progress, as opposed to a leftover.
+func (wm *WorktreeManager) worktreeBusyDetail(wtDir, branch string) (reason string, operation bool, err error) {
 	if out, err := gitOutputIn(wtDir, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || out != branch {
-		return fmt.Sprintf("worktree is not on %s (HEAD %q)", branch, out), nil
+		// A rebase in progress detaches HEAD, so this is also how a real rebase shows up:
+		// say so, because an operation really in progress is not a leftover.
+		inProgress, _, perr := operationInProgress(wtDir, "")
+		return fmt.Sprintf("worktree is not on %s (HEAD %q)", branch, out), perr == nil && inProgress, nil
 	}
 	if wm.scratchExemptDisabled.Load() {
 		status, err := gitOutputIn(wtDir, "status", "--porcelain")
 		if err != nil {
-			return "", fmt.Errorf("reading worktree status: %w", err)
+			return "", false, fmt.Errorf("reading worktree status: %w", err)
 		}
 		if status != "" {
-			return "worktree has uncommitted changes", nil
+			return "worktree has uncommitted changes", false, nil
 		}
 	} else {
 		tracked, err := gitOutputIn(wtDir, "status", "--porcelain", "--untracked-files=no")
 		if err != nil {
-			return "", fmt.Errorf("reading worktree status: %w", err)
+			return "", false, fmt.Errorf("reading worktree status: %w", err)
 		}
 		if tracked != "" {
-			return "worktree has uncommitted changes", nil
+			return "worktree has uncommitted changes", false, nil
 		}
 		untracked, err := gitOutputIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
 		if err != nil {
-			return "", fmt.Errorf("listing untracked files: %w", err)
+			return "", false, fmt.Errorf("listing untracked files: %w", err)
 		}
 		for _, f := range strings.Split(untracked, "\x00") {
 			if f = strings.TrimSpace(f); f != "" && !isFabrikScratchPath(f) {
-				return "worktree has uncommitted changes", nil
+				return "worktree has uncommitted changes", false, nil
 			}
 		}
 	}
@@ -292,22 +321,22 @@ func (wm *WorktreeManager) worktreeBusyReason(wtDir, branch string) (string, err
 			continue
 		}
 		if wm.staleRefCleanupDisabled.Load() {
-			return marker + " present", nil
+			return marker + " present", false, nil
 		}
-		inProgress, why, err := operationInProgress(wtDir)
+		inProgress, why, err := operationInProgress(wtDir, marker)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if inProgress {
-			return marker + " present (" + why + ")", nil
+			return marker + " present (" + why + ")", true, nil
 		}
 		// Nothing can resume from this ref: it is a leftover of a finished operation.
 		if out, err := removeStaleOperationRef(wtDir, marker); err != nil {
-			return fmt.Sprintf("stale %s present and could not be removed: %s", marker, out), nil
+			return fmt.Sprintf("stale %s present and could not be removed: %s", marker, out), false, nil
 		}
 		wm.logf(0, "worktree", "removed stale %s from %s (no rebase or merge in progress)\n", marker, wtDir)
 	}
-	return "", nil
+	return "", false, nil
 }
 
 // CatchUpPushError is PushCatchUp's failure: git's combined output is kept raw so the
