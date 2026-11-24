@@ -661,3 +661,28 @@ func TestSingletonCatchUp_BusyBoundRerouteFailureWritesNothingAndKeepsCount(t *t
 		t.Error("the deferral must still be recorded so the next formation retries")
 	}
 }
+
+// A rebase, merge or cherry-pick really in progress is never counted toward the bound
+// (FR-007), but it is named in the partition's idle_reason so a rebase directory nobody
+// finishes is visible instead of `unknown` (#2615 R4, SC-004).
+func TestSingletonCatchUp_OperationDeferralIsVisibleButNeverBounded(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.gitOut = catchUpGitOutcome{kind: catchUpDefer, reason: ErrCatchUpBusy.Error() + ": rebase-merge/ present", operation: true}
+	for i := 0; i < catchUpBusyBound+3; i++ {
+		w.run()
+	}
+	if paused, moves := w.pausedAndRerouted(); paused || moves != 0 {
+		t.Fatalf("a real operation must never trigger the bound (paused=%v moves=%d)", paused, moves)
+	}
+	w.assertNothingLandedOrCharged()
+	issue, reason, ok := w.eng.catchUpDeferralPeek("owner/repo", func(int) bool { return true })
+	if !ok || issue != 9 || !strings.Contains(reason, "rebase-merge/ present") {
+		t.Fatalf("operation deferral must be named for idle_reason: ok=%v issue=%d reason=%q", ok, issue, reason)
+	}
+	// Once the operation is gone and the worktree is merely busy, counting starts fresh.
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run()
+	if paused, _ := w.pausedAndRerouted(); paused {
+		t.Fatal("the first worktree-busy deferral after an operation must not bound")
+	}
+}

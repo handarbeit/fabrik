@@ -102,6 +102,9 @@ type catchUpDeferral struct {
 	count    int
 	reason   string
 	last     time.Time
+	// operation marks a record made by a rebase, merge or cherry-pick really in progress
+	// (#2615 R4): visible in idle_reason, never counted toward the bound (FR-007).
+	operation bool
 }
 
 // catchUpBusyBound is how many consecutive worktree-busy deferrals (with no worker in
@@ -131,7 +134,7 @@ func (e *Engine) noteCatchUpDeferral(trainKey string, issue int, reason string) 
 	}
 	k := catchUpKey(trainKey, issue)
 	d := e.trainCatchUp.deferrals[k]
-	if d == nil || now.Sub(d.last) > e.catchUpDeferralGap() {
+	if d == nil || d.operation || now.Sub(d.last) > e.catchUpDeferralGap() {
 		d = &catchUpDeferral{trainKey: trainKey, issue: issue}
 		e.trainCatchUp.deferrals[k] = d
 	}
@@ -139,6 +142,22 @@ func (e *Engine) noteCatchUpDeferral(trainKey string, issue int, reason string) 
 	d.reason = reason
 	d.last = now
 	return d.count
+}
+
+// noteCatchUpOperationDeferral records, for the partition's idle_reason only, that the
+// member's worktree has a rebase, merge or cherry-pick really in progress (#2615 R4). It
+// never counts toward the bound: a real operation waits for a human (FR-007), but the
+// human is told which member and why instead of reading `unknown`.
+func (e *Engine) noteCatchUpOperationDeferral(trainKey string, issue int, reason string) {
+	now := e.now()
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	if e.trainCatchUp.deferrals == nil {
+		e.trainCatchUp.deferrals = make(map[string]*catchUpDeferral)
+	}
+	e.trainCatchUp.deferrals[catchUpKey(trainKey, issue)] = &catchUpDeferral{
+		trainKey: trainKey, issue: issue, reason: reason, last: now, operation: true,
+	}
 }
 
 // clearCatchUpDeferral ends the member's run of deferrals (progress, a different kind of
@@ -318,6 +337,9 @@ type catchUpGitOutcome struct {
 	// moved remote, a rebase/merge really in progress, the usage-limit hold and the
 	// post-merge ownership re-check leave it false.
 	worktreeBusy bool
+	// operation, set only on a catchUpDefer, marks a deferral caused by a rebase, merge or
+	// cherry-pick really in progress: visible in idle_reason, never counted (#2615).
+	operation bool
 }
 
 // catchUpBusyReason reports why the member's branch is not ours to push to right now, or
@@ -398,11 +420,14 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	} else {
 		out = e.runCatchUpGit(ctx, p, m)
 	}
-	if out.kind != catchUpDefer || !out.worktreeBusy {
+	if out.kind != catchUpDefer || (!out.worktreeBusy && !out.operation) {
 		e.clearCatchUpDeferral(p.trainKey, m.item.Number)
 	}
 	switch out.kind {
 	case catchUpDefer:
+		if out.operation {
+			e.noteCatchUpOperationDeferral(p.trainKey, m.item.Number, strings.TrimPrefix(out.reason, ErrCatchUpBusy.Error()+": "))
+		}
 		if out.worktreeBusy {
 			n := e.noteCatchUpDeferral(p.trainKey, m.item.Number, strings.TrimPrefix(out.reason, ErrCatchUpBusy.Error()+": "))
 			if n >= catchUpBusyBound && !e.trainCatchUp.boundDisabled.Load() &&
@@ -489,7 +514,7 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 	switch {
 	case errors.Is(err, ErrCatchUpBusy):
 		var busy *CatchUpBusyError
-		return catchUpGitOutcome{kind: catchUpDefer, reason: err.Error(), worktreeBusy: errors.As(err, &busy) && busy.Worktree && !busy.Operation}
+		return catchUpGitOutcome{kind: catchUpDefer, reason: err.Error(), worktreeBusy: errors.As(err, &busy) && busy.Worktree && !busy.Operation, operation: errors.As(err, &busy) && busy.Operation}
 	case err != nil:
 		return catchUpGitOutcome{kind: catchUpFallback, reason: err.Error()}
 	}
