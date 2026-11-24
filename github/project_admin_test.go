@@ -501,3 +501,252 @@ func TestFetchProjectFields_ProjectNotFound(t *testing.T) {
 		t.Fatal("expected error when project is not found")
 	}
 }
+
+// optionInputIntrospection answers the option-input introspection query with
+// the given input field names (nil = a null __type).
+func optionInputIntrospection(names []string) map[string]interface{} {
+	if names == nil {
+		return map[string]interface{}{"data": map[string]interface{}{"__type": nil}}
+	}
+	fields := make([]map[string]interface{}, 0, len(names))
+	for _, n := range names {
+		fields = append(fields, map[string]interface{}{"name": n})
+	}
+	return map[string]interface{}{"data": map[string]interface{}{"__type": map[string]interface{}{"inputFields": fields}}}
+}
+
+func TestStatusOptionIDSupport(t *testing.T) {
+	tests := []struct {
+		name string
+		body func(w http.ResponseWriter)
+		want IDSupport
+	}{
+		{"github.com shape", func(w http.ResponseWriter) {
+			json.NewEncoder(w).Encode(optionInputIntrospection([]string{"color", "description", "id", "name"}))
+		}, IDAccepted},
+		{"GHES shape", func(w http.ResponseWriter) {
+			json.NewEncoder(w).Encode(optionInputIntrospection([]string{"color", "description", "name"}))
+		}, IDNotAccepted},
+		{"null type", func(w http.ResponseWriter) {
+			json.NewEncoder(w).Encode(optionInputIntrospection(nil))
+		}, IDUnknown},
+		{"graphql error (introspection denied)", func(w http.ResponseWriter) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"errors": []map[string]interface{}{{"message": "introspection is disabled"}}})
+		}, IDUnknown},
+		{"http error", func(w http.ResponseWriter) {
+			w.WriteHeader(500)
+			w.Write([]byte("boom"))
+		}, IDUnknown},
+		{"empty field list", func(w http.ResponseWriter) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"__type": map[string]interface{}{"inputFields": []interface{}{}}}})
+		}, IDUnknown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Query string `json:"query"`
+				}
+				json.NewDecoder(r.Body).Decode(&body)
+				gotQuery = body.Query
+				tc.body(w)
+			}))
+			defer srv.Close()
+			c := NewClientWithBaseURL("token", srv.URL)
+			if got := c.StatusOptionIDSupport(); got != tc.want {
+				t.Errorf("StatusOptionIDSupport = %v, want %v", got, tc.want)
+			}
+			if !strings.Contains(gotQuery, "ProjectV2SingleSelectFieldOptionInput") {
+				t.Errorf("did not introspect the option input type: %s", gotQuery)
+			}
+		})
+	}
+}
+
+// populationServer serves pages of items; each page is a list of item
+// "has Status" flags. It records the variables of every request.
+func populationServer(t *testing.T, pages [][]bool, gotVars *[]map[string]interface{}, gotQuery *string) *httptest.Server {
+	t.Helper()
+	call := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		*gotVars = append(*gotVars, body.Variables)
+		*gotQuery = body.Query
+		page := pages[call]
+		call++
+		nodes := make([]map[string]interface{}, 0, len(page))
+		for i, has := range page {
+			n := map[string]interface{}{"id": "PVTI_" + string(rune('a'+i)), "fieldValueByName": nil}
+			if has {
+				n["fieldValueByName"] = map[string]interface{}{"optionId": "OPT"}
+			}
+			nodes = append(nodes, n)
+		}
+		hasNext := call < len(pages)
+		end := ""
+		if hasNext {
+			end = "CUR" + string(rune('0'+call))
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"node": map[string]interface{}{
+			"items": map[string]interface{}{
+				"pageInfo": map[string]interface{}{"hasNextPage": hasNext, "endCursor": end},
+				"nodes":    nodes,
+			},
+		}}})
+	}))
+}
+
+func TestBoardHasStatusValue(t *testing.T) {
+	t.Run("no items", func(t *testing.T) {
+		var vars []map[string]interface{}
+		var q string
+		srv := populationServer(t, [][]bool{{}}, &vars, &q)
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err != nil || got {
+			t.Fatalf("got (%v, %v), want (false, nil)", got, err)
+		}
+		if !strings.Contains(q, "archivedStates: [ARCHIVED, NOT_ARCHIVED]") {
+			t.Errorf("archived items not requested: %s", q)
+		}
+	})
+	t.Run("items none with a Status", func(t *testing.T) {
+		var vars []map[string]interface{}
+		var q string
+		srv := populationServer(t, [][]bool{{false, false}, {false}}, &vars, &q)
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err != nil || got {
+			t.Fatalf("got (%v, %v), want (false, nil)", got, err)
+		}
+		if len(vars) != 2 || vars[1]["cursor"] != "CUR1" {
+			t.Errorf("did not page: %v", vars)
+		}
+	})
+	t.Run("hit on first page stops early", func(t *testing.T) {
+		var vars []map[string]interface{}
+		var q string
+		srv := populationServer(t, [][]bool{{false, true}, {true}}, &vars, &q)
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err != nil || !got {
+			t.Fatalf("got (%v, %v), want (true, nil)", got, err)
+		}
+		if len(vars) != 1 {
+			t.Errorf("should stop at the first hit, made %d requests", len(vars))
+		}
+	})
+	t.Run("hit on a later page", func(t *testing.T) {
+		var vars []map[string]interface{}
+		var q string
+		srv := populationServer(t, [][]bool{{false}, {false}, {true}}, &vars, &q)
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err != nil || !got {
+			t.Fatalf("got (%v, %v), want (true, nil)", got, err)
+		}
+		if len(vars) != 3 {
+			t.Errorf("requests = %d, want 3", len(vars))
+		}
+	})
+	t.Run("http error fails closed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(500)
+		}))
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err == nil || !got {
+			t.Fatalf("got (%v, %v), want (true, error)", got, err)
+		}
+	})
+	t.Run("unreadable project fails closed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"node": nil}})
+		}))
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err == nil || !got {
+			t.Fatalf("got (%v, %v), want (true, error)", got, err)
+		}
+	})
+	t.Run("error on a later page fails closed", func(t *testing.T) {
+		call := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			call++
+			if call == 2 {
+				w.WriteHeader(500)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"node": map[string]interface{}{
+				"items": map[string]interface{}{
+					"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "C"},
+					"nodes":    []interface{}{},
+				},
+			}}})
+		}))
+		defer srv.Close()
+		got, err := NewClientWithBaseURL("token", srv.URL).BoardHasStatusValue("P1")
+		if err == nil || !got {
+			t.Fatalf("got (%v, %v), want (true, error)", got, err)
+		}
+	})
+}
+
+// TestSetStatusFieldOptionsWithoutIDs_RefusesAnID: the no-id path never sends
+// a request when any option carries an id, and otherwise sends name, color and
+// description only.
+func TestSetStatusFieldOptionsWithoutIDs(t *testing.T) {
+	var gotVars map[string]interface{}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotVars = body.Variables
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"updateProjectV2Field": map[string]interface{}{"projectV2Field": map[string]interface{}{"id": "F"}},
+		}})
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("token", srv.URL)
+
+	id := "OPT_1"
+	if err := c.SetStatusFieldOptionsWithoutIDs("F", []StatusOptionInput{{ID: &id, Name: "Todo", Color: "GRAY"}}); err == nil {
+		t.Fatal("expected an error for an option carrying an id")
+	}
+	if calls != 0 {
+		t.Fatalf("no request may be sent when an id is present, got %d", calls)
+	}
+
+	if err := c.SetStatusFieldOptionsWithoutIDs("F", []StatusOptionInput{
+		{Name: "Todo", Color: "BLUE", Description: "d"},
+		{Name: "Queued", Color: "GRAY"},
+	}); err != nil {
+		t.Fatalf("SetStatusFieldOptionsWithoutIDs: %v", err)
+	}
+	raw := gotVars["options"].([]interface{})
+	if len(raw) != 2 {
+		t.Fatalf("options = %v", raw)
+	}
+	for i, o := range raw {
+		m := o.(map[string]interface{})
+		if _, has := m["id"]; has {
+			t.Errorf("option %d sent an id: %v", i, m)
+		}
+		for _, k := range []string{"name", "color", "description"} {
+			if _, ok := m[k]; !ok {
+				t.Errorf("option %d missing %s: %v", i, k, m)
+			}
+		}
+	}
+	if raw[0].(map[string]interface{})["color"] != "BLUE" || raw[0].(map[string]interface{})["description"] != "d" {
+		t.Errorf("existing color/description not preserved: %v", raw[0])
+	}
+}

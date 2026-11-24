@@ -248,6 +248,21 @@ unchanged and only appends the columns your stage configs are missing, so no ite
 loses its place in the pipeline. Like board creation, repair is organization-owned
 repos only, and refuses explicitly on a user-owned board.
 
+**On GitHub Enterprise Server, adding Status columns works only while no board item has a
+Status.** GHES 3.19.10's option input takes no option id (only name, color and description),
+so there is no way to keep an existing column's identity through a replacement, and
+replacing the list would clear the Status of every item. Before sending anything, Fabrik
+asks the server (a schema introspection, once per command) whether the input accepts an id.
+Where it does (github.com), nothing changes. Where it does not — or the answer cannot be
+determined — Fabrik reads the whole board, archived and draft items included: if no item
+has a Status it replaces the options with name, color and description only (your existing
+columns keep those); if any item has a Status, or that cannot be established, `repair-board
+--apply` changes nothing, names the missing columns, exits non-zero, and you add them in the
+board's UI (the Status field's settings). `fabrik init --create-board` is unaffected: a new
+board has no items. After columns are re-created on an empty board, restart a running
+daemon, which caches the Status option ids at startup. See [GitHub Enterprise Server
+Support](#github-enterprise-server-support).
+
 ### Compatibility Notes
 
 > **Warning:** Global Claude Code plugins can interfere with Fabrik's headless sessions. Do not install global plugins on machines running Fabrik as a service. The `superpowers` plugin is a known offender — if installed globally, it injects unexpected behaviour into Fabrik's Claude sessions and causes duplicate comments on issues.
@@ -417,7 +432,7 @@ If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a c
 
 ### GitHub Enterprise Server Support
 
-Fabrik can run against a GitHub Enterprise Server (GHES) instance instead of github.com. This was verified against a live GHES 3.19.8 instance with full API parity for everything Fabrik uses — no adapter layer, schema introspection, or capability negotiation is involved. It's pure endpoint/host configuration.
+Fabrik can run against a GitHub Enterprise Server (GHES) instance instead of github.com. This was verified against a live GHES 3.19.8 instance and works as pure endpoint/host configuration — there is no adapter layer. API parity is not complete, though: GHES 3.19.10's Projects v2 option input (`ProjectV2SingleSelectFieldOptionInput`) has no `id`, so `fabrik repair-board --apply` can add Status columns only while no board item has a Status; otherwise add them in the board's UI (see [Repairing an Existing Board](#repairing-an-existing-board)). That one mutation is the only place Fabrik asks the server what it supports (a schema introspection, once per command); `fabrik init --create-board` is unaffected.
 
 #### Configuring a GHES host
 
@@ -2823,6 +2838,8 @@ If a block still cannot be parsed — for example its first line is not a `TITLE
 Spawn blocks work identically whether the target is the parent's own repo or a different repo. Research is responsible for identifying which repos are in scope — it emits a `## Repositories` section listing all potentially-relevant repos. Plan is constrained to spawn only into repos Research named.
 
 **A cross-repo spawn also requires the *spawning instance's own* `repo:`/`project:` config to actually cover the target repo.** Each Fabrik instance polls exactly one project board. A multi-repo instance (no `repo:` configured) already serves any repo the org grants that board access to — spawning cross-repo into any of those repos just works, the same as it always has. A `repo:`-scoped instance, however, is declared to serve only that one repo; asking it to spawn into a different repo has no board for the engine to register the child on. Before this was enforced, that scenario silently registered the child onto the *spawning* instance's own board anyway — wrong, and invisible, since the child sat correctly in a real column the whole time, just on a board no `repo:`-scoped instance watching the *right* repo would ever see. Fabrik now refuses instead: the spawn fails loudly (parent paused, explanatory comment naming both the unservable target and this instance's own configured repo) rather than silently mis-registering. If you hit this, either point the spawning instance's own `repo:`/`project:` at a board that covers the target repo, or have a differently-configured instance perform the spawn.
+
+**Supplying the child by hand.** The refusal comment also names a manual way forward: create the child issue yourself in the target repo, add the label `fabrik:spawned-child:<i>:<n>` to the parent (`<i>` is the spawn block's 1-based position in the Plan, `<n>` the child's issue number in the target repo), link the child as a `blockedBy` of the parent if you wish, then remove `fabrik:paused`. Fabrik reads that marker before the servability check, resolves the child read-only in its own repo (open or closed), writes nothing to that repo or to this board for it, and the parent then waits on the child like any other blocker. A marker whose child cannot be found pauses the parent again, naming the label to remove. Blocks in the same Plan that still need a child created in an unserved repo keep the refusal.
 
 #### Mid-flight Spawning from Review/Validate
 
