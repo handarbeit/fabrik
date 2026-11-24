@@ -988,6 +988,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if item.Worker.TurnsKnown == known && item.Worker.TurnsUsed == v.Turns && item.Worker.TurnsMax == v.Max {
 			return 0
 		}
+		switch {
+		case !known:
+			item.Worker.LastTurnAt = time.Time{}
+		case v.Turns > item.Worker.TurnsUsed:
+			item.Worker.LastTurnAt = s.nowLocked()
+		}
 		item.Worker.TurnsUsed = v.Turns
 		item.Worker.TurnsKnown = known
 		item.Worker.TurnsMax = v.Max

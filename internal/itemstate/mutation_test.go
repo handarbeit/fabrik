@@ -1497,6 +1497,45 @@ func TestWorkerTurnsRecorded(t *testing.T) {
 	}
 }
 
+func TestWorkerTurnsRecordedStampsLastTurnAt(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	clock := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	s.SetClock(func() time.Time { return clock })
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan"})
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.IsZero() {
+		t.Fatalf("LastTurnAt = %v before any turn, want zero", st.Worker.LastTurnAt)
+	}
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 3, Max: 50}, WorkerChanged)
+	first := clock
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.Equal(first) {
+		t.Fatalf("LastTurnAt = %v, want %v", st.Worker.LastTurnAt, first)
+	}
+	// A re-report at the same count must not refresh it.
+	clock = clock.Add(time.Minute)
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 3, Max: 50}, 0)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.Equal(first) {
+		t.Errorf("same-count re-report moved LastTurnAt to %v", st.Worker.LastTurnAt)
+	}
+	// A budget-only change must not refresh it either.
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 3, Max: 100}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.Equal(first) {
+		t.Errorf("budget-only change moved LastTurnAt to %v", st.Worker.LastTurnAt)
+	}
+	// A rise restamps.
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4, Max: 100}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.Equal(clock) {
+		t.Errorf("LastTurnAt = %v, want %v after a rise", st.Worker.LastTurnAt, clock)
+	}
+	// The zero-turn reset clears it.
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 0, Max: 100}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.LastTurnAt.IsZero() {
+		t.Errorf("LastTurnAt = %v after the reset, want zero", st.Worker.LastTurnAt)
+	}
+	// No worker: a no-op.
+	s.Apply(WorkerExited{Repo: testRepo, Number: 1})
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 9, Max: 100}, 0)
+}
+
 func TestStatusFactsAreRecordedAndInformationalOnly(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	due := time.Now().Add(time.Minute)

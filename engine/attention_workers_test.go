@@ -482,3 +482,43 @@ func TestStatusUnknownMergeStateCauseNeedsItsMarker(t *testing.T) {
 		t.Error("marker not recognised")
 	}
 }
+
+// #2604: a live worker that keeps taking turns is not stalled however long it
+// runs; one whose turns stopped is, and says so. The neutralisation seam shows
+// the first assertion is not vacuous.
+func TestLongRunWithLiveTurnsIsNotStalled(t *testing.T) {
+	e := workerEngine(t)
+	start := time.Now()
+	clk := &stubClock{t: start}
+	e.SetClock(clk)
+	e.seedAPIItem(t, 12, "Implement")
+	e.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 12, StageName: "Implement", StartedAt: start,
+		Kind: itemstate.WorkerKindStageRun})
+	// Wall-clock stage with no max_wall_time: the budget is the inactivity timeout.
+	for i := 1; i <= 9; i++ {
+		clk.t = start.Add(time.Duration(i*5) * time.Minute)
+		e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 12, Turns: i, Max: 100})
+	}
+	clk.t = start.Add(46 * time.Minute) // 1m after the last turn, 46m into the run
+	st := status(t, e, "12")
+	if st.Attention.State != "working" || !strings.Contains(st.Attention.Summary, "long-running") {
+		t.Fatalf("attention = %+v, want working with the long-running note", st.Attention)
+	}
+
+	restore := e.SetTurnProgressDisabledForTest()
+	st = status(t, e, "12")
+	if st.Attention.State != "stalled" {
+		t.Errorf("with turn progress disabled attention = %+v, want stalled (non-vacuity)", st.Attention)
+	}
+	restore()
+	if st := status(t, e, "12"); st.Attention.State != "working" {
+		t.Errorf("after restore attention = %+v, want working", st.Attention)
+	}
+
+	// Turns stop: past the threshold since the last one it is stalled, with the R4 wording.
+	clk.t = start.Add(45*time.Minute + 31*time.Minute)
+	st = status(t, e, "12")
+	if st.Attention.State != "stalled" || !strings.Contains(st.Attention.Summary, "no turn for 31m0s (inactivity timeout 15m0s did not end it)") {
+		t.Errorf("attention = %+v, want stalled with the turn wording", st.Attention)
+	}
+}

@@ -24,6 +24,11 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 		in.WorkerQueuedSince = w.QueuedSince
 		if w.TurnsKnown && !w.Queued {
 			in.WorkerTurnsKnown, in.WorkerTurnsUsed = true, w.TurnsUsed
+			// #2604: the latest turn is real output, so it counts as progress.
+			if !e.chanTest.turnProgressOff.Load() {
+				in.WorkerLastTurnAt = w.LastTurnAt
+				in.WorkerInactivityTimeout = claudeInactivityTimeout
+			}
 		}
 		// The invocation's own budget (comment review limit, fabrik:extend-turns
 		// pre-grant, extensions), not the stage default.

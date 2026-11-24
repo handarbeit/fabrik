@@ -51,6 +51,15 @@ func (e *Engine) SetDowntimeDeltasDisabledForTest() (restore func()) {
 	return func() { e.chanTest.downtimeOff.Store(false) }
 }
 
+// SetTurnProgressDisabledForTest drops the live worker's last-turn time from the
+// attention input (#2604), restoring the pre-fix classification in which a long
+// healthy run reads stalled. It is how the turn-progress tests show they are not
+// vacuous. Returns the restore function.
+func (e *Engine) SetTurnProgressDisabledForTest() (restore func()) {
+	e.chanTest.turnProgressOff.Store(true)
+	return func() { e.chanTest.turnProgressOff.Store(false) }
+}
+
 // StopChannelEventsForTest stops the deriver and closes the hub. Idempotent.
 // Persisted state stays on disk, so a following StartChannelEventsForTest on
 // the same dir models a daemon restart.
