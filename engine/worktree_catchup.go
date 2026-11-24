@@ -227,6 +227,27 @@ func operationInProgress(wtDir string) (busy bool, why string, err error) {
 	return false, "", nil
 }
 
+// removeStaleOperationRef deletes a leftover MERGE_HEAD/REBASE_HEAD/CHERRY_PICK_HEAD.
+// `git update-ref -d` handles the latter two but refuses the MERGE_HEAD pseudoref, so
+// that one falls back to removing the file in the worktree's own git directory.
+func removeStaleOperationRef(wtDir, ref string) (string, error) {
+	out, err := gitOutputIn(wtDir, "update-ref", "-d", ref)
+	if _, verr := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", ref); verr != nil {
+		return "", nil // gone
+	}
+	p, perr := gitPathIn(wtDir, ref)
+	if perr != nil {
+		return perr.Error(), perr
+	}
+	if rerr := os.Remove(p); rerr != nil {
+		if err == nil {
+			err = rerr
+		}
+		return strings.TrimSpace(out + " " + rerr.Error()), err
+	}
+	return "", nil
+}
+
 // worktreeBusyReason reports why the issue worktree must not be mutated right now: it is
 // not on the issue branch, has uncommitted changes, or a merge/rebase/cherry-pick is really
 // in progress. An empty reason means the tree is clean and idle; err is a failure to read
@@ -281,7 +302,7 @@ func (wm *WorktreeManager) worktreeBusyReason(wtDir, branch string) (string, err
 			return marker + " present (" + why + ")", nil
 		}
 		// Nothing can resume from this ref: it is a leftover of a finished operation.
-		if out, err := gitOutputIn(wtDir, "update-ref", "-d", marker); err != nil {
+		if out, err := removeStaleOperationRef(wtDir, marker); err != nil {
 			return fmt.Sprintf("stale %s present and could not be removed: %s", marker, out), nil
 		}
 		wm.logf(0, "worktree", "removed stale %s from %s (no rebase or merge in progress)\n", marker, wtDir)
