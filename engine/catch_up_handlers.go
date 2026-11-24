@@ -560,7 +560,7 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		// every poll with zero trace in the logs. checkCIGate is never
 		// reached while this is true.
 		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
-		e.noteGateHoldFact(pctx.item, gateMerge, settle.Reason, nil, settle.MergeObs == MergeObsComputed)
+		e.noteGateHoldFact(pctx.item, gateMerge, settle.Reason, nil, mergeHoldNoConflict(settle))
 		// #2096: reached only for PRMergeUnsettled/PRMergeQueued (a conflict is the
 		// mergeConflict branch above). The claim sets no awaiting-ci label, and CI
 		// completion moves neither a label nor the issue's updatedAt, so without a

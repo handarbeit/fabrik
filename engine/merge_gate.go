@@ -947,3 +947,12 @@ func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
 		cause:           pauseCauseOther,
 	})
 }
+
+// mergeHoldNoConflict reports whether the merge gate's claim is a conflict-free
+// pending-CI hold (#2613): the same condition checkMergeabilityGate clears the
+// label on. PRMergeQueued is excluded — it keeps the label and its old
+// semantics — so the recorded NoConflict fact never says "rebase pushed" for a
+// PR in the merge queue.
+func mergeHoldNoConflict(settle PRSettleResult) bool {
+	return settle.Status == PRMergeUnsettled && settle.MergeObs == MergeObsComputed
+}

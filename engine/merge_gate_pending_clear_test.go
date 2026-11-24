@@ -124,3 +124,23 @@ func TestCheckMergeabilityGate_Conflicting_ClearsStaleNoConflictHold(t *testing.
 		t.Errorf("stale merge gate hold survived a conflict: %+v", snap.State().GateHold)
 	}
 }
+
+// #2613 review: the NoConflict fact recorded on the claim follows the clearing
+// rule exactly; a queued PR never reads as a conflict-free pending-CI hold.
+func TestMergeHoldNoConflict(t *testing.T) {
+	cases := []struct {
+		name   string
+		settle PRSettleResult
+		want   bool
+	}{
+		{"unsettled computed", PRSettleResult{Status: PRMergeUnsettled, MergeObs: MergeObsComputed}, true},
+		{"unsettled unknown", PRSettleResult{Status: PRMergeUnsettled, MergeObs: MergeObsUnknown}, false},
+		{"unsettled none", PRSettleResult{Status: PRMergeUnsettled, MergeObs: MergeObsNone}, false},
+		{"queued computed", PRSettleResult{Status: PRMergeQueued, MergeObs: MergeObsComputed}, false},
+	}
+	for _, c := range cases {
+		if got := mergeHoldNoConflict(c.settle); got != c.want {
+			t.Errorf("%s: mergeHoldNoConflict = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
