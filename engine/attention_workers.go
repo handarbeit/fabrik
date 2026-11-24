@@ -45,9 +45,10 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 	// A gate hold the gate stopped confirming has ended (the same lapse the
 	// item-wedged detector uses).
 	if h := st.GateHold; h != nil && now.Sub(h.ConfirmedAt) <= e.wedgeLapseFor(h.Gate) {
-		in.Gate = &attention.GateFact{Gate: h.Gate, Reason: h.Reason, IDs: append([]string(nil), h.IDs...), Since: h.Since}
+		in.Gate = &attention.GateFact{Gate: h.Gate, Reason: h.Reason, IDs: append([]string(nil), h.IDs...), Since: h.Since, NoConflict: h.NoConflict}
 	}
 	in.RebaseAfterLanding = st.RebaseCause == rebaseCauseAfterLanding && hasLabelStr(st.Labels, "fabrik:rebase-needed")
+	in.RebaseDispatched = st.StageState.RebaseCycles[st.Status] > 0
 	paused := hasLabelStr(st.Labels, "fabrik:paused")
 	in.DaemonStop = paused && pausedByMarker(st, pauseCauseDaemonStopMarker)
 	in.UnknownMergeState = paused && pausedByMarker(st, pauseCauseUnknownMergeStateMarker)

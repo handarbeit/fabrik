@@ -256,6 +256,11 @@ func (e *Engine) emitDispatchDeferred(issueKeys []string) {
 // fabrik_status can name it on a daemon with no hub; the Store keeps the first
 // call's Since and the latest call's ConfirmedAt.
 func (e *Engine) noteGateHold(item gh.ProjectItem, gate, reason string, ids []string) {
+	e.noteGateHoldFact(item, gate, reason, ids, false)
+}
+
+// noteGateHoldFact is noteGateHold with the merge gate's NoConflict fact (#2613).
+func (e *Engine) noteGateHoldFact(item gh.ProjectItem, gate, reason string, ids []string, noConflict bool) {
 	repo := itemOwnerRepoString(item, e.defaultRepo())
 	now := e.now()
 	if snap, ok := e.store.Peek(repo, item.Number); ok {
@@ -266,7 +271,7 @@ func (e *Engine) noteGateHold(item gh.ProjectItem, gate, reason string, ids []st
 		}
 	}
 	e.store.Apply(itemstate.GateHoldRecorded{Repo: repo, Number: item.Number,
-		Hold: itemstate.GateHold{Gate: gate, Reason: reason, IDs: ids, Since: now, ConfirmedAt: now}})
+		Hold: itemstate.GateHold{Gate: gate, Reason: reason, IDs: ids, Since: now, ConfirmedAt: now, NoConflict: noConflict}})
 	ce := e.channelEvents()
 	if ce == nil {
 		return

@@ -231,7 +231,10 @@ type Input struct {
 	// when the item is paused by the daemon's own clean stop (the pause comment's
 	// marker). Both are explicit recorded facts, never inferred (#2121 causes).
 	RebaseAfterLanding bool
-	DaemonStop         bool
+	// RebaseDispatched is true when the engine has already dispatched a rebase for
+	// the item's stage (its rebase-cycle count is above zero; #2613).
+	RebaseDispatched bool
+	DaemonStop       bool
 	// UnknownMergeState is true when the item is paused by the merge gate's
 	// unknown-merge-state bound (the pause comment's marker; #2302) — an explicit
 	// recorded fact, like DaemonStop.
@@ -711,6 +714,9 @@ func classify(in Input) Result {
 	// waitOutcome turns a wait (a label, a cooldown, the holding stage) into the
 	// item's result, or Stalled when the engine should have acted and has not.
 	waitOutcome := func(code, summary string) Result {
+		if code == "fabrik:rebase-needed" && rebasePushedWaitingForCI(in) {
+			summary = rebasePushedSummary
+		}
 		if code == "fabrik:blocked" {
 			// An open-ended dependency wait: a dispatch cooldown's expiry is not
 			// what ends it (R5).

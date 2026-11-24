@@ -538,3 +538,47 @@ func TestQueuedWorkerIgnoresTurnTime(t *testing.T) {
 		t.Errorf("got %s/%s, want queued-for-slot", got.State, got.Code)
 	}
 }
+
+// #2613 R4: a rebased item held by the merge gate on a conflict-free head reads
+// "rebase pushed; waiting for CI", and every other shape keeps the label meaning.
+func TestRebaseNeededReason_PushedWaitingForCI(t *testing.T) {
+	const pushed = "rebase pushed; waiting for CI on the new head"
+	pending := func(in *Input) {
+		in.Labels = []string{"fabrik:rebase-needed"}
+		in.RebaseDispatched = true
+		in.Gate = &GateFact{Gate: "merge", Reason: "CI checks pending", Since: t0, NoConflict: true}
+	}
+	in := baseInput()
+	pending(&in)
+	res := Classify(in)
+	if res.Summary != pushed {
+		t.Fatalf("summary = %q, want %q", res.Summary, pushed)
+	}
+	if strings.Contains(res.Summary, "dispatching") {
+		t.Errorf("summary must not claim a dispatch: %q", res.Summary)
+	}
+
+	keeps := map[string]func(*Input){
+		"conflicting (no NoConflict)": func(in *Input) { pending(in); in.Gate.NoConflict = false },
+		"no rebase dispatched":        func(in *Input) { pending(in); in.RebaseDispatched = false },
+		"after landing":               func(in *Input) { pending(in); in.RebaseAfterLanding = true },
+		"no gate hold":                func(in *Input) { pending(in); in.Gate = nil },
+		"other gate":                  func(in *Input) { pending(in); in.Gate.Gate = "ci" },
+		"worker running":              func(in *Input) { pending(in); in.HasWorker = true },
+	}
+	for name, mut := range keeps {
+		t.Run(name, func(t *testing.T) {
+			in := baseInput()
+			mut(&in)
+			if got := Classify(in).Summary; got == pushed {
+				t.Errorf("summary = %q, want the existing reason", got)
+			}
+		})
+	}
+	// The label table text itself is unchanged.
+	in = baseInput()
+	in.Labels = []string{"fabrik:rebase-needed"}
+	if got := Classify(in).Summary; !strings.Contains(got, "the engine is dispatching a rebase") {
+		t.Errorf("plain rebase-needed summary = %q", got)
+	}
+}

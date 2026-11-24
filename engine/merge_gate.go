@@ -22,9 +22,13 @@ import (
 //   - (false, false) — gate clears. No PR, mergeable==true, CI failed (deferred
 //     to checkCIGate), or wait_for_ci disabled. Caller falls through to the CI gate.
 //
-//   - (true, false)  — blocked but no confirmed conflict. GitHub has not yet
-//     computed mergeability (PRMergeUnsettled). The fabrik:rebase-needed label
-//     is not touched.
+//   - (true, false)  — blocked but no confirmed conflict (PRMergeUnsettled).
+//     When the settle result proves mergeability was computed and is not
+//     conflicting (MergeObsComputed: checks pending, post-push dwell, suite
+//     hold), a stale fabrik:rebase-needed label is removed (#2613) while the
+//     item is still claimed. When GitHub has not computed mergeability
+//     (MergeObsUnknown) or the read failed (MergeObsNone) the label is not
+//     touched.
 //
 //   - (true, true)   — confirmed conflict. fabrik:rebase-needed applied
 //     (idempotent). Caller should dispatch a rebase reinvoke.
@@ -44,6 +48,13 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		// read) stall an item silently for over an hour with nothing in the
 		// logs to point at. Every claim on this path must name itself.
 		e.logf(item.Number, "merge-gate", "claiming item — PRMergeUnsettled (%s)\n", settle.Reason)
+		// #2613: PRMergeConflicting is returned before every other unsettled
+		// result, so a computed observation here means the head does not
+		// conflict (mergeable true, state other than dirty). The label is a
+		// mirror of live mergeability; refresh it without changing the claim.
+		if settle.MergeObs == MergeObsComputed && !e.rebaseLabelPendingClearOff.Load() {
+			e.removeRebaseNeededLabel(owner, repo, item)
+		}
 		return true, false
 	case PRMergeQueued:
 		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
@@ -71,6 +82,11 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		if !hasLabel(item.Labels, "fabrik:rebase-needed") {
 			e.applyLabelAdd(item, "fabrik:rebase-needed", false)
 		}
+		// #2613: a conflict ends any earlier conflict-free merge hold, so the
+		// attention reason never reads "rebase pushed; waiting for CI" for a
+		// head that conflicts again (the recorded NoConflict fact would otherwise
+		// outlive the conflict until its lapse). Store only: no channel record.
+		e.store.Apply(itemstate.GateHoldCleared{Repo: itemOwnerRepoString(item, e.defaultRepo()), Number: item.Number, Gate: gateMerge})
 		return true, true
 	}
 	return false, false
@@ -930,4 +946,13 @@ func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
 		removeAutoMerge: true,
 		cause:           pauseCauseOther,
 	})
+}
+
+// mergeHoldNoConflict reports whether the merge gate's claim is a conflict-free
+// pending-CI hold (#2613): the same condition checkMergeabilityGate clears the
+// label on. PRMergeQueued is excluded — it keeps the label and its old
+// semantics — so the recorded NoConflict fact never says "rebase pushed" for a
+// PR in the merge queue.
+func mergeHoldNoConflict(settle PRSettleResult) bool {
+	return settle.Status == PRMergeUnsettled && settle.MergeObs == MergeObsComputed
 }
