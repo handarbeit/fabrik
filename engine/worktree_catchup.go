@@ -199,7 +199,7 @@ func isFabrikScratchPath(path string) bool {
 // gitPathIn resolves a path inside the worktree's own git directory (correct in a linked
 // worktree, where .git is a file) via `git rev-parse --git-path`.
 func gitPathIn(wtDir, name string) (string, error) {
-	out, err := gitOutputIn(wtDir, "rev-parse", "--git-path", name)
+	out, err := gitStdoutIn(wtDir, "rev-parse", "--git-path", name)
 	if err != nil {
 		return "", fmt.Errorf("resolving git path %s: %s: %w", name, out, err)
 	}
@@ -236,7 +236,7 @@ func operationInProgress(wtDir, marker string) (busy bool, why string, err error
 			return true, "MERGE_MSG present, commit pending", nil
 		}
 	}
-	out, lerr := gitOutputIn(wtDir, "ls-files", "-u")
+	out, lerr := gitStdoutIn(wtDir, "ls-files", "-u")
 	if lerr != nil {
 		return false, "", fmt.Errorf("reading unmerged index entries: %s: %w", out, lerr)
 	}
@@ -291,7 +291,7 @@ func (wm *WorktreeManager) worktreeBusyDetail(wtDir, branch string) (reason stri
 		return fmt.Sprintf("worktree is not on %s (HEAD %q)", branch, out), perr == nil && inProgress, nil
 	}
 	if wm.scratchExemptDisabled.Load() {
-		status, err := gitOutputIn(wtDir, "status", "--porcelain")
+		status, err := gitStdoutIn(wtDir, "status", "--porcelain")
 		if err != nil {
 			return "", false, fmt.Errorf("reading worktree status: %w", err)
 		}
@@ -299,14 +299,14 @@ func (wm *WorktreeManager) worktreeBusyDetail(wtDir, branch string) (reason stri
 			return "worktree has uncommitted changes", false, nil
 		}
 	} else {
-		tracked, err := gitOutputIn(wtDir, "status", "--porcelain", "--untracked-files=no")
+		tracked, err := gitStdoutIn(wtDir, "status", "--porcelain", "--untracked-files=no")
 		if err != nil {
 			return "", false, fmt.Errorf("reading worktree status: %w", err)
 		}
 		if tracked != "" {
 			return "worktree has uncommitted changes", false, nil
 		}
-		untracked, err := gitOutputIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
+		untracked, err := gitStdoutIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
 		if err != nil {
 			return "", false, fmt.Errorf("listing untracked files: %w", err)
 		}
@@ -389,6 +389,23 @@ func gitOutputIn(dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// gitStdoutIn is gitOutputIn for calls whose stdout is parsed (#2615): only stdout is
+// returned, so a git warning on stderr (for example "could not open directory ...:
+// Permission denied") can never be read as a listed path or a status line. On failure the
+// returned text is stdout followed by stderr, for the caller's error message.
+func gitStdoutIn(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return strings.TrimSpace(stdout.String() + " " + stderr.String()), err
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // isAncestor reports whether ancestor is an ancestor of (or equal to) descendant.

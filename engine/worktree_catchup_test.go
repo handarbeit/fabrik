@@ -141,6 +141,29 @@ func TestPrepareCatchUp_FabrikScratchFilesAreNotBusy(t *testing.T) {
 	}
 }
 
+// #2615: a git warning on stderr during the untracked listing (here an unreadable scratch
+// subdirectory) is never read as an untracked path, so it cannot make the worktree busy.
+func TestPrepareCatchUp_GitStderrWarningIsNotAnUntrackedFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	locked := filepath.Join(wtDir, ".fabrik", "scratch", "locked")
+	writeFile(t, filepath.Join(locked, "x.log"), "log\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	if out, err := gitStdoutIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z"); err != nil || strings.Contains(out, "warning") {
+		t.Fatalf("gitStdoutIn must return stdout only: out=%q err=%v", out, err)
+	}
+	if _, err := wm.PrepareCatchUp(7, "main", head); err != nil {
+		t.Fatalf("PrepareCatchUp with an unreadable scratch directory: %v", err)
+	}
+}
+
 func TestPrepareCatchUp_ScratchExemption_NonVacuity(t *testing.T) {
 	wm, _, head := catchUpFixture(t)
 	wtDir := readyWorktree(t, wm, head)
