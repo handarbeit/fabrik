@@ -1,0 +1,26 @@
+# ADR 2615: Merge-train catch-up busy bound and stale-leftover handling
+
+## Status
+
+Accepted. Amends ADR 2044 (singleton catch-up ownership: "deferred, left Queued, nothing charged") and ADR 2295 (the shared `worktreeBusyReason`). Builds on ADR 2124 (partition liveness).
+
+## Context
+
+The singleton catch-up defers a Queued member when `worktreeBusyReason` calls its worktree busy. The deferral is uncharged and retried every formation with no bound. Two leftovers that nothing clears stalled a member for hours on 0.0.93 (community report, mentioned for context: #2607): untracked worker scratch logs under `.fabrik/scratch/` (`git status --porcelain` is non-empty) and a stale `REBASE_HEAD` with no `rebase-merge/` or `rebase-apply/` (git leaves it after a conflict-resolved `rebase --continue`). Because the deferral is uncharged, no retry budget, ejection cap or runaway guard ever fires, and health said `idle_reason: unknown`.
+
+## Decisions
+
+1. **Fabrik's own leftovers are not busy.** Untracked files under `fabrikScratchPaths` (`.fabrik-context/`, `.fabrik/scratch/`) are ignored. The engine writes only `.fabrik-context/`; `.fabrik/scratch/` is a worker convention. The list is one variable so a new path is added once. The broader `.fabrik/` is not exempted: it could hide a real untracked file. The status read is split in two (`--untracked-files=no`, then `ls-files --others -z`) so a directory is never collapsed into one `?? dir/` line and a *tracked* change under an exempt path still counts. Matching is on a directory boundary (`.fabrik-contextual/` is not exempt).
+2. **Also keep scratch out of `git status` at setup.** `writeGitExclude` writes `.fabrik/scratch/` beside `.fabrik-context/` on every `EnsureWorktree`. This is defence in depth, not the fix: it can fail to write and hand-made worktrees lack it, so the check's own exemption stays. It also keeps scratch out of any `git add -A` the engine runs.
+3. **A stale operation ref is removed, not busy.** The three refs mean busy only while an operation is really in progress: `rebase-merge/` or `rebase-apply/` in the worktree gitdir (resolved with `git rev-parse --git-path`, since `.git` is a file in a linked worktree) or unmerged index entries. Otherwise nothing can resume from the ref, so it is removed and logged. A failed removal is busy, naming the failure. `MERGE_HEAD` is removed as a file because git refuses `update-ref` on it. The check is shared with the issue-branch sync (ADR 2295), which benefits equally; a worktree really mid-rebase still skips the sync (tested through both callers).
+4. **Bounded deferral, N = 2, a constant.** Only a worktree-class busy deferral counts (`CatchUpBusyError.Worktree`): not a moved remote (a race), not the engine-side worker/`fabrik:editing`/unreadable-label check (real activity or doubt: it clears the count), not the usage-limit hold. N is 2 because the first can be a worker that just exited; it is a constant so no `FABRIK_*` variable needs classifying. The count is per member, in memory, and gap-aware (`max(10m, 5 × poll)`). A restart can lengthen the wait by at most N formations, never shorten it.
+5. **Pause, not a bare reroute.** `rerouteQueuedMemberOffHolding` leaves `stage:Validate:complete`, so a persistent cause would send the member back through the landing decision into Queued and restart the count: a slow loop that hides the stall. The bound therefore reroutes, posts one comment naming the reason and how to resume, and pauses with cause `other`, as `ejectRedCatchUpSingleton` does. It is uncharged (no ejection count, `recordTrial`, `max_retries` or failed label). It acts only after a fresh Store `Peek` shows no worker; if the reroute fails nothing is written and the count is kept. A wrongly early pause is the worse error, which is why only worktree-class reasons count and N is not 1. After a human resumes, the member re-validates, re-queues and goes through N formations again if the cause persists: bounded, human-gated and visible.
+6. **Name the member in `idle_reason`.** A new input to `computePartitionLiveness` (`DeferredMember`/`DeferredReason`, from the non-mutating `catchUpDeferralPeek`, modelled on `infraCooldownPeek`) makes the reason `#N catch-up deferred: <reason>`. Unlike the infra cooldown it stays stall-eligible, so `pipeline-stalled` carries the same text as its cause. The peek accepts a member only while it is still queued in the partition, so the name goes when the member moves.
+
+## Consequences
+
+- A member with only Fabrik scratch or a stale ref is caught up on the first formation that reaches it.
+- Any other persistent leftover costs at most two formations and ends with a paused, named, uncharged member instead of an invisible stall.
+- A really busy worktree (worker, `fabrik:editing`, real rebase, real tracked change) keeps today's deferral.
+- Residual risk: an untracked file the operator keeps in a worktree on purpose pauses the member after two formations. The comment says what to clear.
+- Neutralisation seams (per-Engine): `SetCatchUpScratchExemptDisabledForTest`, `SetStaleRefCleanupDisabledForTest`, `SetCatchUpBusyBoundDisabledForTest`, `SetCatchUpDeferralVisibilityDisabledForTest`.
