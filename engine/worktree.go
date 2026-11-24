@@ -25,6 +25,9 @@ type WorktreeManager struct {
 	pureRebaseDisabled    atomic.Bool // test seam: neutralises PrepareCatchUp's pure-rebase tolerance (#2150)
 	restoreRebaseDisabled atomic.Bool // test seam: neutralises RestoreUnpushedRebase (#2150)
 
+	scratchExemptDisabled   atomic.Bool // test seam: neutralises the busy check's Fabrik-scratch exemption (#2615)
+	staleRefCleanupDisabled atomic.Bool // test seam: neutralises the stale MERGE/REBASE/CHERRY_PICK ref handling (#2615)
+
 	restoreContentCheckDisabled atomic.Bool // test seam: neutralises the restore's content-based fallback (#2517)
 	replayEquivalenceDisabled   atomic.Bool // test seam: neutralises the sync/catch-up replay-equivalence fallback (#2517)
 
@@ -1123,9 +1126,14 @@ func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
 		return
 	}
 	excludePath := filepath.Join(infoDir, "exclude")
-	const entry = ".fabrik-context/\n"
 	existing, _ := os.ReadFile(excludePath)
-	if strings.Contains(string(existing), ".fabrik-context/") {
+	var missing strings.Builder
+	for _, entry := range gitExcludeEntries {
+		if !strings.Contains(string(existing), entry) {
+			missing.WriteString(entry + "\n")
+		}
+	}
+	if missing.Len() == 0 {
 		return // already present
 	}
 	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -1134,10 +1142,22 @@ func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
 		return
 	}
 	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		if _, err := f.WriteString("\n"); err != nil {
+			wm.logf(issueNumber, "warn", "could not write git exclude entry: %v\n", err)
+			return
+		}
+	}
+	if _, err := f.WriteString(missing.String()); err != nil {
 		wm.logf(issueNumber, "warn", "could not write git exclude entry: %v\n", err)
 	}
 }
+
+// gitExcludeEntries are the paths kept out of `git status` in every issue worktree: the
+// engine's context files and the workers' scratch directory (#2615, ADR 2615). Defence in
+// depth beside the busy check's own exemption (fabrikScratchPaths), which still applies
+// when the exclude could not be written or the worktree was made by hand.
+var gitExcludeEntries = []string{".fabrik-context/", ".fabrik/scratch/"}
 
 // migrateWorktrees scans worktreeRoot for old-style issue-N/ directories and moves
 // each one to the per-repo layout <repoName>/issue-N/ using git worktree move.

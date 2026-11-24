@@ -175,6 +175,11 @@ type catchUpGitOutcome struct {
 	// returned for a push positively identified as repo policy (classifyCatchUpPushRejection).
 	// Empty for every other fallback, which sets no memo.
 	policyReason string
+	// worktreeBusy, set only on a catchUpDefer, marks a deferral whose cause is the member's
+	// own worktree (PrepareCatchUp's CatchUpBusyError.Worktree): the only kind that counts
+	// toward the bounded deferral (#2615). A moved remote, the usage-limit hold and the
+	// post-merge ownership re-check leave it false.
+	worktreeBusy bool
 }
 
 // catchUpBusyReason reports why the member's branch is not ours to push to right now, or
@@ -332,7 +337,8 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 	wtDir, err := p.wm.PrepareCatchUp(n, p.baseBranch, m.headSHA)
 	switch {
 	case errors.Is(err, ErrCatchUpBusy):
-		return catchUpGitOutcome{kind: catchUpDefer, reason: err.Error()}
+		var busy *CatchUpBusyError
+		return catchUpGitOutcome{kind: catchUpDefer, reason: err.Error(), worktreeBusy: errors.As(err, &busy) && busy.Worktree}
 	case err != nil:
 		return catchUpGitOutcome{kind: catchUpFallback, reason: err.Error()}
 	}

@@ -229,7 +229,7 @@ func (wm *WorktreeManager) syncIssueBranch(wtDir, baseBranch string, issueNumber
 		return SyncReport{Outcome: SyncSkipped, Reason: "sync disabled"}, nil
 	}
 	branch := wm.branchName(issueNumber)
-	busy, err := worktreeBusyReason(wtDir, branch)
+	busy, err := wm.worktreeBusyReason(wtDir, branch)
 	if err != nil {
 		return skip(err.Error())
 	}

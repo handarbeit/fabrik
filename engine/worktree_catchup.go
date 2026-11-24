@@ -3,7 +3,9 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -48,10 +50,10 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 	defer wm.mu.Unlock()
 	branch := wm.branchName(issueNumber)
 
-	if reason, err := worktreeBusyReason(wtDir, branch); err != nil {
+	if reason, err := wm.worktreeBusyReason(wtDir, branch); err != nil {
 		return "", err
 	} else if reason != "" {
-		return "", fmt.Errorf("%w: %s", ErrCatchUpBusy, reason)
+		return "", &CatchUpBusyError{Reason: reason, Worktree: true}
 	}
 
 	tracking := "refs/remotes/origin/" + branch
@@ -66,7 +68,7 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 		return "", fmt.Errorf("resolving %s: %w", tracking, err)
 	}
 	if remote != expectedHead {
-		return "", fmt.Errorf("%w: remote %s is at %s, not the snapshot head %s", ErrCatchUpBusy, branch, remote, expectedHead)
+		return "", &CatchUpBusyError{Reason: fmt.Sprintf("remote %s is at %s, not the snapshot head %s", branch, remote, expectedHead)}
 	}
 
 	local, err := gitRevParse(wtDir, "HEAD")
@@ -156,26 +158,133 @@ func holdsNothingBeyond(wtDir, subject, other, baseRef string) (bool, string) {
 	return true, ""
 }
 
+// CatchUpBusyError is PrepareCatchUp's "defer" error (#2615). It matches ErrCatchUpBusy
+// (errors.Is) and says which kind of busy it is: Worktree is true when the member's own
+// worktree holds the reason (off-branch, uncommitted tracked or foreign files, an operation
+// in progress, a stale ref that could not be removed), false for the remote having moved
+// since the snapshot. Only the worktree kind counts toward the bounded deferral — a moved
+// remote is a race, not a leftover that nothing will clear.
+type CatchUpBusyError struct {
+	Reason   string
+	Worktree bool
+}
+
+func (e *CatchUpBusyError) Error() string { return ErrCatchUpBusy.Error() + ": " + e.Reason }
+
+func (e *CatchUpBusyError) Is(target error) bool { return target == ErrCatchUpBusy }
+
+// fabrikScratchPaths lists the directory prefixes (relative to a worktree root) whose
+// untracked files are Fabrik's or its workers' own leftovers, never someone's work (#2615).
+// The busy check ignores untracked files under them; a tracked change there still counts.
+// One list, so a new path is added once. `.fabrik-context/` is written by the engine
+// (context files); `.fabrik/scratch/` is where workers put logs and temp output.
+var fabrikScratchPaths = []string{".fabrik-context", ".fabrik/scratch"}
+
+// isFabrikScratchPath reports whether the repo-relative path is at or under one of
+// fabrikScratchPaths, matched on a directory boundary (".fabrik-contextual/x" is not).
+func isFabrikScratchPath(path string) bool {
+	path = strings.TrimSuffix(strings.TrimPrefix(path, "./"), "/")
+	for _, dir := range fabrikScratchPaths {
+		if path == dir || strings.HasPrefix(path, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// gitPathIn resolves a path inside the worktree's own git directory (correct in a linked
+// worktree, where .git is a file) via `git rev-parse --git-path`.
+func gitPathIn(wtDir, name string) (string, error) {
+	out, err := gitOutputIn(wtDir, "rev-parse", "--git-path", name)
+	if err != nil {
+		return "", fmt.Errorf("resolving git path %s: %s: %w", name, out, err)
+	}
+	if !filepath.IsAbs(out) {
+		out = filepath.Join(wtDir, out)
+	}
+	return out, nil
+}
+
+// operationInProgress reports whether a rebase is running (rebase-merge/ or rebase-apply/
+// in the worktree gitdir) or the index holds unmerged entries. busy names the evidence.
+func operationInProgress(wtDir string) (busy bool, why string, err error) {
+	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
+		p, perr := gitPathIn(wtDir, dir)
+		if perr != nil {
+			return false, "", perr
+		}
+		if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
+			return true, dir + "/ present", nil
+		}
+	}
+	out, lerr := gitOutputIn(wtDir, "ls-files", "-u")
+	if lerr != nil {
+		return false, "", fmt.Errorf("reading unmerged index entries: %s: %w", out, lerr)
+	}
+	if out != "" {
+		return true, "unmerged index entries", nil
+	}
+	return false, "", nil
+}
+
 // worktreeBusyReason reports why the issue worktree must not be mutated right now: it is
-// not on the issue branch, has uncommitted changes, or a session (or a crash) left a
-// merge/rebase/cherry-pick in progress even though `status` can look empty. An empty
-// reason means the tree is clean and idle; err is a failure to read the status.
-// Shared by PrepareCatchUp (#2044) and the issue-branch sync (#2295 R2).
-func worktreeBusyReason(wtDir, branch string) (string, error) {
+// not on the issue branch, has uncommitted changes, or a merge/rebase/cherry-pick is really
+// in progress. An empty reason means the tree is clean and idle; err is a failure to read
+// the status. Shared by PrepareCatchUp (#2044) and the issue-branch sync (#2295 R2).
+//
+// #2615: untracked files under fabrikScratchPaths are Fabrik's own leftovers and are not
+// "uncommitted changes" (tracked changes are read separately, so a tracked change under
+// those paths still counts); and MERGE_HEAD / REBASE_HEAD / CHERRY_PICK_HEAD mean busy only
+// when an operation is really in progress — otherwise the stale ref is removed (logged).
+func (wm *WorktreeManager) worktreeBusyReason(wtDir, branch string) (string, error) {
 	if out, err := gitOutputIn(wtDir, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || out != branch {
 		return fmt.Sprintf("worktree is not on %s (HEAD %q)", branch, out), nil
 	}
-	status, err := gitOutputIn(wtDir, "status", "--porcelain")
-	if err != nil {
-		return "", fmt.Errorf("reading worktree status: %w", err)
-	}
-	if status != "" {
-		return "worktree has uncommitted changes", nil
+	if wm.scratchExemptDisabled.Load() {
+		status, err := gitOutputIn(wtDir, "status", "--porcelain")
+		if err != nil {
+			return "", fmt.Errorf("reading worktree status: %w", err)
+		}
+		if status != "" {
+			return "worktree has uncommitted changes", nil
+		}
+	} else {
+		tracked, err := gitOutputIn(wtDir, "status", "--porcelain", "--untracked-files=no")
+		if err != nil {
+			return "", fmt.Errorf("reading worktree status: %w", err)
+		}
+		if tracked != "" {
+			return "worktree has uncommitted changes", nil
+		}
+		untracked, err := gitOutputIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
+		if err != nil {
+			return "", fmt.Errorf("listing untracked files: %w", err)
+		}
+		for _, f := range strings.Split(untracked, "\x00") {
+			if f = strings.TrimSpace(f); f != "" && !isFabrikScratchPath(f) {
+				return "worktree has uncommitted changes", nil
+			}
+		}
 	}
 	for _, marker := range []string{"MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"} {
-		if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", marker); err == nil {
+		if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", marker); err != nil {
+			continue
+		}
+		if wm.staleRefCleanupDisabled.Load() {
 			return marker + " present", nil
 		}
+		inProgress, why, err := operationInProgress(wtDir)
+		if err != nil {
+			return "", err
+		}
+		if inProgress {
+			return marker + " present (" + why + ")", nil
+		}
+		// Nothing can resume from this ref: it is a leftover of a finished operation.
+		if out, err := gitOutputIn(wtDir, "update-ref", "-d", marker); err != nil {
+			return fmt.Sprintf("stale %s present and could not be removed: %s", marker, out), nil
+		}
+		wm.logf(0, "worktree", "removed stale %s from %s (no rebase or merge in progress)\n", marker, wtDir)
 	}
 	return "", nil
 }
