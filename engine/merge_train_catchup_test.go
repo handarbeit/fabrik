@@ -509,3 +509,155 @@ func TestSingletonCatchUp_CancelledNeutralisedPauses(t *testing.T) {
 		t.Error("expected the red-singleton pause under the neutralising seam")
 	}
 }
+
+// ---- #2615: bounded deferral of a worktree-busy member ----
+//
+// Neutralisation: each test below fails with SetCatchUpBusyBoundDisabledForTest(true)
+// (the member stays Queued) except the ones that assert the bound does NOT fire.
+
+func (w *catchUpWorld) busyOutcome(reason string) {
+	w.gitOut = catchUpGitOutcome{kind: catchUpDefer, reason: ErrCatchUpBusy.Error() + ": " + reason, worktreeBusy: true}
+}
+
+func (w *catchUpWorld) pausedAndRerouted() (paused bool, moves int) {
+	w.client.mu.Lock()
+	defer w.client.mu.Unlock()
+	for _, c := range w.client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			paused = true
+		}
+	}
+	return paused, len(w.client.updateStatusCalls)
+}
+
+func TestSingletonCatchUp_BusyDeferralIsBoundedToN(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.busyOutcome("REBASE_HEAD present")
+
+	for i := 1; i < catchUpBusyBound; i++ {
+		if _, decided := w.run(); !decided {
+			t.Fatal("a deferral decides the poll")
+		}
+		if paused, moves := w.pausedAndRerouted(); paused || moves != 0 {
+			t.Fatalf("formation %d: member moved before the bound (paused=%v moves=%d)", i, paused, moves)
+		}
+	}
+	// The Nth consecutive deferral stops the waiting.
+	if _, decided := w.run(); !decided {
+		t.Fatal("the bound decides the poll")
+	}
+	paused, moves := w.pausedAndRerouted()
+	if !paused || moves != 1 {
+		t.Fatalf("after %d busy deferrals the member must be rerouted and paused (paused=%v moves=%d)", catchUpBusyBound, paused, moves)
+	}
+	var named int
+	for _, c := range w.comments() {
+		if strings.Contains(c, catchUpStuckFragment) && strings.Contains(c, "REBASE_HEAD present") {
+			named++
+		}
+	}
+	if named != 1 {
+		t.Errorf("want exactly one comment naming the reason, got %d: %v", named, w.comments())
+	}
+	// Uncharged: no ejection count, no trial counter, no failure label.
+	w.eng.mergeTrainEjectionsMu.Lock()
+	if n := w.eng.mergeTrainEjectionCounts["owner/repo#9"]; n != 0 {
+		t.Errorf("ejection counter charged: %d", n)
+	}
+	w.eng.mergeTrainEjectionsMu.Unlock()
+	w.client.mu.Lock()
+	defer w.client.mu.Unlock()
+	for _, c := range w.client.addLabelCalls {
+		if strings.HasSuffix(c.labelName, ":failed") {
+			t.Errorf("failure label applied: %s", c.labelName)
+		}
+	}
+	if len(w.client.mergePRAtHeadSHACalls) != 0 {
+		t.Error("nothing may be merged")
+	}
+}
+
+func TestSingletonCatchUp_BusyBoundNeutralised_MemberStaysQueued(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.SetCatchUpBusyBoundDisabledForTest(true)
+	w.busyOutcome("REBASE_HEAD present")
+	for i := 0; i < catchUpBusyBound+3; i++ {
+		w.run()
+	}
+	w.assertNothingLandedOrCharged()
+}
+
+func TestSingletonCatchUp_BusyBoundDoesNotFireWithAWorker(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run() // count 1
+	// A worker enters: the engine-side check defers first and the run starts over.
+	w.eng.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 9, StageName: "Validate", StartedAt: time.Now()})
+	for i := 0; i < catchUpBusyBound+2; i++ {
+		w.run()
+	}
+	if paused, moves := w.pausedAndRerouted(); paused || moves != 0 {
+		t.Fatalf("a member with a worker must keep today's deferral (paused=%v moves=%d)", paused, moves)
+	}
+	if _, _, ok := w.eng.catchUpDeferralPeek("owner/repo", func(int) bool { return true }); ok {
+		t.Error("the deferral run must be cleared once a worker was seen")
+	}
+}
+
+func TestSingletonCatchUp_BusyBoundDoesNotFireWithEditingLabel(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run()
+	w.labels = []string{"fabrik:editing"}
+	for i := 0; i < catchUpBusyBound+2; i++ {
+		w.run()
+	}
+	if paused, moves := w.pausedAndRerouted(); paused || moves != 0 {
+		t.Fatalf("fabrik:editing keeps today's deferral (paused=%v moves=%d)", paused, moves)
+	}
+}
+
+func TestSingletonCatchUp_RemoteMovedDeferralDoesNotCount(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.gitOut = catchUpGitOutcome{kind: catchUpDefer, reason: "remote moved", worktreeBusy: false}
+	for i := 0; i < catchUpBusyBound+2; i++ {
+		w.run()
+	}
+	w.assertNothingLandedOrCharged()
+}
+
+func TestSingletonCatchUp_ProgressResetsTheBusyCount(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run() // count 1
+	// The worktree is clean next time: catch-up proceeds (here: falls back to the trial).
+	w.gitOut = catchUpGitOutcome{kind: catchUpFallback, reason: "push rejected"}
+	if _, decided := w.run(); decided {
+		t.Fatal("fallback hands the member to the trial")
+	}
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run() // count 1 again, not 2
+	if paused, moves := w.pausedAndRerouted(); paused || moves != 0 {
+		t.Fatalf("the count must start over after progress (paused=%v moves=%d)", paused, moves)
+	}
+}
+
+func TestSingletonCatchUp_BusyBoundRerouteFailureWritesNothingAndKeepsCount(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.statusField = nil // rerouteQueuedMemberOffHolding cannot resolve the board option
+	w.busyOutcome("REBASE_HEAD present")
+	for i := 0; i < catchUpBusyBound+1; i++ {
+		if _, decided := w.run(); !decided {
+			t.Fatal("still deferred")
+		}
+	}
+	if paused, _ := w.pausedAndRerouted(); paused {
+		t.Fatal("a failed reroute must not pause")
+	}
+	if len(w.comments()) != 0 {
+		t.Errorf("a failed reroute must post nothing: %v", w.comments())
+	}
+	if _, _, ok := w.eng.catchUpDeferralPeek("owner/repo", func(int) bool { return true }); !ok {
+		t.Error("the deferral must still be recorded so the next formation retries")
+	}
+}

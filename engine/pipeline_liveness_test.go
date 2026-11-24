@@ -74,6 +74,12 @@ func TestComputePartitionLiveness(t *testing.T) {
 			in.InfraHeld = true
 			in.Poll = pollVerdict{Known: true, Overdue: true, Cause: pollCauseNoPoll}
 		}, idleReasonPollOverdue, false, ""},
+		{"a deferred member is named and still stalls (#2615)", func(in *partitionLivenessInput) {
+			in.DeferredMember, in.DeferredReason = 859, "REBASE_HEAD present"
+		}, "#859 catch-up deferred: REBASE_HEAD present", true, "#859 catch-up deferred: REBASE_HEAD present"},
+		{"an active run hides the deferred member", func(in *partitionLivenessInput) {
+			in.RunActive, in.DeferredMember, in.DeferredReason = true, 859, "x"
+		}, "", false, ""},
 		{"deliberate poll back-off never stalls", func(in *partitionLivenessInput) { in.PollDeliberatelyPending = true }, idleReasonUnknown, false, ""},
 		{"unknown queued-since never stalls", func(in *partitionLivenessInput) { in.OldestQueued = time.Time{} }, idleReasonUnknown, false, ""},
 		{"zero threshold disables the stall", func(in *partitionLivenessInput) { in.Threshold = 0 }, idleReasonUnknown, false, ""},
@@ -214,5 +220,66 @@ func TestErroredPollKeepsTheBackoffPeriodForNextDue(t *testing.T) {
 	}
 	if v := e2.pollVerdictFor(s2, t0.Add(10*time.Minute)); !v.Overdue {
 		t.Fatalf("a missed poll with no back-off must read as overdue: %+v", v)
+	}
+}
+
+// #2615 R4: a member the catch-up keeps deferring is named in idle_reason while it waits,
+// and the name goes when the member leaves the partition or the record is cleared.
+func TestHealthPartitionNamesDeferredCatchUpMember(t *testing.T) {
+	e := apiEngine(t, 0)
+	e.cfg.MergeTrain = "on"
+	e.cfg.PollSeconds = 30
+	now := e.now()
+	e.health.markStarted(now.Add(-time.Hour))
+	e.seedAPIItem(t, 1, "Queued")
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Queued"}})
+	e.health.beginPoll(now.Add(-time.Second), pollVerdict{})
+	e.health.endPoll(now, pollVerdict{}, now.Add(30*time.Second))
+
+	idle := func() string {
+		h, err := e.LocalAPIBackend().Health(localapi.HealthParams{})
+		if err != nil || len(h.MergeTrain) != 1 {
+			t.Fatalf("health: %v %+v", err, h.MergeTrain)
+		}
+		return h.MergeTrain[0].IdleReason
+	}
+	if got := idle(); got != idleReasonUnknown {
+		t.Fatalf("before any deferral: %q", got)
+	}
+	e.noteCatchUpDeferral("owner/repo", 1, "REBASE_HEAD present")
+	want := "#1 catch-up deferred: REBASE_HEAD present"
+	if got := idle(); got != want {
+		t.Fatalf("idle_reason = %q, want %q", got, want)
+	}
+	// Reading health did not consume the record.
+	if got := idle(); got != want {
+		t.Fatalf("second read = %q", got)
+	}
+	// A deferral for a member that is not in the partition is never shown.
+	e.noteCatchUpDeferral("owner/repo", 99, "other")
+	if got := idle(); got != want {
+		t.Fatalf("a non-member must not be named: %q", got)
+	}
+	e.clearCatchUpDeferral("owner/repo", 1)
+	if got := idle(); got != idleReasonUnknown {
+		t.Fatalf("after clearing: %q", got)
+	}
+}
+
+func TestHealthPartitionDeferredNaming_NonVacuity(t *testing.T) {
+	e := apiEngine(t, 0)
+	e.cfg.MergeTrain = "on"
+	e.cfg.PollSeconds = 30
+	now := e.now()
+	e.health.markStarted(now.Add(-time.Hour))
+	e.seedAPIItem(t, 1, "Queued")
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Queued"}})
+	e.health.beginPoll(now.Add(-time.Second), pollVerdict{})
+	e.health.endPoll(now, pollVerdict{}, now.Add(30*time.Second))
+	e.SetCatchUpDeferralVisibilityDisabledForTest(true)
+	e.noteCatchUpDeferral("owner/repo", 1, "REBASE_HEAD present")
+	h, _ := e.LocalAPIBackend().Health(localapi.HealthParams{})
+	if got := h.MergeTrain[0].IdleReason; got != idleReasonUnknown {
+		t.Fatalf("neutralised: idle_reason = %q, want unknown", got)
 	}
 }
