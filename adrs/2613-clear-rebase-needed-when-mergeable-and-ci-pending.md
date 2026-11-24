@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends the "no label churn on pending" wording of ADR 032 R10c as built, and the clearing-owner invariant in `docs/state-machine.md` §6.6.1. Restates community report #2608 (mentioned for context: #2608).
+Accepted. Amends the "no label churn on pending" wording of ADR 032 (032-ci-gate-conjunctive-completion-label.md) R10c as built, and the clearing-owner invariant in `docs/state-machine.md` §6.6.1. Restates community report #2608 (mentioned for context: #2608).
 
 ## Context
 
