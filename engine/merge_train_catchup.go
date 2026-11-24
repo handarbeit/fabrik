@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -85,6 +86,141 @@ type catchUpState struct {
 	// window a live head has no marker yet; the SHA-invalidation scan (#2158) defers on
 	// it rather than reading the unmarked head as external. In-memory only.
 	pushing map[string]int
+	// deferrals counts, per (trainKey, issue), consecutive formations in which the git half
+	// deferred the member because its own worktree was busy (#2615, ADR 2615). In memory only:
+	// a restart can lengthen the wait by at most catchUpBusyBound formations, never shorten it.
+	deferrals map[string]*catchUpDeferral
+
+	boundDisabled      atomic.Bool // test seam: neutralises the bounded deferral (#2615 R3)
+	visibilityDisabled atomic.Bool // test seam: neutralises the partition idle_reason naming (#2615 R4)
+}
+
+// catchUpDeferral is one member's run of worktree-busy deferrals.
+type catchUpDeferral struct {
+	trainKey string
+	issue    int
+	count    int
+	reason   string
+	last     time.Time
+}
+
+// catchUpBusyBound is how many consecutive worktree-busy deferrals (with no worker in
+// flight) a Queued member gets before the train stops waiting and moves it off Queued
+// (#2615, ADR 2615). Two, because the first can be a worker that exited a moment ago; a
+// leftover that survives two formations is not going to clear itself.
+const catchUpBusyBound = 2
+
+// catchUpDeferralGap is how long a deferral may be followed by silence before the run is
+// no longer "consecutive": the member left the train for a while and came back.
+func (e *Engine) catchUpDeferralGap() time.Duration {
+	gap := 5 * time.Duration(e.cfg.PollSeconds) * time.Second
+	if gap < 10*time.Minute {
+		gap = 10 * time.Minute
+	}
+	return gap
+}
+
+// noteCatchUpDeferral records one worktree-busy deferral of the member and returns the
+// length of the consecutive run including this one.
+func (e *Engine) noteCatchUpDeferral(trainKey string, issue int, reason string) int {
+	now := e.now()
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	if e.trainCatchUp.deferrals == nil {
+		e.trainCatchUp.deferrals = make(map[string]*catchUpDeferral)
+	}
+	k := catchUpKey(trainKey, issue)
+	d := e.trainCatchUp.deferrals[k]
+	if d == nil || now.Sub(d.last) > e.catchUpDeferralGap() {
+		d = &catchUpDeferral{trainKey: trainKey, issue: issue}
+		e.trainCatchUp.deferrals[k] = d
+	}
+	d.count++
+	d.reason = reason
+	d.last = now
+	return d.count
+}
+
+// clearCatchUpDeferral ends the member's run of deferrals (progress, a different kind of
+// deferral, a worker or editing label seen, the member left Queued).
+func (e *Engine) clearCatchUpDeferral(trainKey string, issue int) {
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	delete(e.trainCatchUp.deferrals, catchUpKey(trainKey, issue))
+}
+
+// catchUpDeferralPeek is the non-mutating read the health path uses (#2615 R4, like
+// infraCooldownPeek): the lowest-numbered member of the partition that is currently
+// deferred as busy, accepted only when inPartition says it is still queued there, with
+// its reason. A run older than the gap is not reported.
+func (e *Engine) catchUpDeferralPeek(trainKey string, inPartition func(issue int) bool) (issue int, reason string, ok bool) {
+	if e.trainCatchUp.visibilityDisabled.Load() {
+		return 0, "", false
+	}
+	now := e.now()
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	for _, d := range e.trainCatchUp.deferrals {
+		if d.trainKey != trainKey || now.Sub(d.last) > e.catchUpDeferralGap() || !inPartition(d.issue) {
+			continue
+		}
+		if !ok || d.issue < issue {
+			issue, reason, ok = d.issue, d.reason, true
+		}
+	}
+	return issue, reason, ok
+}
+
+// SetCatchUpBusyBoundDisabledForTest neutralises the bounded deferral (#2615 R3).
+func (e *Engine) SetCatchUpBusyBoundDisabledForTest(disabled bool) {
+	e.trainCatchUp.boundDisabled.Store(disabled)
+}
+
+// SetCatchUpDeferralVisibilityDisabledForTest neutralises the partition idle_reason naming
+// of a deferred member (#2615 R4).
+func (e *Engine) SetCatchUpDeferralVisibilityDisabledForTest(disabled bool) {
+	e.trainCatchUp.visibilityDisabled.Store(disabled)
+}
+
+// catchUpStuckFragment is the stable prose the bounded-deferral comment starts with
+// (hasPauseComment dedup).
+const catchUpStuckFragment = "Catching this branch up with the merge-train base was deferred"
+
+// resolveStuckCatchUp is R3: the member has been deferred as busy catchUpBusyBound times
+// in a row with nothing working on it. It re-checks that no worker is in flight, reroutes
+// the member off Queued (uncharged), says why in one comment and pauses it with the reason
+// named. It returns false — writing nothing — when the member is not eligible or the
+// reroute failed; the caller then defers as before and the next formation retries.
+func (e *Engine) resolveStuckCatchUp(state *mergeTrainWorkerState, p trialParams, m trainMember, reason string, count int) bool {
+	if snap, ok := e.store.Peek(p.owner+"/"+p.repo, m.item.Number); ok {
+		if w := snap.Worker(); w != nil && !isWorkerStale(w, e.workerStaleTimeout()) {
+			return false
+		}
+	}
+	if !e.rerouteQueuedMemberOffHolding(state.projectID, m.item) {
+		e.logf(m.item.Number, "merge-train", "singleton catch-up: #%d deferred %d times (%s) but could not be rerouted off Queued — will retry on the next formation\n", m.item.Number, count, reason)
+		return false
+	}
+	targetName := "the preceding stage"
+	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
+		targetName = target.Name
+	}
+	e.logf(m.item.Number, "merge-train", "singleton catch-up: #%d deferred %d times in a row (%s) with no worker on it — rerouted to %s and pausing, nothing charged\n", m.item.Number, count, reason, targetName)
+	if !hasPauseComment(m.item, catchUpStuckFragment) {
+		msg := fmt.Sprintf("🏭 **Fabrik — merge-train catch-up stopped**\n\n"+
+			"%s on %d formations in a row because its worktree is busy (%s), and nothing is working on it. "+
+			"Fabrik will not keep waiting for ever, so #%d was moved back to %s and paused. Nothing was charged against it.\n\n"+
+			"To resume, clear what the worktree is holding (for example commit or remove the files `git status` lists, or finish or abort the rebase) and comment on this issue.",
+			catchUpStuckFragment, count, reason, m.item.Number, targetName)
+		if _, err := e.client.AddComment(p.owner, p.repo, m.item.Number, msg); err != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not post the catch-up stopped comment: %v\n", err)
+		}
+	}
+	e.pauseMergeTrainMember(p.owner, p.repo, m.item.Number, pauseCauseOther)
+	e.setStatusLine(m.item, statusLinePaused("catch-up worktree busy"))
+	p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d stopped after %d busy deferrals (%s); paused", m.item.Number, count, reason))
+	e.clearCatchUpDeferral(p.trainKey, m.item.Number)
+	return true
 }
 
 func catchUpPRKey(owner, repo string, pr int) string { return fmt.Sprintf("%s/%s#%d", owner, repo, pr) }
@@ -143,6 +279,7 @@ func (e *Engine) resetCatchUpAttempts(trainKey string, issue int) {
 	e.trainCatchUp.mu.Lock()
 	defer e.trainCatchUp.mu.Unlock()
 	delete(e.trainCatchUp.attempts, catchUpKey(trainKey, issue))
+	delete(e.trainCatchUp.deferrals, catchUpKey(trainKey, issue))
 }
 
 // catchUpGitKind classifies what the git half of a catch-up produced.
@@ -241,6 +378,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		return m, false
 	}
 	if why := e.catchUpBusyReason(p, m); why != "" {
+		// A worker, fabrik:editing or unreadable labels: real activity (or doubt), not a
+		// leftover — the run of worktree-busy deferrals starts over (#2615 FR-007).
+		e.clearCatchUpDeferral(p.trainKey, m.item.Number)
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: deferring #%d — %s; leaving it in Queued, nothing charged\n", m.item.Number, why)
 		p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d deferred: %s", m.item.Number, why))
 		return m, true
@@ -257,8 +397,18 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	} else {
 		out = e.runCatchUpGit(ctx, p, m)
 	}
+	if out.kind != catchUpDefer || !out.worktreeBusy {
+		e.clearCatchUpDeferral(p.trainKey, m.item.Number)
+	}
 	switch out.kind {
 	case catchUpDefer:
+		if out.worktreeBusy {
+			n := e.noteCatchUpDeferral(p.trainKey, m.item.Number, strings.TrimPrefix(out.reason, ErrCatchUpBusy.Error()+": "))
+			if n >= catchUpBusyBound && !e.trainCatchUp.boundDisabled.Load() &&
+				e.resolveStuckCatchUp(state, p, m, strings.TrimPrefix(out.reason, ErrCatchUpBusy.Error()+": "), n) {
+				return m, true
+			}
+		}
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: deferring #%d — %s; leaving it in Queued, nothing charged\n", m.item.Number, out.reason)
 		p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d deferred: %s", m.item.Number, out.reason))
 		return m, true
