@@ -82,6 +82,11 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		if !hasLabel(item.Labels, "fabrik:rebase-needed") {
 			e.applyLabelAdd(item, "fabrik:rebase-needed", false)
 		}
+		// #2613: a conflict ends any earlier conflict-free merge hold, so the
+		// attention reason never reads "rebase pushed; waiting for CI" for a
+		// head that conflicts again (the recorded NoConflict fact would otherwise
+		// outlive the conflict until its lapse). Store only: no channel record.
+		e.store.Apply(itemstate.GateHoldCleared{Repo: itemOwnerRepoString(item, e.defaultRepo()), Number: item.Number, Gate: gateMerge})
 		return true, true
 	}
 	return false, false

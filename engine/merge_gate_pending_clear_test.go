@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -101,5 +102,25 @@ func TestCheckMergeabilityGate_UnsettledComputed_Neutralised_KeepsLabel(t *testi
 	eng.checkMergeabilityGate(item, stage, settle)
 	if got := rebaseLabelRemovals(client); got != 0 {
 		t.Errorf("removals = %d, want 0 when neutralised", got)
+	}
+}
+
+// #2613 review: a conflict that returns after a conflict-free hold must drop the
+// recorded NoConflict fact, so the attention reason cannot read "rebase pushed".
+func TestCheckMergeabilityGate_Conflicting_ClearsStaleNoConflictHold(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
+	repo := itemOwnerRepoString(item, eng.defaultRepo())
+	eng.store.Apply(itemstate.GateHoldRecorded{Repo: repo, Number: 1,
+		Hold: itemstate.GateHold{Gate: gateMerge, Reason: "CI checks pending", NoConflict: true}})
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 5}}
+	if blocked, conflict := eng.checkMergeabilityGate(item, stage, settle); !blocked || !conflict {
+		t.Fatalf("want blocked+conflict, got %v %v", blocked, conflict)
+	}
+	if snap, ok := eng.store.Peek(repo, 1); ok && snap.State().GateHold != nil {
+		t.Errorf("stale merge gate hold survived a conflict: %+v", snap.State().GateHold)
 	}
 }
