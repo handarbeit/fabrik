@@ -12,6 +12,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // Singleton catch-up (#2044, ADR-2044).
@@ -92,6 +93,7 @@ type catchUpState struct {
 	deferrals map[string]*catchUpDeferral
 
 	boundDisabled      atomic.Bool // test seam: neutralises the bounded deferral (#2615 R3)
+	cooldownDisabled   atomic.Bool // test seam: neutralises the re-poll cooldown of a counted deferral (#2615 R3)
 	visibilityDisabled atomic.Bool // test seam: neutralises the partition idle_reason naming (#2615 R4)
 }
 
@@ -114,13 +116,56 @@ type catchUpDeferral struct {
 const catchUpBusyBound = 2
 
 // catchUpDeferralGap is how long a deferral may be followed by silence before the run is
-// no longer "consecutive": the member left the train for a while and came back.
+// no longer "consecutive": the member left the train for a while and came back. A counted
+// deferral records catchUpDeferredCooldownReason, so the poll comes back within about half a
+// poll interval; the gap is deliberately wider than the longest idle cadence (webhookIdleCap,
+// 60 min, for a webhook-healthy board) so that, even when that cap is skipped (GraphQL
+// rate-limit backoff), a run is not silently restarted between two deferrals (#2615 R3).
 func (e *Engine) catchUpDeferralGap() time.Duration {
-	gap := 5 * time.Duration(e.cfg.PollSeconds) * time.Second
-	if gap < 10*time.Minute {
-		gap = 10 * time.Minute
+	gap := webhookIdleCap + 10*time.Minute
+	if p := 12 * time.Duration(e.cfg.PollSeconds) * time.Second; p > gap {
+		gap = p
 	}
 	return gap
+}
+
+// catchUpDeferredCooldownReason is the short admission cooldown a counted worktree-busy
+// deferral records on its member (#2615 R3). A deferral ends the run and writes nothing
+// else, so on a quiet, webhook-healthy board the idle backoff (about 10 x poll + poll)
+// would space two deferrals further apart than the run's gap and the count would never
+// reach catchUpBusyBound. The cooldown makes PollWithBackoff cap the idle interval at its
+// due (the earliestShortCooldown rule), so the next formation, and with it the bound,
+// arrives within about half a poll interval. A Queued member is never dispatched
+// individually, so the entry holds nothing back; it is simply expired by the next poll.
+const catchUpDeferredCooldownReason = "catch-up-deferred"
+
+// recordCatchUpDeferralCooldown keeps the poll coming back while a member's counted
+// deferral run is open.
+func (e *Engine) recordCatchUpDeferralCooldown(item gh.ProjectItem) {
+	if e.trainCatchUp.cooldownDisabled.Load() {
+		return
+	}
+	d := e.mergeGateRecheckInterval()
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: catchUpDeferredCooldownReason,
+		Until:  e.now().Add(d),
+	})
+	// The deferral is recorded by a worker goroutine after the poll that dispatched it
+	// has already chosen its next interval, and a train worker's exit wakes nothing, so
+	// the cooldown alone would only shorten the sleep after the one that follows. Wake
+	// the poll loop at the due (a dropped wake under rate-limit backoff falls back to
+	// the cooldown cap and the wide gap).
+	if e.wakeCh != nil {
+		wake := e.wakeCh
+		time.AfterFunc(d+time.Second, func() {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		})
+	}
 }
 
 // noteCatchUpDeferral records one worktree-busy deferral of the member and returns the
@@ -180,7 +225,9 @@ func (e *Engine) catchUpDeferralPeek(trainKey string, inPartition func(issue int
 	e.trainCatchUp.mu.Lock()
 	defer e.trainCatchUp.mu.Unlock()
 	for _, d := range e.trainCatchUp.deferrals {
-		if d.trainKey != trainKey || now.Sub(d.last) > e.catchUpDeferralGap() || !inPartition(d.issue) {
+		// An operation record is not refreshed by a poll cadence of its own (it waits for
+		// a human), so it does not age out: the next formation clears or replaces it.
+		if d.trainKey != trainKey || (!d.operation && now.Sub(d.last) > e.catchUpDeferralGap()) || !inPartition(d.issue) {
 			continue
 		}
 		if !ok || d.issue < issue {
@@ -188,6 +235,12 @@ func (e *Engine) catchUpDeferralPeek(trainKey string, inPartition func(issue int
 		}
 	}
 	return issue, reason, ok
+}
+
+// SetCatchUpDeferralCooldownDisabledForTest neutralises the re-poll cooldown a counted
+// deferral records (#2615 R3).
+func (e *Engine) SetCatchUpDeferralCooldownDisabledForTest(disabled bool) {
+	e.trainCatchUp.cooldownDisabled.Store(disabled)
 }
 
 // SetCatchUpBusyBoundDisabledForTest neutralises the bounded deferral (#2615 R3).
@@ -434,6 +487,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 				e.resolveStuckCatchUp(state, p, m, strings.TrimPrefix(out.reason, ErrCatchUpBusy.Error()+": "), n) {
 				return m, true
 			}
+			e.recordCatchUpDeferralCooldown(m.item)
 		}
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: deferring #%d — %s; leaving it in Queued, nothing charged\n", m.item.Number, out.reason)
 		p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d deferred: %s", m.item.Number, out.reason))

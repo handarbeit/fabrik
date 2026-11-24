@@ -1,13 +1,16 @@
 package sim
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
@@ -164,5 +167,61 @@ func TestMergeTrainSingletonCatchUp_PersistentlyBusyMember_NeutralisedStaysQueue
 	}
 	if got := partitionIdleReason(t, env); strings.Contains(got, "catch-up deferred") {
 		t.Fatalf("with visibility neutralised idle_reason = %q", got)
+	}
+}
+
+// R3 on a quiet, webhook-healthy board (review finding): a deferral records no admission
+// cooldown of its own, so the idle backoff used to put the next formation up to an hour
+// away, and the run of deferrals never reached the bound. The deferral now records a short
+// cooldown (and a wake at its due), so the poll comes back within about a poll interval
+// even though the daemon is as idle as it can be.
+//
+// Neutralisation: SetCatchUpDeferralCooldownDisabledForTest(true) records nothing and the
+// idle daemon sleeps at its idle cadence.
+func TestMergeTrainSingletonCatchUp_DeferredMember_KeepsPollingOnAnIdleHealthyBoard(t *testing.T) {
+	t.Parallel()
+	for _, cooldown := range []bool{true, false} {
+		cooldown := cooldown
+		name := "cooldown"
+		if !cooldown {
+			name = "nonvacuity-cooldown-disabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, num, _, _, wtDir := busyMemberEnv(t, "busy-idle-"+name)
+			stub := engine.NewStubTransport()
+			stub.SetHealthy(true)
+			env.Engine.AttachStubTransportForTest(stub)
+			env.Engine.SetCatchUpDeferralCooldownDisabledForTest(!cooldown)
+			if err := os.WriteFile(filepath.Join(wtDir, "stray.go"), []byte("package x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			// Stop at the first deferral: the second would move the member off Queued.
+			AdvanceUntil(t, env, func(env *Env) bool {
+				h := healthOf(t, env)
+				return len(h.MergeTrain) == 1 && strings.Contains(h.MergeTrain[0].IdleReason, "catch-up deferred")
+			}, 8)
+			if st := projectItem(t, env, num).Status; st != "Queued" {
+				t.Fatalf("one deferral must leave the member Queued, got %q", st)
+			}
+			rec, _ := env.Engine.StoreItemForTest(env.OwnerRepo, num)
+			if has := !rec.CooldownAt["catch-up-deferred"].IsZero(); has != cooldown {
+				t.Fatalf("catch-up-deferred cooldown recorded = %v, want %v", has, cooldown)
+			}
+
+			// A deeply idle poll, taken while the cooldown is unexpired, must not sleep past it.
+			env.Engine.SetIdleStartForTest(time.Now().Add(-time.Hour))
+			res, err := env.Engine.PollWithBackoff(context.Background(), env.PollInterval)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cooldown && res.NextInterval > time.Minute {
+				t.Fatalf("a deferred member must keep the poll coming back soon; next poll in %v", res.NextInterval)
+			}
+			if !cooldown && res.NextInterval < 10*time.Minute {
+				t.Fatalf("neutralised, the idle daemon should sleep at its idle cadence, got %v", res.NextInterval)
+			}
+		})
 	}
 }

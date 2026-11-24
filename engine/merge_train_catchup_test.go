@@ -686,3 +686,83 @@ func TestSingletonCatchUp_OperationDeferralIsVisibleButNeverBounded(t *testing.T
 		t.Fatal("the first worktree-busy deferral after an operation must not bound")
 	}
 }
+
+// A counted deferral records no admission cooldown of its own, so on a quiet webhook-healthy
+// board the idle backoff (about 10 x poll + poll) used to space two deferrals further apart
+// than the run's gap: the run restarted every time and catchUpBusyBound was never reached
+// (#2615 R3, review finding). Each counted deferral now records a short cooldown, so the poll
+// comes back within about half a poll interval.
+const cuDevPollSeconds = 180 // the dev daemon: poll 180 s, tailscale (webhook-healthy)
+
+func nextPollAfterDeferral(w *catchUpWorld) (next, idle time.Duration) {
+	idle = computeEffectiveInterval(cuDevPollSeconds*time.Second, time.Hour, 1.0, true)
+	now := w.eng.now()
+	return capIntervalToDue(idle, w.eng.earliestShortCooldown(now), now, minDueWakeInterval), idle
+}
+
+func TestSingletonCatchUp_CountedDeferralKeepsThePollComingBack(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.cfg.PollSeconds = cuDevPollSeconds
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run()
+	next, idle := nextPollAfterDeferral(w)
+	if want := time.Duration(cuDevPollSeconds) * time.Second / 2; next > want {
+		t.Fatalf("after a counted deferral the next poll is %v away (idle cadence %v); want at most %v", next, idle, want)
+	}
+}
+
+func TestSingletonCatchUp_DeferralCooldownNeutralised_PollSleepsAtTheIdleCadence(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.cfg.PollSeconds = cuDevPollSeconds
+	w.eng.SetCatchUpDeferralCooldownDisabledForTest(true)
+	w.busyOutcome("worktree has uncommitted changes")
+	w.run()
+	if next, idle := nextPollAfterDeferral(w); next != idle {
+		t.Fatalf("with the cooldown neutralised the poll must sleep at the idle cadence %v, got %v", idle, next)
+	}
+}
+
+// The bound still fires when the deferrals are spaced at the real idle cadence of the
+// dev daemon (poll 180 s, webhook-healthy, no other cooldown): the gap between the two
+// deferrals is the interval PollWithBackoff would actually sleep.
+func TestSingletonCatchUp_BoundFiresWhenDeferralsAreSpacedAtTheRealCadence(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.cfg.PollSeconds = cuDevPollSeconds
+	clk := &fakeClock{t: time.Now()}
+	w.eng.SetClock(clk)
+	w.busyOutcome("REBASE_HEAD present")
+	for i := 0; i < catchUpBusyBound; i++ {
+		w.run()
+		next, _ := nextPollAfterDeferral(w)
+		clk.t = clk.t.Add(next)
+	}
+	if paused, moves := w.pausedAndRerouted(); !paused || moves != 1 {
+		t.Fatalf("the member must be rerouted and paused after %d deferrals at the real cadence (paused=%v moves=%d)", catchUpBusyBound, paused, moves)
+	}
+}
+
+// Even when the poll cap is skipped (GraphQL rate-limit backoff), the run's gap must be
+// wider than the webhook-healthy idle cadence, or the count restarts between deferrals.
+func TestCatchUpDeferralGap_CoversTheIdleCadence(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.cfg.PollSeconds = cuDevPollSeconds
+	idle := computeEffectiveInterval(cuDevPollSeconds*time.Second, time.Hour, 1.0, true)
+	if gap := w.eng.catchUpDeferralGap(); gap <= idle {
+		t.Fatalf("deferral gap %v does not cover the idle cadence %v", gap, idle)
+	}
+}
+
+// An operation really in progress is named in idle_reason until the next formation, however
+// long the poll sleeps: its record does not age out (nothing re-polls it on a cadence).
+func TestSingletonCatchUp_OperationRecordDoesNotAgeOut(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.cfg.PollSeconds = cuDevPollSeconds
+	clk := &fakeClock{t: time.Now()}
+	w.eng.SetClock(clk)
+	w.gitOut = catchUpGitOutcome{kind: catchUpDefer, reason: ErrCatchUpBusy.Error() + ": rebase-merge/ present", operation: true}
+	w.run()
+	clk.t = clk.t.Add(24 * time.Hour)
+	if _, reason, ok := w.eng.catchUpDeferralPeek("owner/repo", func(int) bool { return true }); !ok || !strings.Contains(reason, "rebase-merge/ present") {
+		t.Fatalf("an operation record must stay named (ok=%v reason=%q)", ok, reason)
+	}
+}
