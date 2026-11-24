@@ -985,6 +985,10 @@ func createBoardTestServerFields(t *testing.T, ownerTypename string, statusOptio
 				},
 			}
 		case strings.Contains(body.Query, "updateProjectV2Field(input:"):
+			if errResp := ff.recordStatusMutation(body.Variables); errResp != nil {
+				json.NewEncoder(w).Encode(errResp)
+				return
+			}
 			resp = map[string]interface{}{
 				"data": map[string]interface{}{
 					"updateProjectV2Field": map[string]interface{}{

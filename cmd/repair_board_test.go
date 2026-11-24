@@ -99,6 +99,10 @@ func repairBoardTestServerFields(t *testing.T, ownerType string, statusOptions [
 			if setStatusCalled != nil {
 				*setStatusCalled = true
 			}
+			if errResp := ff.recordStatusMutation(body.Variables); errResp != nil {
+				json.NewEncoder(w).Encode(errResp)
+				return
+			}
 			resp = map[string]interface{}{
 				"data": map[string]interface{}{
 					"updateProjectV2Field": map[string]interface{}{
@@ -243,6 +247,8 @@ func TestRepairBoardCore_ApplyPreservesExistingIDsAndEchoesFields(t *testing.T) 
 			}
 		case strings.Contains(body.Query, "fields(first: 100"):
 			resp, _ = allDisplayFieldsPresent().handle(body.Query, body.Variables)
+		case strings.Contains(body.Query, "__type(name:"):
+			resp, _ = newFakeFieldBoard().handle(body.Query, body.Variables)
 		case strings.Contains(body.Query, "updateProjectV2Field(input:"):
 			gotVars = body.Variables
 			resp = map[string]interface{}{
