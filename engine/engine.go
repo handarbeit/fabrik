@@ -341,6 +341,11 @@ type Engine struct {
 	// completeLabelSkipOff restores the unconditional completion-label add of the
 	// CI gate clear (#2530); test seam SetCompleteLabelSkipDisabledForTest.
 	completeLabelSkipOff atomic.Bool
+
+	// rebaseLabelPendingClearOff restores the merge gate leaving fabrik:rebase-needed
+	// in place while CI is pending on a conflict-free head (#2613); test seam
+	// SetRebaseLabelClearOnPendingDisabledForTest.
+	rebaseLabelPendingClearOff atomic.Bool
 	// periodicActivityNarrowingOff counts a periodic-re-evaluation-only admission as
 	// activity again (#2530); test seam SetPeriodicActivityNarrowingDisabledForTest.
 	periodicActivityNarrowingOff atomic.Bool

@@ -77,12 +77,28 @@ type GateFact struct {
 	// IDs are the pending feedback ids (feedback gate).
 	IDs   []string
 	Since time.Time
+	// NoConflict is true when the merge gate holds the item on a head GitHub
+	// reports as conflict-free (checks pending; #2613).
+	NoConflict bool
 }
 
 // ConflictFact is a merge-train conflict resolution for the item.
 type ConflictFact struct {
 	Queued bool
 	Since  time.Time
+}
+
+// rebasePushedSummary is the reason for a fabrik:rebase-needed item whose rebase
+// was dispatched and whose head GitHub now reports as conflict-free (#2613).
+const rebasePushedSummary = "rebase pushed; waiting for CI on the new head"
+
+// rebasePushedWaitingForCI reports whether a fabrik:rebase-needed item is past its
+// rebase: not the after-landing case, no worker running, a rebase dispatched, and
+// the merge gate holding a conflict-free head. Every input is an explicit recorded
+// fact, never inferred from gate reason text.
+func rebasePushedWaitingForCI(in Input) bool {
+	return !in.RebaseAfterLanding && !in.HasWorker && in.RebaseDispatched &&
+		in.Gate != nil && in.Gate.Gate == "merge" && in.Gate.NoConflict
 }
 
 // slotsBusy reports whether the worker pool is known to be full.

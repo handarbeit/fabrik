@@ -695,6 +695,9 @@ type GateHold struct {
 	// confirmed it.
 	Since       time.Time
 	ConfirmedAt time.Time
+	// NoConflict is set by the merge gate when its hold is on a head GitHub
+	// reports as conflict-free (mergeability computed; checks pending, #2613).
+	NoConflict bool
 }
 
 // ConflictResolution marks a merge-train conflict resolution for a member item
