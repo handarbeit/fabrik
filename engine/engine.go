@@ -561,6 +561,11 @@ type Engine struct {
 	cleanStopResume    cleanStopResumeState
 	cleanStopResumeOff atomic.Bool
 
+	// spawnMarkerFirstOff restores the pre-#2612 ordering in spawnChildren (the
+	// servability guard over every block before the resume markers are read) —
+	// the per-Engine non-vacuity seam.
+	spawnMarkerFirstOff atomic.Bool
+
 	// fabrik/review commit status (#2471, ADR 2471): the per-item last-written record
 	// the scan and the CI-timer attribution read, the warnings-panel dedup state and
 	// the per-Engine neutralisation seams.

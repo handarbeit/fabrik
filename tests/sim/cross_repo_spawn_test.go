@@ -8,6 +8,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tests/sim/simgh"
 )
 
 // This file ports tests/e2e/cross_repo_spawn_test.go's TestCrossRepoSpawn:
@@ -258,4 +259,58 @@ func TestCrossRepoSpawn_RefusesUnservedTarget(t *testing.T) {
 		t.Fatalf("expected an AddComment call on #%d naming %q as not served by this instance; log:\n%s", parent, unservedTarget, env.Sim.Log().Dump(50))
 	}
 	t.Logf("AC3 verified: explanatory comment names the unservable target %q", unservedTarget)
+}
+
+// runMarkedUnservedSpawn drives a repo-scoped instance whose parent's Plan
+// declares a block in a repo the instance does not serve, and whose operator
+// created that child by hand (a closed issue in the unserved repo) and marked
+// the parent with fabrik:spawned-child:1:<n> (#2612, ADR 2612). markerFirstOff
+// neutralises the fix (the non-vacuity run). It returns the parent number, the
+// hand-made child's number and the unserved repo.
+func runMarkedUnservedSpawn(t *testing.T, markerFirstOff bool) (env *Env, parent, child int, target string) {
+	t.Helper()
+	env = NewEnv(t, EnvOptions{Stages: crossRepoSpawnStages()})
+	env.Engine.SetSpawnMarkerFirstDisabledForTest(markerFirstOff)
+
+	target = "acme/handmade-elsewhere"
+	child = 77
+	env.Sim.Sim().SeedRepo(target)
+	env.Sim.Sim().SeedIssue(target, simgh.IssueSeed{Number: child, Title: "hand-made child", Author: "operator", State: "CLOSED"})
+	parent = seedSpawnReadyParent(t, env, target, "hand-made child", "created by the operator")
+	if err := env.Sim.Sim().AddLabelToIssue(env.Owner, env.Repo, parent, fmt.Sprintf("fabrik:spawned-child:1:%d", child)); err != nil {
+		t.Fatalf("seeding the spawned-child marker: %v", err)
+	}
+	return env, parent, child, target
+}
+
+// TestCrossRepoSpawn_MarkedUnservedChildResumesParent: the marker is read before
+// the servability guard, so the parent proceeds with no pause, no CreateIssue and
+// no write to the unserved repo.
+func TestCrossRepoSpawn_MarkedUnservedChildResumesParent(t *testing.T) {
+	t.Parallel()
+	env, parent, _, target := runMarkedUnservedSpawn(t, false)
+
+	WaitForIssueLabel(t, env, parent, "fabrik:children-spawned", 80)
+	if labels := IssueLabels(t, env, parent); hasLabel(labels, "fabrik:paused") {
+		t.Fatalf("parent paused despite a resolvable marked child; labels=%v", labels)
+	}
+	if n := len(env.Sim.Log().ByMethod("CreateIssue")); n != 0 {
+		t.Errorf("CreateIssue calls = %d, want 0", n)
+	}
+	for _, e := range env.Sim.Log().Mutations() {
+		if e.Args.Owner+"/"+e.Args.Repo == target {
+			t.Errorf("write against the unserved repo %s: %s", target, e.Method)
+		}
+	}
+}
+
+// Non-vacuity: with the marker-first ordering neutralised the same setup pauses.
+func TestCrossRepoSpawn_MarkedUnservedChild_NeutralisedPauses(t *testing.T) {
+	t.Parallel()
+	env, parent, _, _ := runMarkedUnservedSpawn(t, true)
+
+	WaitForIssueLabel(t, env, parent, "fabrik:paused", 80)
+	if labels := IssueLabels(t, env, parent); hasLabel(labels, "fabrik:children-spawned") {
+		t.Fatal("fabrik:children-spawned applied with the fix neutralised")
+	}
 }
