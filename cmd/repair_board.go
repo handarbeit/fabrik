@@ -41,7 +41,10 @@ func runRepairBoard(args []string) error {
 		fmt.Fprintf(fset.Output(), "  --apply    Add the missing columns and fields. Never removes a column or\n")
 		fmt.Fprintf(fset.Output(), "             field, never reorders existing options; existing option ids are\n")
 		fmt.Fprintf(fset.Output(), "             always preserved so no item loses its current Status. A field\n")
-		fmt.Fprintf(fset.Output(), "             that exists with the wrong type is reported, never touched.\n\n")
+		fmt.Fprintf(fset.Output(), "             that exists with the wrong type is reported, never touched.\n")
+		fmt.Fprintf(fset.Output(), "             On a server whose option input takes no id (GHES 3.19.10) columns\n")
+		fmt.Fprintf(fset.Output(), "             are added only while no item has a Status; otherwise add them in\n")
+		fmt.Fprintf(fset.Output(), "             the board's UI (see the User Guide).\n\n")
 		fmt.Fprintf(fset.Output(), "Organization-owned boards only (see #770) — refuses on a user-owned board.\n")
 		fset.PrintDefaults()
 	}
@@ -126,6 +129,13 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 	fieldsMissing := countDisplayFields(plan, displayFieldMissing)
 	enabledFields := len(requiredDisplayFields(pf))
 
+	// How a Status replacement may be sent is decided once, only when columns
+	// are missing (#2616). The same decision reports the dry run and drives apply.
+	mode, refuseReason := statusReplaceEcho, ""
+	if len(missing) > 0 {
+		mode, refuseReason = planStatusReplace(client, board.ProjectID)
+	}
+
 	if len(missing) > 0 {
 		fmt.Fprintf(w, "repair-board: %d missing column(s): %s\n", len(missing), strings.Join(missing, ", "))
 	}
@@ -136,9 +146,22 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 		return nil
 	}
 
+	statusRefused := len(missing) > 0 && mode == statusReplaceRefuse
+
 	if !apply {
-		if len(missing) > 0 || fieldsMissing > 0 {
-			fmt.Fprintf(w, "Dry run — no changes made. Re-run with --apply to add the missing column(s) and display field(s).\n")
+		if statusRefused {
+			fmt.Fprintf(w, "repair-board: %s\n", statusRefusalMessage(missing, refuseReason))
+		}
+		addable := len(missing) > 0 && !statusRefused
+		if addable || fieldsMissing > 0 {
+			what := "the missing column(s) and display field(s)"
+			switch {
+			case !addable:
+				what = "the missing display field(s)"
+			case fieldsMissing == 0:
+				what = "the missing column(s)"
+			}
+			fmt.Fprintf(w, "Dry run — no changes made. Re-run with --apply to add %s.\n", what)
 		}
 		return planErr
 	}
@@ -148,7 +171,9 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 		errs = append(errs, planErr)
 	}
 	if len(missing) > 0 {
-		if err := addMissingStatusColumns(client, sf, missing); err != nil {
+		if statusRefused {
+			errs = append(errs, errors.New(statusRefusalMessage(missing, refuseReason)))
+		} else if err := addMissingStatusColumns(client, sf, missing, mode); err != nil {
 			errs = append(errs, err)
 		} else {
 			fmt.Fprintf(w, "repair-board: added %d column(s): %s\n", len(missing), strings.Join(missing, ", "))
@@ -168,34 +193,47 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 	return errors.Join(errs...)
 }
 
-// addMissingStatusColumns appends the missing Status columns.
-func addMissingStatusColumns(client *gh.Client, sf *gh.StatusField, missing []string) error {
+// addMissingStatusColumns appends the missing Status columns. mode is the
+// planStatusReplace decision: statusReplaceEcho echoes every existing option's
+// id (github.com); statusReplaceNameOnly sends no id at all (a server without
+// id support, on a board no item has a Status on — #2616). statusReplaceRefuse
+// is never passed here.
+func addMissingStatusColumns(client *gh.Client, sf *gh.StatusField, missing []string, mode statusReplaceMode) error {
 	// R4/R6: build the option list by echoing every existing option's
-	// id/color/description back UNCHANGED (never omitted, never
-	// regenerated — that would silently clear every item's Status) and
-	// appending only the missing columns, each with a nil id so the server
+	// color/description (and, where the server takes it, id) back UNCHANGED
+	// and appending only the missing columns, each with a nil id so the server
 	// mints a fresh one. There is no code path here that omits an existing
 	// entry, so a column is never deleted (R6) — by construction, not by a
-	// separate "check for items first" step.
+	// separate "check for items first" step. Omitting an id where the server
+	// accepts one would silently clear every item's Status, which is why the
+	// no-id path exists only behind planStatusReplace's empty-board proof.
 	options := make([]gh.StatusOptionInput, 0, len(sf.OrderedOptionNames)+len(missing))
 	for _, name := range sf.OrderedOptionNames {
 		detail, ok := sf.OptionDetails[name]
 		if !ok {
 			return fmt.Errorf("internal error: existing option %q has no details from FetchStatusField — refusing to risk an id-losing repair", name)
 		}
-		id := detail.ID
-		options = append(options, gh.StatusOptionInput{
-			ID:          &id,
-			Name:        detail.Name,
-			Color:       detail.Color,
-			Description: detail.Description,
-		})
+		opt := gh.StatusOptionInput{Name: detail.Name, Color: detail.Color, Description: detail.Description}
+		if mode == statusReplaceEcho {
+			id := detail.ID
+			opt.ID = &id
+		}
+		options = append(options, opt)
 	}
 	for _, name := range missing {
 		options = append(options, gh.StatusOptionInput{Name: name, Color: "GRAY", Description: ""})
 	}
 
-	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
+	var err error
+	switch mode {
+	case statusReplaceEcho:
+		err = client.SetStatusFieldOptions(sf.FieldID, options)
+	case statusReplaceNameOnly:
+		err = client.SetStatusFieldOptionsWithoutIDs(sf.FieldID, options)
+	default:
+		return fmt.Errorf("internal error: addMissingStatusColumns called with a refusing mode")
+	}
+	if err != nil {
 		return fmt.Errorf("adding missing column(s): %w", err)
 	}
 	return nil

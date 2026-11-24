@@ -854,7 +854,10 @@ Marketplace auto-update is off by default; enable it from /plugin -> Marketplace
 // items yet, so there is nothing for R4's id-preservation contract to
 // protect here — every option is created fresh, deliberately not reusing
 // SetStatusFieldOptions's id-echo contract (StatusOptionInput.ID left nil
-// for every entry).
+// for every entry). It goes through SetStatusFieldOptionsWithoutIDs, which
+// refuses any id, so the payload (name, color, description) is the one shape
+// every server accepts, GHES 3.19.10 included (#2616, ADR 2616); no capability
+// check is needed because the board is empty by construction.
 //
 // Returns the new project's number (as a string, for direct use in
 // .fabrik/config.yaml's project: key) and the resolved owner type
@@ -956,7 +959,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string, pf
 	for _, name := range names {
 		options = append(options, gh.StatusOptionInput{Name: name, Color: "GRAY", Description: ""})
 	}
-	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
+	if err := client.SetStatusFieldOptionsWithoutIDs(sf.FieldID, options); err != nil {
 		return "", "", nil, wrapPostCreateErr("setting Status columns on newly created board", err)
 	}
 	fmt.Printf("  board: Status columns set: %s\n", strings.Join(names, ", "))

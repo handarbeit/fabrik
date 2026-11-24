@@ -219,6 +219,27 @@ mutation($fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
 // nil ID — see StatusOptionInput's doc comment and R4/R6 in
 // adrs/1714-board-admin-create-and-repair.md.
 func (c *Client) SetStatusFieldOptions(fieldID string, options []StatusOptionInput) error {
+	return c.setStatusFieldOptions(fieldID, options)
+}
+
+// SetStatusFieldOptionsWithoutIDs is SetStatusFieldOptions for the servers
+// whose option input type has no `id` field (GHES 3.19.10, #2616, ADR 2616).
+// It refuses, before any request, an option list in which any entry carries an
+// ID, so "never send id where it is not accepted" holds by construction.
+//
+// The replacement it sends regenerates every option, so on such a server the
+// caller MUST have established that no item holds a Status value (an empty
+// board, or one created a moment ago) — see BoardHasStatusValue.
+func (c *Client) SetStatusFieldOptionsWithoutIDs(fieldID string, options []StatusOptionInput) error {
+	for _, opt := range options {
+		if opt.ID != nil {
+			return fmt.Errorf("setting status field options for field %s: option %q carries an id, but this path must not send one (ADR 2616)", fieldID, opt.Name)
+		}
+	}
+	return c.setStatusFieldOptions(fieldID, options)
+}
+
+func (c *Client) setStatusFieldOptions(fieldID string, options []StatusOptionInput) error {
 	rendered := make([]map[string]interface{}, 0, len(options))
 	for _, opt := range options {
 		entry := map[string]interface{}{
@@ -242,6 +263,153 @@ func (c *Client) SetStatusFieldOptions(fieldID string, options []StatusOptionInp
 		return fmt.Errorf("setting status field options for field %s: %w", fieldID, err)
 	}
 	return nil
+}
+
+// IDSupport says whether the connected server's
+// ProjectV2SingleSelectFieldOptionInput accepts an `id` (#2616, ADR 2616).
+type IDSupport int
+
+const (
+	// IDUnknown: the capability could not be determined (introspection failed,
+	// was denied, or returned no type). Callers treat it like IDNotAccepted:
+	// never send an id, and replace the option list only on a board with no
+	// Status value.
+	IDUnknown IDSupport = iota
+	// IDAccepted: the input has an `id` field (github.com); the id echo of
+	// ADR 1714 is both possible and required to keep item Statuses.
+	IDAccepted
+	// IDNotAccepted: the input has no `id` field (GHES 3.19.10).
+	IDNotAccepted
+)
+
+func (s IDSupport) String() string {
+	switch s {
+	case IDAccepted:
+		return "accepted"
+	case IDNotAccepted:
+		return "not accepted"
+	default:
+		return "unknown"
+	}
+}
+
+// fetchOptionInputFieldsQuery introspects the single-select option input type.
+const fetchOptionInputFieldsQuery = `
+query {
+  __type(name: "ProjectV2SingleSelectFieldOptionInput") {
+    inputFields {
+      name
+    }
+  }
+}`
+
+// StatusOptionIDSupport asks the server, by introspection, whether the option
+// input type accepts an `id`. Any failure — a transport error, denied
+// introspection, a null type — yields IDUnknown, never an error: the caller's
+// safe default for unknown is the non-destructive path.
+func (c *Client) StatusOptionIDSupport() IDSupport {
+	var result struct {
+		Data struct {
+			Type *struct {
+				InputFields []struct {
+					Name string `json:"name"`
+				} `json:"inputFields"`
+			} `json:"__type"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchOptionInputFieldsQuery, map[string]interface{}{}, &result); err != nil {
+		return IDUnknown
+	}
+	t := result.Data.Type
+	if t == nil || len(t.InputFields) == 0 {
+		return IDUnknown
+	}
+	for _, f := range t.InputFields {
+		if f.Name == "id" {
+			return IDAccepted
+		}
+	}
+	return IDNotAccepted
+}
+
+// fetchBoardStatusPopulationQuery pages every item of the project, archived
+// ones included (the items connection defaults to NOT_ARCHIVED, and Fabrik
+// archives Done items, which still hold a Status), selecting only whether the
+// Status field has a value. Unlike FetchProjectBoard it does not skip items
+// without content (draft/redacted items can hold a Status) and has no
+// empty-result retry.
+const fetchBoardStatusPopulationQuery = `
+query($projectId: ID!, $cursor: String) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      items(first: 100, after: $cursor, archivedStates: [ARCHIVED, NOT_ARCHIVED]) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              optionId
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// BoardHasStatusValue reports whether any item on the project — archived,
+// draft or redacted included, across all pages — holds a Status value. It
+// stops at the first hit. It FAILS CLOSED: on any error, or an unreadable
+// project, it returns true together with the error, so a caller that ignores
+// the error still treats the board as populated (#2616 FR-006).
+func (c *Client) BoardHasStatusValue(projectID string) (bool, error) {
+	cursor := ""
+	for {
+		vars := map[string]interface{}{"projectId": projectID}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+
+		var result struct {
+			Data struct {
+				Node *struct {
+					Items *struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							FieldValueByName *struct {
+								OptionID string `json:"optionId"`
+							} `json:"fieldValueByName"`
+						} `json:"nodes"`
+					} `json:"items"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+		if err := c.graphqlRequest(fetchBoardStatusPopulationQuery, vars, &result); err != nil {
+			return true, fmt.Errorf("checking whether project %s has items with a Status: %w", projectID, err)
+		}
+		if result.Data.Node == nil || result.Data.Node.Items == nil {
+			return true, fmt.Errorf("checking whether project %s has items with a Status: project not found or unreadable", projectID)
+		}
+		for _, n := range result.Data.Node.Items.Nodes {
+			if n.FieldValueByName != nil {
+				return true, nil
+			}
+		}
+		pi := result.Data.Node.Items.PageInfo
+		if !pi.HasNextPage {
+			return false, nil
+		}
+		if pi.EndCursor == "" {
+			return true, fmt.Errorf("checking whether project %s has items with a Status: hasNextPage=true but endCursor is empty", projectID)
+		}
+		cursor = pi.EndCursor
+	}
 }
 
 // Display-field data types accepted by CreateProjectV2Field and reported by

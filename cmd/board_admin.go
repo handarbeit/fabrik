@@ -112,6 +112,62 @@ func missingStageColumns(required []string, sf *gh.StatusField) []string {
 	return missing
 }
 
+// statusReplaceMode is how a Status option-list replacement may safely be sent
+// to the connected server (#2616, ADR 2616).
+type statusReplaceMode int
+
+const (
+	// statusReplaceEcho: the server accepts an option id. Every existing option
+	// is echoed with its id, so item Statuses survive (ADR 1714, github.com).
+	statusReplaceEcho statusReplaceMode = iota
+	// statusReplaceNameOnly: the server takes no id (or its capability is
+	// unknown) and no item holds a Status, so the regeneration of every option
+	// clears nothing. Options are sent with name, color and description only.
+	statusReplaceNameOnly
+	// statusReplaceRefuse: the server takes no id (or its capability is
+	// unknown) and a Status-bearing item exists, or that could not be ruled
+	// out. Nothing is sent.
+	statusReplaceRefuse
+)
+
+// statusAdminClient is the slice of *gh.Client planStatusReplace uses; a
+// narrow interface so tests can count the reads.
+type statusAdminClient interface {
+	StatusOptionIDSupport() gh.IDSupport
+	BoardHasStatusValue(projectID string) (bool, error)
+}
+
+// planStatusReplace decides, once per command, how the Status option list may
+// be replaced. The reason is for the operator and is non-empty only for
+// statusReplaceRefuse. It FAILS CLOSED: an unknown capability takes the
+// no-id branch, and any failure to establish that the board is Status-free is
+// a refusal.
+func planStatusReplace(client statusAdminClient, projectID string) (statusReplaceMode, string) {
+	support := client.StatusOptionIDSupport()
+	if support == gh.IDAccepted {
+		return statusReplaceEcho, ""
+	}
+	populated, err := client.BoardHasStatusValue(projectID)
+	if err != nil {
+		return statusReplaceRefuse, fmt.Sprintf("could not determine whether any board item has a Status (%v)", err)
+	}
+	if populated {
+		if support == gh.IDUnknown {
+			return statusReplaceRefuse, "board items already have a Status, and this server's option-id support could not be determined"
+		}
+		return statusReplaceRefuse, "this server does not accept option ids, so replacing the Status options would clear the Status of every board item"
+	}
+	return statusReplaceNameOnly, ""
+}
+
+// statusRefusalMessage names the columns Fabrik will not add and the manual
+// remedy. Shared by the dry-run report and the apply error.
+func statusRefusalMessage(missing []string, reason string) string {
+	return fmt.Sprintf("cannot add Status column(s) %s: %s. Nothing was changed — add the column(s) in the board's UI "+
+		"(the Status field's settings), in this order, then re-run. A running daemon must be restarted afterwards.",
+		strings.Join(missing, ", "), reason)
+}
+
 // appBoardClient builds an installation-token client for the board-admin
 // entry points that have no daemon Config to draw from, when the resolved
 // config (FABRIK_GITHUB_APP_* env over .fabrik/config.yaml) fully configures
