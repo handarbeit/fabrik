@@ -241,6 +241,21 @@ func TestPromoteFailFast_NegativeNotMemoisedWhileJobsRunning(t *testing.T) {
 	}
 }
 
+func TestPromoteFailFast_EmptyJobListNotMemoised(t *testing.T) {
+	// An empty job list does not show the run is final, so "no failed step" must
+	// not be cached under the check-run ID (review finding on allJobsCompleted).
+	jc := &jobsClient{mockGitHubClient: &mockGitHubClient{}, jobs: map[int64][]gh.WorkflowJob{900: {}}}
+	eng := failFastEngine(t, jc)
+	in := []gh.CheckRun{cancelledCheck(2)}
+	if out := eng.promoteFailFast("owner", "repo", "sha1", in); out[0].Conclusion != "cancelled" {
+		t.Fatalf("run = %+v", out[0])
+	}
+	jc.jobs[900] = failedStepJobs(2)
+	if out := eng.promoteFailFast("owner", "repo", "sha1", in); out[0].Conclusion != "failure" {
+		t.Errorf("an empty job list's negative answer was cached: %+v", out[0])
+	}
+}
+
 func TestPromoteFailFast_NeutralisedIsInert(t *testing.T) {
 	jc := &jobsClient{mockGitHubClient: &mockGitHubClient{}, jobs: map[int64][]gh.WorkflowJob{900: failedStepJobs(2)}}
 	eng := failFastEngine(t, jc)

@@ -140,8 +140,12 @@ func failedStepOf(jobs []gh.WorkflowJob, cr gh.CheckRun) (job, step string, ok b
 }
 
 // allJobsCompleted reports whether every job of the run has finished, i.e. a
-// "no failed step" answer is final and may be memoised.
+// "no failed step" answer is final and may be memoised. An empty list shows
+// nothing about the run, so it is never final.
 func allJobsCompleted(jobs []gh.WorkflowJob) bool {
+	if len(jobs) == 0 {
+		return false
+	}
 	for _, j := range jobs {
 		if j.Status != "completed" {
 			return false
