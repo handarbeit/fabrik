@@ -498,6 +498,17 @@ or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
 - **Live coverage gap.** A `startup_failure` cannot be induced on demand against
   the e2e bed, so there is no live twin; the sim and unit tests carry the proof
   (ADR 2052).
+- **Jobs and steps (#2614).** `FetchWorkflowRunJobs` returns the latest attempt's jobs
+  with their steps from `repoState.workflowJobs`, seeded per run with
+  `SeedWorkflowRunJobs` (an unseeded run has no jobs; an unknown run is `gh.ErrNotFound`).
+  A `RerunStep` may carry `Jobs` that replace the run's jobs when the re-run finishes (the new
+  attempt). The method is reached by the engine through an optional capability interface,
+  not `engine.GitHubClient`, so `Instrumented` forwards it and the fault table accepts it
+  (`optionalCapabilityMethods`). **Not modelled:** per-job `filter=latest` versus `all`
+  history, job IDs matching check-run IDs (scenarios give jobs any ID; the engine falls back
+  to names and then the run's first failed job), step `started_at`/`completed_at`, and how
+  GitHub reports a `continue-on-error` step.
+
 
 ### Required contexts — **Simplified**
 
