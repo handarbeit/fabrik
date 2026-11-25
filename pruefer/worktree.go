@@ -3,22 +3,23 @@ package pruefer
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // cloneURL returns the HTTPS clone URL Pruefer uses to fetch a PR's head
-// commit, with the installation token embedded as HTTP basic auth.
-// "x-access-token" is GitHub's documented username convention for App
-// installation tokens. Safe here because each clone is single-use and
-// discarded (see CloneForReview) — there is no persisted git config for the
-// token to leak from afterward, and runGit redacts the token from any
-// returned error text.
-func cloneURL(owner, repo, token string) string {
-	return fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, owner, repo)
+// commit. It carries no userinfo: the installation token is never part of a
+// git argument, because process arguments are readable by any local process
+// that can list processes (#2622, ADR 2622). The credential reaches git only
+// through the environment of the fetch itself (see gitCredentialEnv).
+func cloneURL(owner, repo string) string {
+	return fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
 }
 
 // CloneForReview creates an ephemeral shallow clone of owner/repo at the
@@ -37,7 +38,7 @@ func cloneURL(owner, repo, token string) string {
 // benefit at V1 scale (see adrs/1113-pruefer-v1-architecture.md and
 // adrs/2331-pruefer-head-sha-fetch-fallback.md).
 func CloneForReview(ctx context.Context, owner, repo, token string, prNumber int, headSHA string) (dir string, cleanup func(), err error) {
-	return cloneRefAt(ctx, cloneURL(owner, repo, token), token, fmt.Sprintf("refs/pull/%d/head", prNumber), headSHA, prNumber)
+	return cloneRefAt(ctx, cloneURL(owner, repo), token, fmt.Sprintf("refs/pull/%d/head", prNumber), headSHA, prNumber)
 }
 
 // Test seams for the git invocations made by cloneRefAt. Production code
@@ -103,8 +104,9 @@ func cloneRefAt(ctx context.Context, remoteURL, token, ref, headSHA string, prNu
 		return "", func() {}, fmt.Errorf("checking out FETCH_HEAD: %w", err)
 	}
 	// FETCH_HEAD records the fetched URL, and the clone is readable by the
-	// reviewer (#2192): drop it so a credentialed remote URL can never be read
-	// from inside the review scope. Best effort; checkout no longer needs it.
+	// reviewer (#2192): drop it so a remote URL can never be read from inside
+	// the review scope. The URL carries no credential since #2622, so this is
+	// now defence in depth. Best effort; checkout no longer needs it.
 	_ = os.Remove(filepath.Join(dir, ".git", "FETCH_HEAD"))
 	if isFullSHA(headSHA) {
 		got, err := gitOutputFn(ctx, dir, token, "rev-parse", "HEAD")
@@ -130,21 +132,17 @@ func isMissingRefErr(err error) bool {
 
 // runGit runs git in dir with a clean, non-interactive environment
 // (GIT_TERMINAL_PROMPT=0, so a misconfigured/expired token fails fast
-// instead of hanging on a credential prompt), redacting token from any
-// error output so it never reaches logs.
+// instead of hanging on a credential prompt). A network fetch also gets the
+// token as an environment-supplied HTTP authorization header (gitCredentialEnv);
+// the token is redacted, in every form git could echo it, from any error
+// output so it never reaches logs.
 func runGit(ctx context.Context, dir, token string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitCredentialEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), args, token)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := string(out)
-		displayArgs := args
-		if token != "" {
-			msg = strings.ReplaceAll(msg, token, "***")
-			displayArgs = redactArgs(args, token)
-		}
-		return fmt.Errorf("git %s: %w: %s", strings.Join(displayArgs, " "), err, strings.TrimSpace(msg))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(redactArgs(args, token), " "), err, strings.TrimSpace(redactSecrets(string(out), token)))
 	}
 	return nil
 }
@@ -154,33 +152,107 @@ func runGit(ctx context.Context, dir, token string, args ...string) error {
 func gitOutput(ctx context.Context, dir, token string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitCredentialEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), args, token)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		msg := stdout.String() + stderr.String()
-		displayArgs := args
-		if token != "" {
-			msg = strings.ReplaceAll(msg, token, "***")
-			displayArgs = redactArgs(args, token)
-		}
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(displayArgs, " "), err, strings.TrimSpace(msg))
+		msg := redactSecrets(stdout.String()+stderr.String(), token)
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(redactArgs(args, token), " "), err, strings.TrimSpace(msg))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// redactArgs returns a copy of args with any argument containing token
-// replaced by a masked version, so an error message built from the argv
-// never echoes the installation token.
+// basicAuthValue is the base64 credential GitHub accepts for an App
+// installation token over git's smart-HTTP transport: Basic auth with the
+// documented "x-access-token" username.
+func basicAuthValue(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+// gitCredentialEnv returns the environment for one git invocation. For a
+// "fetch" whose remote is an https URL and a non-empty token it appends a
+// per-invocation config entry, scoped to that URL's origin, that supplies
+// the Authorization header:
+//
+//	GIT_CONFIG_COUNT=n+1
+//	GIT_CONFIG_KEY_n=http.https://<host>/.extraHeader
+//	GIT_CONFIG_VALUE_n=Authorization: Basic base64("x-access-token:<token>")
+//
+// Nothing is written to disk and the process arguments carry no secret
+// (#2622, ADR 2622). Any config entries already in base (GIT_CONFIG_COUNT and
+// its KEY/VALUE pairs) are kept: the new entry takes the next index, and a
+// missing, negative or malformed count counts as zero. Every other command
+// (init, checkout, rev-parse), a local-path or file:// remote, a cleartext
+// http:// remote and an empty token leave base unchanged. base is never
+// mutated.
+func gitCredentialEnv(base, args []string, token string) []string {
+	if token == "" || len(args) == 0 || args[0] != "fetch" {
+		return base
+	}
+	var origin string
+	for _, a := range args[1:] {
+		u, err := url.Parse(a)
+		if err == nil && u.Scheme == "https" && u.Host != "" {
+			origin = "https://" + u.Host + "/"
+			break
+		}
+	}
+	if origin == "" {
+		return base
+	}
+	n := 0
+	env := make([]string, 0, len(base)+3)
+	for _, e := range base {
+		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
+			if c, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && c > 0 {
+				n = c
+			}
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env,
+		"GIT_CONFIG_COUNT="+strconv.Itoa(n+1),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.%s.extraHeader", n, origin),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=Authorization: Basic %s", n, basicAuthValue(token)),
+	)
+}
+
+// redactSecrets replaces every form in which git could echo the credential
+// with "***": the full Authorization header line, the base64 value in its
+// standard, unpadded, URL-safe and unpadded URL-safe encodings, and the raw
+// token. Longest forms go first so a header line is masked whole. An empty
+// token is a no-op.
+func redactSecrets(s, token string) string {
+	if token == "" {
+		return s
+	}
+	raw := []byte("x-access-token:" + token)
+	encoded := []string{
+		base64.StdEncoding.EncodeToString(raw),
+		base64.RawStdEncoding.EncodeToString(raw),
+		base64.URLEncoding.EncodeToString(raw),
+		base64.RawURLEncoding.EncodeToString(raw),
+	}
+	var forms []string
+	for _, e := range encoded {
+		forms = append(forms, "Authorization: Basic "+e)
+	}
+	forms = append(forms, encoded...)
+	forms = append(forms, token)
+	for _, f := range forms {
+		s = strings.ReplaceAll(s, f, "***")
+	}
+	return s
+}
+
+// redactArgs returns a copy of args with every credential form masked, so an
+// error message built from the argv never echoes the installation token.
 func redactArgs(args []string, token string) []string {
 	out := make([]string, len(args))
 	for i, a := range args {
-		if token != "" && strings.Contains(a, token) {
-			out[i] = strings.ReplaceAll(a, token, "***")
-		} else {
-			out[i] = a
-		}
+		out[i] = redactSecrets(a, token)
 	}
 	return out
 }
