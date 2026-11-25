@@ -33,7 +33,7 @@ This is self-healing and restart-safe by construction — the acceptance criteri
 
 ### 3. Ephemeral shallow clone, not zero-clone diff-only
 
-Each review does a single-use `git init` + `git fetch --depth 1 <url> refs/pull/<N>/head` + `git checkout FETCH_HEAD` into a fresh temp directory (`pruefer/worktree.go`), deleted after the review completes. The clone URL embeds the installation token as HTTP basic auth (`x-access-token:<token>@github.com/...`, GitHub's documented convention for App tokens); `runGit` redacts the token from any error text before it can reach logs.
+Each review does a single-use `git init` + `git fetch --depth 1 <url> refs/pull/<N>/head` + `git checkout FETCH_HEAD` into a fresh temp directory (`pruefer/worktree.go`), deleted after the review completes. The clone URL embeds the installation token as HTTP basic auth (`x-access-token:<token>@github.com/...`, GitHub's documented convention for App tokens); `runGit` redacts the token from any error text before it can reach logs. *(Amended by ADR 2622: the URL no longer carries the token; it is supplied to `git fetch` through the process environment as an `http.<origin>/.extraHeader` entry, so it never appears in a git command line.)*
 
 The issue's own example allowlist (`Read`, `Grep`, `Glob`, `Bash(git:*)`) presumes a checkout, and real review quality benefits from surrounding-code context, not just an isolated diff hunk. No bare-clone cache: Fabrik's worktrees persist for days across many stage runs on the same issue, but Pruefer's reviews are single-shot, so a cache would add lifecycle-management complexity for comparatively little benefit at V1 scale — flagged as a future optimization if watched-repo PR volume grows.
 
