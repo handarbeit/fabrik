@@ -279,6 +279,7 @@ func cloneRepoState(r *repoState) *repoState {
 		reopenScripts:     make(map[int][]ReopenStep, len(r.reopenScripts)),
 		readyScripts:      make(map[int][]ReadyForReviewStep, len(r.readyScripts)),
 		rerunScripts:      make(map[int64]RerunStep, len(r.rerunScripts)),
+		workflowJobs:      make(map[int64][]gh.WorkflowJob, len(r.workflowJobs)),
 		nextWorkflowRunID: r.nextWorkflowRunID,
 		commitStatuses:    make(map[string][]gh.CommitStatus, len(r.commitStatuses)),
 		ciSchedule:        r.ciSchedule.clone(),
@@ -316,6 +317,9 @@ func cloneRepoState(r *repoState) *repoState {
 	}
 	for k, v := range r.rerunScripts {
 		out.rerunScripts[k] = v
+	}
+	for k, v := range r.workflowJobs {
+		out.workflowJobs[k] = cloneWorkflowJobs(v)
 	}
 	for k, v := range r.commitStatuses {
 		out.commitStatuses[k] = append([]gh.CommitStatus(nil), v...)
@@ -630,6 +634,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"reopenScripts":       fieldCopied,
 		"readyScripts":        fieldCopied,
 		"rerunScripts":        fieldCopied,
+		"workflowJobs":        fieldCopied,
 		"nextWorkflowRunID":   fieldCopied,
 		"commitStatuses":      fieldCopied,
 		"ciSchedule":          fieldCopied,

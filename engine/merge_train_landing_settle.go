@@ -197,6 +197,9 @@ func (e *Engine) settleAndMerge(ctx context.Context, owner, repo string, prNum i
 			var checkRunsErr error
 			if pr.HeadSHA != "" {
 				checkRuns, checkRunsErr = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+				if checkRunsErr == nil {
+					checkRuns = e.promoteFailFast(owner, repo, pr.HeadSHA, checkRuns) // #2614
+				}
 			}
 			if checkRunsErr != nil {
 				// A fetch failure is "unknown", not "confirmed zero check runs" — see the

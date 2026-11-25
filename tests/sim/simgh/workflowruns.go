@@ -65,6 +65,63 @@ type RerunStep struct {
 	// (auto-assigned, so strictly higher), under the same names as the failed
 	// ones: production keeps the highest ID per name, so these supersede.
 	CheckRuns []gh.CheckRun
+	// Jobs, when non-nil, replace the run's jobs (the new attempt's jobs and
+	// steps, #2614) when the re-run finishes.
+	Jobs []gh.WorkflowJob
+}
+
+func cloneWorkflowJobs(in []gh.WorkflowJob) []gh.WorkflowJob {
+	out := make([]gh.WorkflowJob, len(in))
+	for i, j := range in {
+		out[i] = j
+		out[i].Steps = append([]gh.WorkflowStep(nil), j.Steps...)
+	}
+	return out
+}
+
+// SeedWorkflowRunJobs records the jobs, with their steps, of a workflow run's
+// latest attempt (#2614). A job with an empty Status is "completed". Reading a
+// run with no seeded jobs yields an empty list, like a run whose jobs were
+// never created.
+func (s *Sim) SeedWorkflowRunJobs(ownerRepo string, runID int64, jobs ...gh.WorkflowJob) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := cloneWorkflowJobs(jobs)
+	for i := range cp {
+		if cp[i].Status == "" {
+			cp[i].Status = "completed"
+		}
+	}
+	r.workflowJobs[runID] = cp
+	return s
+}
+
+// FetchWorkflowRunJobs returns the jobs, with steps, of a workflow run's latest
+// attempt. An unknown run is gh.ErrNotFound, as on GitHub.
+func (s *Sim) FetchWorkflowRunJobs(owner, repo string, runID int64) ([]gh.WorkflowJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	s.drainCI(r)
+	known := false
+	for _, runs := range r.workflowRuns {
+		for _, w := range runs {
+			if w.ID == runID {
+				known = true
+			}
+		}
+	}
+	if !known {
+		return nil, fmt.Errorf("simgh: workflow run %d: %w", runID, gh.ErrNotFound)
+	}
+	return cloneWorkflowJobs(r.workflowJobs[runID]), nil
 }
 
 func (s *Sim) reserveWorkflowRun(r *repoState, run gh.WorkflowRun, defaultCreated time.Time) gh.WorkflowRun {
@@ -213,6 +270,9 @@ func (s *Sim) RerunFailedJobs(owner, repo string, runID int64) error {
 		rs.workflowRuns[sha] = upsertWorkflowRun(rs.workflowRuns[sha], done)
 		for _, cr := range checks {
 			rs.checkRuns[stepSHA] = upsertCheckRun(rs.checkRuns[stepSHA], cr)
+		}
+		if step.Jobs != nil {
+			rs.workflowJobs[runID] = cloneWorkflowJobs(step.Jobs)
 		}
 	})
 	return nil

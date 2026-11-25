@@ -541,6 +541,13 @@ func (in *Instrumented) FetchWorkflowRuns(owner, repo, sha string) ([]gh.Workflo
 		func() ([]gh.WorkflowRun, error) { return in.sim.FetchWorkflowRuns(owner, repo, sha) })
 }
 
+// FetchWorkflowRunJobs is the optional jobs-with-steps read (#2614); the engine
+// asserts for it rather than requiring it on GitHubClient.
+func (in *Instrumented) FetchWorkflowRunJobs(owner, repo string, runID int64) ([]gh.WorkflowJob, error) {
+	return do1(in, "FetchWorkflowRunJobs", false, Args{Owner: owner, Repo: repo, ID: strconv.FormatInt(runID, 10)},
+		func() ([]gh.WorkflowJob, error) { return in.sim.FetchWorkflowRunJobs(owner, repo, runID) })
+}
+
 func (in *Instrumented) RerunFailedJobs(owner, repo string, runID int64) error {
 	return do0(in, "RerunFailedJobs", true, Args{Owner: owner, Repo: repo, ID: strconv.FormatInt(runID, 10)},
 		func() error { return in.sim.RerunFailedJobs(owner, repo, runID) })

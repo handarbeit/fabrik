@@ -187,6 +187,7 @@ func (e *Engine) checkRunCounts(item gh.ProjectItem, headSHA string) (gh.CheckRu
 		e.logf(item.Number, "merge-gate", "could not read check runs for the escalation note: %v\n", err)
 		return gh.CheckRunCounts{}, err
 	}
+	runs = e.promoteFailFast(owner, repo, headSHA, runs) // #2614
 	return gh.SummarizeCheckRuns(runs), nil
 }
 

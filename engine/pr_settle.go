@@ -255,6 +255,8 @@ func (e *Engine) settlePRMergeStateInner(item gh.ProjectItem, stage *stages.Stag
 		// (ADR-1441).
 		nonPassingShortcut := false
 		if ciInfra {
+			// failfast-audited: deliberately unpromoted — a cancelled run reads NonPassing here,
+			// so the shortcut falls through to the classified read below, which promotes (#2614).
 			if runs, rerr := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA); rerr == nil {
 				if len(runs) == 0 {
 					if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
@@ -301,6 +303,8 @@ func (e *Engine) settlePRMergeStateInner(item gh.ProjectItem, stage *stages.Stag
 			pr.HeadSHA[:min(8, len(pr.HeadSHA))], err)
 		return PRSettleResult{Status: PRMergeUnsettled, Reason: fmt.Sprintf("FetchCheckRuns error: %v", err), MergeableState: mergeableState, PR: pr}
 	}
+
+	checkRuns = e.promoteFailFast(owner, repo, pr.HeadSHA, checkRuns) // #2614
 
 	if len(checkRuns) > 0 {
 		e.store.Apply(itemstate.PRChecksObserved{

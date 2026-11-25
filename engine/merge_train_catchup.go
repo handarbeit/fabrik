@@ -762,6 +762,7 @@ func (e *Engine) waitMemberCI(ctx context.Context, state *mergeTrainWorkerState,
 				e.logfRepo(logRepo, "merge-train", "warn: singleton catch-up: FetchCheckRuns(%s) failed: %v\n", m.headSHA, rerr)
 				break
 			}
+			runs = e.promoteFailFast(p.owner, p.repo, m.headSHA, runs) // #2614
 			if len(runs) == 0 {
 				if time.Since(started) > timing.noCIDwell {
 					return memberCINoCI, nil

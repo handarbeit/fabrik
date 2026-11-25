@@ -2053,6 +2053,7 @@ func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.
 	if err != nil {
 		return false, fmt.Sprintf("could not fetch check runs for %s: %v", m.headSHA, err)
 	}
+	checkRuns = e.promoteFailFast(p.owner, p.repo, m.headSHA, checkRuns) // #2614
 	// classifyLandingCI's zero-check-runs branch falls back to mergeable_state
 	// alone (ADR-933's "Actions disabled" case) — correct for its usual caller
 	// (settleAndMerge, judging a landing PR whose tree was already validated
@@ -5353,6 +5354,9 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 		state := cr.Status
 		if cr.Status == "completed" {
 			state = cr.Conclusion
+		}
+		if t := failedStepText(cr); t != "" {
+			state += " — " + t // #2614
 		}
 		parts = append(parts, fmt.Sprintf("%s (%s)", cr.Name, state))
 	}
