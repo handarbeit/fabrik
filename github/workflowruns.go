@@ -113,6 +113,84 @@ func (c *Client) fetchWorkflowRunJobCount(owner, repo string, runID int64) (int,
 	return raw.TotalCount, nil
 }
 
+// WorkflowStep is one step of a workflow job.
+type WorkflowStep struct {
+	Name       string
+	Number     int
+	Status     string
+	Conclusion string
+}
+
+// WorkflowJob is one job of a workflow run with its steps (#2614). The job's
+// own conclusion can read `cancelled` after a fail-fast cancel while a step
+// inside it concluded `failure` — the step is the only place the real failure
+// shows.
+type WorkflowJob struct {
+	ID         int64
+	Name       string
+	Status     string
+	Conclusion string
+	Steps      []WorkflowStep
+}
+
+// FetchWorkflowRunJobs lists the jobs, with their steps, of the latest attempt
+// of a workflow run (GET /repos/{o}/{r}/actions/runs/{id}/jobs?filter=latest).
+//
+// Paginated and total_count-verified with the same fail-closed polarity as
+// FetchCheckRuns: a truncated or incomplete list is an error, never "no step
+// failed". Needs the `actions` permission; a runtime 403/404 comes back
+// wrapped as ErrForbidden/ErrNotFound.
+func (c *Client) FetchWorkflowRunJobs(owner, repo string, runID int64) ([]WorkflowJob, error) {
+	type rawStep struct {
+		Name       string `json:"name"`
+		Number     int    `json:"number"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	}
+	type rawJob struct {
+		ID         int64     `json:"id"`
+		Name       string    `json:"name"`
+		Status     string    `json:"status"`
+		Conclusion string    `json:"conclusion"`
+		Steps      []rawStep `json:"steps"`
+	}
+	var all []rawJob
+	totalCount := 0
+	for page := 1; page <= restMaxPages; page++ {
+		apiURL := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=%d&page=%d",
+			c.baseURL, owner, repo, runID, restPageSize, page)
+		var raw struct {
+			TotalCount int      `json:"total_count"`
+			Jobs       []rawJob `json:"jobs"`
+		}
+		if err := c.restGetJSON(apiURL, &raw); err != nil {
+			return nil, fmt.Errorf("fetching jobs for workflow run %d: %w", runID, err)
+		}
+		totalCount = raw.TotalCount
+		all = append(all, raw.Jobs...)
+		if len(raw.Jobs) < restPageSize {
+			break
+		}
+		if page == restMaxPages {
+			return nil, fmt.Errorf("fetching jobs for workflow run %d: exceeded %d pages without reaching the end — refusing to return a truncated result",
+				runID, restMaxPages)
+		}
+	}
+	if totalCount > 0 && len(all) != totalCount {
+		return nil, fmt.Errorf("fetching jobs for workflow run %d: collected %d of %d reported jobs — refusing to return an incomplete set",
+			runID, len(all), totalCount)
+	}
+	out := make([]WorkflowJob, len(all))
+	for i, j := range all {
+		job := WorkflowJob{ID: j.ID, Name: j.Name, Status: j.Status, Conclusion: j.Conclusion}
+		for _, s := range j.Steps {
+			job.Steps = append(job.Steps, WorkflowStep{Name: s.Name, Number: s.Number, Status: s.Status, Conclusion: s.Conclusion})
+		}
+		out[i] = job
+	}
+	return out, nil
+}
+
 // RerunFailedJobs re-runs only the failed jobs of a finished workflow run
 // (POST /repos/{o}/{r}/actions/runs/{id}/rerun-failed-jobs, #2052 R5). Needs
 // `actions: write`. GitHub answers 403 when the run is not finished, cannot be

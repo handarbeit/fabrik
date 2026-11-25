@@ -671,6 +671,15 @@ type CheckRun struct {
 	// HTMLURL is the check run's html_url — the GitHub-hosted permalink to
 	// the check run itself.
 	HTMLURL string
+	// ObservedConclusion is set only on a copy the engine promoted (#2614,
+	// ADR 2614): the conclusion GitHub actually reported (always "cancelled")
+	// for a run whose Conclusion was rewritten to "failure" because a step of
+	// its Actions run failed. Empty on every run read from GitHub.
+	ObservedConclusion string
+	// FailedJob and FailedStep name the job and step that concluded `failure`
+	// in a promoted run (#2614). Empty on every run read from GitHub.
+	FailedJob  string
+	FailedStep string
 }
 
 // FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
