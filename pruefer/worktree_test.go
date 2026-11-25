@@ -585,8 +585,8 @@ func TestGitCredentialEnv(t *testing.T) {
 			"init":           {[]string{"init", "-q"}, tok},
 			"checkout":       {[]string{"checkout", "-q", "FETCH_HEAD"}, tok},
 			"rev-parse":      {[]string{"rev-parse", "HEAD"}, tok},
-			"local path":     {[]string{"fetch", "-q", "/tmp/some/repo", "refs/pull/1/head"}, tok},
-			"file url":       {[]string{"fetch", "-q", "file:///tmp/some/repo", "refs/pull/1/head"}, tok},
+			"local path":     {[]string{"fetch", "-q", "/some/local/repo", "refs/pull/1/head"}, tok},
+			"file url":       {[]string{"fetch", "-q", "file:///some/local/repo", "refs/pull/1/head"}, tok},
 			"cleartext http": {[]string{"fetch", "-q", "http://github.com/o/r.git", "refs/pull/1/head"}, tok},
 			"no args":        {nil, tok},
 		}
