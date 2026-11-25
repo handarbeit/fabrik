@@ -96,6 +96,8 @@ var cooldownClasses = map[string]cooldownSpec{
 		Evidence: "recorded at PollSeconds/2 to refetch a cache the dispatcher cannot see through; an engine-scheduled retry"},
 	mergeUnsettledCooldownReason: {Class: cooldownShort, Gate: true,
 		Evidence: "transient GitHub merge state (ADR 2096)"},
+	catchUpDeferredCooldownReason: {Class: cooldownShort,
+		Evidence: "re-poll while a merge-train member's catch-up is deferred as worktree-busy, so the bound is reached (ADR 2615)"},
 	reasonRetryBackoff: {Class: cooldownShort,
 		Evidence: "stage retry backoff (ADR 2232/2499)"},
 	reasonSentinelLive: {Class: cooldownShort,

@@ -132,6 +132,10 @@ const (
 	idleReasonPollOverdue = "poll-overdue"
 	idleReasonInfra       = "infra-abandon-cooldown"
 	idleReasonUnknown     = "unknown"
+	// idleReasonCatchUpDeferred prefixes the reason for a partition whose member keeps
+	// being deferred by the singleton catch-up (#2615): the full text names the member and
+	// the cause, e.g. "#859 catch-up deferred: REBASE_HEAD present".
+	idleReasonCatchUpDeferred = "catch-up deferred"
 )
 
 // partitionLivenessInput is everything computePartitionLiveness needs.
@@ -152,6 +156,10 @@ type partitionLivenessInput struct {
 	PollDeliberatelyPending bool
 	InfraHeld               bool
 	InfraRemaining          time.Duration
+	// DeferredMember/DeferredReason name a member the singleton catch-up keeps deferring
+	// as busy (#2615). Zero = none.
+	DeferredMember int
+	DeferredReason string
 }
 
 // partitionLiveness is the liveness verdict for one partition.
@@ -179,6 +187,9 @@ func computePartitionLiveness(in partitionLivenessInput) partitionLiveness {
 	case in.InfraHeld:
 		out.IdleReason = idleReasonInfra
 		out.IdleDetail = fmt.Sprintf("%d s of the post-abandon cooldown remain", int64(in.InfraRemaining.Seconds()))
+	case in.DeferredMember > 0:
+		// Stall-eligible, unlike the infra cooldown: nothing here clears by itself.
+		out.IdleReason = fmt.Sprintf("#%d %s: %s", in.DeferredMember, idleReasonCatchUpDeferred, in.DeferredReason)
 	default:
 		out.IdleReason = idleReasonUnknown
 	}
@@ -249,6 +260,15 @@ func (e *Engine) partitionStates(now time.Time, h healthSnapshot) []partitionSta
 	out := make([]partitionState, 0, len(states))
 	for _, st := range states {
 		remaining, held := e.infraCooldownPeek(st.Key)
+		inPartition := func(issue int) bool {
+			for _, r := range st.Members {
+				if r.number == issue {
+					return true
+				}
+			}
+			return false
+		}
+		defIssue, defReason, _ := e.catchUpDeferralPeek(st.Key, inPartition)
 		st.Live = computePartitionLiveness(partitionLivenessInput{
 			Now:                     now,
 			TrainOn:                 e.cfg.MergeTrain == "on",
@@ -260,6 +280,8 @@ func (e *Engine) partitionStates(now time.Time, h healthSnapshot) []partitionSta
 			PollDeliberatelyPending: pending,
 			InfraHeld:               held,
 			InfraRemaining:          remaining,
+			DeferredMember:          defIssue,
+			DeferredReason:          defReason,
 		})
 		out = append(out, *st)
 	}

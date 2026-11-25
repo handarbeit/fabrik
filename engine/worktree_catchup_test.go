@@ -82,19 +82,272 @@ func TestPrepareCatchUp_DirtyWorktreeIsBusy(t *testing.T) {
 }
 
 func TestPrepareCatchUp_InProgressMergeIsBusy(t *testing.T) {
-	wm, _, head := catchUpFixture(t)
+	wm, srcDir, head := catchUpFixture(t)
 	wtDir, err := wm.PrepareCatchUp(7, "main", head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gitDir, _ := gitOutputIn(wtDir, "rev-parse", "--git-dir")
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(wtDir, gitDir)
+	// A real conflicted merge: MERGE_HEAD plus unmerged index entries.
+	advanceSrcMain(t, srcDir, "member.txt")
+	mustGit(t, wtDir, "fetch", "origin", "main")
+	if out, err := gitOutputIn(wtDir, "merge", "origin/main"); err == nil {
+		t.Fatalf("fixture: expected a merge conflict, got %s", out)
 	}
-	writeFile(t, filepath.Join(gitDir, "MERGE_HEAD"), head+"\n")
 
 	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.Is(err, ErrCatchUpBusy) {
 		t.Fatalf("err = %v, want ErrCatchUpBusy for a tree mid-merge", err)
+	}
+	if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err != nil {
+		t.Error("MERGE_HEAD of a real merge must not be removed")
+	}
+}
+
+// gitDirOf returns the worktree's own git directory.
+func gitDirOf(t *testing.T, wtDir string) string {
+	t.Helper()
+	gitDir, err := gitOutputIn(wtDir, "rev-parse", "--git-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(wtDir, gitDir)
+	}
+	return gitDir
+}
+
+// readyWorktree returns a prepared, clean member worktree.
+func readyWorktree(t *testing.T, wm *WorktreeManager, head string) string {
+	t.Helper()
+	wtDir, err := wm.PrepareCatchUp(7, "main", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wtDir
+}
+
+// #2615 R1: Fabrik's own untracked leftovers are not "uncommitted changes".
+func TestPrepareCatchUp_FabrikScratchFilesAreNotBusy(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "validate.log"), "log\n")
+	writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "sub", "more.log"), "log\n")
+	writeFile(t, filepath.Join(wtDir, ".fabrik-context", "issue.md"), "ctx\n")
+
+	if _, err := wm.PrepareCatchUp(7, "main", head); err != nil {
+		t.Fatalf("PrepareCatchUp with only Fabrik scratch files: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wtDir, ".fabrik", "scratch", "validate.log")); err != nil {
+		t.Errorf("scratch files must not be deleted: %v", err)
+	}
+}
+
+// #2615: a git warning on stderr during the untracked listing (here an unreadable scratch
+// subdirectory) is never read as an untracked path, so it cannot make the worktree busy.
+func TestPrepareCatchUp_GitStderrWarningIsNotAnUntrackedFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	locked := filepath.Join(wtDir, ".fabrik", "scratch", "locked")
+	writeFile(t, filepath.Join(locked, "x.log"), "log\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	if out, err := gitStdoutIn(wtDir, "ls-files", "--others", "--exclude-standard", "-z"); err != nil || strings.Contains(out, "warning") {
+		t.Fatalf("gitStdoutIn must return stdout only: out=%q err=%v", out, err)
+	}
+	if _, err := wm.PrepareCatchUp(7, "main", head); err != nil {
+		t.Fatalf("PrepareCatchUp with an unreadable scratch directory: %v", err)
+	}
+}
+
+func TestPrepareCatchUp_ScratchExemption_NonVacuity(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "validate.log"), "log\n")
+	wm.scratchExemptDisabled.Store(true)
+
+	var busy *CatchUpBusyError
+	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.As(err, &busy) || !busy.Worktree {
+		t.Fatalf("with the exemption neutralised err = %v, want a worktree-busy error", err)
+	}
+}
+
+// #2615 FR-002: only Fabrik-written untracked paths are exempt.
+func TestPrepareCatchUp_NonScratchChangesStayBusy(t *testing.T) {
+	cases := map[string]func(t *testing.T, wtDir string){
+		"stray untracked source file": func(t *testing.T, wtDir string) { writeFile(t, filepath.Join(wtDir, "stray.go"), "x\n") },
+		"lookalike directory":         func(t *testing.T, wtDir string) { writeFile(t, filepath.Join(wtDir, ".fabrik-contextual", "x"), "x\n") },
+		"other file under .fabrik":    func(t *testing.T, wtDir string) { writeFile(t, filepath.Join(wtDir, ".fabrik", "notes.md"), "x\n") },
+		"modified tracked file": func(t *testing.T, wtDir string) {
+			writeFile(t, filepath.Join(wtDir, "member.txt"), "changed\n")
+		},
+		"scratch next to a tracked change": func(t *testing.T, wtDir string) {
+			writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "a.log"), "x\n")
+			writeFile(t, filepath.Join(wtDir, "member.txt"), "changed\n")
+		},
+		"tracked change under an exempt path": func(t *testing.T, wtDir string) {
+			writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "tracked.txt"), "v1\n")
+			mustGit(t, wtDir, "add", "-f", ".fabrik/scratch/tracked.txt")
+			mustGit(t, wtDir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "track")
+			writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "tracked.txt"), "v2\n")
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			wm, _, head := catchUpFixture(t)
+			wtDir := readyWorktree(t, wm, head)
+			setup(t, wtDir)
+			reason, err := wm.worktreeBusyReason(wtDir, "fabrik/issue-7")
+			if err != nil || reason == "" {
+				t.Fatalf("reason=%q err=%v, want busy", reason, err)
+			}
+		})
+	}
+}
+
+// #2615 R2: a stale ref with no operation in progress is removed and is not busy.
+func TestPrepareCatchUp_StaleRefsAreRemovedNotBusy(t *testing.T) {
+	for _, ref := range []string{"REBASE_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		t.Run(ref, func(t *testing.T) {
+			wm, _, head := catchUpFixture(t)
+			wtDir := readyWorktree(t, wm, head)
+			writeFile(t, filepath.Join(gitDirOf(t, wtDir), ref), head+"\n")
+
+			if _, err := wm.PrepareCatchUp(7, "main", head); err != nil {
+				t.Fatalf("PrepareCatchUp with a stale %s: %v", ref, err)
+			}
+			if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", ref); err == nil {
+				t.Errorf("stale %s must be removed", ref)
+			}
+		})
+	}
+}
+
+func TestPrepareCatchUp_StaleRefAndScratchTogether(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	writeFile(t, filepath.Join(wtDir, ".fabrik", "scratch", "a.log"), "x\n")
+	mustGit(t, wtDir, "update-ref", "REBASE_HEAD", head)
+	if _, err := wm.PrepareCatchUp(7, "main", head); err != nil {
+		t.Fatalf("scratch plus a stale ref: %v", err)
+	}
+}
+
+func TestPrepareCatchUp_StaleRefCleanup_NonVacuity(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	mustGit(t, wtDir, "update-ref", "REBASE_HEAD", head)
+	wm.staleRefCleanupDisabled.Store(true)
+	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.Is(err, ErrCatchUpBusy) {
+		t.Fatalf("with the cleanup neutralised err = %v, want ErrCatchUpBusy", err)
+	}
+}
+
+// A real rebase in progress keeps today's deferral and loses nothing.
+func TestPrepareCatchUp_RealRebaseInProgressStaysBusy(t *testing.T) {
+	wm, srcDir, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	advanceSrcMain(t, srcDir, "member.txt")
+	mustGit(t, wtDir, "fetch", "origin", "main")
+	if out, err := gitOutputIn(wtDir, "rebase", "origin/main"); err == nil {
+		t.Fatalf("fixture: expected a rebase conflict, got %s", out)
+	}
+
+	// An operation really in progress is busy but is not a leftover: it must not count
+	// toward the bounded deferral (spec FR-007).
+	var busy *CatchUpBusyError
+	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.As(err, &busy) || !busy.Worktree || !busy.Operation {
+		t.Fatalf("err = %v, want a worktree-busy error marked Operation", err)
+	}
+	if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", "REBASE_HEAD"); err != nil {
+		t.Error("REBASE_HEAD of a real rebase must not be removed")
+	}
+}
+
+// A merge whose conflicts are resolved and staged but not yet committed (so no rebase
+// directory and no unmerged entries) is still an operation in progress: its MERGE_HEAD
+// must survive, or the pending commit would lose its merge parent.
+func TestWorktreeBusyReason_PendingMergeCommitKeepsMergeHead(t *testing.T) {
+	for _, ref := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD"} {
+		t.Run(ref, func(t *testing.T) {
+			wm, _, head := catchUpFixture(t)
+			wtDir := readyWorktree(t, wm, head)
+			gd := gitDirOf(t, wtDir)
+			writeFile(t, filepath.Join(gd, ref), head+"\n")
+			writeFile(t, filepath.Join(gd, "MERGE_MSG"), "Merge pending\n")
+
+			reason, operation, err := wm.worktreeBusyDetail(wtDir, "fabrik/issue-7")
+			if err != nil || !operation || !strings.Contains(reason, ref+" present") {
+				t.Fatalf("reason=%q operation=%v err=%v, want %s present as an operation", reason, operation, err, ref)
+			}
+			if _, err := os.Stat(filepath.Join(gd, ref)); err != nil {
+				t.Errorf("%s of a pending commit must not be removed: %v", ref, err)
+			}
+		})
+	}
+}
+
+// A rebase-merge directory alone (the ref gone) is still an operation in progress.
+func TestWorktreeBusyReason_RebaseDirectoryWithStaleRefIsBusy(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	mustGit(t, wtDir, "update-ref", "REBASE_HEAD", head)
+	if err := os.MkdirAll(filepath.Join(gitDirOf(t, wtDir), "rebase-merge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reason, err := wm.worktreeBusyReason(wtDir, "fabrik/issue-7")
+	if err != nil || !strings.Contains(reason, "REBASE_HEAD present") {
+		t.Fatalf("reason=%q err=%v, want REBASE_HEAD present", reason, err)
+	}
+	if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", "REBASE_HEAD"); err != nil {
+		t.Error("the ref must be left in place while a rebase directory exists")
+	}
+}
+
+// The remote moving is a race, not a leftover: it must not count as a worktree deferral.
+func TestPrepareCatchUp_RemoteMovedIsNotWorktreeBusy(t *testing.T) {
+	wm, srcDir, head := catchUpFixture(t)
+	readyWorktree(t, wm, head)
+	advanceRemoteBranch(t, srcDir, "late.txt")
+	var busy *CatchUpBusyError
+	if _, err := wm.PrepareCatchUp(7, "main", head); !errors.As(err, &busy) || busy.Worktree {
+		t.Fatalf("err = %v, want a non-worktree busy error", err)
+	}
+}
+
+// writeGitExclude keeps both Fabrik paths out of git status and is idempotent.
+func TestWriteGitExclude_ListsFabrikPathsOnce(t *testing.T) {
+	wm, _, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	wm.writeGitExclude(wtDir, 7)
+	wm.writeGitExclude(wtDir, 7)
+	data, err := os.ReadFile(filepath.Join(gitDirOf(t, wtDir), "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range gitExcludeEntries {
+		if n := strings.Count(string(data), e+"\n"); n != 1 {
+			t.Errorf("exclude has %d copies of %q, want 1:\n%s", n, e, data)
+		}
+	}
+}
+
+// #2295 shares the check: a branch sync must not touch a worktree mid-rebase.
+func TestBranchSync_RealRebaseInProgressSkipsSync(t *testing.T) {
+	wm, srcDir, head := catchUpFixture(t)
+	wtDir := readyWorktree(t, wm, head)
+	advanceSrcMain(t, srcDir, "member.txt")
+	mustGit(t, wtDir, "fetch", "origin", "main")
+	if _, err := gitOutputIn(wtDir, "rebase", "origin/main"); err == nil {
+		t.Fatal("fixture: expected a rebase conflict")
+	}
+	rep, err := wm.syncIssueBranch(wtDir, "main", 7)
+	if err != nil || rep.Outcome != SyncSkipped {
+		t.Fatalf("rep=%+v err=%v, want a skipped sync", rep, err)
 	}
 }
 

@@ -129,3 +129,26 @@ func (e *Engine) SetCatchUpPureRebaseDisabledForTest(disabled bool) {
 		wm.pureRebaseDisabled.Store(disabled)
 	}
 }
+
+// SetCatchUpScratchExemptDisabledForTest neutralises the busy check's exemption for
+// untracked Fabrik scratch files on every registered worktree manager (#2615 R1).
+func (e *Engine) SetCatchUpScratchExemptDisabledForTest(disabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.scratchExemptDisabledForTest = disabled
+	for _, wm := range e.worktreeManagers {
+		wm.scratchExemptDisabled.Store(disabled)
+	}
+}
+
+// SetStaleRefCleanupDisabledForTest neutralises the busy check's stale
+// MERGE_HEAD/REBASE_HEAD/CHERRY_PICK_HEAD handling on every registered worktree manager
+// (#2615 R2): a present ref is busy again, as before.
+func (e *Engine) SetStaleRefCleanupDisabledForTest(disabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.staleRefCleanupDisabledForTest = disabled
+	for _, wm := range e.worktreeManagers {
+		wm.staleRefCleanupDisabled.Store(disabled)
+	}
+}

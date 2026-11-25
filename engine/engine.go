@@ -471,6 +471,8 @@ type Engine struct {
 	replayEquivalenceDisabledForTest      bool                                      // test seam: SetReplayEquivalenceDisabledForTest (#2517); guarded by mu, applied to managers registered later too
 	branchSyncDisabledForTest             bool                                      // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
 	bareLeasePushForTest                  bool                                      // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too
+	scratchExemptDisabledForTest          bool                                      // test seam: SetCatchUpScratchExemptDisabledForTest (#2615); guarded by mu
+	staleRefCleanupDisabledForTest        bool                                      // test seam: SetStaleRefCleanupDisabledForTest (#2615); guarded by mu
 	pureRebaseDisabledForTest             bool                                      // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                               // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                             // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
@@ -1084,6 +1086,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	defer e.mu.Unlock()
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
+	wm.scratchExemptDisabled.Store(e.scratchExemptDisabledForTest)
+	wm.staleRefCleanupDisabled.Store(e.staleRefCleanupDisabledForTest)
 	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
 	wm.restoreContentCheckDisabled.Store(e.restoreContentCheckDisabledForTest)
 	wm.replayEquivalenceDisabled.Store(e.replayEquivalenceDisabledForTest)
@@ -1285,6 +1289,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	wm.logfFn = e.logf
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
+	wm.scratchExemptDisabled.Store(e.scratchExemptDisabledForTest)
+	wm.staleRefCleanupDisabled.Store(e.staleRefCleanupDisabledForTest)
 	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
 	wm.restoreContentCheckDisabled.Store(e.restoreContentCheckDisabledForTest)
 	wm.replayEquivalenceDisabled.Store(e.replayEquivalenceDisabledForTest)
