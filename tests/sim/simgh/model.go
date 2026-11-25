@@ -106,14 +106,14 @@ type repoState struct {
 	// reopenScripts and rerunScripts are the scenario's scripted answers to
 	// "what does reopening this PR / re-running this run produce"; see
 	// workflowruns.go. nextWorkflowRunID auto-assigns run IDs.
-	workflowRuns      map[string][]gh.WorkflowRun
-	reopenScripts     map[int][]ReopenStep
-	readyScripts      map[int][]ReadyForReviewStep
-	rerunScripts      map[int64]RerunStep
+	workflowRuns  map[string][]gh.WorkflowRun
+	reopenScripts map[int][]ReopenStep
+	readyScripts  map[int][]ReadyForReviewStep
+	rerunScripts  map[int64]RerunStep
 	// workflowJobs is the per-run job list with steps (#2614), keyed by workflow
 	// run ID: the latest attempt's jobs, which is what FetchWorkflowRunJobs
 	// returns (filter=latest).
-	workflowJobs map[int64][]gh.WorkflowJob
+	workflowJobs      map[int64][]gh.WorkflowJob
 	nextWorkflowRunID int64
 
 	// ciSchedule holds pending clock-driven mutations to checkRuns and
