@@ -915,3 +915,39 @@ func TestSettleClosedValidateAdvance_NoDoubleAdvance(t *testing.T) {
 		t.Error("expected no status update for already-advanced closed item")
 	}
 }
+
+// TestMissingGateCheckedCompleteLabels covers the pure selection rule shared by
+// the fill and the closed-cleanup log line (#2628).
+func TestMissingGateCheckedCompleteLabels(t *testing.T) {
+	tr := true
+	cases := []struct {
+		name   string
+		stages []*stages.Stage
+		labels []string
+		want   []string
+	}{
+		{"all missing, gated only", terminalAdvanceStages(), []string{"stage:Implement:complete"},
+			[]string{"stage:Review:complete", "stage:Validate:complete"}},
+		{"only after highest complete", terminalAdvanceStages(), []string{"stage:Review:complete"},
+			[]string{"stage:Validate:complete"}},
+		{"nothing missing", terminalAdvanceStages(), []string{"stage:Validate:complete"}, nil},
+		{"unmanaged cleanup skipped, not a break", []*stages.Stage{
+			{Name: "Backlog", Order: -1, Unmanaged: true, CleanupWorktree: true},
+			{Name: "Review", Order: 2, WaitForReviews: &tr},
+			{Name: "Done", Order: 4, CleanupWorktree: true},
+		}, nil, []string{"stage:Review:complete"}},
+		{"unmanaged gated stage skipped", []*stages.Stage{
+			{Name: "Hold", Order: 1, Unmanaged: true, WaitForCI: &tr},
+			{Name: "Done", Order: 4, CleanupWorktree: true},
+		}, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := testEngineWithStages(t, &mockGitHubClient{}, tc.stages)
+			got := eng.missingGateCheckedCompleteLabels(gh.ProjectItem{Labels: tc.labels})
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

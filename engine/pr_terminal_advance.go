@@ -143,12 +143,12 @@ func (e *Engine) classifyLinkedPRTerminal(owner, repo string, number int, tag st
 	return pr, linkedPRClosedUnmerged
 }
 
-// fillGateCheckedCompleteLabels adds the stage:<X>:complete label of every
-// gate-checked stage that sits after the highest already-complete stage and is
-// missing it (EC-3). Idempotent; it stops at the first failed write and reports
-// it so the caller can retry on a later poll (EC-2). item.Labels must be live
-// for the caller's purposes.
-func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.ProjectItem) (fillFailed bool) {
+// missingGateCheckedCompleteLabels returns, in ascending stage order, the
+// stage:<X>:complete label of every gate-checked stage that sits after the
+// highest already-complete stage in item.Labels and is missing it (EC-3). It is
+// the pure selection rule shared by fillGateCheckedCompleteLabels and the
+// closed-cleanup log line (#2628).
+func (e *Engine) missingGateCheckedCompleteLabels(item gh.ProjectItem) []string {
 	// Find the highest-order stage that already has a :complete label so we
 	// only fill in stages that are missing their completion label (EC-3).
 	highestCompleteOrder := -1
@@ -162,8 +162,8 @@ func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.Proje
 
 	// Iterate stages in ascending Order starting from the one after the
 	// highest already-complete stage, stopping before the cleanup-terminal
-	// stage. For each gate-checked stage missing its :complete label, add
-	// it. Fail-fast on error to preserve idempotent retry (EC-2).
+	// stage.
+	var missing []string
 	for _, s := range e.cfg.Stages {
 		// An Unmanaged stage never receives gate-checked bookkeeping here,
 		// regardless of any other flag it carries — it was never actually
@@ -192,6 +192,19 @@ func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.Proje
 		if hasLabel(item.Labels, completeLabel) {
 			continue // already present — idempotent no-op
 		}
+		missing = append(missing, completeLabel)
+	}
+	return missing
+}
+
+// fillGateCheckedCompleteLabels adds the stage:<X>:complete label of every
+// gate-checked stage that sits after the highest already-complete stage and is
+// missing it (EC-3). Idempotent; it stops at the first failed write and reports
+// it so the caller can retry on a later poll (EC-2). item.Labels must be live
+// for the caller's purposes.
+func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.ProjectItem) (fillFailed bool) {
+	// Fail-fast on error to preserve idempotent retry (EC-2).
+	for _, completeLabel := range e.missingGateCheckedCompleteLabels(item) {
 		if addErr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); addErr != nil {
 			e.logf(item.Number, "warn", "pr-terminal: could not add %s: %v — skipping item\n", completeLabel, addErr)
 			fillFailed = true
