@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"strings"
+
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -53,4 +56,60 @@ func (e *Engine) clearPauseOnClosedCleanup(item gh.ProjectItem) bool {
 		e.logf(item.Number, "cleanup", "pause cleared because the issue is closed (#2459)\n")
 	}
 	return ok
+}
+
+// SetClosedCleanupFillDisabledForTest turns off the landing-label fill of a
+// closed item's Done cleanup (#2628) so a test can show its assertions bite
+// (the non-vacuity seam). It is independent of SetClosedPausedCleanupDisabledForTest:
+// the pause clearing (#2459) keeps working with only this flag set.
+func (e *Engine) SetClosedCleanupFillDisabledForTest(disabled bool) {
+	e.closedCleanupFillOff.Store(disabled)
+}
+
+// deferClosedCleanup records the periodic-re-eval cooldown that makes the whole
+// closed-item cleanup retry next poll. stage:<Done>:complete is the only
+// re-admission stop, so every failure before it must come back here (#2459,
+// #2628).
+func (e *Engine) deferClosedCleanup(repoStr string, item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   repoStr,
+		Number: item.Number,
+		Reason: reasonPeriodicReEval,
+		Until:  e.now().Add(e.githubRecheckInterval()),
+	})
+}
+
+// fillMergedLandingLabelsOnClosedCleanup records, on a closed item first seen at
+// Done, that its linked PR landed (#2628, ADR 2628). A PR merged outside Fabrik
+// closes the issue and the board's "Item closed -> Done" automation moves it to
+// Done before the engine polls, so the Validate terminal path never runs; this
+// fills the gate-checked completion labels with fillGateCheckedCompleteLabels,
+// unchanged, before the caller applies stage:<Done>:complete.
+//
+// The linked PR is read live (classifyLinkedPRTerminal), never from cached
+// state. It returns false when the read or the fill failed, so the caller leaves
+// the completion label unapplied and retries the whole cleanup next poll. No PR,
+// an open PR and a PR closed unmerged return true having written nothing. No
+// comment, board move, landing-verification marker or pause is added.
+func (e *Engine) fillMergedLandingLabelsOnClosedCleanup(item gh.ProjectItem) bool {
+	if e.closedCleanupFillOff.Load() {
+		return true
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	pr, state := e.classifyLinkedPRTerminal(owner, repo, item.Number, "cleanup")
+	switch state {
+	case linkedPRReadErr:
+		return false
+	case linkedPRMerged:
+	default:
+		return true
+	}
+	missing := e.missingGateCheckedCompleteLabels(item)
+	if e.fillGateCheckedCompleteLabels(owner, repo, item) {
+		return false
+	}
+	if len(missing) > 0 {
+		e.logf(item.Number, "cleanup", "linked PR #%d merged — filled %s before Done cleanup (#2628)\n", pr.Number, strings.Join(missing, ", "))
+	}
+	return true
 }

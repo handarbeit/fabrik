@@ -464,6 +464,7 @@ type Engine struct {
 	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
 	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	closedPausedCleanupOff                atomic.Bool                               // test seam: SetClosedPausedCleanupDisabledForTest (#2459)
+	closedCleanupFillOff                  atomic.Bool                               // test seam: SetClosedCleanupFillDisabledForTest (#2628)
 	pauseCauseSettleOff                   atomic.Bool                               // test seam: SetPauseCauseSettleDisabledForTest (#2487)
 	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	validateRerunGuardOff                 atomic.Bool                               // test seam: SetValidateRerunGuardDisabledForTest (#2378)

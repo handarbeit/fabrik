@@ -1059,12 +1059,16 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 	// would strand the pause labels for good. On failure, back off and retry the
 	// whole cleanup next poll.
 	if e.closedCleanupItem(item, stage) && !e.clearPauseOnClosedCleanup(item) {
-		e.store.Apply(itemstate.CooldownRecorded{
-			Repo:   repoStr,
-			Number: item.Number,
-			Reason: reasonPeriodicReEval,
-			Until:  e.now().Add(e.githubRecheckInterval()),
-		})
+		e.deferClosedCleanup(repoStr, item)
+		return
+	}
+
+	// A PR merged outside Fabrik closes the item and the board moves it to Done
+	// before the Validate terminal path can run, so record the landing here
+	// (#2628): after the pause clearing and before the worktree removal and the
+	// completion label, for the same retry reason.
+	if e.closedCleanupItem(item, stage) && !e.fillMergedLandingLabelsOnClosedCleanup(item) {
+		e.deferClosedCleanup(repoStr, item)
 		return
 	}
 
