@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // cpRemovedLabels returns the labels the mock was asked to remove from issue n.
@@ -189,5 +190,198 @@ func TestClosedPausedCleanup_ErrNotFoundIsSuccess(t *testing.T) {
 	item := gh.ProjectItem{Repo: "owner/repo", Number: 11, Status: "Done", IsClosed: true}
 	if !eng.clearPauseOnClosedCleanup(item) {
 		t.Error("ErrNotFound should count as cleared")
+	}
+}
+
+// --- #2628: landing-label fill in the Done cleanup of a closed item -----------
+
+func cpMergedPRClient() *mockGitHubClient {
+	return &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 8, Merged: true, State: "closed"}, nil
+		},
+	}
+}
+
+func cpAddedOrder(c *mockGitHubClient, n int) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, call := range c.addLabelCalls {
+		if call.issueNumber == n {
+			out = append(out, call.labelName)
+		}
+	}
+	return out
+}
+
+func cpHasCooldown(eng *Engine, n int) bool {
+	st, ok := eng.store.Peek("owner/repo", n)
+	if !ok {
+		return false
+	}
+	return !st.CooldownAt(reasonPeriodicReEval).IsZero()
+}
+
+func cpDoneStage(eng *Engine) *stages.Stage {
+	return eng.cfg.Stages[len(eng.cfg.Stages)-1]
+}
+
+func TestClosedCleanupFill_MergedPRFillsBeforeDoneLabel(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		name := "not paused"
+		labels := []string{"stage:Implement:complete"}
+		if paused {
+			name = "paused"
+			labels = append(labels, "fabrik:paused", "fabrik:awaiting-input")
+		}
+		t.Run(name, func(t *testing.T) {
+			client := cpMergedPRClient()
+			eng := testEngineWithStages(t, client, terminalAdvanceStages())
+			item := gh.ProjectItem{Repo: "owner/repo", Number: 20, Status: "Done", IsClosed: true, Labels: labels}
+			eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+
+			got := cpAddedOrder(client, 20)
+			want := []string{"stage:Review:complete", "stage:Validate:complete", "stage:Done:complete"}
+			if len(got) != len(want) {
+				t.Fatalf("added labels = %v, want %v", got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("added labels = %v, want %v", got, want)
+				}
+			}
+			if paused {
+				if rm := cpRemovedLabels(client, 20); !rm["fabrik:paused"] || !rm["fabrik:awaiting-input"] {
+					t.Errorf("pause pair not cleared: %v", rm)
+				}
+			}
+			client.mu.Lock()
+			nComments := len(client.addCommentCalls)
+			client.mu.Unlock()
+			if nComments != 0 {
+				t.Errorf("posted %d comment(s), want none", nComments)
+			}
+			if cpAddedLabel(client, 20, "fabrik:awaiting-landing-verification") {
+				t.Error("landing-verification marker added")
+			}
+		})
+	}
+}
+
+func TestClosedCleanupFill_OnlyMissingLabelsFilled(t *testing.T) {
+	client := cpMergedPRClient()
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 21, Status: "Done", IsClosed: true,
+		Labels: []string{"stage:Implement:complete", "stage:Review:complete"}}
+	eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+	got := cpAddedOrder(client, 21)
+	if len(got) != 2 || got[0] != "stage:Validate:complete" || got[1] != "stage:Done:complete" {
+		t.Errorf("added labels = %v", got)
+	}
+}
+
+func TestClosedCleanupFill_ReadFailureDefers(t *testing.T) {
+	cases := map[string]*mockGitHubClient{
+		"FetchLinkedPR error": {
+			fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) { return nil, errors.New("boom") },
+		},
+		"FetchPRMerged error": {
+			fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 8, State: "closed"}, nil
+			},
+			fetchPRMergedFn: func(owner, repo string, n int) (bool, error) { return false, errors.New("boom") },
+		},
+	}
+	for name, client := range cases {
+		t.Run(name, func(t *testing.T) {
+			eng := testEngineWithStages(t, client, terminalAdvanceStages())
+			item := gh.ProjectItem{Repo: "owner/repo", Number: 22, Status: "Done", IsClosed: true,
+				Labels: []string{"stage:Implement:complete"}}
+			eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+			if got := cpAddedOrder(client, 22); len(got) != 0 {
+				t.Errorf("labels added despite failed read: %v", got)
+			}
+			if !cpHasCooldown(eng, 22) {
+				t.Error("no periodic-re-eval cooldown recorded")
+			}
+		})
+	}
+}
+
+func TestClosedCleanupFill_FillFailureDefers(t *testing.T) {
+	client := cpMergedPRClient()
+	client.addLabelToIssueFn = func(owner, repo string, n int, label string) error {
+		if label == "stage:Validate:complete" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 23, Status: "Done", IsClosed: true,
+		Labels: []string{"stage:Implement:complete"}}
+	eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+	if cpAddedLabel(client, 23, "stage:Done:complete") {
+		t.Error("completion label applied despite failed fill")
+	}
+	if !cpHasCooldown(eng, 23) {
+		t.Error("no periodic-re-eval cooldown recorded")
+	}
+}
+
+func TestClosedCleanupFill_NoFillShapes(t *testing.T) {
+	cases := map[string]struct {
+		client *mockGitHubClient
+		item   gh.ProjectItem
+	}{
+		"no linked PR": {&mockGitHubClient{}, gh.ProjectItem{IsClosed: true}},
+		"open PR": {&mockGitHubClient{fetchLinkedPRFn: func(o, r string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 8, State: "open"}, nil
+		}}, gh.ProjectItem{IsClosed: true}},
+		"closed unmerged PR": {&mockGitHubClient{fetchLinkedPRFn: func(o, r string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 8, State: "closed"}, nil
+		}}, gh.ProjectItem{IsClosed: true}},
+		"open item": {cpMergedPRClient(), gh.ProjectItem{}},
+		"PR card":   {cpMergedPRClient(), gh.ProjectItem{IsClosed: true, IsPR: true}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			eng := testEngineWithStages(t, tc.client, terminalAdvanceStages())
+			item := tc.item
+			item.Repo, item.Number, item.Status = "owner/repo", 24, "Done"
+			item.Labels = []string{"stage:Implement:complete"}
+			eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+			got := cpAddedOrder(tc.client, 24)
+			if len(got) != 1 || got[0] != "stage:Done:complete" {
+				t.Errorf("added labels = %v, want only stage:Done:complete", got)
+			}
+		})
+	}
+}
+
+func TestClosedCleanupFill_AlreadyCompleteUntouched(t *testing.T) {
+	client := cpMergedPRClient()
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 25, Status: "Done", IsClosed: true,
+		Labels: []string{"stage:Implement:complete", "stage:Done:complete"}}
+	eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+	if got := cpAddedOrder(client, 25); len(got) != 0 {
+		t.Errorf("added labels = %v, want none", got)
+	}
+}
+
+func TestClosedCleanupFill_SeamDisablesFillOnly(t *testing.T) {
+	client := cpMergedPRClient()
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	eng.SetClosedCleanupFillDisabledForTest(true)
+	item := gh.ProjectItem{Repo: "owner/repo", Number: 26, Status: "Done", IsClosed: true,
+		Labels: []string{"stage:Implement:complete", "fabrik:paused", "fabrik:awaiting-input"}}
+	eng.handleCleanupStage(item, cpDoneStage(eng), "owner/repo")
+	got := cpAddedOrder(client, 26)
+	if len(got) != 1 || got[0] != "stage:Done:complete" {
+		t.Errorf("added labels = %v, want only stage:Done:complete", got)
+	}
+	if rm := cpRemovedLabels(client, 26); !rm["fabrik:paused"] {
+		t.Error("seam must not disable the pause clearing (#2459)")
 	}
 }
