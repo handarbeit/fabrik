@@ -72,6 +72,12 @@ var interfaceMethodSet = func() map[string]bool {
 	return out
 }()
 
+// optionalCapabilityMethods are instrumented methods the engine reaches through
+// an optional capability interface asserted at the call site, not through
+// engine.GitHubClient (#2614: FetchWorkflowRunJobs). They are faultable like any
+// other method but are not part of the interface-completeness reflection.
+var optionalCapabilityMethods = map[string]bool{"FetchWorkflowRunJobs": true}
+
 // InterfaceMethods returns every engine.GitHubClient method name, sorted.
 // Exported for the reflection-driven completeness tests, which assert that
 // every one of them is both instrumented and (bar RateLimitStats) faultable.
@@ -247,7 +253,7 @@ func (f *FaultTable) runHooks(method string, args Args) {
 // are programming errors in the scenario, not runtime conditions, so failing
 // loudly at registration is the only way they surface at all.
 func validateMethod(method string) {
-	if !interfaceMethodSet[method] {
+	if !interfaceMethodSet[method] && !optionalCapabilityMethods[method] {
 		panic(fmt.Sprintf("simgh: no engine.GitHubClient method named %q; "+
 			"a fault on an unknown method would never fire", method))
 	}

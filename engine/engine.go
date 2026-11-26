@@ -425,6 +425,8 @@ type Engine struct {
 	reviewConfirmLiveOff      atomic.Bool            // test seam: SetReviewConfirmLiveDisabledForTest (#2350)
 	reviewWaitHeadAnchorOff   atomic.Bool            // test seam: SetReviewWaitHeadAnchorDisabledForTest (#2467)
 	reviewAdvanceGateOff      atomic.Bool            // test seam: SetReviewGateAdvanceDisabledForTest (#2491)
+	failFastOff               atomic.Bool            // test seam: SetFailFastPromotionDisabledForTest (#2614)
+	failFast                  failFastState          // memo + once-per-head log set for fail-fast promotion (#2614)
 	headTimes                 headTimeCache          // per-SHA commit dates for the review-wait head anchor (#2467)
 	liveFreshOverride         atomic.Int64           // test seam: SetLiveFreshForTest, nanoseconds (#2350)
 	live                      liveReadState          // engine-clock stamps of the last live read of a fact (#2350)

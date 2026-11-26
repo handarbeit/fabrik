@@ -114,6 +114,7 @@ func (e *Engine) writeCIStatus(item gh.ProjectItem, currentStage *stages.Stage, 
 		return
 	}
 
+	runs = e.promoteFailFast(owner, repo, pr.HeadSHA, runs) // #2614
 	verdict := e.ciStatusVerdictFor(owner, repo, pr.MergeableState, pr.HeadSHA, runs)
 	if verdict == ciVerdictRed {
 		e.collectFailingChecks(item, owner, repo, runs, extras)
@@ -289,6 +290,10 @@ func renderFailingChecks(b *strings.Builder, extras *ciStatusExtras) {
 	for _, f := range extras.failing {
 		name := strings.ReplaceAll(f.run.Name, "\n", " ")
 		fmt.Fprintf(b, "### %s\n\n- conclusion: %s\n", name, nonPassingConclusion(f.run))
+		if t := failedStepText(f.run); t != "" {
+			// #2614: reported `cancelled` by GitHub, red because a step failed.
+			fmt.Fprintf(b, "- failed step: %s\n", t)
+		}
 		if !gh.IsFailureConclusion(f.run.Conclusion) {
 			fmt.Fprintf(b, "- note: %s\n", nonPassingNote)
 		}

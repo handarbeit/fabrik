@@ -32,6 +32,7 @@ func (e *Engine) memberCIEvidence(owner, repo string, members []trainMember) (ho
 		if m.headSHA == "" {
 			continue
 		}
+		// failfast-audited: only the presence of check runs is read, never their conclusions
 		// live-read-audited: positive CI evidence must be read at decision time from the
 		// member's own PR head, never from a cached or formation-time value (FR-006)
 		runs, err := e.client.FetchCheckRuns(owner, repo, m.headSHA)

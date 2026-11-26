@@ -21,6 +21,8 @@ import (
 type cancelledGateOpts struct {
 	rerunConclusion string // conclusion of the check run the scripted re-run adds
 	rerunForbidden  bool   // the re-run endpoint is refused (no `actions` permission)
+	// jobs, when non-nil, are the run's jobs with steps (#2614), before and after the re-run.
+	jobs []gh.WorkflowJob
 }
 
 // cancelledGateEnv is flakeRerunEnv with a CANCELLED sentinel check instead of a
@@ -64,8 +66,12 @@ func cancelledGateEnv(t *testing.T, o cancelledGateOpts) (*Env, int, string, fun
 	}
 	s := env.Sim.Sim()
 	s.SeedWorkflowRun(env.OwnerRepo, sha, gh.WorkflowRun{ID: 7101, Name: "CI", Status: "completed", Conclusion: "cancelled", JobCount: 1})
+	if o.jobs != nil {
+		s.SeedWorkflowRunJobs(env.OwnerRepo, 7101, o.jobs...)
+	}
 	s.SeedRerunStep(env.OwnerRepo, 7101, simgh.RerunStep{
 		SHA:        sha,
+		Jobs:       o.jobs,
 		Conclusion: o.rerunConclusion,
 		CheckRuns:  []gh.CheckRun{{Name: ciFixSentinel, Status: "completed", Conclusion: o.rerunConclusion, DetailsURL: actionsJobURL(7101, 1)}},
 	})

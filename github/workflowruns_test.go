@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -147,6 +148,95 @@ func TestActionsRunIDFromDetailsURL(t *testing.T) {
 		id, ok := ActionsRunIDFromDetailsURL(tc.url)
 		if id != tc.id || ok != tc.ok {
 			t.Errorf("%q = (%d,%v), want (%d,%v)", tc.url, id, ok, tc.id, tc.ok)
+		}
+	}
+}
+
+// TestFetchWorkflowRunJobs_DecodesSteps pins the request shape and the step
+// decoding the fail-fast promotion reads (#2614).
+func TestFetchWorkflowRunJobs_DecodesSteps(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/actions/runs/42/jobs" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("filter") != "latest" {
+			t.Errorf("filter = %q, want latest", r.URL.Query().Get("filter"))
+		}
+		w.Write([]byte(`{"total_count":2,"jobs":[
+			{"id":7,"name":"test","status":"completed","conclusion":"cancelled","steps":[
+				{"name":"Set up job","number":1,"status":"completed","conclusion":"success"},
+				{"name":"Run tests","number":2,"status":"completed","conclusion":"failure"}]},
+			{"id":8,"name":"lint","status":"completed","conclusion":"cancelled","steps":[]}]}`))
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("tok", srv.URL)
+	jobs, err := c.FetchWorkflowRunJobs("o", "r", 42)
+	if err != nil {
+		t.Fatalf("FetchWorkflowRunJobs: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != 7 || jobs[0].Name != "test" || jobs[0].Conclusion != "cancelled" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	if len(jobs[0].Steps) != 2 || jobs[0].Steps[1].Name != "Run tests" || jobs[0].Steps[1].Conclusion != "failure" || jobs[0].Steps[1].Number != 2 {
+		t.Errorf("steps = %+v", jobs[0].Steps)
+	}
+}
+
+func TestFetchWorkflowRunJobs_IncompleteIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"total_count":3,"jobs":[{"id":1,"name":"a","status":"completed"}]}`))
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("tok", srv.URL)
+	if _, err := c.FetchWorkflowRunJobs("o", "r", 42); err == nil {
+		t.Fatal("expected error for an incomplete job list")
+	}
+}
+
+func TestFetchWorkflowRunJobs_PaginatesAndVerifies(t *testing.T) {
+	var pages atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		var b strings.Builder
+		n := 100
+		if r.URL.Query().Get("page") == "2" {
+			n = 5
+		}
+		b.WriteString(`{"total_count":105,"jobs":[`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"id":1,"name":"j","status":"completed"}`)
+		}
+		b.WriteString(`]}`)
+		w.Write([]byte(b.String()))
+	}))
+	defer srv.Close()
+	c := NewClientWithBaseURL("tok", srv.URL)
+	jobs, err := c.FetchWorkflowRunJobs("o", "r", 42)
+	if err != nil {
+		t.Fatalf("FetchWorkflowRunJobs: %v", err)
+	}
+	if len(jobs) != 105 || pages.Load() != 2 {
+		t.Errorf("got %d jobs over %d pages, want 105 over 2", len(jobs), pages.Load())
+	}
+}
+
+func TestFetchWorkflowRunJobs_PermissionRefusedIsClassifiable(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{{403, ErrForbidden}, {404, ErrNotFound}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+			w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		}))
+		c := NewClientWithBaseURL("tok", srv.URL)
+		_, err := c.FetchWorkflowRunJobs("o", "r", 42)
+		srv.Close()
+		if !errors.Is(err, tc.want) {
+			t.Errorf("status %d: err = %v, want errors.Is %v", tc.status, err, tc.want)
 		}
 	}
 }

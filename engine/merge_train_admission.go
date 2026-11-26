@@ -62,6 +62,7 @@ func (e *Engine) admitTrainMembers(ctx context.Context, state *mergeTrainWorkerS
 			admitted = append(admitted, m)
 			continue
 		}
+		runs = e.promoteFailFast(owner, repo, m.headSHA, runs) // #2614
 
 		// mergeableState is "" deliberately: red never depends on it (a check-run or
 		// required-context failure is red unconditionally), and it only ever matters

@@ -598,6 +598,8 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 		baseBranch = bb
 		if baseSHA, err := gitRevParse(workDir, "origin/"+baseBranch); err == nil && baseSHA != "" {
 			baseRuns, _ = e.readClient.FetchCheckRuns(owner, repo, baseSHA)
+			// #2614: a fail-fast-cancelled base run with a failed step is a base failure.
+			baseRuns = e.promoteFailFast(owner, repo, baseSHA, baseRuns)
 		}
 	}
 
@@ -620,6 +622,10 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 				note = "pre-existing (also fails on base branch)"
 			}
 			line := fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note)
+			if t := failedStepText(cr); t != "" {
+				// #2614: the check run read `cancelled`, the failure is in a step.
+				line += " — " + t
+			}
 			if !baseFailedNames[cr.Name] {
 				// Only NEW REGRESSION checks get failure detail: the
 				// instructions tell the agent not to touch pre-existing ones.

@@ -77,6 +77,11 @@ func (e *Engine) evalTrialCI(ctx context.Context, owner, repo string, prNum int,
 		e.rerunInFlight(logRepo, owner, repo, trialSHA, st.rr.runIDs)
 
 	checkRuns, err := e.client.FetchCheckRuns(owner, repo, trialSHA)
+	if err == nil {
+		// #2614: a fail-fast-cancelled run with a failed step is a failure, so it takes
+		// the Failed branch below (one re-run, then red) and never the infra verdict.
+		checkRuns = e.promoteFailFast(owner, repo, trialSHA, checkRuns)
+	}
 	if err != nil {
 		e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchCheckRuns failed for %s: %v\n", trialSHA, err)
 	} else if len(checkRuns) > 0 {

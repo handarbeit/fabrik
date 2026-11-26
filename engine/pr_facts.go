@@ -248,6 +248,7 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 		e.logf(c.item.Number, "pr-facts", "could not read check runs for %s: %v\n", head, err)
 		return
 	}
+	runs = e.promoteFailFast(owner, name, head, runs) // #2614
 	verdict := e.ciStatusVerdictFor(owner, name, lpr.Facts.MergeableState, head, runs)
 	next := itemstate.CIVerdictRecord{
 		Verdict:         string(verdict),
