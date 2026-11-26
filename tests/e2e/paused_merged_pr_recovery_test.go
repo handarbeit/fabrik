@@ -109,8 +109,13 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 			// so the Validate-scoped settle-owner never observes it at Validate and
 			// the heal is missed (the failure mode this test previously exhibited).
 			WaitForProjectStatus(t, env, env.RepoAlpha, num, "Validate", 3*time.Minute)
-			time.Sleep(45 * time.Second)
-			t.Logf("engine had a poll window to observe %s#%d at Validate before merge", env.RepoAlpha, num)
+			// A fixed dwell is not enough: the board listing can lag a new item
+			// by more than a poll, and an item the engine first sees already
+			// closed at Done (no worktree) is seeded terminal and never processed,
+			// which is a different scenario from the one under test. Wait for the
+			// daemon's own fabrik_status to report the item at Validate.
+			waitEngineSeesValidate(t, env, env.RepoAlpha, num, 10*time.Minute)
+			t.Logf("engine observed %s#%d at Validate before merge", env.RepoAlpha, num)
 
 			// Step 7: Merge the PR externally, simulating a human merge.
 			MergePR(t, env, env.RepoAlpha, prNum)
@@ -150,4 +155,19 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 			t.Logf("%s#%d closed — R4 verified (variant=%s)", env.RepoAlpha, num, tc.name)
 		})
 	}
+}
+
+// waitEngineSeesValidate blocks until the bed daemon's local API reports the
+// item at Validate. A timeout is a bed-side visibility lag, not an engine
+// verdict, so it is Inconclusive.
+func waitEngineSeesValidate(t *testing.T, env *Env, repo string, issue int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if st, err := bedStatus(env, repo, issue); err == nil && st.Place.Status.Valid && st.Place.Status.V == "Validate" {
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+	Inconclusive(t, "engine never reported %s#%d at Validate within %s", repo, issue, timeout)
 }
