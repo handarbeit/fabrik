@@ -216,6 +216,9 @@ func TestMergeTrainSingletonCatchUp_DeferredMember_KeepsPollingOnAnIdleHealthyBo
 			if err != nil {
 				t.Fatal(err)
 			}
+			// PollWithBackoff, unlike RunPoll, does not wait for train work it started;
+			// let it finish before TempDir's RemoveAll runs under it.
+			waitForWorkerQuiescence(t, env)
 			if cooldown && res.NextInterval > time.Minute {
 				t.Fatalf("a deferred member must keep the poll coming back soon; next poll in %v", res.NextInterval)
 			}
