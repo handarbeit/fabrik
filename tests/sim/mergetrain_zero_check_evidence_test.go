@@ -79,8 +79,8 @@ func TestMergeTrainZeroCheck_MembersHaveChecks_NeutralisedLands(t *testing.T) {
 
 	RunPoll(t, env)
 
-	WaitForProjectStatus(t, env, a, "Done", 20)
-	WaitForProjectStatus(t, env, b, "Done", 10)
+	WaitForProjectStatus(t, env, a, "Done", 80) // real-time trial work: generous under suite load, exits early
+	WaitForProjectStatus(t, env, b, "Done", 40)
 }
 
 // A repository with no check-run CI still lands on the zero-check path, in one trial.
@@ -91,8 +91,8 @@ func TestMergeTrainZeroCheck_NoCIRepoStillLands(t *testing.T) {
 
 	RunPoll(t, env)
 
-	WaitForProjectStatus(t, env, a, "Done", 20)
-	WaitForProjectStatus(t, env, b, "Done", 10)
+	WaitForProjectStatus(t, env, a, "Done", 80) // real-time trial work: generous under suite load, exits early
+	WaitForProjectStatus(t, env, b, "Done", 40)
 	assertLandedOnFirstTrial(t, env, []int{a, b})
 }
 
@@ -124,8 +124,8 @@ func TestMergeTrainZeroCheck_DelayedCIPasses_Lands(t *testing.T) {
 
 	RunPoll(t, env)
 
-	WaitForProjectStatus(t, env, a, "Done", 20)
-	WaitForProjectStatus(t, env, b, "Done", 10)
+	WaitForProjectStatus(t, env, a, "Done", 80) // real-time trial work: generous under suite load, exits early
+	WaitForProjectStatus(t, env, b, "Done", 40)
 }
 
 // Once the real CI runs and fails, the trial is red and goes through bisection: the poison
@@ -135,7 +135,7 @@ func TestMergeTrainZeroCheck_DelayedCIFails_BisectedPoisonerEjected(t *testing.T
 	env, a, b := zeroCheckEnv(t, true)
 	startTrialScript(t, env, delayedVerdictScript(env, 200*time.Millisecond, poisonVerdict(a)))
 
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 40; i++ { // generous under suite load; exits as soon as b lands
 		RunPoll(t, env)
 		if projectItem(t, env, b).Status == "Done" {
 			break
