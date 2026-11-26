@@ -62,6 +62,10 @@ func startTurnRun(t *testing.T) *turnRun {
 		default:
 			close(r.end)
 		}
+		// Releasing the held worker lets it finish its script, which commits and
+		// pushes into the env's origin.git. Wait for it, or TempDir's RemoveAll
+		// races the push ("directory not empty").
+		waitForWorkerQuiescence(t, env)
 	})
 	r.num = FileIssue(t, env, "long healthy run", "body", "Specify")
 	_, r.sink = startChannelAt(t, env, t.TempDir())
