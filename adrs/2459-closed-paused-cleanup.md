@@ -43,3 +43,5 @@ could briefly be seen as closed from the listing; the effect is limited to
 clearing the pause and reaping the worktree of an item already at Done, the same
 edge as `settleClosedItemsToDone` (ADR 064). The janitor, the archive scan and
 `isTerminalPredicate` are untouched.
+
+See ADR 2628: the same cleanup also records a merged linked PR by filling the gate-checked completion labels, before the completion label, with the same failure model as decision 3.
