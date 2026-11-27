@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,12 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 		{"awaiting-review", "fabrik:awaiting-review"}, // R2
 		{"no-gate-label", ""},                         // R3 (control)
 	}
+
+	// A variant whose item the engine never observed at Validate cannot
+	// demonstrate the property. Inconclusive must be called on the top-level
+	// test, so the variant records the reason and the parent decides after the
+	// (sequential) subtests.
+	var lagged []string
 
 	for _, tc := range cases {
 		tc := tc
@@ -114,7 +121,11 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 			// closed at Done (no worktree) is seeded terminal and never processed,
 			// which is a different scenario from the one under test. Wait for the
 			// daemon's own fabrik_status to report the item at Validate.
-			waitEngineSeesValidate(t, env, env.RepoAlpha, num, 10*time.Minute)
+			if reason := waitEngineSeesValidate(env, env.RepoAlpha, num, 10*time.Minute); reason != "" {
+				t.Logf("INCONCLUSIVE precondition: %s", reason)
+				lagged = append(lagged, tc.name+": "+reason)
+				return
+			}
 			t.Logf("engine observed %s#%d at Validate before merge", env.RepoAlpha, num)
 
 			// Step 7: Merge the PR externally, simulating a human merge.
@@ -155,19 +166,23 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 			t.Logf("%s#%d closed — R4 verified (variant=%s)", env.RepoAlpha, num, tc.name)
 		})
 	}
+
+	if len(lagged) > 0 && !t.Failed() {
+		Inconclusive(t, "engine never observed the item at Validate before the merge: %s", strings.Join(lagged, "; "))
+	}
 }
 
 // waitEngineSeesValidate blocks until the bed daemon's local API reports the
-// item at Validate. A timeout is a bed-side visibility lag, not an engine
-// verdict, so it is Inconclusive.
-func waitEngineSeesValidate(t *testing.T, env *Env, repo string, issue int, timeout time.Duration) {
-	t.Helper()
+// item at Validate, returning "" then. On timeout it returns the reason: a
+// bed-side visibility lag, not an engine verdict, which the top-level test
+// reports as Inconclusive.
+func waitEngineSeesValidate(env *Env, repo string, issue int, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if st, err := bedStatus(env, repo, issue); err == nil && st.Place.Status.Valid && st.Place.Status.V == "Validate" {
-			return
+			return ""
 		}
 		time.Sleep(5 * time.Second)
 	}
-	Inconclusive(t, "engine never reported %s#%d at Validate within %s", repo, issue, timeout)
+	return fmt.Sprintf("engine never reported %s#%d at Validate within %s", repo, issue, timeout)
 }
